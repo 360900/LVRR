@@ -74,7 +74,7 @@ The version xrizer reports comes from `git describe`, via the default `git-versi
 # Contributing
 
 All contributions welcome.
-- If you're opening a bug, please submit a log. The log is located at `$XDG_STATE_HOME/xrizer/xrizer.txt`, or `$HOME/.local/state/xrizer/xrizer.txt` if `$XDG_STATE_HOME` is not set.
+- If you're opening a bug, please submit a log. Logs are written to `$XDG_STATE_HOME/xrizer`, or `$HOME/.local/state/xrizer` if `$XDG_STATE_HOME` is not set. Each process gets its own file named `xrizer-<timestamp>-<pid>.txt` - the most recent one is usually the one you want, as launchers often start a short-lived process to check for a headset before the game itself runs. Files older than two days are removed on startup.
 - If submitting pull requests, please consider writing a test if possible/helpful - OpenVR is a large API surface and games are fickle, so ensuring things are well tested prevents future unintentional breakage.
 
 # Environment Variables
@@ -83,6 +83,8 @@ _RUST_LOG_ - This is used for adjusting the logging of xrizer. See the [env_logg
 - `tracked_property` - logs the name and device index of each requested tracked device property.
 
 _XRIZER_SYNTHESIZED_VELOCITY_ - Set to `1` to report controller linear velocities computed from position deltas rather than the ones the OpenXR runtime reports, or `0` to force the runtime's. Some runtimes under-report linear velocity, which makes throwing objects in games difficult; xrizer enables this automatically for games known to need it.
+
+If `RUST_LOG` doesn't reach xrizer - some launchers sanitize the environment before starting a game - you can put the same filter string in a file named `log_filter` in the log directory instead. It's only read when `RUST_LOG` is unset.
 
 _XRIZER_CUSTOM_BINDINGS_DIR_ - This can be used to supply a directory that xrizer will search for controller bindings files. Note that the format of these bindings aren't actually documented anywhere, but it's easy enough to modify an existing file, and xrizer parses them so you can read the source too.
 

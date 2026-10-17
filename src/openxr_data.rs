@@ -120,8 +120,15 @@ impl<C: Compositor> OpenXrData<C> {
         let entry = xr::Entry::linked(&platform_info).expect("Failed to linked OpenXR loader");
 
         #[cfg(all(not(test), not(feature = "static-openxr")))]
-        let entry = unsafe { xr::Entry::load(&platform_info) }
-            .expect("Failed to load OpenXR loader — is libopenxr-loader installed?");
+        let entry = unsafe { xr::Entry::load(&platform_info) }.unwrap_or_else(|e| {
+            let hint = if cfg!(target_pointer_width = "32") {
+                "this is the 32-bit xrizer, which needs a 32-bit OpenXR loader \
+                (e.g. lib32-openxr) - alternatively, build with --features static-openxr"
+            } else {
+                "is libopenxr-loader installed?"
+            };
+            panic!("Failed to load OpenXR loader — {hint}: {e:?}");
+        });
 
         #[cfg(test)]
         let entry = unsafe {
