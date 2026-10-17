@@ -57,7 +57,7 @@ Status: `pending` | `merged` | `superseded-by-<n>` | `blocked` | `dropped` | `re
 | 130 | WMR controller support | merged | WMR profiles adapted to static trait; registered for HolographicController/HPMotionController; fakexr exposes HP + Samsung extensions |
 | 330 | Background and Utility application types | merged | headless sessions (XR_MND_headless + XR_KHR_convert_timespec_time), headless graphics backend, OpenXrData::new(injector, application_type) |
 | 193 | New interface versions | merged | overlay name/raw texture/thumbnail additions; newer 1.23.8 header; fixes #177 UEVR |
-| 229 | libmonado battery status | pending | closes #26 |
+| 229 | libmonado battery status | merged | closes #26; monado feature now enables libmonado; battery percentage/provides/charging properties; builds fine without system libmonado |
 | 69 | Skeletal Summary | pending | likely superseded by merged 313 |
 | 168 | Hitman | pending | by Supreeeme, empty body |
 | 87 | IVRDebug stub and IVROverlay014 stub | pending | old |
