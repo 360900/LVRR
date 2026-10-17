@@ -35,9 +35,9 @@ Status: `pending` | `merged` | `superseded-by-<n>` | `blocked` | `dropped` | `re
 
 | PR | Title | Status | Notes |
 |----|-------|--------|-------|
-| 397 | hl2-vr: multiple fixes | pending | adds src/quirks.rs; prerequisite of 400 |
-| 400 | superhot-vr: fix grab, menu button | blocked | rebase on 397; probably fixes #385 |
-| 382 | controller pose transformations | pending | #303; supersedes 234 |
+| 397 | hl2-vr: multiple fixes | merged | adds src/quirks.rs; prerequisite of 400 |
+| 400 | superhot-vr: fix grab, menu button | merged | on top of 397; probably fixes #385 |
+| 382 | controller pose transformations | merged | #303; supersedes 234; time-keyed raw pose cache + per-call transform |
 
 ## Phase 1d: fix CI first
 
