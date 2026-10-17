@@ -108,6 +108,7 @@ fn probe(
         system_id,
         vr::ETrackingUniverseOrigin::Standing,
         None,
+        false,
     )
     .map_err(|e| {
         warn!("Failed to create probe session: {e:?}");

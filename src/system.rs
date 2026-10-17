@@ -261,7 +261,7 @@ impl System {
     pub fn reset_views(&self) {
         std::mem::take(&mut *self.views.lock().unwrap());
         let session = self.openxr.session_data.get();
-        let display_time = self.openxr.display_time.get();
+        let display_time = self.openxr.get_display_time();
         let mut views = self.views.lock().unwrap();
         views.get_views(&session, display_time, xr::ReferenceSpaceType::VIEW);
         views.get_views(
@@ -275,7 +275,7 @@ impl System {
         tracy_span!();
         let session = self.openxr.session_data.get();
         let mut views = self.views.lock().unwrap();
-        views.get_views(&session, self.openxr.display_time.get(), ty)
+        views.get_views(&session, self.openxr.get_display_time(), ty)
     }
 
     pub fn push_event(&self, event: vr::VREvent_t) {
@@ -1203,7 +1203,8 @@ mod tests {
 
     #[test]
     fn unity_required_properties() {
-        let xr = Arc::new(OpenXrData::new(&Injector::default()).unwrap());
+        let xr =
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
         let injector = Injector::default();
         let input = Arc::new(Input::new(xr.clone()));
         let system = System::new(xr, &injector);
@@ -1247,7 +1248,8 @@ mod tests {
 
     #[test]
     fn test_session_stop() {
-        let xr = Arc::new(OpenXrData::new(&Injector::default()).unwrap());
+        let xr =
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
         let injector = Injector::default();
         let system = Arc::new(System::new(xr.clone(), &injector));
 
@@ -1271,7 +1273,8 @@ mod tests {
             fakexr::UserPath::RightHand,
             Some("/interaction_profiles/oculus/touch_controller"),
         );
-        let xr = Arc::new(OpenXrData::new(&Injector::default()).unwrap());
+        let xr =
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
         fakexr::set_default_interaction_profile(fakexr::UserPath::RightHand, None);
 
         let injector = Injector::default();
