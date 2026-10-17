@@ -14,7 +14,7 @@ jobs:
   vendor-dependencies:
     runs-on: ubuntu-latest
     container:
-      image: 'ghcr.io/supreeeme/xrizer-ubuntu:latest'
+      image: 'ghcr.io/360900/xrizer-edge-ubuntu:latest'
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}

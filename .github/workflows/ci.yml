@@ -12,6 +12,10 @@ on:
   pull_request:
     branches: [ "main" ]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
@@ -80,6 +84,10 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
     - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: Set version
+      run: echo "XRIZER_VERSION=$(git describe --tags --always)" >> "$GITHUB_ENV"
     - name: Build
       run: cargo xbuild --release --features static-openxr --verbose
     - name: Run tests
