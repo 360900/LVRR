@@ -15,7 +15,7 @@ crate-type = ["cdylib"]
 default = ["monado", "git-version"]
 static-openxr = ["openxr/static"]
 tracing = ["dep:tracy-client", "openvr/tracing"]
-monado = ["dep:openxr_mndx_xdev_space"]
+monado = ["dep:openxr_mndx_xdev_space", "dep:libmonado"]
 # Derive the reported version from `git describe`. Disable when building outside
 # of a git checkout and pass XRIZER_VERSION instead.
 git-version = ["dep:vergen-gitcl"]
@@ -69,6 +69,7 @@ derive_more = { workspace = true }
 gl = "0.14.0"
 obj = "0.10.2"
 lz4_flex = { version = "0.12.0", default-features = false, features = ["frame"] }
+libmonado = { version = "1.3.2", optional = true }
 
 [build-dependencies]
 anyhow = "1.0.99"

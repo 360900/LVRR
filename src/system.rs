@@ -5,6 +5,10 @@ use crate::{
     overlay::OverlayMan,
     tracy_span,
 };
+
+#[cfg(feature = "monado")]
+use libmonado::BatteryStatus;
+
 use glam::{Mat3, Quat, Vec3};
 use log::{debug, error, trace, warn};
 use openvr as vr;
@@ -281,6 +285,17 @@ impl System {
     pub fn push_event(&self, event: vr::VREvent_t) {
         let mut events = self.events.lock().unwrap();
         events.push_back(event);
+    }
+
+    #[cfg(feature = "monado")]
+    pub fn mnd_get_device_battery(&self, device_index: u32) -> Option<BatteryStatus> {
+        let session_data = self.openxr.session_data.get();
+
+        session_data
+            .monado
+            .as_ref()?
+            .get_device_from_vr_index(device_index)
+            .and_then(|device| device.battery_status().ok())
     }
 }
 
@@ -842,27 +857,58 @@ impl vr::IVRSystem026_Interface for System {
         error: *mut vr::ETrackedPropertyError,
     ) -> f32 {
         debug!(target: log_tags::TRACKED_PROP, "requesting float property: {prop:?} ({device_index})");
-        if device_index != vr::k_unTrackedDeviceIndex_Hmd {
+        if !self.IsTrackedDeviceConnected(device_index) {
             if let Some(error) = unsafe { error.as_mut() } {
-                *error = vr::ETrackedPropertyError::UnknownProperty;
+                *error = vr::ETrackedPropertyError::InvalidDevice;
             }
             return 0.0;
         }
 
+        if let Some(error) = unsafe { error.as_mut() } {
+            *error = vr::ETrackedPropertyError::Success;
+        }
+
         match prop {
-            vr::ETrackedDeviceProperty::UserIpdMeters_Float => {
-                let views = self.get_views(xr::ReferenceSpaceType::VIEW).views;
-                views[1].pose.position.x - views[0].pose.position.x
-            }
-            vr::ETrackedDeviceProperty::DisplayFrequency_Float => self.openxr.get_refresh_rate(),
-            _ => {
-                if let Some(error) = unsafe { error.as_mut() } {
-                    *error = vr::ETrackedPropertyError::UnknownProperty;
+            #[cfg(feature = "monado")]
+            vr::ETrackedDeviceProperty::DeviceBatteryPercentage_Float => {
+                let Some(battery) = self.mnd_get_device_battery(device_index) else {
+                    if let Some(error) = unsafe { error.as_mut() } {
+                        *error = vr::ETrackedPropertyError::ValueNotProvidedByDevice;
+                    }
+                    return 0.0;
+                };
+
+                if !battery.present {
+                    if let Some(error) = unsafe { error.as_mut() } {
+                        *error = vr::ETrackedPropertyError::ValueNotProvidedByDevice;
+                    }
+                    return 0.0;
                 }
-                0.0
+
+                return battery.charge;
+            }
+            _ => {}
+        }
+
+        if device_index == vr::k_unTrackedDeviceIndex_Hmd {
+            match prop {
+                vr::ETrackedDeviceProperty::UserIpdMeters_Float => {
+                    let views = self.get_views(xr::ReferenceSpaceType::VIEW).views;
+                    return views[1].pose.position.x - views[0].pose.position.x;
+                }
+                vr::ETrackedDeviceProperty::DisplayFrequency_Float => {
+                    return self.openxr.get_refresh_rate();
+                }
+                _ => {}
             }
         }
+
+        if let Some(error) = unsafe { error.as_mut() } {
+            *error = vr::ETrackedPropertyError::UnknownProperty;
+        }
+        0.0
     }
+
     fn GetBoolTrackedDeviceProperty(
         &self,
         device_index: vr::TrackedDeviceIndex_t,
@@ -870,6 +916,50 @@ impl vr::IVRSystem026_Interface for System {
         err: *mut vr::ETrackedPropertyError,
     ) -> bool {
         debug!(target: log_tags::TRACKED_PROP, "requesting bool property: {prop:?} ({device_index})");
+        if !self.IsTrackedDeviceConnected(device_index) {
+            if let Some(err) = unsafe { err.as_mut() } {
+                *err = vr::ETrackedPropertyError::InvalidDevice;
+            }
+            return false;
+        }
+
+        if let Some(err) = unsafe { err.as_mut() } {
+            *err = vr::ETrackedPropertyError::Success;
+        }
+
+        match prop {
+            #[cfg(feature = "monado")]
+            vr::ETrackedDeviceProperty::DeviceProvidesBatteryStatus_Bool => {
+                let Some(d) = self.mnd_get_device_battery(device_index) else {
+                    if let Some(err) = unsafe { err.as_mut() } {
+                        *err = vr::ETrackedPropertyError::ValueNotProvidedByDevice;
+                    }
+                    return false;
+                };
+
+                return d.present;
+            }
+            #[cfg(feature = "monado")]
+            vr::ETrackedDeviceProperty::DeviceIsCharging_Bool => {
+                let Some(d) = self.mnd_get_device_battery(device_index) else {
+                    if let Some(err) = unsafe { err.as_mut() } {
+                        *err = vr::ETrackedPropertyError::ValueNotProvidedByDevice;
+                    }
+                    return false;
+                };
+
+                if !d.present {
+                    if let Some(err) = unsafe { err.as_mut() } {
+                        *err = vr::ETrackedPropertyError::ValueNotProvidedByDevice;
+                    }
+                    return false;
+                }
+
+                return d.charging;
+            }
+            _ => {}
+        }
+
         if let Some(err) = unsafe { err.as_mut() } {
             *err = vr::ETrackedPropertyError::UnknownProperty;
         }
