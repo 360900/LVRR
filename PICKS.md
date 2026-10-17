@@ -71,5 +71,16 @@ Status: `pending` | `merged` | `superseded-by-<n>` | `blocked` | `dropped` | `re
 | 442 | build: inherit workspace rust-version | merged | closed by AI policy upstream (#433); workspace MSRV bumped 1.85 -> 1.88 (as_chunks, PR 451) |
 | 443 | skip bindings with mismatched action type | merged | panic -> warn+skip, fixes #384; adapted add_vector2_binding call site |
 | 444 | clientcore: don't panic in Cleanup | merged | #423, #439; graceful cleanup with outstanding refs |
-| 445 | compositor: replace todo!() with warnings | merged | fixes #283; GetLastFrameRenderer conflict resolved to std::process::id(); GetFrameTimings (446) + SubmitWithArrayIndex (sweep) still todo!() |
+| 445 | compositor: replace todo!() with warnings | merged | fixes #283; GetLastFrameRenderer conflict resolved to std::process::id(); GetFrameTimings implemented by 446, SubmitWithArrayIndex fixed in sweep |
 | 446 | compositor: implement GetFrameTimings | merged | real timing from last presented frame |
+
+## Fork fixes (not upstream PRs)
+
+| Commit | Change |
+|--------|--------|
+| `cf9881b` | overlay: 53 `todo!()` stubs replaced with one-time warnings and safe defaults |
+| `a523d24` | system + applications: stubs warn and return safe defaults; `ApplyTransform` implemented; non-Quit queued events no longer panic |
+| `4a0c756` | rendermodels, overlayview, vulkan Linear colorspace, vive_tracker bindings, `HmdSystemFactory` stubs replaced; no `todo!()`/`unimplemented!()` left in `src/` |
+| `faab880` | compositor: `SubmitWithArrayIndex` warns and returns `IncompatibleVersion` |
+| `bf6be63` | workspace MSRV 1.85 -> 1.88 (for `as_chunks`) |
+| `d9f387b` | CI: cancel superseded runs, embed `git describe` version; release: fork container image |
