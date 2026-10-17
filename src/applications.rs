@@ -13,7 +13,8 @@ pub struct Applications {
 
 impl vr::IVRApplications008_Interface for Applications {
     fn GetCurrentSceneProcessId(&self) -> u32 {
-        todo!()
+        // xrizer runs in the scene application itself
+        std::process::id()
     }
     fn LaunchInternalProcess(
         &self,
@@ -60,92 +61,161 @@ impl vr::IVRApplications008_Interface for Applications {
     }
     fn GetSceneApplicationStateNameFromEnum(
         &self,
-        _: vr::EVRSceneApplicationState,
+        state: vr::EVRSceneApplicationState,
     ) -> *const c_char {
-        todo!()
+        match state {
+            vr::EVRSceneApplicationState::None => c"None".as_ptr(),
+            vr::EVRSceneApplicationState::Starting => c"Starting".as_ptr(),
+            vr::EVRSceneApplicationState::Quitting => c"Quitting".as_ptr(),
+            vr::EVRSceneApplicationState::Running => c"Running".as_ptr(),
+            vr::EVRSceneApplicationState::Waiting => c"Waiting".as_ptr(),
+        }
     }
     fn PerformApplicationPrelaunchCheck(&self, _: *const c_char) -> vr::EVRApplicationError {
-        todo!()
+        crate::warn_unimplemented!("PerformApplicationPrelaunchCheck");
+        vr::EVRApplicationError::None
     }
     fn GetSceneApplicationState(&self) -> vr::EVRSceneApplicationState {
-        todo!()
+        // xrizer runs in the scene application itself
+        vr::EVRSceneApplicationState::Running
     }
-    fn GetStartingApplication(&self, _: *mut c_char, _: u32) -> vr::EVRApplicationError {
-        todo!()
+    fn GetStartingApplication(&self, buffer: *mut c_char, size: u32) -> vr::EVRApplicationError {
+        crate::warn_unimplemented!("GetStartingApplication");
+        if !buffer.is_null() && size > 0 {
+            unsafe { *buffer = 0 };
+        }
+        vr::EVRApplicationError::None
     }
-    fn GetApplicationLaunchArguments(&self, _: u32, _: *mut c_char, _: u32) -> u32 {
-        todo!()
+    fn GetApplicationLaunchArguments(&self, _: u32, buffer: *mut c_char, size: u32) -> u32 {
+        crate::warn_unimplemented!("GetApplicationLaunchArguments");
+        if !buffer.is_null() && size > 0 {
+            unsafe { *buffer = 0 };
+        }
+        0
     }
     fn GetApplicationsThatSupportMimeType(&self, _: *const c_char, _: *mut c_char, _: u32) -> u32 {
-        todo!()
+        crate::warn_unimplemented!("GetApplicationsThatSupportMimeType");
+        0
     }
     fn GetApplicationSupportedMimeTypes(&self, _: *const c_char, _: *mut c_char, _: u32) -> bool {
-        todo!()
+        crate::warn_unimplemented!("GetApplicationSupportedMimeTypes");
+        false
     }
     fn GetDefaultApplicationForMimeType(&self, _: *const c_char, _: *mut c_char, _: u32) -> bool {
-        todo!()
+        crate::warn_unimplemented!("GetDefaultApplicationForMimeType");
+        false
     }
     fn SetDefaultApplicationForMimeType(
         &self,
         _: *const c_char,
         _: *const c_char,
     ) -> vr::EVRApplicationError {
-        todo!()
+        crate::warn_unimplemented!("SetDefaultApplicationForMimeType");
+        vr::EVRApplicationError::None
     }
     fn GetApplicationAutoLaunch(&self, _: *const c_char) -> bool {
-        todo!()
+        crate::warn_unimplemented!("GetApplicationAutoLaunch");
+        false
     }
     fn SetApplicationAutoLaunch(&self, _: *const c_char, _: bool) -> vr::EVRApplicationError {
-        todo!()
+        crate::warn_unimplemented!("SetApplicationAutoLaunch");
+        vr::EVRApplicationError::None
     }
     fn GetApplicationPropertyUint64(
         &self,
         _: *const c_char,
         _: vr::EVRApplicationProperty,
-        _: *mut vr::EVRApplicationError,
+        error: *mut vr::EVRApplicationError,
     ) -> u64 {
-        todo!()
+        crate::warn_unimplemented!("GetApplicationPropertyUint64");
+        if let Some(error) = unsafe { error.as_mut() } {
+            *error = vr::EVRApplicationError::UnknownApplication;
+        }
+        0
     }
     fn GetApplicationPropertyBool(
         &self,
         _: *const c_char,
         _: vr::EVRApplicationProperty,
-        _: *mut vr::EVRApplicationError,
+        error: *mut vr::EVRApplicationError,
     ) -> bool {
-        todo!()
+        crate::warn_unimplemented!("GetApplicationPropertyBool");
+        if let Some(error) = unsafe { error.as_mut() } {
+            *error = vr::EVRApplicationError::UnknownApplication;
+        }
+        false
     }
     fn GetApplicationPropertyString(
         &self,
         _: *const c_char,
         _: vr::EVRApplicationProperty,
-        _: *mut c_char,
-        _: u32,
-        _: *mut vr::EVRApplicationError,
+        buffer: *mut c_char,
+        size: u32,
+        error: *mut vr::EVRApplicationError,
     ) -> u32 {
-        todo!()
+        crate::warn_unimplemented!("GetApplicationPropertyString");
+        if !buffer.is_null() && size > 0 {
+            unsafe { *buffer = 0 };
+        }
+        if let Some(error) = unsafe { error.as_mut() } {
+            *error = vr::EVRApplicationError::UnknownApplication;
+        }
+        0
     }
-    fn GetApplicationsErrorNameFromEnum(&self, _: vr::EVRApplicationError) -> *const c_char {
-        todo!()
+    fn GetApplicationsErrorNameFromEnum(&self, error: vr::EVRApplicationError) -> *const c_char {
+        match error {
+            vr::EVRApplicationError::None => c"None".as_ptr(),
+            vr::EVRApplicationError::AppKeyAlreadyExists => c"AppKeyAlreadyExists".as_ptr(),
+            vr::EVRApplicationError::NoManifest => c"NoManifest".as_ptr(),
+            vr::EVRApplicationError::NoApplication => c"NoApplication".as_ptr(),
+            vr::EVRApplicationError::InvalidIndex => c"InvalidIndex".as_ptr(),
+            vr::EVRApplicationError::UnknownApplication => c"UnknownApplication".as_ptr(),
+            vr::EVRApplicationError::IPCFailed => c"IPCFailed".as_ptr(),
+            vr::EVRApplicationError::ApplicationAlreadyRunning => {
+                c"ApplicationAlreadyRunning".as_ptr()
+            }
+            vr::EVRApplicationError::InvalidManifest => c"InvalidManifest".as_ptr(),
+            vr::EVRApplicationError::InvalidApplication => c"InvalidApplication".as_ptr(),
+            vr::EVRApplicationError::LaunchFailed => c"LaunchFailed".as_ptr(),
+            vr::EVRApplicationError::ApplicationAlreadyStarting => {
+                c"ApplicationAlreadyStarting".as_ptr()
+            }
+            vr::EVRApplicationError::LaunchInProgress => c"LaunchInProgress".as_ptr(),
+            vr::EVRApplicationError::OldApplicationQuitting => c"OldApplicationQuitting".as_ptr(),
+            vr::EVRApplicationError::TransitionAborted => c"TransitionAborted".as_ptr(),
+            vr::EVRApplicationError::IsTemplate => c"IsTemplate".as_ptr(),
+            vr::EVRApplicationError::SteamVRIsExiting => c"SteamVRIsExiting".as_ptr(),
+            vr::EVRApplicationError::WaitingForChaperone => c"WaitingForChaperone".as_ptr(),
+            vr::EVRApplicationError::BufferTooSmall => c"BufferTooSmall".as_ptr(),
+            vr::EVRApplicationError::PropertyNotSet => c"PropertyNotSet".as_ptr(),
+            vr::EVRApplicationError::UnknownProperty => c"UnknownProperty".as_ptr(),
+            vr::EVRApplicationError::InvalidParameter => c"InvalidParameter".as_ptr(),
+            vr::EVRApplicationError::NotImplemented => c"NotImplemented".as_ptr(),
+        }
     }
     fn GetApplicationProcessId(&self, _: *const c_char) -> u32 {
-        todo!()
+        crate::warn_unimplemented!("GetApplicationProcessId");
+        0
     }
     fn IdentifyApplication(&self, _: u32, _: *const c_char) -> vr::EVRApplicationError {
         crate::warn_unimplemented!("IdentifyApplication");
         vr::EVRApplicationError::None
     }
     fn CancelApplicationLaunch(&self, _: *const c_char) -> bool {
-        todo!()
+        crate::warn_unimplemented!("CancelApplicationLaunch");
+        false
     }
     fn LaunchDashboardOverlay(&self, _: *const c_char) -> vr::EVRApplicationError {
-        todo!()
+        crate::warn_unimplemented!("LaunchDashboardOverlay");
+        vr::EVRApplicationError::LaunchFailed
     }
     fn LaunchApplicationFromMimeType(
         &self,
         _: *const c_char,
         _: *const c_char,
     ) -> vr::EVRApplicationError {
-        todo!()
+        crate::warn_unimplemented!("LaunchApplicationFromMimeType");
+        vr::EVRApplicationError::LaunchFailed
     }
     fn LaunchTemplateApplication(
         &self,
@@ -154,21 +224,36 @@ impl vr::IVRApplications008_Interface for Applications {
         _: *const vr::AppOverrideKeys_t,
         _: u32,
     ) -> vr::EVRApplicationError {
-        todo!()
+        crate::warn_unimplemented!("LaunchTemplateApplication");
+        vr::EVRApplicationError::LaunchFailed
     }
     fn LaunchApplication(&self, _: *const c_char) -> vr::EVRApplicationError {
-        todo!()
+        crate::warn_unimplemented!("LaunchApplication");
+        vr::EVRApplicationError::LaunchFailed
     }
     fn GetApplicationKeyByProcessId(
         &self,
         _: u32,
-        _: *mut c_char,
-        _: u32,
+        buffer: *mut c_char,
+        size: u32,
     ) -> vr::EVRApplicationError {
-        todo!()
+        crate::warn_unimplemented!("GetApplicationKeyByProcessId");
+        if !buffer.is_null() && size > 0 {
+            unsafe { *buffer = 0 };
+        }
+        vr::EVRApplicationError::UnknownApplication
     }
-    fn GetApplicationKeyByIndex(&self, _: u32, _: *mut c_char, _: u32) -> vr::EVRApplicationError {
-        todo!()
+    fn GetApplicationKeyByIndex(
+        &self,
+        _: u32,
+        buffer: *mut c_char,
+        size: u32,
+    ) -> vr::EVRApplicationError {
+        crate::warn_unimplemented!("GetApplicationKeyByIndex");
+        if !buffer.is_null() && size > 0 {
+            unsafe { *buffer = 0 };
+        }
+        vr::EVRApplicationError::UnknownApplication
     }
     fn GetApplicationCount(&self) -> u32 {
         crate::warn_unimplemented!("GetApplicationCount");

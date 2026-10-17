@@ -419,11 +419,13 @@ impl vr::IVRSystem026_Interface for System {
         vr::EVRInitError::None
     }
     fn GetAppContainerFilePaths(&self, _: *mut std::os::raw::c_char, _: u32) -> u32 {
-        todo!()
+        crate::warn_unimplemented!("GetAppContainerFilePaths");
+        0
     }
     fn AcknowledgeQuit_Exiting(&self) {}
     fn PerformFirmwareUpdate(&self, _: vr::TrackedDeviceIndex_t) -> vr::EVRFirmwareError {
-        todo!()
+        crate::warn_unimplemented!("PerformFirmwareUpdate");
+        vr::EVRFirmwareError::Fail
     }
     fn ShouldApplicationReduceRenderingWork(&self) -> bool {
         false
@@ -582,7 +584,8 @@ impl vr::IVRSystem026_Interface for System {
     }
 
     fn GetEventTypeNameFromEnum(&self, _: vr::EVREventType) -> *const std::os::raw::c_char {
-        todo!()
+        crate::warn_unimplemented!("GetEventTypeNameFromEnum");
+        c"Unknown".as_ptr()
     }
 
     fn PollNextEventWithPoseAndOverlays(
@@ -639,7 +642,7 @@ impl vr::IVRSystem026_Interface for System {
 
                         return true;
                     }
-                    _ => todo!(),
+                    _ => return true,
                 }
             }
         }
@@ -772,9 +775,13 @@ impl vr::IVRSystem026_Interface for System {
         _: vr::PropertyTypeTag_t,
         _: *mut std::os::raw::c_void,
         _: u32,
-        _: *mut vr::ETrackedPropertyError,
+        error: *mut vr::ETrackedPropertyError,
     ) -> u32 {
-        todo!()
+        crate::warn_unimplemented!("GetArrayTrackedDeviceProperty");
+        if let Some(error) = unsafe { error.as_mut() } {
+            *error = vr::ETrackedPropertyError::UnknownProperty;
+        }
+        0
     }
     fn GetMatrix34TrackedDeviceProperty(
         &self,
@@ -1015,11 +1022,52 @@ impl vr::IVRSystem026_Interface for System {
     }
     fn ApplyTransform(
         &self,
-        _: *mut vr::TrackedDevicePose_t,
-        _: *const vr::TrackedDevicePose_t,
-        _: *const vr::HmdMatrix34_t,
+        output: *mut vr::TrackedDevicePose_t,
+        input: *const vr::TrackedDevicePose_t,
+        transform: *const vr::HmdMatrix34_t,
     ) {
-        todo!()
+        if output.is_null() || input.is_null() || transform.is_null() {
+            return;
+        }
+
+        // copy first: the caller may pass the same pointer for input and output
+        let input_pose = unsafe { *input };
+        let transform = xr::Posef::from(unsafe { *transform });
+        let pose = xr::Posef::from(input_pose.mDeviceToAbsoluteTracking);
+
+        let rot = Quat::from_xyzw(
+            transform.orientation.x,
+            transform.orientation.y,
+            transform.orientation.z,
+            transform.orientation.w,
+        );
+        let position = rot * Vec3::new(pose.position.x, pose.position.y, pose.position.z);
+        let orientation = rot
+            * Quat::from_xyzw(
+                pose.orientation.x,
+                pose.orientation.y,
+                pose.orientation.z,
+                pose.orientation.w,
+            );
+
+        let result = xr::Posef {
+            position: xr::Vector3f {
+                x: transform.position.x + position.x,
+                y: transform.position.y + position.y,
+                z: transform.position.z + position.z,
+            },
+            orientation: xr::Quaternionf {
+                x: orientation.x,
+                y: orientation.y,
+                z: orientation.z,
+                w: orientation.w,
+            },
+        };
+
+        unsafe {
+            (*output) = input_pose;
+            (*output).mDeviceToAbsoluteTracking = result.into();
+        }
     }
     fn GetTrackedDeviceActivityLevel(
         &self,
@@ -1128,10 +1176,14 @@ impl vr::IVRSystem019On020 for System {
         &self,
         _un_device_index: vr::TrackedDeviceIndex_t,
         _pch_request: *const std::os::raw::c_char,
-        _pch_response_buffer: *mut std::os::raw::c_char,
-        _un_response_buffer_size: u32,
+        response_buffer: *mut std::os::raw::c_char,
+        response_buffer_size: u32,
     ) -> u32 {
-        unimplemented!()
+        crate::warn_unimplemented!("DriverDebugRequest");
+        if !response_buffer.is_null() && response_buffer_size > 0 {
+            unsafe { *response_buffer = 0 };
+        }
+        0
     }
 }
 
@@ -1219,11 +1271,11 @@ impl vr::IVRSystem012On014 for System {
 
 impl vr::IVRSystem011On012 for System {
     fn PerformanceTestEnableCapture(&self, _: bool) {
-        todo!()
+        crate::warn_unimplemented!("PerformanceTestEnableCapture");
     }
 
     fn PerformanceTestReportFidelityLevelChange(&self, _: i32) {
-        todo!()
+        crate::warn_unimplemented!("PerformanceTestReportFidelityLevelChange");
     }
 }
 
