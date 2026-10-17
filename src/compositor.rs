@@ -755,7 +755,8 @@ impl vr::IVRCompositor029_Interface for Compositor {
         _pBounds: *const vr::VRTextureBounds_t,
         _nSubmitFlags: vr::EVRSubmitFlags,
     ) -> vr::EVRCompositorError {
-        todo!()
+        crate::warn_unimplemented!("SubmitWithArrayIndex");
+        vr::EVRCompositorError::IncompatibleVersion
     }
 
     fn GetSubmitTexture(
