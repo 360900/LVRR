@@ -386,6 +386,30 @@ fn unknown_handles() {
 }
 
 #[test]
+fn dominant_hand() {
+    use vr::ETrackedControllerRole::*;
+    let f = Fixture::new();
+    let get = || {
+        let mut hand = Invalid;
+        assert_eq!(f.input.GetDominantHand(&mut hand), vr::EVRInputError::None);
+        hand
+    };
+
+    assert_eq!(get(), RightHand);
+    assert_eq!(f.input.SetDominantHand(LeftHand), vr::EVRInputError::None);
+    assert_eq!(get(), LeftHand);
+    assert_eq!(
+        f.input.SetDominantHand(Treadmill),
+        vr::EVRInputError::InvalidParam
+    );
+    assert_eq!(get(), LeftHand);
+    assert_eq!(
+        f.input.GetDominantHand(std::ptr::null_mut()),
+        vr::EVRInputError::InvalidParam
+    );
+}
+
+#[test]
 fn handles_dont_change_after_load() {
     let f = Fixture::new();
 

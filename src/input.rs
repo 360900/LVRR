@@ -105,6 +105,7 @@ pub struct Input<C: openxr_data::Compositor> {
     subaction_paths: SubactionPaths,
     events: Mutex<VecDeque<InputEvent>>,
     loading_actions: AtomicBool,
+    left_handed: AtomicBool,
     /// The properties of the most recently seen controller interaction profile. The HMD's
     /// identity is derived from this, so it needs to survive session restarts (which reset the
     /// device list) and controllers going to sleep.
@@ -190,6 +191,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             subaction_paths,
             events: Mutex::default(),
             loading_actions: false.into(),
+            left_handed: false.into(),
             last_profile_properties: Mutex::new(probed_profile),
         }
     }
@@ -1283,12 +1285,25 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
 
         vr::EVRInputError::None
     }
-    fn SetDominantHand(&self, _: vr::ETrackedControllerRole) -> vr::EVRInputError {
-        crate::warn_unimplemented!("SetDominantHand");
+    fn SetDominantHand(&self, hand: vr::ETrackedControllerRole) -> vr::EVRInputError {
+        let left = match hand {
+            vr::ETrackedControllerRole::LeftHand => true,
+            vr::ETrackedControllerRole::RightHand => false,
+            _ => return vr::EVRInputError::InvalidParam,
+        };
+        self.left_handed.store(left, Ordering::Relaxed);
         vr::EVRInputError::None
     }
-    fn GetDominantHand(&self, _: *mut vr::ETrackedControllerRole) -> vr::EVRInputError {
-        crate::warn_unimplemented!("GetDominantHand");
+    fn GetDominantHand(&self, hand: *mut vr::ETrackedControllerRole) -> vr::EVRInputError {
+        if hand.is_null() {
+            return vr::EVRInputError::InvalidParam;
+        }
+        let role = if self.left_handed.load(Ordering::Relaxed) {
+            vr::ETrackedControllerRole::LeftHand
+        } else {
+            vr::ETrackedControllerRole::RightHand
+        };
+        unsafe { hand.write(role) };
         vr::EVRInputError::None
     }
     fn GetSkeletalActionData(
