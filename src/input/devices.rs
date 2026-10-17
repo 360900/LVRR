@@ -81,21 +81,18 @@ pub struct TrackedDevice {
     pub profile_path: xr::Path,
     pub connected: bool,
     pub previous_connected: bool,
-    pose_cache: Mutex<Option<vr::TrackedDevicePose_t>>,
+    pose_cache: Mutex<HashMap<i64, vr::TrackedDevicePose_t>>,
 }
 
 fn get_hmd_pose(
-    xr_data: &OpenXrData<impl crate::openxr_data::Compositor>,
+    xr_time: xr::Time,
     session_data: &SessionData,
     origin: vr::ETrackingUniverseOrigin,
 ) -> Option<vr::TrackedDevicePose_t> {
     let (location, velocity) = {
         session_data
             .view_space
-            .relate(
-                session_data.get_space_for_origin(origin),
-                xr_data.display_time.get(),
-            )
+            .relate(session_data.get_space_for_origin(origin), xr_time)
             .ok()?
     };
 
@@ -103,7 +100,7 @@ fn get_hmd_pose(
 }
 
 fn get_controller_pose(
-    xr_data: &OpenXrData<impl crate::openxr_data::Compositor>,
+    xr_time: xr::Time,
     session_data: &SessionData,
     controller: &TrackedDevice,
     origin: vr::ETrackingUniverseOrigin,
@@ -118,11 +115,8 @@ fn get_controller_pose(
     let (location, velocity) = if let Some(raw) =
         spaces.try_get_or_init_raw(&controller.profile_data, session_data, pose_data)
     {
-        raw.relate(
-            session_data.get_space_for_origin(origin),
-            xr_data.display_time.get(),
-        )
-        .ok()?
+        raw.relate(session_data.get_space_for_origin(origin), xr_time)
+            .ok()?
     } else {
         trace!("Failed to get raw space, returning empty pose");
         (xr::SpaceLocation::default(), xr::SpaceVelocity::default())
@@ -133,7 +127,7 @@ fn get_controller_pose(
 
 #[cfg(feature = "monado")]
 fn get_generic_tracker_pose(
-    xr_data: &OpenXrData<impl crate::openxr_data::Compositor>,
+    xr_time: xr::Time,
     session_data: &SessionData,
     tracker: &TrackedDevice,
     origin: vr::ETrackingUniverseOrigin,
@@ -143,10 +137,7 @@ fn get_generic_tracker_pose(
     };
 
     let (location, velocity) = space
-        .relate(
-            session_data.get_space_for_origin(origin),
-            xr_data.display_time.get(),
-        )
+        .relate(session_data.get_space_for_origin(origin), xr_time)
         .ok()?;
 
     Some(vr::space_relation_to_openvr_pose(location, velocity))
@@ -164,33 +155,33 @@ impl TrackedDevice {
             connected: matches!(device_type, TrackedDeviceType::Hmd),
             device_type,
             previous_connected: false,
-            pose_cache: Mutex::new(None),
+            pose_cache: Mutex::new(HashMap::new()),
         }
     }
 
     pub fn get_pose(
         &self,
-        xr_data: &OpenXrData<impl crate::openxr_data::Compositor>,
+        xr_time: xr::Time,
         session_data: &SessionData,
         origin: vr::ETrackingUniverseOrigin,
     ) -> Option<vr::TrackedDevicePose_t> {
+        let nanos = xr_time.as_nanos();
         let mut pose_cache = self.pose_cache.lock().unwrap();
-        if let Some(pose) = *pose_cache {
-            return Some(pose);
+        if let Some(pose) = pose_cache.get(&nanos) {
+            return Some(*pose);
         }
 
-        *pose_cache = match self.device_type {
-            TrackedDeviceType::Hmd => get_hmd_pose(xr_data, session_data, origin),
+        let pose = match self.device_type {
+            TrackedDeviceType::Hmd => get_hmd_pose(xr_time, session_data, origin),
             TrackedDeviceType::Controller { .. } => {
-                get_controller_pose(xr_data, session_data, self, origin)
+                get_controller_pose(xr_time, session_data, self, origin)
             }
             #[cfg(feature = "monado")]
             TrackedDeviceType::GenericTracker { .. } => {
-                get_generic_tracker_pose(xr_data, session_data, self, origin)
+                get_generic_tracker_pose(xr_time, session_data, self, origin)
             }
         };
-
-        *pose_cache
+        pose.and_then(|p| Some(pose_cache.entry(nanos).insert_entry(p).get()).copied())
     }
 
     pub fn get_hand_skeleton(
@@ -219,7 +210,7 @@ impl TrackedDevice {
     }
 
     pub fn clear_pose_cache(&self) {
-        std::mem::take(&mut *self.pose_cache.lock().unwrap());
+        self.pose_cache.lock().unwrap().clear();
         if let TrackedDeviceType::Controller { skeleton_cache, .. } = self.get_type() {
             skeleton_cache.lock().unwrap().clear();
         }
@@ -473,6 +464,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         &self,
         poses: &mut [vr::TrackedDevicePose_t],
         origin: Option<vr::ETrackingUniverseOrigin>,
+        xr_time: xr::Time,
     ) {
         tracy_span!();
         let session_data = self.openxr.session_data.get();
@@ -484,7 +476,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             if let Some(device) = device {
                 *pose = device
                     .get_pose(
-                        &self.openxr,
+                        xr_time,
                         &session_data,
                         origin.unwrap_or(session_data.current_origin),
                     )
@@ -497,6 +489,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         &self,
         hand: Hand,
         origin: Option<vr::ETrackingUniverseOrigin>,
+        xr_time: xr::Time,
     ) -> Option<vr::TrackedDevicePose_t> {
         let session_data = self.openxr.session_data.get();
         let controller_index = session_data
@@ -506,13 +499,14 @@ impl<C: openxr_data::Compositor> Input<C> {
             .unwrap()
             .get_controller_index(hand)?;
 
-        self.get_device_pose(controller_index, origin)
+        self.get_device_pose(controller_index, origin, xr_time)
     }
 
     pub fn get_device_pose(
         &self,
         index: vr::TrackedDeviceIndex_t,
         origin: Option<vr::ETrackingUniverseOrigin>,
+        xr_time: xr::Time,
     ) -> Option<vr::TrackedDevicePose_t> {
         tracy_span!();
 
@@ -520,7 +514,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         let devices = session_data.input_data.devices.read().unwrap();
 
         devices.get_device(index)?.get_pose(
-            &self.openxr,
+            xr_time,
             &session_data,
             origin.unwrap_or(session_data.current_origin),
         )
@@ -630,9 +624,11 @@ mod tests {
                 == Some(vr::ETrackedDeviceClass::GenericTracker)
         );
 
-        let pose2 = f
-            .input
-            .get_device_pose(2, Some(vr::ETrackingUniverseOrigin::Seated));
+        let pose2 = f.input.get_device_pose(
+            2,
+            Some(vr::ETrackingUniverseOrigin::Seated),
+            f.input.openxr.display_time.get(),
+        );
         assert!(pose2.is_some());
     }
 

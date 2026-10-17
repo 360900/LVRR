@@ -393,6 +393,15 @@ impl<C: Compositor> OpenXrData<C> {
             }
         }
     }
+
+    pub fn time_from_now(&self, seconds: f32) -> xr::Time {
+        match self.instance.now() {
+            Ok(time) => xr::Time::from_nanos(
+                time.as_nanos() + std::time::Duration::from_secs_f32(seconds).as_nanos() as i64,
+            ),
+            _ => self.display_time.get(),
+        }
+    }
 }
 
 pub struct AtomicXrTime(AtomicI64);
