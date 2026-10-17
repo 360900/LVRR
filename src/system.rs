@@ -1389,6 +1389,24 @@ mod tests {
     }
 
     #[test]
+    fn display_frequency_fallback_is_hz() {
+        let xr =
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
+        let system = System::new(xr.clone(), &Injector::default());
+        xr.display_period_nanos
+            .store(11_111_111, std::sync::atomic::Ordering::Relaxed);
+
+        let mut err = vr::ETrackedPropertyError::Success;
+        let freq = system.GetFloatTrackedDeviceProperty(
+            vr::k_unTrackedDeviceIndex_Hmd,
+            vr::ETrackedDeviceProperty::DisplayFrequency_Float,
+            &mut err,
+        );
+        assert_eq!(err, vr::ETrackedPropertyError::Success);
+        assert!((freq - 90.0).abs() < 0.01, "{freq}");
+    }
+
+    #[test]
     fn test_session_stop() {
         let xr =
             Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());

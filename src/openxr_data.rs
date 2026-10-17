@@ -456,6 +456,7 @@ impl<C: Compositor> OpenXrData<C> {
                     .unwrap(),
             )
             .as_secs_f32()
+            .recip()
         };
         if !self.enabled_extensions.fb_display_refresh_rate {
             return get_fallback_rate();
