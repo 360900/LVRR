@@ -9,7 +9,6 @@ use log::{debug, trace};
 use openvr as vr;
 use openxr as xr;
 use slotmap::{Key, KeyData, SecondaryMap, SlotMap, new_key_type};
-use std::f32::consts::PI;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::{Arc, Mutex, RwLock};
 use std::{collections::HashMap, ops::Deref};
@@ -206,9 +205,7 @@ impl OverlayMan {
                 ($ty:ident) => {{
                     $ty::new()
                         .space(space)
-                        .layer_flags(
-                            xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA,
-                        )
+                        .layer_flags(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA)
                         .eye_visibility(xr::EyeVisibility::BOTH)
                         .sub_image(
                             xr::SwapchainSubImage::new()
