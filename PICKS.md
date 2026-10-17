@@ -72,4 +72,4 @@ Status: `pending` | `merged` | `superseded-by-<n>` | `blocked` | `dropped` | `re
 | 443 | skip bindings with mismatched action type | merged | panic -> warn+skip, fixes #384; adapted add_vector2_binding call site |
 | 444 | clientcore: don't panic in Cleanup | merged | #423, #439; graceful cleanup with outstanding refs |
 | 445 | compositor: replace todo!() with warnings | merged | fixes #283; GetLastFrameRenderer conflict resolved to std::process::id(); GetFrameTimings (446) + SubmitWithArrayIndex (sweep) still todo!() |
-| 446 | compositor: implement GetFrameTimings | pending | |
+| 446 | compositor: implement GetFrameTimings | merged | real timing from last presented frame |
