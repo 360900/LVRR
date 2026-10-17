@@ -37,7 +37,7 @@ pub fn synthesized_velocity() -> bool {
 
 /// A boolean environment override, if one is set. Anything other than 1/true
 /// disables the quirk, so a game profile can be turned off as well as on.
-fn env_override(var: &str) -> Option<bool> {
+pub(crate) fn env_override(var: &str) -> Option<bool> {
     let value = std::env::var(var).ok()?;
     let value = value.trim();
     Some(value == "1" || value.eq_ignore_ascii_case("true"))

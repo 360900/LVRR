@@ -92,6 +92,8 @@ _XRIZER_MAX_TRACKERS_ - The maximum number of generic trackers to expose. Tracke
 
 _XRIZER_TRACKER_SERIALS_ - This is a semi-colon (`;`) separated list of device serial numbers to use as generic trackers. Can be used to assign controllers as FBT trackers.
 
+_XRIZER_PROFILE_PROBE_ - Set to `0` to skip the interaction profile probe at startup, a short throwaway session xrizer uses to learn the controller type before the game's first frame. Some games pick their control scheme from it at init. Background and utility apps never probe.
+
 # See also
 
 - [OpenComposite](https://gitlab.com/znixian/OpenOVR) - The original OpenVR/OpenXR implementation, much more mature than xrizer. Some of the code in this repo was rewritten based on OpenComposite.

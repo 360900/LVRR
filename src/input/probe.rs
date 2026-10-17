@@ -10,6 +10,7 @@
 
 use super::profiles::{self, InteractionProfile, RunWithProfile};
 use crate::openxr_data::{Hand, SessionData};
+use crate::quirks::env_override;
 use log::{info, warn};
 use openvr as vr;
 use openxr as xr;
@@ -42,21 +43,35 @@ pub fn probe_interaction_profiles(
     instance: &xr::Instance,
     system_id: xr::SystemId,
     enabled_extensions: &xr::ExtensionSet,
+    app_type: vr::EVRApplicationType,
 ) -> ProbedProfiles {
-    match probe(instance, system_id, enabled_extensions) {
-        Ok(probed) => probed,
-        Err(e) => {
-            warn!("Failed to probe interaction profiles: {e}");
-            Default::default()
-        }
+    let mut probed = ProbedProfiles::default();
+    if !should_probe(app_type, env_override("XRIZER_PROFILE_PROBE")) {
+        info!("Skipping interaction profile probe ({app_type:?})");
+        return probed;
     }
+    if let Err(e) = probe(instance, system_id, enabled_extensions, &mut probed) {
+        warn!("Failed to probe interaction profiles: {e}");
+    }
+    probed
+}
+
+/// Background and utility apps never render, so they don't need the probe - and a probe session
+/// there could steal focus from the app that does.
+fn should_probe(app_type: vr::EVRApplicationType, env: Option<bool>) -> bool {
+    env != Some(false)
+        && !matches!(
+            app_type,
+            vr::EVRApplicationType::Background | vr::EVRApplicationType::Utility
+        )
 }
 
 fn probe(
     instance: &xr::Instance,
     system_id: xr::SystemId,
     enabled_extensions: &xr::ExtensionSet,
-) -> xr::Result<ProbedProfiles> {
+    probed: &mut ProbedProfiles,
+) -> xr::Result<()> {
     let left = instance.string_to_path("/user/hand/left")?;
     let right = instance.string_to_path("/user/hand/right")?;
 
@@ -64,6 +79,7 @@ fn probe(
     // any of them bound.
     let set = instance.create_action_set("xrizer_probe", "XRizer profile probe", 0)?;
     let action = set.create_action::<xr::Posef>("grip", "Grip", &[left, right])?;
+    probed._probe_set = Some((set.clone(), action.clone()));
 
     struct Suggester<'a> {
         instance: &'a xr::Instance,
@@ -119,26 +135,29 @@ fn probe(
         stream.try_into().unwrap_or_else(|_| unreachable!());
     let session = &session_data.session;
 
-    session.attach_action_sets(&[&set])?;
-
-    // Profiles are only resolved on xrSyncActions in a focused session, and the runtime won't
-    // focus us until we submit frames.
     let mut state = xr::SessionState::READY;
     let mut events = EventPoller::new(instance);
-    let start = Instant::now();
-    while state != xr::SessionState::FOCUSED && start.elapsed() < FOCUS_TIMEOUT {
-        let frame = waiter.wait()?;
-        stream.begin()?;
-        stream.end(
-            frame.predicted_display_time,
-            xr::EnvironmentBlendMode::OPAQUE,
-            &[],
-        )?;
-        state = events.poll(state);
-    }
+    let result = (|| {
+        session.attach_action_sets(&[&set])?;
 
-    let mut probed = ProbedProfiles::default();
-    if state == xr::SessionState::FOCUSED {
+        // Profiles are only resolved on xrSyncActions in a focused session, and the runtime won't
+        // focus us until we submit frames.
+        let start = Instant::now();
+        while state != xr::SessionState::FOCUSED && start.elapsed() < FOCUS_TIMEOUT {
+            let frame = waiter.wait()?;
+            stream.begin()?;
+            stream.end(
+                frame.predicted_display_time,
+                xr::EnvironmentBlendMode::OPAQUE,
+                &[],
+            )?;
+            state = events.poll(state);
+        }
+
+        if state != xr::SessionState::FOCUSED {
+            warn!("Probe session never became focused, interaction profiles unknown until later");
+            return Ok(());
+        }
         session.sync_actions(&[xr::ActiveActionSet::new(&set)])?;
         state = events.poll(state);
         let profile_for = |subaction| {
@@ -155,14 +174,18 @@ fn probe(
             probed.left.as_deref().unwrap_or("<null>"),
             probed.right.as_deref().unwrap_or("<null>")
         );
-    } else {
-        warn!("Probe session never became focused, interaction profiles unknown until later");
-    }
+        Ok(())
+    })();
 
-    // Tear the session down cleanly before the real one gets created.
-    session.request_exit()?;
+    // Tear the session down cleanly before the real one gets created. Best effort: a failure here
+    // shouldn't throw away profiles we already probed.
+    if let Err(e) = session.request_exit() {
+        warn!("Failed to request probe session exit: {e}");
+    }
     state = events.wait_for(state, xr::SessionState::STOPPING, EXIT_TIMEOUT);
-    session.end()?;
+    if let Err(e) = session.end() {
+        warn!("Failed to end probe session: {e}");
+    }
     events.wait_for(state, xr::SessionState::EXITING, EXIT_TIMEOUT);
     // The frame stream and waiter hold a reference to the session, which has to be gone before
     // the temporary graphics setup inside SessionData is destroyed.
@@ -170,8 +193,7 @@ fn probe(
     drop(waiter);
     drop(session_data);
 
-    probed._probe_set = Some((set, action));
-    Ok(probed)
+    result
 }
 
 struct EventPoller<'a> {
@@ -208,5 +230,22 @@ impl<'a> EventPoller<'a> {
             state = self.poll(state);
         }
         state
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vr::EVRApplicationType::*;
+
+    #[test]
+    fn should_probe_skips_non_rendering_apps() {
+        assert!(should_probe(Scene, None));
+        assert!(should_probe(Overlay, None));
+        assert!(should_probe(Other, Some(true)));
+        assert!(!should_probe(Background, None));
+        assert!(!should_probe(Utility, None));
+        assert!(!should_probe(Background, Some(true)));
+        assert!(!should_probe(Scene, Some(false)));
     }
 }

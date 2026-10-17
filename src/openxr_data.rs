@@ -234,7 +234,8 @@ impl<C: Compositor> OpenXrData<C> {
             .system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)
             .map_err(InitError::SystemCreationFailed)?;
 
-        let probed_profiles = crate::input::probe_interaction_profiles(&instance, system_id, &exts);
+        let probed_profiles =
+            crate::input::probe_interaction_profiles(&instance, system_id, &exts, application_type);
 
         let session_data = SessionReadGuard(RwLock::new(ManuallyDrop::new(
             SessionData::new(
