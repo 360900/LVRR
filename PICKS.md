@@ -23,13 +23,13 @@ Status: `pending` | `merged` | `superseded-by-<n>` | `blocked` | `dropped` | `re
 
 | PR | Title | Status | Notes |
 |----|-------|--------|-------|
-| 419 | System button | pending | prerequisite of 440 |
-| 422 | input: support Vector2 binding inversion | pending | |
-| 406 | action set name invalid chars + string/number json | pending | Halo CEVR #390 |
-| 394 | system: HMD tracking system/model/manufacturer strings | pending | Serious Sam 3, #232 |
-| 430 | HMD identity from controller interaction profile | pending | #365; review by hand (vibe-coded) |
-| 429 | input: implement action binding and origin queries | pending | prefer over 418; fixes #162 |
-| 418 | GetActionOrigins, GetActionBindingInfo, InputProfilePath | pending | diff vs 429, keep better one as reference |
+| 419 | System button | merged | prerequisite of 440; merged with IVRClientCore003, GetEnglishStringForHmdError, SimpleController fixes |
+| 422 | input: support Vector2 binding inversion | merged | |
+| 406 | action set name invalid chars + string/number json | merged | Halo CEVR #390 |
+| 394 | system: HMD tracking system/model/manufacturer strings | merged | Serious Sam 3, #232 |
+| 430 | HMD identity from controller interaction profile | merged | #365; probe session at init; review by hand (vibe-coded) |
+| 429 | input: implement action binding and origin queries | merged | fixes #162 |
+| 418 | GetActionOrigins, GetActionBindingInfo, InputProfilePath | superseded-by-429 | follow-up: port InputProfilePath_String tracked property (per-profile input_profile_path exists already) |
 
 ## Phase 1c: quirks and poses
 
