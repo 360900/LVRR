@@ -60,7 +60,7 @@ Status: `pending` | `merged` | `superseded-by-<n>` | `blocked` | `dropped` | `re
 | 229 | libmonado battery status | merged | closes #26; monado feature now enables libmonado; battery percentage/provides/charging properties; builds fine without system libmonado |
 | 69 | Skeletal Summary | dropped | superseded by merged 313 + 261 skeletal summary work |
 | 168 | Hitman | merged | C-unwind ABI on exported fns/vtables; GetPosesForFrame delegates to GetLastPoses; GetLastPosePredictionIDs; partially fixes #448 |
-| 87 | IVRDebug stub and IVROverlay014 stub | deferred | Phase 3; adds IVRDebug + chaperone setup; old branch needs rebase |
+| 87 | IVRDebug stub and IVROverlay014 stub | merged | adapted; IVRDebug + IVRChaperoneSetup added, overlay 014 already covered by 193 |
 | 234 | Support all the BoundPoseTypes | superseded-by-382 | draft |
 | 337 | input profile path support | superseded-by-429 | draft |
 
