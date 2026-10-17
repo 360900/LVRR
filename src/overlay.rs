@@ -945,7 +945,7 @@ impl vr::IVROverlay028_Interface for OverlayMan {
     }
 
     fn CloseMessageOverlay(&self) {
-        todo!()
+        crate::warn_unimplemented!("CloseMessageOverlay");
     }
     fn ShowMessageOverlay(
         &self,
@@ -956,23 +956,25 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         _: *const c_char,
         _: *const c_char,
     ) -> vr::VRMessageOverlayResponse {
-        todo!()
+        crate::warn_unimplemented!("ShowMessageOverlay");
+        vr::VRMessageOverlayResponse::ButtonPress_0
     }
     fn SetKeyboardPositionForOverlay(&self, _: vr::VROverlayHandle_t, _: vr::HmdRect2_t) {
-        todo!()
+        crate::warn_unimplemented!("SetKeyboardPositionForOverlay");
     }
     fn SetKeyboardTransformAbsolute(
         &self,
         _: vr::ETrackingUniverseOrigin,
         _: *const vr::HmdMatrix34_t,
     ) {
-        todo!()
+        crate::warn_unimplemented!("SetKeyboardTransformAbsolute");
     }
     fn HideKeyboard(&self) {
         crate::warn_unimplemented!("HideKeyboard");
     }
     fn GetKeyboardText(&self, _: *mut c_char, _: u32) -> u32 {
-        todo!()
+        crate::warn_unimplemented!("GetKeyboardText");
+        0
     }
     fn ShowKeyboardForOverlay(
         &self,
@@ -1002,27 +1004,31 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         vr::EVROverlayError::RequestFailed
     }
     fn GetPrimaryDashboardDevice(&self) -> vr::TrackedDeviceIndex_t {
-        todo!()
+        crate::warn_unimplemented!("GetPrimaryDashboardDevice");
+        vr::k_unTrackedDeviceIndexInvalid
     }
     fn ShowDashboard(&self, _: *const c_char) {
-        todo!()
+        crate::warn_unimplemented!("ShowDashboard");
     }
     fn GetDashboardOverlaySceneProcess(
         &self,
         _: vr::VROverlayHandle_t,
         _: *mut u32,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetDashboardOverlaySceneProcess");
+        vr::EVROverlayError::RequestFailed
     }
     fn SetDashboardOverlaySceneProcess(
         &self,
         _: vr::VROverlayHandle_t,
         _: u32,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetDashboardOverlaySceneProcess");
+        vr::EVROverlayError::RequestFailed
     }
     fn IsActiveDashboardOverlay(&self, _: vr::VROverlayHandle_t) -> bool {
-        todo!()
+        crate::warn_unimplemented!("IsActiveDashboardOverlay");
+        false
     }
     fn IsDashboardVisible(&self) -> bool {
         false
@@ -1052,14 +1058,16 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         _: *mut u32,
         _: *mut u32,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayTextureSize");
+        vr::EVROverlayError::RequestFailed
     }
     fn ReleaseNativeOverlayHandle(
         &self,
         _: vr::VROverlayHandle_t,
         _: *mut c_void,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("ReleaseNativeOverlayHandle");
+        vr::EVROverlayError::RequestFailed
     }
     fn GetOverlayTexture(
         &self,
@@ -1073,14 +1081,16 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         _: *mut vr::EColorSpace,
         _: *mut vr::VRTextureBounds_t,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayTexture");
+        vr::EVROverlayError::RequestFailed
     }
     fn SetOverlayFromFile(
         &self,
         _: vr::VROverlayHandle_t,
         _: *const c_char,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetOverlayFromFile");
+        vr::EVROverlayError::RequestFailed
     }
     fn SetOverlayRaw(
         &self,
@@ -1110,21 +1120,24 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         vr::EVROverlayError::None
     }
     fn ClearOverlayCursorPositionOverride(&self, _: vr::VROverlayHandle_t) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("ClearOverlayCursorPositionOverride");
+        vr::EVROverlayError::RequestFailed
     }
     fn SetOverlayCursorPositionOverride(
         &self,
         _: vr::VROverlayHandle_t,
         _: *const vr::HmdVector2_t,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetOverlayCursorPositionOverride");
+        vr::EVROverlayError::RequestFailed
     }
     fn SetOverlayCursor(
         &self,
         _: vr::VROverlayHandle_t,
         _: vr::VROverlayHandle_t,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetOverlayCursor");
+        vr::EVROverlayError::RequestFailed
     }
     fn TriggerLaserMouseHapticVibration(
         &self,
@@ -1133,7 +1146,8 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         _: f32,
         _: f32,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("TriggerLaserMouseHapticVibration");
+        vr::EVROverlayError::RequestFailed
     }
     fn SetOverlayIntersectionMask(
         &self,
@@ -1146,7 +1160,8 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         vr::EVROverlayError::None
     }
     fn IsHoverTargetOverlay(&self, _: vr::VROverlayHandle_t) -> bool {
-        todo!()
+        crate::warn_unimplemented!("IsHoverTargetOverlay");
+        false
     }
     fn ComputeOverlayIntersection(
         &self,
@@ -1170,7 +1185,8 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         _: vr::VROverlayHandle_t,
         _: *mut vr::HmdVector2_t,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayMouseScale");
+        vr::EVROverlayError::RequestFailed
     }
     fn SetOverlayInputMethod(
         &self,
@@ -1189,7 +1205,8 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         _: vr::VROverlayHandle_t,
         _: *mut vr::VROverlayInputMethod,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayInputMethod");
+        vr::EVROverlayError::RequestFailed
     }
     fn PollNextOverlayEvent(
         &self,
@@ -1210,7 +1227,8 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         _: vr::HmdVector2_t,
         _: *mut vr::HmdMatrix34_t,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetTransformForOverlayCoordinates");
+        vr::EVROverlayError::RequestFailed
     }
     fn IsOverlayVisible(&self, handle: vr::VROverlayHandle_t) -> bool {
         let overlays = self.overlays.read().unwrap();
@@ -1226,7 +1244,8 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         _x: f32,
         _y: f32,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetSubviewPosition");
+        vr::EVROverlayError::RequestFailed
     }
     fn SetOverlayTransformProjection(
         &self,
@@ -1236,21 +1255,24 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         _: *const vr::VROverlayProjection_t,
         _: vr::EVREye,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetOverlayTransformProjection");
+        vr::EVROverlayError::RequestFailed
     }
     fn GetOverlayTransformCursor(
         &self,
         _: vr::VROverlayHandle_t,
         _: *mut vr::HmdVector2_t,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayTransformCursor");
+        vr::EVROverlayError::RequestFailed
     }
     fn SetOverlayTransformCursor(
         &self,
         _: vr::VROverlayHandle_t,
         _: *const vr::HmdVector2_t,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetOverlayTransformCursor");
+        vr::EVROverlayError::RequestFailed
     }
     fn GetOverlayTransformTrackedDeviceComponent(
         &self,
@@ -1259,7 +1281,8 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         _: *mut c_char,
         _: u32,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayTransformTrackedDeviceComponent");
+        vr::EVROverlayError::RequestFailed
     }
     fn SetOverlayTransformTrackedDeviceComponent(
         &self,
@@ -1267,7 +1290,8 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         _: vr::TrackedDeviceIndex_t,
         _: *const c_char,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetOverlayTransformTrackedDeviceComponent");
+        vr::EVROverlayError::RequestFailed
     }
     fn GetOverlayTransformTrackedDeviceRelative(
         &self,
@@ -1275,7 +1299,8 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         _: *mut vr::TrackedDeviceIndex_t,
         _: *mut vr::HmdMatrix34_t,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayTransformTrackedDeviceRelative");
+        vr::EVROverlayError::RequestFailed
     }
     fn SetOverlayTransformTrackedDeviceRelative(
         &self,
@@ -1349,7 +1374,8 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         _: vr::VROverlayHandle_t,
         _: *mut vr::VROverlayTransformType,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayTransformType");
+        vr::EVROverlayError::RequestFailed
     }
     fn GetOverlayTextureBounds(
         &self,
@@ -1383,21 +1409,24 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         _: vr::VROverlayHandle_t,
         _: *mut vr::EColorSpace,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayTextureColorSpace");
+        vr::EVROverlayError::RequestFailed
     }
     fn SetOverlayTextureColorSpace(
         &self,
         _: vr::VROverlayHandle_t,
         _: vr::EColorSpace,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetOverlayTextureColorSpace");
+        vr::EVROverlayError::RequestFailed
     }
     fn GetOverlayPreCurvePitch(
         &self,
         _: vr::VROverlayHandle_t,
         _: *mut f32,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayPreCurvePitch");
+        vr::EVROverlayError::RequestFailed
     }
     fn SetOverlayPreCurvePitch(&self, _: vr::VROverlayHandle_t, _: f32) -> vr::EVROverlayError {
         crate::warn_unimplemented!("SetOverlayPreCurvePitch");
@@ -1475,7 +1504,8 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         vr::EVROverlayError::None
     }
     fn GetOverlayTexelAspect(&self, _: vr::VROverlayHandle_t, _: *mut f32) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayTexelAspect");
+        vr::EVROverlayError::RequestFailed
     }
     fn SetOverlayTexelAspect(&self, _: vr::VROverlayHandle_t, _: f32) -> vr::EVROverlayError {
         crate::warn_unimplemented!("SetOverlayTexelAspect");
@@ -1498,7 +1528,8 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         _: *mut f32,
         _: *mut f32,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayColor");
+        vr::EVROverlayError::RequestFailed
     }
     fn SetOverlayColor(
         &self,
@@ -1511,7 +1542,8 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         vr::EVROverlayError::None
     }
     fn GetOverlayFlags(&self, _: vr::VROverlayHandle_t, _: *mut u32) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayFlags");
+        vr::EVROverlayError::RequestFailed
     }
     fn GetOverlayFlag(
         &self,
@@ -1519,7 +1551,8 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         _: vr::VROverlayFlags,
         _: *mut bool,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayFlag");
+        vr::EVROverlayError::RequestFailed
     }
     fn SetOverlayFlag(
         &self,
@@ -1532,10 +1565,12 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         vr::EVROverlayError::None
     }
     fn GetOverlayRenderingPid(&self, _: vr::VROverlayHandle_t) -> u32 {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayRenderingPid");
+        0
     }
     fn SetOverlayRenderingPid(&self, _: vr::VROverlayHandle_t, _: u32) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetOverlayRenderingPid");
+        vr::EVROverlayError::RequestFailed
     }
     /// Return the name of the given error enum as a pointer to a static c string.
     fn GetOverlayErrorNameFromEnum(&self, e: vr::EVROverlayError) -> *const c_char {
@@ -1576,7 +1611,8 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         _: *mut u32,
         _: *mut u32,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayImageData");
+        vr::EVROverlayError::RequestFailed
     }
     fn SetOverlayName(
         &self,
@@ -1594,7 +1630,8 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         _: u32,
         _: *mut vr::EVROverlayError,
     ) -> u32 {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayName");
+        0
     }
     fn GetOverlayKey(
         &self,
@@ -1603,7 +1640,8 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         _: u32,
         _: *mut vr::EVROverlayError,
     ) -> u32 {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayKey");
+        0
     }
     fn DestroyOverlay(&self, handle: vr::VROverlayHandle_t) -> vr::EVROverlayError {
         let key = OverlayKey::from(KeyData::from_ffi(handle));
@@ -1698,7 +1736,8 @@ impl vr::IVROverlay021On024 for OverlayMan {
         _: *mut vr::HmdVector2_t,
         _: *mut f32,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayDualAnalogTransform");
+        vr::EVROverlayError::RequestFailed
     }
     fn SetOverlayDualAnalogTransform(
         &self,
@@ -1707,7 +1746,8 @@ impl vr::IVROverlay021On024 for OverlayMan {
         _: *const vr::HmdVector2_t,
         _: f32,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetOverlayDualAnalogTransform");
+        vr::EVROverlayError::RequestFailed
     }
     fn SetOverlayRenderModel(
         &self,
@@ -1715,7 +1755,8 @@ impl vr::IVROverlay021On024 for OverlayMan {
         _: *const c_char,
         _: *const vr::HmdColor_t,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetOverlayRenderModel");
+        vr::EVROverlayError::RequestFailed
     }
     fn GetOverlayRenderModel(
         &self,
@@ -1725,7 +1766,8 @@ impl vr::IVROverlay021On024 for OverlayMan {
         _: *mut vr::HmdColor_t,
         _: *mut vr::EVROverlayError,
     ) -> u32 {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayRenderModel");
+        0
     }
 }
 
@@ -1735,7 +1777,8 @@ impl vr::IVROverlay020On021 for OverlayMan {
         _: vr::EOverlayDirection,
         _: vr::VROverlayHandle_t,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("MoveGamepadFocusToNeighbor");
+        vr::EVROverlayError::RequestFailed
     }
     fn SetOverlayNeighbor(
         &self,
@@ -1743,13 +1786,16 @@ impl vr::IVROverlay020On021 for OverlayMan {
         _: vr::VROverlayHandle_t,
         _: vr::VROverlayHandle_t,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetOverlayNeighbor");
+        vr::EVROverlayError::RequestFailed
     }
     fn SetGamepadFocusOverlay(&self, _: vr::VROverlayHandle_t) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("SetGamepadFocusOverlay");
+        vr::EVROverlayError::RequestFailed
     }
     fn GetGamepadFocusOverlay(&self) -> vr::VROverlayHandle_t {
-        todo!()
+        crate::warn_unimplemented!("GetGamepadFocusOverlay");
+        0
     }
     fn GetOverlayAutoCurveDistanceRangeInMeters(
         &self,
@@ -1790,7 +1836,8 @@ impl vr::IVROverlay017On018 for OverlayMan {
         _: vr::VROverlayHandle_t,
         _: vr::TrackedDeviceIndex_t,
     ) -> bool {
-        todo!()
+        crate::warn_unimplemented!("HandleControllerOverlayInteractionAsMouse");
+        false
     }
 }
 
@@ -1806,7 +1853,8 @@ impl vr::IVROverlay013On014 for OverlayMan {
         _: *mut vr::EGraphicsAPIConvention,
         _: *mut vr::EColorSpace,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("GetOverlayTexture");
+        vr::EVROverlayError::RequestFailed
     }
 }
 
@@ -1816,6 +1864,7 @@ impl vr::IVROverlay007On010 for OverlayMan {
         _: vr::VROverlayHandle_t,
         _: *mut vr::vr_0_9_12::VREvent_t,
     ) -> bool {
-        todo!()
+        crate::warn_unimplemented!("PollNextOverlayEvent");
+        false
     }
 }
