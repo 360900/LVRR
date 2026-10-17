@@ -421,6 +421,22 @@ fn binding_rank(state: &xr::ActionState<bool>) -> (bool, bool, i64) {
     )
 }
 
+/// Adds a set's priority, keeping the highest one if the set is already present (e.g. as both a
+/// primary and a secondary set). The extension doesn't allow duplicates.
+fn push_priority(
+    priorities: &mut Vec<xr::sys::ActiveActionSetPriorityEXT>,
+    set: &xr::ActionSet,
+    priority: u32,
+) {
+    match priorities.iter_mut().find(|p| p.action_set == set.as_raw()) {
+        Some(existing) => existing.priority_override = existing.priority_override.max(priority),
+        None => priorities.push(xr::sys::ActiveActionSetPriorityEXT {
+            action_set: set.as_raw(),
+            priority_override: priority,
+        }),
+    }
+}
+
 pub struct InputSessionData {
     actions: OnceLock<LoadedActions>,
     estimated_skeleton_actions: OnceLock<SkeletalInputActionData>,
@@ -1555,18 +1571,32 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             tracy_span!("UpdateActionState generate active sets");
 
             // we need to convert int32 to uint32
-            let priority_offset = -active_sets
-                .iter()
-                .map(|set| set.nPriority)
-                .min()
-                .unwrap() // safe: count cannot be zero here
-                .min(0)
-                + 1; // override legacy actions
+            let priority_offset = 1 // override legacy actions
+                - i64::from(
+                    active_sets
+                        .iter()
+                        .map(|set| set.nPriority)
+                        .min()
+                        .unwrap() // safe: count cannot be zero here
+                        .min(0),
+                );
 
             for set in active_sets {
                 let key = ActionSetKey::from(KeyData::from_ffi(set.ulActionSet));
                 let name = set_map.get(key);
-                let priority = (set.nPriority + priority_offset) as u32;
+                let priority =
+                    u32::try_from(i64::from(set.nPriority) + priority_offset).unwrap_or(u32::MAX);
+
+                // A restricted set without OpenXR actions doesn't have the hand subaction paths,
+                // which would fail xrSyncActions. It has nothing to restrict, so sync it
+                // unrestricted.
+                let restrict = |path, key| {
+                    if actions.hand_restrictable_sets.contains(&key) {
+                        path
+                    } else {
+                        xr::Path::NULL
+                    }
+                };
 
                 let mut path = xr::Path::NULL;
                 if let Some(new_path) = self.subaction_path_from_handle(set.ulRestrictedToDevice) {
@@ -1589,12 +1619,12 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
                             return vr::EVRInputError::InvalidHandle;
                         };
                         debug!("Activating secondary set {}", name.unwrap());
-                        sync_sets.push(xr::ActiveActionSet::with_subaction(set, path));
-                        priorities.push(xr::sys::ActiveActionSetPriorityEXT {
-                            action_set: set.as_raw(),
-                            // TODO: check if SteamVR actually puts these on the same priority as the primary
-                            priority_override: priority,
-                        });
+                        sync_sets.push(xr::ActiveActionSet::with_subaction(
+                            set,
+                            restrict(path, key),
+                        ));
+                        // TODO: check if SteamVR actually puts these on the same priority as the primary
+                        push_priority(&mut priorities, set, priority);
                     }
                 };
 
@@ -1607,11 +1637,11 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
                     name.unwrap(),
                     priority
                 );
-                sync_sets.push(xr::ActiveActionSet::with_subaction(set, path));
-                priorities.push(xr::sys::ActiveActionSetPriorityEXT {
-                    action_set: set.as_raw(),
-                    priority_override: priority,
-                });
+                sync_sets.push(xr::ActiveActionSet::with_subaction(
+                    set,
+                    restrict(path, key),
+                ));
+                push_priority(&mut priorities, set, priority);
             }
 
             let skeletal_input = data.input_data.estimated_skeleton_actions.get().unwrap();
@@ -1652,12 +1682,10 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
 
             let result =
                 unsafe { (self.openxr.instance.fp().sync_actions)(data.session.as_raw(), &info) };
-            if result.into_raw() >= 0 {
-                Ok(result)
-            } else {
-                Err(result)
+            if result.into_raw() < 0 {
+                warn!("xrSyncActions failed: {result}");
+                return vr::EVRInputError::IPCError;
             }
-            .unwrap();
         }
 
         let hands = [
@@ -2416,6 +2444,8 @@ enum LoadedActions {
 
 struct ManifestLoadedActions {
     sets: SecondaryMap<ActionSetKey, xr::ActionSet>,
+    /// Sets that contain OpenXR actions (and thus the hand subaction paths).
+    hand_restrictable_sets: HashSet<ActionSetKey>,
     actions: SecondaryMap<ActionKey, ActionData>,
     extra_actions: SecondaryMap<ActionKey, ExtraActionData>,
     actions_with_custom_bindings: HashSet<ActionKey>,

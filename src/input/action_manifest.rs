@@ -176,6 +176,23 @@ impl<C: openxr_data::Compositor> Input<C> {
             .sync_actions(&[xr::ActiveActionSet::new(&info_set)])
             .unwrap();
 
+        // Every manifest OpenXR action is created with both hand subaction paths, so a set can
+        // only be synced restricted to a hand if it has at least one.
+        let sets_with_xr_actions: HashSet<String> = actions
+            .iter()
+            .filter(|(_, data)| {
+                !matches!(
+                    data,
+                    super::ActionData::Pose | super::ActionData::Skeleton(_)
+                )
+            })
+            .map(|(path, _)| path)
+            .chain(extra_actions.keys())
+            .filter_map(|path| path.match_indices('/').nth(2).map(|(idx, _)| &path[..idx]))
+            .map(str::to_string)
+            .collect();
+        let mut hand_restrictable_sets = HashSet::new();
+
         // Transform actions and sets into maps
         // If the application has already requested the handle for an action/set, we need to
         // reuse the corresponding slot. Otherwise just create a new one.
@@ -188,7 +205,10 @@ impl<C: openxr_data::Compositor> Input<C> {
                 let key = set_guard
                     .iter()
                     .find_map(|(key, set_path)| (*set_path == set_name).then_some(key))
-                    .unwrap_or_else(|| set_guard.insert(set_name));
+                    .unwrap_or_else(|| set_guard.insert(set_name.clone()));
+                if sets_with_xr_actions.contains(&set_name) {
+                    hand_restrictable_sets.insert(key);
+                }
                 (key, set)
             })
             .collect();
@@ -234,6 +254,7 @@ impl<C: openxr_data::Compositor> Input<C> {
 
         let loaded = super::ManifestLoadedActions {
             sets,
+            hand_restrictable_sets,
             actions,
             actions_with_custom_bindings,
             extra_actions,

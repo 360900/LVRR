@@ -1,0 +1,24 @@
+{
+	"actions": [
+		{
+			"name": "/actions/main/in/boolact",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/poses/in/pose",
+			"type": "pose"
+		}
+	],
+	"action_sets": [
+		{
+			"name": "/actions/main",
+			"usage": "leftright"
+		},
+		{
+			"name": "/actions/poses",
+			"usage": "leftright"
+		}
+	],
+	"default_bindings": [],
+	"localization": []
+}

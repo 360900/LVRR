@@ -845,6 +845,7 @@ struct Action {
     state: LeftRight<AtomicCell<ActionStateData>>,
     pending_state: AtomicCell<LeftRight<Option<(ActionState, xr::Time)>>>,
     suggested: Mutex<HashMap<xr::Path, Vec<xr::Path>>>,
+    subaction_paths: Vec<xr::Path>,
 }
 
 impl Action {
@@ -1119,6 +1120,14 @@ extern "system" fn create_action(
         },
         pending_state: Default::default(),
         suggested: Mutex::default(),
+        subaction_paths: if info.count_subaction_paths == 0 {
+            Vec::new()
+        } else {
+            unsafe {
+                std::slice::from_raw_parts(info.subaction_paths, info.count_subaction_paths as _)
+            }
+            .to_vec()
+        },
     });
 
     set.pending_actions.write().unwrap().push(a.clone());
@@ -1420,10 +1429,18 @@ extern "system" fn sync_actions(
         if !attached.contains(&set.action_set) {
             return xr::Result::ERROR_ACTIONSET_NOT_ATTACHED;
         }
+        let subaction_path = set.subaction_path;
         let set = get_handle!(set.action_set);
         let Some(actions) = set.actions.get() else {
             return xr::Result::ERROR_ACTIONSET_NOT_ATTACHED;
         };
+        if subaction_path != xr::Path::NULL
+            && !actions
+                .iter()
+                .any(|a| a.subaction_paths.contains(&subaction_path))
+        {
+            return xr::Result::ERROR_PATH_UNSUPPORTED;
+        }
         set.active.store(true, Ordering::Relaxed);
 
         for action in actions {

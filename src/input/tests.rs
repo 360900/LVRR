@@ -1427,3 +1427,57 @@ fn synthesized_velocity_from_history() {
     );
     assert!(after_switch.is_none());
 }
+
+#[test]
+fn restricted_set_without_openxr_actions() {
+    let mut f = Fixture::new();
+    f.load_actions(c"actions_pose_only_set.json");
+    let main = f.get_action_set_handle(c"/actions/main");
+    let poses = f.get_action_set_handle(c"/actions/poses");
+    let left = f.get_input_source_handle(c"/user/hand/left");
+
+    f.sync(vr::VRActiveActionSet_t {
+        ulActionSet: main,
+        ulRestrictedToDevice: left,
+        ..Default::default()
+    });
+    f.sync(vr::VRActiveActionSet_t {
+        ulActionSet: poses,
+        ulRestrictedToDevice: left,
+        ..Default::default()
+    });
+}
+
+#[test]
+fn push_priority_keeps_highest() {
+    let f = Fixture::new();
+    let instance = &f.input.openxr.instance;
+    let a = instance.create_action_set("prio_a", "Prio A", 0).unwrap();
+    let b = instance.create_action_set("prio_b", "Prio B", 0).unwrap();
+
+    let mut priorities = Vec::new();
+    super::push_priority(&mut priorities, &a, 1);
+    super::push_priority(&mut priorities, &b, 5);
+    super::push_priority(&mut priorities, &a, 3);
+    super::push_priority(&mut priorities, &a, 2);
+
+    let got: Vec<_> = priorities
+        .iter()
+        .map(|p| (p.action_set, p.priority_override))
+        .collect();
+    assert_eq!(got, [(a.as_raw(), 3), (b.as_raw(), 5)]);
+}
+
+#[test]
+fn extreme_set_priorities() {
+    let mut f = Fixture::new();
+    f.load_actions(c"actions.json");
+    let set1 = f.get_action_set_handle(c"/actions/set1");
+    for priority in [i32::MIN, i32::MAX] {
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: set1,
+            nPriority: priority,
+            ..Default::default()
+        });
+    }
+}
