@@ -68,7 +68,7 @@ Status: `pending` | `merged` | `superseded-by-<n>` | `blocked` | `dropped` | `re
 
 | PR | Title | Status | Notes |
 |----|-------|--------|-------|
-| 442 | build: inherit workspace rust-version | pending | closed by AI policy upstream (#433) |
+| 442 | build: inherit workspace rust-version | merged | closed by AI policy upstream (#433); workspace MSRV bumped 1.85 -> 1.88 (as_chunks, PR 451) |
 | 443 | skip bindings with mismatched action type | pending | panic -> skip; #334? |
 | 444 | clientcore: don't panic in Cleanup | pending | #423, #439 |
 | 445 | compositor: replace todo!() with warnings | pending | #391? |
