@@ -1,6 +1,6 @@
 use super::{
-    DynInputPath, HmdProperties, InteractionProfile, MainAxisType, ProfileProperties, Property,
-    SkeletalInputBindings, legal_paths, paths::*,
+    BoundPoseType, DynInputPath, HmdProperties, InteractionProfile, MainAxisType,
+    PoseTransformations, ProfileProperties, Property, SkeletalInputBindings, legal_paths, paths::*,
 };
 use crate::button_mask_from_ids;
 use crate::input::legacy::{Bindings, LegacyBindings, button_mask_from_id};
@@ -95,6 +95,10 @@ impl InteractionProfile for SimpleController {
 
     fn offset_grip_pose(_: Hand) -> Mat4 {
         Mat4::IDENTITY
+    }
+
+    fn pose_transformation(_pose: BoundPoseType) -> Option<PoseTransformations> {
+        None
     }
 }
 

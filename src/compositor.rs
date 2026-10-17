@@ -822,7 +822,8 @@ impl vr::IVRCompositor029_Interface for Compositor {
 
         let input = self.input.force(|_| Input::new(self.openxr.clone()));
 
-        let Some(pose) = input.get_device_pose(device_index, None, self.openxr.display_time.get())
+        let Some(pose) =
+            input.get_device_pose(device_index, None, self.openxr.display_time.get(), None)
         else {
             return vr::EVRCompositorError::RequestFailed;
         };

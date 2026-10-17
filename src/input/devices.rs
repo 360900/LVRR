@@ -3,18 +3,19 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::sync::Mutex;
 
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Quat, Vec3};
 use openvr as vr;
 use openxr as xr;
 use openxr::sys::Handle;
 
+use crate::input::BoundPoseType;
 use crate::input::profiles::knuckles::Knuckles;
 #[cfg(feature = "monado")]
 use crate::input::profiles::vive_tracker::ViveTracker;
 #[cfg(feature = "monado")]
 use openxr_mndx_xdev_space::{SessionXDevExtensionMNDX, XDev, XR_MNDX_XDEV_SPACE_EXTENSION_NAME};
 
-use crate::input::profiles::ProfileProperties;
+use crate::input::profiles::{PoseTransformations, ProfileProperties};
 use crate::openxr_data::{self, Hand, OpenXrData, SessionData};
 use crate::tracy_span;
 use log::trace;
@@ -54,6 +55,7 @@ impl std::fmt::Debug for TrackedDeviceType {
 pub struct ProfileData {
     pub properties: &'static ProfileProperties,
     get_hand_offset: fn(Hand) -> Mat4,
+    get_pose_transformation: fn(BoundPoseType) -> Option<PoseTransformations>,
     /// For Knuckles, the skeleton thumb tries to accurately match where the physical
     /// thumb is, e.g. the curl depends on which part of the touchpad is being touched,
     /// or how the thumbstick is being pushed, but in GetSkeletalSummaryData with
@@ -68,6 +70,7 @@ impl ProfileData {
         Self {
             properties: P::properties(),
             get_hand_offset: P::offset_grip_pose,
+            get_pose_transformation: P::pose_transformation,
             force_estimated_thumb: TypeId::of::<P>() == TypeId::of::<Knuckles>(),
         }
     }
@@ -103,6 +106,14 @@ impl ProfileData {
     #[inline]
     pub fn hand_offset(&self, hand: Hand) -> Mat4 {
         (self.get_hand_offset)(hand)
+    }
+
+    #[inline]
+    pub fn pose_transformation(&self, hand: Hand, pose_type: BoundPoseType) -> Option<Mat4> {
+        (self.get_pose_transformation)(pose_type).map(|transforms| match hand {
+            Hand::Left => transforms.left_hand,
+            Hand::Right => transforms.right_hand,
+        })
     }
 }
 
@@ -216,24 +227,39 @@ impl TrackedDevice {
         xr_time: xr::Time,
         session_data: &SessionData,
         origin: vr::ETrackingUniverseOrigin,
+        pose_type: Option<BoundPoseType>,
     ) -> Option<vr::TrackedDevicePose_t> {
         let nanos = xr_time.as_nanos();
         let mut pose_cache = self.pose_cache.lock().unwrap();
-        if let Some(pose) = pose_cache.get(&nanos) {
-            return Some(*pose);
-        }
-
-        let pose = match self.device_type {
-            TrackedDeviceType::Hmd => get_hmd_pose(xr_time, session_data, origin),
-            TrackedDeviceType::Controller { .. } => {
-                get_controller_pose(xr_time, session_data, self, origin)
-            }
-            #[cfg(feature = "monado")]
-            TrackedDeviceType::GenericTracker { .. } => {
-                get_generic_tracker_pose(xr_time, session_data, self, origin)
-            }
+        let pose = if let Some(pose) = pose_cache.get(&nanos) {
+            *pose
+        } else {
+            let pose = match self.device_type {
+                TrackedDeviceType::Hmd => get_hmd_pose(xr_time, session_data, origin),
+                TrackedDeviceType::Controller { .. } => {
+                    get_controller_pose(xr_time, session_data, self, origin)
+                }
+                #[cfg(feature = "monado")]
+                TrackedDeviceType::GenericTracker { .. } => {
+                    get_generic_tracker_pose(xr_time, session_data, self, origin)
+                }
+            }?;
+            *pose_cache.entry(nanos).or_insert(pose)
         };
-        pose.and_then(|p| Some(pose_cache.entry(nanos).insert_entry(p).get()).copied())
+
+        // The cache holds the raw pose; the profile's pose transformation is
+        // applied per call, since different bindings can ask for different
+        // pose types (raw, tip, handgrip, ...) in the same frame.
+        Some(match pose_type {
+            Some(p_type) if pose.bPoseIsValid => {
+                let mut pose = pose;
+                pose.mDeviceToAbsoluteTracking = vr::HmdMatrix34_t::from(
+                    self.transform_pose(xr::Posef::from(pose.mDeviceToAbsoluteTracking), p_type),
+                );
+                pose
+            }
+            _ => pose,
+        })
     }
 
     pub fn get_hand_skeleton(
@@ -304,6 +330,51 @@ impl TrackedDevice {
                 .or(last_profile),
             _ => self.profile_data.as_ref().map(|data| data.properties),
         }
+    }
+
+    /// Modify a pose's position & orientation if the device defines a
+    /// transformation for the given pose type.
+    pub fn transform_pose(&self, raw_pose: xr::Posef, pose_type: BoundPoseType) -> xr::Posef {
+        self.profile_data
+            .as_ref()
+            .and_then(|profile_data| {
+                self.get_controller_hand().and_then(|hand| {
+                    profile_data
+                        .pose_transformation(hand, pose_type)
+                        .map(|location_transform| {
+                            let pose_mat = Mat4::from_rotation_translation(
+                                Quat::from_xyzw(
+                                    raw_pose.orientation.x,
+                                    raw_pose.orientation.y,
+                                    raw_pose.orientation.z,
+                                    raw_pose.orientation.w,
+                                ),
+                                Vec3 {
+                                    x: raw_pose.position.x,
+                                    y: raw_pose.position.y,
+                                    z: raw_pose.position.z,
+                                },
+                            );
+                            let (_, new_quat, new_vec) =
+                                (pose_mat * location_transform).to_scale_rotation_translation();
+                            let [quat_x, quat_y, quat_z, quat_w] = new_quat.to_array();
+                            xr::Posef {
+                                orientation: xr::Quaternionf {
+                                    x: quat_x,
+                                    y: quat_y,
+                                    z: quat_z,
+                                    w: quat_w,
+                                },
+                                position: xr::Vector3f {
+                                    x: new_vec.x,
+                                    y: new_vec.y,
+                                    z: new_vec.z,
+                                },
+                            }
+                        })
+                })
+            })
+            .unwrap_or(raw_pose)
     }
 
     fn get_string_property(
@@ -580,6 +651,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                         xr_time,
                         &session_data,
                         origin.unwrap_or(session_data.current_origin),
+                        None,
                     )
                     .unwrap_or_default();
             }
@@ -591,6 +663,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         hand: Hand,
         origin: Option<vr::ETrackingUniverseOrigin>,
         xr_time: xr::Time,
+        pose_type: Option<BoundPoseType>,
     ) -> Option<vr::TrackedDevicePose_t> {
         let session_data = self.openxr.session_data.get();
         let controller_index = session_data
@@ -600,7 +673,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             .unwrap()
             .get_controller_index(hand)?;
 
-        self.get_device_pose(controller_index, origin, xr_time)
+        self.get_device_pose(controller_index, origin, xr_time, pose_type)
     }
 
     pub fn get_device_pose(
@@ -608,6 +681,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         index: vr::TrackedDeviceIndex_t,
         origin: Option<vr::ETrackingUniverseOrigin>,
         xr_time: xr::Time,
+        pose_type: Option<BoundPoseType>,
     ) -> Option<vr::TrackedDevicePose_t> {
         tracy_span!();
 
@@ -618,6 +692,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             xr_time,
             &session_data,
             origin.unwrap_or(session_data.current_origin),
+            pose_type,
         )
     }
 
@@ -732,6 +807,7 @@ mod tests {
             2,
             Some(vr::ETrackingUniverseOrigin::Seated),
             f.input.openxr.display_time.get(),
+            None,
         );
         assert!(pose2.is_some());
     }

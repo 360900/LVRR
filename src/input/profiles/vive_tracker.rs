@@ -1,6 +1,6 @@
 use super::{
-    HmdProperties, InteractionProfile, MainAxisType, ProfileProperties, Property,
-    SkeletalInputBindings,
+    BoundPoseType, HmdProperties, InteractionProfile, MainAxisType, PoseTransformations,
+    ProfileProperties, Property, SkeletalInputBindings,
 };
 use crate::{input::legacy::LegacyBindings, openxr_data::Hand};
 use glam::Mat4;
@@ -47,5 +47,9 @@ impl InteractionProfile for ViveTracker {
 
     fn offset_grip_pose(_: Hand) -> Mat4 {
         Mat4::IDENTITY
+    }
+
+    fn pose_transformation(_pose: BoundPoseType) -> Option<PoseTransformations> {
+        None
     }
 }
