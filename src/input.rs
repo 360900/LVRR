@@ -39,6 +39,7 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock, RwLock, RwLockReadGuard};
+use xr::sys::Handle as _;
 
 new_key_type! {
     struct InputSourceKey;
@@ -2023,7 +2024,10 @@ fn create_hand_tracker_with_data_sources<G>(
         return Err(xr::sys::Result::ERROR_EXTENSION_NOT_PRESENT);
     };
 
-    let data_sources = [xr::HandTrackingDataSourceEXT::CONTROLLER, xr::HandTrackingDataSourceEXT::UNOBSTRUCTED];
+    let data_sources = [
+        xr::HandTrackingDataSourceEXT::CONTROLLER,
+        xr::HandTrackingDataSourceEXT::UNOBSTRUCTED,
+    ];
     let data_source_info = xr::sys::HandTrackingDataSourceInfoEXT {
         ty: xr::sys::HandTrackingDataSourceInfoEXT::TYPE,
         next: std::ptr::null(),
