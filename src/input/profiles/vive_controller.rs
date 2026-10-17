@@ -1,5 +1,5 @@
 use super::{
-    DynInputPath, InteractionProfile, MainAxisType, ProfileProperties, Property,
+    DynInputPath, HmdProperties, InteractionProfile, MainAxisType, ProfileProperties, Property,
     SkeletalInputBindings,
 };
 use crate::button_mask_from_ids;
@@ -50,6 +50,11 @@ impl InteractionProfile for ViveWands {
                 EVRButtonId::Axis0,
                 EVRButtonId::Axis1
             ),
+            hmd: HmdProperties {
+                model: c"Vive. MV",
+                controller_type: c"vive",
+                serial_number: c"LHR-00000000",
+            },
         };
         &DEVICE_PROPERTIES
     }

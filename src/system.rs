@@ -666,15 +666,25 @@ impl vr::IVRSystem026_Interface for System {
             &mut []
         };
 
-        let data = match device_index {
-            vr::k_unTrackedDeviceIndex_Hmd => match prop {
-                // The Unity OpenVR sample appears to have a hard requirement on these first three properties returning
-                // something to even get the game to recognize the HMD's location. However, the value
-                // itself doesn't appear to be that important.
-                vr::ETrackedDeviceProperty::SerialNumber_String
-                | vr::ETrackedDeviceProperty::ControllerType_String => {
-                    Some(CString::new("<unknown>").unwrap())
-                }
+        // The HMD's identity is derived from the controller interaction profile, so make sure
+        // the input module exists to answer for it.
+        let input = if device_index == vr::k_unTrackedDeviceIndex_Hmd {
+            Some(self.input.force(|_| Input::new(self.openxr.clone())))
+        } else {
+            self.input.get()
+        };
+
+        let data = input
+            .and_then(|input| input.get_device_string_tracked_property(device_index, prop))
+            .or_else(|| match (device_index, prop) {
+                // If the interaction profile isn't known we still need to return *something*
+                // here: the Unity OpenVR sample has a hard requirement on these three properties
+                // returning a value to even recognize the HMD's location.
+                (
+                    vr::k_unTrackedDeviceIndex_Hmd,
+                    vr::ETrackedDeviceProperty::SerialNumber_String
+                    | vr::ETrackedDeviceProperty::ControllerType_String,
+                ) => Some(CString::new("<unknown>").unwrap()),
                 // Some games sniff the HMD's tracking system/model/vendor
                 // strings to decide which motion controller scheme to enable.
                 // If these are empty, such games fall back to "no supported
@@ -683,22 +693,20 @@ impl vr::IVRSystem026_Interface for System {
                 // button) - and they typically sniff once, at startup, before
                 // any controller has connected, so the HMD is the only device
                 // that can answer.
-                vr::ETrackedDeviceProperty::TrackingSystemName_String => {
-                    Some(self.hmd_identity().tracking_system.clone())
-                }
-                vr::ETrackedDeviceProperty::ModelNumber_String => {
-                    Some(self.hmd_identity().model.clone())
-                }
-                vr::ETrackedDeviceProperty::ManufacturerName_String => {
-                    Some(self.hmd_identity().manufacturer.clone())
-                }
+                (
+                    vr::k_unTrackedDeviceIndex_Hmd,
+                    vr::ETrackedDeviceProperty::TrackingSystemName_String,
+                ) => Some(self.hmd_identity().tracking_system.clone()),
+                (
+                    vr::k_unTrackedDeviceIndex_Hmd,
+                    vr::ETrackedDeviceProperty::ModelNumber_String,
+                ) => Some(self.hmd_identity().model.clone()),
+                (
+                    vr::k_unTrackedDeviceIndex_Hmd,
+                    vr::ETrackedDeviceProperty::ManufacturerName_String,
+                ) => Some(self.hmd_identity().manufacturer.clone()),
                 _ => None,
-            },
-            _ => self
-                .input
-                .get()
-                .and_then(|input| input.get_device_string_tracked_property(device_index, prop)),
-        };
+            });
 
         let Some(data) = data else {
             if let Some(error) = unsafe { error.as_mut() } {
@@ -1232,5 +1240,53 @@ mod tests {
             std::ptr::null_mut()
         ));
         assert_eq!(event.eventType, vr::EVREventType::Quit as u32);
+    }
+
+    #[test]
+    fn hmd_identity_available_before_first_frame() {
+        fakexr::set_default_interaction_profile(
+            fakexr::UserPath::RightHand,
+            Some("/interaction_profiles/oculus/touch_controller"),
+        );
+        let xr = Arc::new(OpenXrData::new(&Injector::default()).unwrap());
+        fakexr::set_default_interaction_profile(fakexr::UserPath::RightHand, None);
+
+        let injector = Injector::default();
+        let input = Arc::new(Input::new(xr.clone()));
+        let system = System::new(xr.clone(), &injector);
+        system.input.set(Arc::downgrade(&input));
+        xr.input.set(Arc::downgrade(&input));
+
+        let get_prop = |property| {
+            let mut err = vr::ETrackedPropertyError::Success;
+            let mut buf = vec![0; 64];
+            let len = system.GetStringTrackedDeviceProperty(
+                vr::k_unTrackedDeviceIndex_Hmd,
+                property,
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                &mut err,
+            );
+            assert_eq!(err, vr::ETrackedPropertyError::Success);
+            let slice = unsafe { std::slice::from_raw_parts(buf.as_ptr() as _, len as usize) };
+            CStr::from_bytes_with_nul(slice).unwrap().to_owned()
+        };
+
+        assert_eq!(
+            get_prop(vr::ETrackedDeviceProperty::TrackingSystemName_String).as_c_str(),
+            c"oculus"
+        );
+        assert_eq!(
+            get_prop(vr::ETrackedDeviceProperty::ManufacturerName_String).as_c_str(),
+            c"Oculus"
+        );
+        assert_eq!(
+            get_prop(vr::ETrackedDeviceProperty::ModelNumber_String).as_c_str(),
+            c"Oculus Quest2"
+        );
+        assert_eq!(
+            get_prop(vr::ETrackedDeviceProperty::ControllerType_String).as_c_str(),
+            c"rift"
+        );
     }
 }
