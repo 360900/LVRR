@@ -172,6 +172,11 @@ pub fn get_suggested_bindings(action: xr::Action, profile: xr::Path) -> Vec<Stri
         .collect()
 }
 
+pub fn set_stage_bounds(session: xr::Session, bounds: Option<xr::Extent2Df>) {
+    let session = session.to_handle().unwrap();
+    session.stage_bounds.store(bounds);
+}
+
 pub fn session_frame_state(session: xr::Session) -> FrameState {
     let session = session.to_handle().unwrap();
     session.frame_state.load()
@@ -328,7 +333,7 @@ pub unsafe extern "system" fn get_instance_proc_addr(
                     (PollEvent),
                     StringToPath,
                     PathToString,
-                    (GetReferenceSpaceBoundsRect),
+                    GetReferenceSpaceBoundsRect,
                     GetActionStateBoolean,
                     GetActionStateFloat,
                     GetActionStateVector2f,
@@ -591,6 +596,7 @@ struct Session {
     should_render: AtomicBool,
     frame_state: AtomicCell<FrameState>,
     with_trackers: AtomicBool,
+    stage_bounds: AtomicCell<Option<xr::Extent2Df>>,
 }
 
 impl Session {
@@ -952,6 +958,7 @@ extern "system" fn create_session(
         should_render: false.into(),
         frame_state: FrameState::Ended.into(),
         with_trackers: false.into(),
+        stage_bounds: None.into(),
     });
 
     DEFAULT_PROFILES.with_borrow(|profiles| {
@@ -1253,6 +1260,29 @@ extern "system" fn create_reference_space(
     }
 
     xr::Result::SUCCESS
+}
+
+extern "system" fn get_reference_space_bounds_rect(
+    session: xr::Session,
+    ty: xr::ReferenceSpaceType,
+    bounds: *mut xr::Extent2Df,
+) -> xr::Result {
+    let session = get_handle!(session);
+    let value = match ty {
+        xr::ReferenceSpaceType::STAGE => session.stage_bounds.load(),
+        _ => None,
+    };
+    unsafe {
+        bounds.write(value.unwrap_or(xr::Extent2Df {
+            width: 0.0,
+            height: 0.0,
+        }))
+    };
+    if value.is_some() {
+        xr::Result::SUCCESS
+    } else {
+        xr::Result::SPACE_BOUNDS_UNAVAILABLE
+    }
 }
 
 extern "system" fn poll_event(
