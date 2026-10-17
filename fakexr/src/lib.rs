@@ -370,8 +370,8 @@ extern "system" fn enumerate_instance_extension_properties(
     properties: *mut xr::ExtensionProperties,
 ) -> xr::Result {
     assert!(layer_name.is_null());
-    unsafe { *property_count_output = 4 };
-    if property_capacity_input >= 4 {
+    unsafe { *property_count_output = 6 };
+    if property_capacity_input >= 6 {
         let props =
             unsafe { std::slice::from_raw_parts_mut(properties, property_capacity_input as usize) };
 
@@ -418,6 +418,28 @@ extern "system" fn enumerate_instance_extension_properties(
         let name =
             unsafe { std::slice::from_raw_parts(name.as_ptr() as *const c_char, name.len()) };
         props[3].extension_name[..name.len()].copy_from_slice(name);
+
+        props[4] = xr::ExtensionProperties {
+            ty: xr::ExtensionProperties::TYPE,
+            next: std::ptr::null_mut(),
+            extension_name: [0 as c_char; xr::MAX_EXTENSION_NAME_SIZE],
+            extension_version: 1,
+        };
+        let name = xr::EXT_HP_MIXED_REALITY_CONTROLLER_EXTENSION_NAME;
+        let name =
+            unsafe { std::slice::from_raw_parts(name.as_ptr() as *const c_char, name.len()) };
+        props[4].extension_name[..name.len()].copy_from_slice(name);
+
+        props[5] = xr::ExtensionProperties {
+            ty: xr::ExtensionProperties::TYPE,
+            next: std::ptr::null_mut(),
+            extension_name: [0 as c_char; xr::MAX_EXTENSION_NAME_SIZE],
+            extension_version: 1,
+        };
+        let name = xr::EXT_SAMSUNG_ODYSSEY_CONTROLLER_EXTENSION_NAME;
+        let name =
+            unsafe { std::slice::from_raw_parts(name.as_ptr() as *const c_char, name.len()) };
+        props[5].extension_name[..name.len()].copy_from_slice(name);
     }
     xr::Result::SUCCESS
 }

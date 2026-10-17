@@ -8,6 +8,7 @@ pub mod vive_focus3;
 #[cfg(feature = "monado")]
 pub mod vive_tracker;
 pub mod vrlink_hand;
+pub mod wmr;
 use super::{
     BoundPoseType, action_manifest::ControllerType, legacy::LegacyBindings,
     skeletal::SkeletalInputBindings,
@@ -25,6 +26,10 @@ use std::ffi::CStr;
 use std::marker::PhantomData;
 use vive_controller::ViveWands;
 use vive_focus3::ViveFocus3;
+use wmr::{
+    hp_motion_controller::ReverbG2Controller, ms_motion_controller::HolographicController,
+    samsung_odyssey_controller::SamsungOdysseyController,
+};
 
 #[allow(private_interfaces)]
 pub trait InteractionProfile: SupportedProfile + Sized + 'static {
@@ -86,6 +91,11 @@ impl ControllerType {
             Self::Knuckles => runner.run::<Knuckles>(),
             Self::FrameController => runner.run::<FrameController>(),
             Self::ViveFocus3 => runner.run::<ViveFocus3>(),
+            Self::HolographicController => {
+                runner.run::<SamsungOdysseyController>();
+                runner.run::<HolographicController>();
+            }
+            Self::HPMotionController => runner.run::<ReverbG2Controller>(),
             Self::Unknown(_) => {}
         }
     }
@@ -125,6 +135,9 @@ pub fn run_for_all_profiles(runner: &mut impl RunWithProfile) {
     profile!(OculusTouch);
     profile!(ViveFocus3);
     profile!(SimpleController);
+    profile!(wmr::hp_motion_controller::ReverbG2Controller);
+    profile!(wmr::ms_motion_controller::HolographicController);
+    profile!(wmr::samsung_odyssey_controller::SamsungOdysseyController);
 }
 
 pub struct InputToXrPath<'a, P: InteractionProfile> {

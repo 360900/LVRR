@@ -42,6 +42,9 @@ pub enum ControllerType {
     Knuckles,
     FrameController,
     OculusTouch,
+    HolographicController,
+    #[serde(rename = "hpmotioncontroller")]
+    HPMotionController,
     #[serde(untagged)]
     Unknown(String),
 }
@@ -56,6 +59,8 @@ impl std::str::FromStr for ControllerType {
             "knuckles" => Self::Knuckles,
             "frame_controller" => Self::FrameController,
             "oculus_touch" => Self::OculusTouch,
+            "holographic_controller" => Self::HolographicController,
+            "hpmotioncontroller" => Self::HPMotionController,
             other => Self::Unknown(other.to_owned()),
         })
     }
@@ -69,6 +74,8 @@ impl std::fmt::Display for ControllerType {
             Self::Knuckles => "knuckles",
             Self::FrameController => "frame_controller",
             Self::OculusTouch => "oculus_touch",
+            Self::HolographicController => "holographic_controller",
+            Self::HPMotionController => "hpmotioncontroller",
             Self::Unknown(value) => value,
         };
         f.write_str(value)

@@ -153,6 +153,8 @@ impl<C: Compositor> OpenXrData<C> {
         exts.htc_vive_focus3_controller_interaction =
             supported_exts.htc_vive_focus3_controller_interaction;
         exts.meta_touch_controller_plus = supported_exts.meta_touch_controller_plus;
+        exts.ext_samsung_odyssey_controller = supported_exts.ext_samsung_odyssey_controller;
+        exts.ext_hp_mixed_reality_controller = supported_exts.ext_hp_mixed_reality_controller;
         exts.fb_display_refresh_rate = supported_exts.fb_display_refresh_rate;
 
         if supported_exts
