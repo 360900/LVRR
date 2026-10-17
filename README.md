@@ -1,4 +1,8 @@
-# xrizer - XR-ize your OpenVR games
+# xrizer-edge
+
+A fork of [xrizer](https://github.com/Supreeeme/xrizer) that carries open upstream PRs and extra fixes. See [PICKS.md](PICKS.md) for what's included.
+
+## xrizer - XR-ize your OpenVR games
 
 xrizer is a reimplementation of OpenVR on top of OpenXR. This enables you to run OpenVR games through any OpenXR runtime without running SteamVR.
 
@@ -6,9 +10,9 @@ Note that xrizer is currently immature. Many things are likely broken, so please
 
 # Download & Usage
 
-[Latest nightly](https://nightly.link/Supreeeme/xrizer/workflows/ci/main/xrizer-nightly-release.zip) - Bleeding edge!
+[Latest nightly](https://nightly.link/360900/xrizer-edge/workflows/ci/main/xrizer-nightly-release.zip) - Bleeding edge!
 
-[Latest release](https://github.com/Supreeeme/xrizer/releases/latest/download/xrizer-release.zip)
+[Releases](https://github.com/360900/xrizer-edge/releases)
 
 Choose a download and click it to download a zip. Unzip it and place it wherever you like.
 
