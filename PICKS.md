@@ -54,7 +54,7 @@ Status: `pending` | `merged` | `superseded-by-<n>` | `blocked` | `dropped` | `re
 |----|-------|--------|-------|
 | 261 | hand tracking with no interaction profile and/or grip pose | merged | ported synthesised grip pose + pre-created hand devices + VRLinkHand fallback; closes #165 |
 | 401 | log to per-process files, crash reports | merged | per-process log files, crash collection, 32-bit loader hint (#450); partial #73 |
-| 130 | WMR controller support | pending | |
+| 130 | WMR controller support | merged | WMR profiles adapted to static trait; registered for HolographicController/HPMotionController; fakexr exposes HP + Samsung extensions |
 | 330 | Background and Utility application types | pending | |
 | 193 | New interface versions | pending | fixes #177, UEVR |
 | 229 | libmonado battery status | pending | closes #26 |
