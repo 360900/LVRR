@@ -58,9 +58,9 @@ Status: `pending` | `merged` | `superseded-by-<n>` | `blocked` | `dropped` | `re
 | 330 | Background and Utility application types | merged | headless sessions (XR_MND_headless + XR_KHR_convert_timespec_time), headless graphics backend, OpenXrData::new(injector, application_type) |
 | 193 | New interface versions | merged | overlay name/raw texture/thumbnail additions; newer 1.23.8 header; fixes #177 UEVR |
 | 229 | libmonado battery status | merged | closes #26; monado feature now enables libmonado; battery percentage/provides/charging properties; builds fine without system libmonado |
-| 69 | Skeletal Summary | pending | likely superseded by merged 313 |
-| 168 | Hitman | pending | by Supreeeme, empty body |
-| 87 | IVRDebug stub and IVROverlay014 stub | pending | old |
+| 69 | Skeletal Summary | dropped | superseded by merged 313 + 261 skeletal summary work |
+| 168 | Hitman | merged | C-unwind ABI on exported fns/vtables; GetPosesForFrame delegates to GetLastPoses; GetLastPosePredictionIDs; partially fixes #448 |
+| 87 | IVRDebug stub and IVROverlay014 stub | deferred | Phase 3; adds IVRDebug + chaperone setup; old branch needs rebase |
 | 234 | Support all the BoundPoseTypes | superseded-by-382 | draft |
 | 337 | input profile path support | superseded-by-429 | draft |
 
