@@ -70,6 +70,6 @@ Status: `pending` | `merged` | `superseded-by-<n>` | `blocked` | `dropped` | `re
 |----|-------|--------|-------|
 | 442 | build: inherit workspace rust-version | merged | closed by AI policy upstream (#433); workspace MSRV bumped 1.85 -> 1.88 (as_chunks, PR 451) |
 | 443 | skip bindings with mismatched action type | merged | panic -> warn+skip, fixes #384; adapted add_vector2_binding call site |
-| 444 | clientcore: don't panic in Cleanup | pending | #423, #439 |
+| 444 | clientcore: don't panic in Cleanup | merged | #423, #439; graceful cleanup with outstanding refs |
 | 445 | compositor: replace todo!() with warnings | pending | #391? |
 | 446 | compositor: implement GetFrameTimings | pending | |
