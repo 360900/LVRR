@@ -43,10 +43,10 @@ Status: `pending` | `merged` | `superseded-by-<n>` | `blocked` | `dropped` | `re
 
 | PR | Title | Status | Notes |
 |----|-------|--------|-------|
-| 338 | XR_EXT_hand_tracking_data_source skeletal level | blocked | CI red; unblocks 261 |
-| 388 | overlays, skybox, color conversion, canting | blocked | CI red; high value (#79, racing) |
-| 440 | Steamframe profile | blocked | needs 419; draft |
-| 41 | action set priorities and device restriction | blocked | draft, large; merge last, test VRChat |
+| 338 | XR_EXT_hand_tracking_data_source skeletal level | merged | CI fixed (xr::sys::Handle import); unblocks 261 |
+| 388 | overlays, skybox, color conversion, canting | merged | CI fixed (unused PI import); high value (#79, racing) |
+| 440 | Steamframe profile | merged | adapted to HmdProperties/input_profile_path/pose_transformation; pose transforms TODO |
+| 41 | action set priorities and device restriction | merged | needs VRChat validation on edge build |
 
 ## Phase 2: rebase conflicted
 
