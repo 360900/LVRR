@@ -17,9 +17,12 @@ use openxr as xr;
 use std::mem::ManuallyDrop;
 use std::sync::{
     RwLock,
-    atomic::{AtomicI64, Ordering},
+    atomic::{AtomicBool, AtomicI64, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// How long to wait for the runtime to move the session to a requested state.
+const SESSION_STATE_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[cfg(feature = "monado")]
 use openxr_mndx_xdev_space::XR_MNDX_XDEV_SPACE_EXTENSION_NAME;
@@ -54,6 +57,9 @@ pub struct OpenXrData<C: Compositor> {
     /// [crate::input::probe_interaction_profiles].
     pub probed_profiles: crate::input::ProbedProfiles,
     pub headless: bool,
+    /// Set while we are ending the session ourselves (restart or shutdown), so the resulting
+    /// STOPPING state isn't reported to the application as a Quit.
+    exit_requested: AtomicBool,
 
     /// should only be externally accessed for testing
     pub(crate) input: Injected<crate::input::Input<C>>,
@@ -257,6 +263,7 @@ impl<C: Compositor> OpenXrData<C> {
             enabled_extensions: exts,
             probed_profiles,
             headless,
+            exit_requested: false.into(),
             input: injector.inject(),
             compositor: injector.inject(),
             system: injector.inject(),
@@ -277,9 +284,22 @@ impl<C: Compositor> OpenXrData<C> {
         while let Some(event) = self.instance.poll_event(&mut buf).unwrap() {
             match event {
                 xr::Event::SessionStateChanged(event) => {
+                    // Events for an older session (i.e. the probe session or a session we
+                    // already replaced) are stale.
+                    if event.session() != session_data.session.as_raw() {
+                        debug!(
+                            "ignoring state change {:?} for stale session",
+                            event.state()
+                        );
+                        continue;
+                    }
                     state = Some(event.state());
                     info!("OpenXR session state changed: {:?}", event.state());
-                    if let Some(system) = self.system.get().filter(|_| {
+                    if state == Some(xr::SessionState::STOPPING)
+                        && self.exit_requested.load(Ordering::Relaxed)
+                    {
+                        debug!("session stopping at our request, not pushing Quit");
+                    } else if let Some(system) = self.system.get().filter(|_| {
                         (cfg!(test) || session_data.temp_vulkan.is_none())
                             && state == Some(xr::SessionState::STOPPING)
                     }) {
@@ -448,23 +468,48 @@ impl<C: Compositor> OpenXrData<C> {
     }
 
     fn end_session(&self, session_data: &mut SessionData) {
-        session_data.session.request_exit().unwrap();
+        self.exit_requested.store(true, Ordering::Relaxed);
         let mut state = session_data.state;
-        while state != xr::SessionState::STOPPING {
-            if let Some(s) = self.poll_events_impl(session_data) {
-                state = s;
+        if state != xr::SessionState::STOPPING {
+            match session_data.session.request_exit() {
+                Ok(()) => {
+                    state = self.wait_for_state(session_data, state, xr::SessionState::STOPPING)
+                }
+                Err(e) => warn!("xrRequestExitSession failed: {e}"),
             }
         }
         #[cfg(test)]
         if let Some(comp) = self.compositor.get() {
             comp.on_restart();
         }
-        session_data.session.end().unwrap();
-        while state != xr::SessionState::EXITING {
-            if let Some(s) = self.poll_events_impl(session_data) {
-                state = s;
+        match session_data.session.end() {
+            Ok(_) => {
+                self.wait_for_state(session_data, state, xr::SessionState::EXITING);
+            }
+            Err(e) => warn!("xrEndSession failed: {e}"),
+        }
+        self.exit_requested.store(false, Ordering::Relaxed);
+    }
+
+    /// Polls events until the session reaches `target`, giving up after [SESSION_STATE_TIMEOUT].
+    fn wait_for_state(
+        &self,
+        session_data: &SessionData,
+        mut state: xr::SessionState,
+        target: xr::SessionState,
+    ) -> xr::SessionState {
+        let start = Instant::now();
+        while state != target {
+            if start.elapsed() >= SESSION_STATE_TIMEOUT {
+                warn!("timed out waiting for session state {target:?} (current: {state:?})");
+                break;
+            }
+            match self.poll_events_impl(session_data) {
+                Some(s) => state = s,
+                None => std::thread::sleep(Duration::from_millis(1)),
             }
         }
+        state
     }
 
     pub fn time_from_now(&self, seconds: f32) -> xr::Time {
@@ -681,13 +726,20 @@ impl SessionData {
         });
 
         let mut buf = xr::EventDataBuffer::new();
+        // No timeout: the runtime may hold the session until the user puts on the headset.
         loop {
-            if let Some(xr::Event::SessionStateChanged(state)) = instance
+            match instance
                 .poll_event(&mut buf)
                 .map_err(SessionCreationError::PollEventFailed)?
-                && state.state() == xr::SessionState::READY
             {
-                break;
+                Some(xr::Event::SessionStateChanged(state))
+                    if state.session() == session.as_raw()
+                        && state.state() == xr::SessionState::READY =>
+                {
+                    break;
+                }
+                Some(_) => {}
+                None => std::thread::sleep(Duration::from_millis(1)),
             }
         }
 

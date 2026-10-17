@@ -2293,4 +2293,42 @@ mod tests {
             vr::EVRScreenshotType::None
         );
     }
+
+    #[test]
+    fn late_action_manifest_does_not_quit() {
+        use crate::input::Input;
+        use crate::system::System;
+        use vr::{IVRInput010_Interface, IVRSystem023_Interface};
+
+        let f = Fixture::new();
+        let xr = f.comp.openxr.clone();
+        let input = Arc::new(Input::new(xr.clone()));
+        xr.input.set(Arc::downgrade(&input));
+        let system = Arc::new(System::new(xr.clone(), &Injector::default()));
+        xr.system.set(Arc::downgrade(&system));
+
+        f.ensure_real_session(false);
+        input.frame_start_update(); // attach legacy actions
+
+        // Attaching an action manifest now forces a session restart.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/input_data/actions.json\0"
+        );
+        assert_eq!(
+            input.SetActionManifestPath(path.as_ptr() as _),
+            vr::EVRInputError::None
+        );
+        xr.poll_events();
+
+        let mut event = vr::VREvent_t::default();
+        while system.PollNextEventWithPose(
+            vr::ETrackingUniverseOrigin::Standing,
+            &mut event,
+            std::mem::size_of_val(&event) as u32,
+            std::ptr::null_mut(),
+        ) {
+            assert_ne!(event.eventType, vr::EVREventType::Quit as u32);
+        }
+    }
 }
