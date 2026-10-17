@@ -53,7 +53,7 @@ Status: `pending` | `merged` | `superseded-by-<n>` | `blocked` | `dropped` | `re
 | PR | Title | Status | Notes |
 |----|-------|--------|-------|
 | 261 | hand tracking with no interaction profile and/or grip pose | merged | ported synthesised grip pose + pre-created hand devices + VRLinkHand fallback; closes #165 |
-| 401 | log to per-process files, crash reports | blocked | needs 397; partial #73 |
+| 401 | log to per-process files, crash reports | merged | per-process log files, crash collection, 32-bit loader hint (#450); partial #73 |
 | 130 | WMR controller support | pending | |
 | 330 | Background and Utility application types | pending | |
 | 193 | New interface versions | pending | fixes #177, UEVR |
