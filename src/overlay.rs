@@ -438,6 +438,14 @@ pub struct OverlaySessionData {
     swapchains: Mutex<Option<AnySwapchainMap>>,
 }
 
+/// The X and Y scale of an overlay transform: the lengths of its basis vectors. The diagonal alone
+/// would shrink rotated overlays.
+fn transform_scale(transform: &vr::HmdMatrix34_t) -> (f32, f32) {
+    let m = &transform.m;
+    let column = |c: usize| Vec3::new(m[0][c], m[1][c], m[2][c]).length();
+    (column(0), column(1))
+}
+
 enum OverlayKind {
     Quad,
     Curved { curvature: f32 },
@@ -1345,9 +1353,8 @@ impl vr::IVROverlay028_Interface for OverlayMan {
             vr::EVROverlayError::InvalidParameter
         } else {
             let transform = unsafe { transform.read() };
-            // Preserve the diagonal scale (like OpenComposite does) before
-            // decomposing to a pose which discards it.
-            let scale = (transform.m[0][0], transform.m[1][1]);
+            // Preserve the scale before decomposing to a pose which discards it.
+            let scale = transform_scale(&transform);
             let xr_transform: xr::Posef = transform.into();
             let o = xr_transform.orientation;
             let q = Quat::from_xyzw(o.x, o.y, o.z, o.w).normalize();
@@ -1866,5 +1873,24 @@ impl vr::IVROverlay007On010 for OverlayMan {
     ) -> bool {
         crate::warn_unimplemented!("PollNextOverlayEvent");
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rotation_does_not_change_scale() {
+        let rot = glam::Mat3::from_rotation_y(60f32.to_radians())
+            * glam::Mat3::from_rotation_x(20f32.to_radians())
+            * glam::Mat3::from_diagonal(Vec3::new(2.0, 0.5, 1.0));
+        let c = rot.to_cols_array_2d();
+        let transform = vr::HmdMatrix34_t {
+            m: std::array::from_fn(|r| [c[0][r], c[1][r], c[2][r], 1.0]),
+        };
+        let (x, y) = transform_scale(&transform);
+        assert!((x - 2.0).abs() < 1e-5, "{x}");
+        assert!((y - 0.5).abs() < 1e-5, "{y}");
     }
 }
