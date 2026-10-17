@@ -55,6 +55,7 @@ impl InteractionProfile for ViveWands {
                 controller_type: c"vive",
                 serial_number: c"LHR-00000000",
             },
+            input_profile_path: c"{htc}/input/vive_controller_profile.json",
         };
         &DEVICE_PROPERTIES
     }
