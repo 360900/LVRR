@@ -994,25 +994,120 @@ impl vr::IVRCompositor021On022 for Compositor {
     }
 }
 
+/// Fills the fields shared by the 0.9.15 to 1.0.1 frame timing layouts.
+macro_rules! scene_render_timing {
+    ($c:ident, $($ty:ident)::+ { $($extra:tt)* }) => {
+        $($ty)::+ {
+            m_nSize: 0,
+            m_nFrameIndex: $c.m_nFrameIndex,
+            m_nNumFramePresents: $c.m_nNumFramePresents,
+            m_nNumDroppedFrames: $c.m_nNumDroppedFrames,
+            m_flSystemTimeInSeconds: $c.m_flSystemTimeInSeconds,
+            m_flSceneRenderGpuMs: $c.m_flPreSubmitGpuMs,
+            m_flTotalRenderGpuMs: $c.m_flTotalRenderGpuMs,
+            m_flCompositorRenderGpuMs: $c.m_flCompositorRenderGpuMs,
+            m_flCompositorRenderCpuMs: $c.m_flCompositorRenderCpuMs,
+            m_flCompositorIdleCpuMs: $c.m_flCompositorIdleCpuMs,
+            m_flClientFrameIntervalMs: $c.m_flClientFrameIntervalMs,
+            m_flPresentCallCpuMs: $c.m_flPresentCallCpuMs,
+            m_flWaitForPresentCpuMs: $c.m_flWaitForPresentCpuMs,
+            m_flSubmitFrameMs: $c.m_flSubmitFrameMs,
+            m_flWaitGetPosesCalledMs: $c.m_flWaitGetPosesCalledMs,
+            m_flNewPosesReadyMs: $c.m_flNewPosesReadyMs,
+            m_flNewFrameReadyMs: $c.m_flNewFrameReadyMs,
+            m_flCompositorUpdateStartMs: $c.m_flCompositorUpdateStartMs,
+            m_flCompositorUpdateEndMs: $c.m_flCompositorUpdateEndMs,
+            m_flCompositorRenderStartMs: $c.m_flCompositorRenderStartMs,
+            m_HmdPose: $c.m_HmdPose,
+            $($extra)*
+            ..Default::default()
+        }
+    };
+}
+
+impl Compositor {
+    /// GetFrameTiming for older interface versions. `T` is that version's
+    /// Compositor_FrameTiming, which starts with a u32 size like all of them.
+    fn legacy_frame_timing<T>(
+        &self,
+        timing: *mut T,
+        frames_ago: u32,
+        convert: impl FnOnce(&vr::Compositor_FrameTiming) -> T,
+    ) -> bool {
+        if timing.is_null() {
+            return false;
+        }
+        let size = unsafe { timing.cast::<u32>().read_unaligned() };
+        if (size as usize) < std::mem::size_of::<T>() {
+            return false;
+        }
+
+        let mut current = vr::Compositor_FrameTiming {
+            m_nSize: std::mem::size_of::<vr::Compositor_FrameTiming>() as u32,
+            ..Default::default()
+        };
+        if !<Self as vr::IVRCompositor029_Interface>::GetFrameTiming(self, &mut current, frames_ago)
+        {
+            return false;
+        }
+        unsafe {
+            timing.write_unaligned(convert(&current));
+            timing.cast::<u32>().write_unaligned(size);
+        }
+        true
+    }
+}
+
 impl vr::IVRCompositor016On018 for Compositor {
     fn GetFrameTiming(
         &self,
-        _timing: *mut vr::vr_1_0_3::Compositor_FrameTiming,
-        _frames_ago: u32,
+        timing: *mut vr::vr_1_0_3::Compositor_FrameTiming,
+        frames_ago: u32,
     ) -> bool {
-        crate::warn_unimplemented!("GetFrameTiming (v1.0.3)");
-        false
+        self.legacy_frame_timing(timing, frames_ago, |c| {
+            vr::vr_1_0_3::Compositor_FrameTiming {
+                m_nSize: 0,
+                m_nFrameIndex: c.m_nFrameIndex,
+                m_nNumFramePresents: c.m_nNumFramePresents,
+                m_nNumDroppedFrames: c.m_nNumDroppedFrames,
+                m_nReprojectionFlags: c.m_nReprojectionFlags,
+                m_flSystemTimeInSeconds: c.m_flSystemTimeInSeconds,
+                m_flPreSubmitGpuMs: c.m_flPreSubmitGpuMs,
+                m_flPostSubmitGpuMs: c.m_flPostSubmitGpuMs,
+                m_flTotalRenderGpuMs: c.m_flTotalRenderGpuMs,
+                m_flCompositorRenderGpuMs: c.m_flCompositorRenderGpuMs,
+                m_flCompositorRenderCpuMs: c.m_flCompositorRenderCpuMs,
+                m_flCompositorIdleCpuMs: c.m_flCompositorIdleCpuMs,
+                m_flClientFrameIntervalMs: c.m_flClientFrameIntervalMs,
+                m_flPresentCallCpuMs: c.m_flPresentCallCpuMs,
+                m_flWaitForPresentCpuMs: c.m_flWaitForPresentCpuMs,
+                m_flSubmitFrameMs: c.m_flSubmitFrameMs,
+                m_flWaitGetPosesCalledMs: c.m_flWaitGetPosesCalledMs,
+                m_flNewPosesReadyMs: c.m_flNewPosesReadyMs,
+                m_flNewFrameReadyMs: c.m_flNewFrameReadyMs,
+                m_flCompositorUpdateStartMs: c.m_flCompositorUpdateStartMs,
+                m_flCompositorUpdateEndMs: c.m_flCompositorUpdateEndMs,
+                m_flCompositorRenderStartMs: c.m_flCompositorRenderStartMs,
+                m_HmdPose: c.m_HmdPose,
+            }
+        })
     }
 }
 
 impl vr::IVRCompositor015On016 for Compositor {
     fn GetFrameTiming(
         &self,
-        _timing: *mut openvr::vr_1_0_1::Compositor_FrameTiming,
-        _frames_ago: u32,
+        timing: *mut openvr::vr_1_0_1::Compositor_FrameTiming,
+        frames_ago: u32,
     ) -> bool {
-        crate::warn_unimplemented!("GetFrameTiming (v1.0.1)");
-        false
+        self.legacy_frame_timing(timing, frames_ago, |c| {
+            scene_render_timing!(
+                c,
+                vr::vr_1_0_1::Compositor_FrameTiming {
+                    m_nReprojectionFlags: c.m_nReprojectionFlags,
+                }
+            )
+        })
     }
     fn RequestScreenshot(
         &self,
@@ -1031,54 +1126,76 @@ impl vr::IVRCompositor015On016 for Compositor {
 impl vr::IVRCompositor014On015 for Compositor {
     fn GetFrameTiming(
         &self,
-        _timing: *mut vr::vr_0_9_20::Compositor_FrameTiming,
-        _frames_ago: u32,
+        timing: *mut vr::vr_0_9_20::Compositor_FrameTiming,
+        frames_ago: u32,
     ) -> bool {
-        crate::warn_unimplemented!("GetFrameTiming (v0.9.20)");
-        false
+        self.legacy_frame_timing(timing, frames_ago, |c| {
+            scene_render_timing!(
+                c,
+                vr::vr_0_9_20::Compositor_FrameTiming {
+                    m_nReprojectionFlags: c.m_nReprojectionFlags,
+                }
+            )
+        })
     }
 }
 impl vr::IVRCompositor013On014 for Compositor {
     fn GetFrameTiming(
         &self,
-        _timing: *mut openvr::vr_0_9_19::Compositor_FrameTiming,
-        _frames_ago: u32,
+        timing: *mut openvr::vr_0_9_19::Compositor_FrameTiming,
+        frames_ago: u32,
     ) -> bool {
-        crate::warn_unimplemented!("GetFrameTiming (v0.9.19)");
-        false
+        self.legacy_frame_timing(timing, frames_ago, |c| {
+            scene_render_timing!(c, vr::vr_0_9_19::Compositor_FrameTiming {})
+        })
     }
 }
 
 impl vr::IVRCompositor012On013 for Compositor {
     fn GetFrameTiming(
         &self,
-        _timing: *mut openvr::vr_0_9_17::Compositor_FrameTiming,
-        _frames_ago: u32,
+        timing: *mut openvr::vr_0_9_17::Compositor_FrameTiming,
+        frames_ago: u32,
     ) -> bool {
-        crate::warn_unimplemented!("GetFrameTiming (v0.9.17)");
-        false
+        self.legacy_frame_timing(timing, frames_ago, |c| {
+            scene_render_timing!(c, vr::vr_0_9_17::Compositor_FrameTiming {})
+        })
     }
 }
 
 impl vr::IVRCompositor011On012 for Compositor {
     fn GetFrameTiming(
         &self,
-        _timing: *mut openvr::vr_0_9_15::Compositor_FrameTiming,
-        _frames_ago: u32,
+        timing: *mut openvr::vr_0_9_15::Compositor_FrameTiming,
+        frames_ago: u32,
     ) -> bool {
-        crate::warn_unimplemented!("GetFrameTiming (v0.9.15)");
-        false
+        self.legacy_frame_timing(timing, frames_ago, |c| {
+            scene_render_timing!(c, vr::vr_0_9_15::Compositor_FrameTiming {})
+        })
     }
 }
 
 impl vr::IVRCompositor009On011 for Compositor {
     fn GetFrameTiming(
         &self,
-        _timing: *mut vr::vr_0_9_12::Compositor_FrameTiming,
-        _frames_ago: u32,
+        timing: *mut vr::vr_0_9_12::Compositor_FrameTiming,
+        frames_ago: u32,
     ) -> bool {
-        crate::warn_unimplemented!("GetFrameTiming (v0.9.12)");
-        false
+        self.legacy_frame_timing(timing, frames_ago, |c| {
+            vr::vr_0_9_12::Compositor_FrameTiming {
+                size: 0,
+                frameStart: c.m_flSystemTimeInSeconds,
+                droppedFrames: c.m_nNumDroppedFrames,
+                frameIndex: c.m_nFrameIndex,
+                pose: c.m_HmdPose,
+                m_flFrameIntervalMs: c.m_flClientFrameIntervalMs,
+                m_flSceneRenderGpuMs: c.m_flPreSubmitGpuMs,
+                m_flCompositorRenderCpuMs: c.m_flCompositorRenderCpuMs,
+                m_flCompositorRenderGpuMs: c.m_flCompositorRenderGpuMs,
+                m_flPresentCallCpuMs: c.m_flPresentCallCpuMs,
+                ..Default::default()
+            }
+        })
     }
 }
 
@@ -1875,6 +1992,71 @@ mod tests {
             (&raw mut (*timing.as_mut_ptr()).m_nSize).write(0);
         }
         assert!(!f.comp.GetFrameTiming(timing.as_mut_ptr(), 1));
+    }
+
+    #[test]
+    fn get_frame_timing_legacy() {
+        let f = Fixture::new();
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        let interval = 1000.0 / f.comp.openxr.get_refresh_rate();
+
+        let mut timing = vr::vr_1_0_3::Compositor_FrameTiming {
+            m_nSize: std::mem::size_of::<vr::vr_1_0_3::Compositor_FrameTiming>() as u32,
+            ..Default::default()
+        };
+        assert!(vr::IVRCompositor016On018::GetFrameTiming(
+            &*f.comp,
+            &mut timing,
+            0
+        ));
+        let (size, frame_interval) = (timing.m_nSize, timing.m_flClientFrameIntervalMs);
+        assert_eq!(
+            size as usize,
+            std::mem::size_of::<vr::vr_1_0_3::Compositor_FrameTiming>()
+        );
+        assert_eq!(frame_interval, interval);
+
+        let mut timing = vr::vr_0_9_17::Compositor_FrameTiming {
+            m_nSize: std::mem::size_of::<vr::vr_0_9_17::Compositor_FrameTiming>() as u32,
+            ..Default::default()
+        };
+        assert!(vr::IVRCompositor012On013::GetFrameTiming(
+            &*f.comp,
+            &mut timing,
+            0
+        ));
+        let frame_interval = timing.m_flClientFrameIntervalMs;
+        assert_eq!(frame_interval, interval);
+
+        let mut timing = vr::vr_0_9_12::Compositor_FrameTiming {
+            size: std::mem::size_of::<vr::vr_0_9_12::Compositor_FrameTiming>() as u32,
+            ..Default::default()
+        };
+        assert!(vr::IVRCompositor009On011::GetFrameTiming(
+            &*f.comp,
+            &mut timing,
+            0
+        ));
+        let frame_interval = timing.m_flFrameIntervalMs;
+        assert_eq!(frame_interval, interval);
+
+        // Too small for the struct the version expects.
+        let mut timing = vr::vr_1_0_3::Compositor_FrameTiming {
+            m_nSize: 4,
+            ..Default::default()
+        };
+        assert!(!vr::IVRCompositor016On018::GetFrameTiming(
+            &*f.comp,
+            &mut timing,
+            0
+        ));
+        assert!(!vr::IVRCompositor016On018::GetFrameTiming(
+            &*f.comp,
+            std::ptr::null_mut(),
+            0
+        ));
     }
 
     #[test]
