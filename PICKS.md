@@ -10,14 +10,14 @@ Status: `pending` | `merged` | `superseded-by-<n>` | `blocked` | `dropped` | `re
 
 | PR | Title | Status | Notes |
 |----|-------|--------|-------|
-| 451 | clippy: Swap chunks_exact call for as_chunks | pending | blocks clippy on new toolchains |
-| 297 | improve error message when app is using wrong GPU | pending | plain text fix |
-| 230 | fire VREvent_Quit when session STOPPING | pending | stuck session exit (#389?) |
-| 398 | treat swapchain sample count 0 as 1 | pending | fixes #369 |
-| 245 | poses functions with "seconds from now" | pending | The Lab |
-| 306 | Add OpenVR v0.9.19 for BoneWorks | pending | closes #305, needs IVRCompositor_013 |
-| 404 | rendermodels: standard pose components | pending | BigWalk #403 |
-| 416 | input: report release edge of custom bindings | pending | Alyx throw/grab |
+| 451 | clippy: Swap chunks_exact call for as_chunks | merged | blocks clippy on new toolchains |
+| 297 | improve error message when app is using wrong GPU | merged | plain text fix |
+| 230 | fire VREvent_Quit when session STOPPING | merged | also handles Quit for OpenVR 0.9.12 |
+| 398 | treat swapchain sample count 0 as 1 | merged | fixes #369 |
+| 245 | poses functions with "seconds from now" | merged | The Lab; conflict resolved: xr_time threaded through new input refactors |
+| 306 | Add OpenVR v0.9.19 for BoneWorks | merged | closes #305 |
+| 404 | rendermodels: standard pose components | merged | BigWalk #403 |
+| 416 | input: report release edge of custom bindings | merged | Alyx throw/grab |
 
 ## Phase 1b: input infra (sequential, same files)
 
