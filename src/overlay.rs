@@ -775,6 +775,38 @@ impl Overlay {
     }
 }
 
+impl OverlayMan {
+    /// Copies a string field of an overlay into `buf` and returns the size it needs, including
+    /// the null terminator. Nothing is copied if `buf` is too small.
+    fn copy_overlay_string(
+        &self,
+        handle: vr::VROverlayHandle_t,
+        field: impl FnOnce(&Overlay) -> &CStr,
+        buf: *mut c_char,
+        size: u32,
+        error: *mut vr::EVROverlayError,
+    ) -> u32 {
+        let set_error = |e| {
+            if let Some(error) = unsafe { error.as_mut() } {
+                *error = e;
+            }
+        };
+        let overlays = self.overlays.read().unwrap();
+        let Some(overlay) = overlays.get(OverlayKey::from(KeyData::from_ffi(handle))) else {
+            set_error(vr::EVROverlayError::UnknownOverlay);
+            return 0;
+        };
+        let data = field(overlay).to_bytes_with_nul();
+        if buf.is_null() || (size as usize) < data.len() {
+            set_error(vr::EVROverlayError::ArrayTooSmall);
+        } else {
+            unsafe { std::ptr::copy_nonoverlapping(data.as_ptr().cast(), buf, data.len()) };
+            set_error(vr::EVROverlayError::None);
+        }
+        data.len() as u32
+    }
+}
+
 macro_rules! get_overlay {
     (@impl $self:ident, $handle:expr, $overlay:ident, $lock:ident, $get:ident $(,$mut:ident)?) => {
         let $($mut)? overlays = $self.overlays.$lock().unwrap();
@@ -1378,11 +1410,16 @@ impl vr::IVROverlay028_Interface for OverlayMan {
     }
     fn GetOverlayTransformType(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: *mut vr::VROverlayTransformType,
+        handle: vr::VROverlayHandle_t,
+        ty: *mut vr::VROverlayTransformType,
     ) -> vr::EVROverlayError {
-        crate::warn_unimplemented!("GetOverlayTransformType");
-        vr::EVROverlayError::RequestFailed
+        get_overlay!(self, handle, _overlay);
+        if ty.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        // relative transforms are unimplemented, so stored transform is always absolute
+        unsafe { ty.write(vr::VROverlayTransformType::Absolute) };
+        vr::EVROverlayError::None
     }
     fn GetOverlayTextureBounds(
         &self,
@@ -1548,18 +1585,30 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         crate::warn_unimplemented!("SetOverlayColor");
         vr::EVROverlayError::None
     }
-    fn GetOverlayFlags(&self, _: vr::VROverlayHandle_t, _: *mut u32) -> vr::EVROverlayError {
-        crate::warn_unimplemented!("GetOverlayFlags");
-        vr::EVROverlayError::RequestFailed
+    fn GetOverlayFlags(
+        &self,
+        handle: vr::VROverlayHandle_t,
+        flags: *mut u32,
+    ) -> vr::EVROverlayError {
+        get_overlay!(self, handle, overlay);
+        if flags.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        unsafe { flags.write(overlay.flags) };
+        vr::EVROverlayError::None
     }
     fn GetOverlayFlag(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: vr::VROverlayFlags,
-        _: *mut bool,
+        handle: vr::VROverlayHandle_t,
+        flag: vr::VROverlayFlags,
+        enabled: *mut bool,
     ) -> vr::EVROverlayError {
-        crate::warn_unimplemented!("GetOverlayFlag");
-        vr::EVROverlayError::RequestFailed
+        get_overlay!(self, handle, overlay);
+        if enabled.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        unsafe { enabled.write(overlay.flags & flag as u32 != 0) };
+        vr::EVROverlayError::None
     }
     fn SetOverlayFlag(
         &self,
@@ -1632,23 +1681,21 @@ impl vr::IVROverlay028_Interface for OverlayMan {
     }
     fn GetOverlayName(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: *mut c_char,
-        _: u32,
-        _: *mut vr::EVROverlayError,
+        handle: vr::VROverlayHandle_t,
+        buf: *mut c_char,
+        size: u32,
+        error: *mut vr::EVROverlayError,
     ) -> u32 {
-        crate::warn_unimplemented!("GetOverlayName");
-        0
+        self.copy_overlay_string(handle, |o| &o.name, buf, size, error)
     }
     fn GetOverlayKey(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: *mut c_char,
-        _: u32,
-        _: *mut vr::EVROverlayError,
+        handle: vr::VROverlayHandle_t,
+        buf: *mut c_char,
+        size: u32,
+        error: *mut vr::EVROverlayError,
     ) -> u32 {
-        crate::warn_unimplemented!("GetOverlayKey");
-        0
+        self.copy_overlay_string(handle, |o| &o.key, buf, size, error)
     }
     fn DestroyOverlay(&self, handle: vr::VROverlayHandle_t) -> vr::EVROverlayError {
         let key = OverlayKey::from(KeyData::from_ffi(handle));
@@ -1879,6 +1926,97 @@ impl vr::IVROverlay007On010 for OverlayMan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{clientcore::Injector, openxr_data::OpenXrData};
+    use vr::IVROverlay028_Interface;
+
+    fn overlay_man() -> OverlayMan {
+        let xr =
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
+        OverlayMan::new(xr, &Injector::default())
+    }
+
+    fn create(man: &OverlayMan, key: &CStr, name: &CStr) -> vr::VROverlayHandle_t {
+        let mut handle = 0;
+        assert_eq!(
+            man.CreateOverlay(key.as_ptr(), name.as_ptr(), &mut handle),
+            vr::EVROverlayError::None
+        );
+        handle
+    }
+
+    #[test]
+    fn get_overlay_flags() {
+        let man = overlay_man();
+        let handle = create(&man, c"key", c"name");
+        let flag = vr::VROverlayFlags::SendVRDiscreteScrollEvents;
+
+        let mut enabled = true;
+        assert_eq!(
+            man.GetOverlayFlag(handle, flag, &mut enabled),
+            vr::EVROverlayError::None
+        );
+        assert!(!enabled);
+
+        assert_eq!(
+            man.SetOverlayFlag(handle, flag, true),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(
+            man.GetOverlayFlag(handle, flag, &mut enabled),
+            vr::EVROverlayError::None
+        );
+        assert!(enabled);
+        let mut flags = 0;
+        assert_eq!(
+            man.GetOverlayFlags(handle, &mut flags),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(flags, flag as u32);
+
+        assert_eq!(
+            man.GetOverlayFlags(handle + 1, &mut flags),
+            vr::EVROverlayError::UnknownOverlay
+        );
+    }
+
+    #[test]
+    fn get_overlay_key_and_name() {
+        let man = overlay_man();
+        let handle = create(&man, c"some.key", c"Some Name");
+        let mut error = vr::EVROverlayError::RequestFailed;
+
+        // Size query
+        let len = man.GetOverlayKey(handle, std::ptr::null_mut(), 0, &mut error);
+        assert_eq!(len, 9);
+        assert_eq!(error, vr::EVROverlayError::ArrayTooSmall);
+
+        let mut buf = [0 as c_char; 16];
+        let len = man.GetOverlayKey(handle, buf.as_mut_ptr(), buf.len() as u32, &mut error);
+        assert_eq!(len, 9);
+        assert_eq!(error, vr::EVROverlayError::None);
+        assert_eq!(unsafe { CStr::from_ptr(buf.as_ptr()) }, c"some.key");
+
+        let len = man.GetOverlayName(handle, buf.as_mut_ptr(), buf.len() as u32, &mut error);
+        assert_eq!(len, 10);
+        assert_eq!(error, vr::EVROverlayError::None);
+        assert_eq!(unsafe { CStr::from_ptr(buf.as_ptr()) }, c"Some Name");
+
+        let len = man.GetOverlayName(handle + 1, buf.as_mut_ptr(), buf.len() as u32, &mut error);
+        assert_eq!(len, 0);
+        assert_eq!(error, vr::EVROverlayError::UnknownOverlay);
+    }
+
+    #[test]
+    fn get_overlay_transform_type() {
+        let man = overlay_man();
+        let handle = create(&man, c"key", c"name");
+        let mut ty = vr::VROverlayTransformType::Invalid;
+        assert_eq!(
+            man.GetOverlayTransformType(handle, &mut ty),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(ty, vr::VROverlayTransformType::Absolute);
+    }
 
     #[test]
     fn rotation_does_not_change_scale() {
