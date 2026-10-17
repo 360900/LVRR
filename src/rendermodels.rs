@@ -172,20 +172,34 @@ impl vr::IVRRenderModels006_Interface for RenderModels {
     fn GetRenderModelOriginalPath(
         &self,
         _: *const std::ffi::c_char,
-        _: *mut std::ffi::c_char,
-        _: u32,
-        _: *mut vr::EVRRenderModelError,
+        buffer: *mut std::ffi::c_char,
+        buffer_size: u32,
+        error: *mut vr::EVRRenderModelError,
     ) -> u32 {
-        todo!()
+        crate::warn_unimplemented!("GetRenderModelOriginalPath");
+        if !buffer.is_null() && buffer_size > 0 {
+            unsafe { *buffer = 0 };
+        }
+        if let Some(error) = unsafe { error.as_mut() } {
+            *error = vr::EVRRenderModelError::NotSupported;
+        }
+        0
     }
     fn GetRenderModelThumbnailURL(
         &self,
         _: *const std::ffi::c_char,
-        _: *mut std::ffi::c_char,
-        _: u32,
-        _: *mut vr::EVRRenderModelError,
+        buffer: *mut std::ffi::c_char,
+        buffer_size: u32,
+        error: *mut vr::EVRRenderModelError,
     ) -> u32 {
-        todo!()
+        crate::warn_unimplemented!("GetRenderModelThumbnailURL");
+        if !buffer.is_null() && buffer_size > 0 {
+            unsafe { *buffer = 0 };
+        }
+        if let Some(error) = unsafe { error.as_mut() } {
+            *error = vr::EVRRenderModelError::NotSupported;
+        }
+        0
     }
     fn RenderModelHasComponent(
         &self,
@@ -343,7 +357,7 @@ impl vr::IVRRenderModels006_Interface for RenderModels {
         cstr_write_out(&cstr, render_model_name, render_model_name_len)
     }
     fn FreeTextureD3D11(&self, _: *mut std::ffi::c_void) {
-        todo!()
+        crate::warn_unimplemented!("FreeTextureD3D11");
     }
     fn LoadIntoTextureD3D11_Async(
         &self,

@@ -321,12 +321,20 @@ pub unsafe extern "C-unwind" fn VRClientCoreFactory(
 }
 
 /// Needed for Proton, but seems unused.
+///
+/// # Safety
+///
+/// `return_code` must be a valid pointer or null.
 #[unsafe(no_mangle)]
-pub extern "C-unwind" fn HmdSystemFactory(
+pub unsafe extern "C-unwind" fn HmdSystemFactory(
     _interface_name: *const c_char,
-    _return_code: *mut i32,
+    return_code: *mut i32,
 ) -> *mut c_void {
-    unimplemented!()
+    crate::warn_unimplemented!("HmdSystemFactory");
+    if let Some(ret) = unsafe { return_code.as_mut() } {
+        *ret = 1;
+    }
+    std::ptr::null_mut()
 }
 
 #[cfg(test)]

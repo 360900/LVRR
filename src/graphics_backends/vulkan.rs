@@ -879,7 +879,10 @@ fn get_colorspace_corrected_format(format: vk::Format, color_space: vr::EColorSp
                 format
             }
         },
-        vr::EColorSpace::Linear => todo!("Linear colorspace not implemented yet"),
+        vr::EColorSpace::Linear => {
+            crate::warn_unimplemented!("Linear colorspace");
+            format
+        }
     }
 }
 

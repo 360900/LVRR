@@ -2,7 +2,8 @@ use super::{
     BoundPoseType, HmdProperties, InteractionProfile, MainAxisType, PoseTransformations,
     ProfileProperties, Property, SkeletalInputBindings,
 };
-use crate::{input::legacy::LegacyBindings, openxr_data::Hand};
+use crate::input::legacy::{Bindings, LegacyBindings};
+use crate::openxr_data::Hand;
 use glam::Mat4;
 
 pub struct ViveTracker;
@@ -37,12 +38,31 @@ impl InteractionProfile for ViveTracker {
         &DEVICE_PROPERTIES
     }
 
-    fn legacy_bindings(_: &super::InputToXrPath<Self>) -> LegacyBindings {
-        unimplemented!()
+    fn legacy_bindings(c: &super::InputToXrPath<Self>) -> LegacyBindings {
+        LegacyBindings {
+            app_menu: vec![],
+            a: vec![],
+            trigger_click: vec![],
+            squeeze_click: vec![],
+            trigger: vec![],
+            squeeze: vec![],
+            main_xy: vec![],
+            main_xy_touch: vec![],
+            main_xy_click: vec![],
+            haptic: vec![],
+            extra: Bindings {
+                grip_pose: c.pose(),
+            },
+        }
     }
 
     fn skeletal_input_bindings(_: &super::InputToXrPath<Self>) -> SkeletalInputBindings {
-        unimplemented!()
+        SkeletalInputBindings {
+            thumb_touch: Vec::new(),
+            index_touch: Vec::new(),
+            index_curl: Vec::new(),
+            rest_curl: Vec::new(),
+        }
     }
 
     fn offset_grip_pose(_: Hand) -> Mat4 {

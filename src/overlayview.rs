@@ -9,10 +9,11 @@ pub struct OverlayView {
 
 impl vr::IVROverlayView003_Interface for OverlayView {
     fn IsViewingPermitted(&self, _: vr::VROverlayHandle_t) -> bool {
-        todo!()
+        crate::warn_unimplemented!("IsViewingPermitted");
+        false
     }
     fn PostOverlayEvent(&self, _: vr::VROverlayHandle_t, _: *const vr::VREvent_t) {
-        todo!()
+        crate::warn_unimplemented!("PostOverlayEvent");
     }
     fn ReleaseOverlayView(&self, _: *mut vr::VROverlayView_t) -> vr::EVROverlayError {
         vr::EVROverlayError::InvalidHandle
@@ -24,6 +25,7 @@ impl vr::IVROverlayView003_Interface for OverlayView {
         _: *mut vr::VROverlayView_t,
         _: u32,
     ) -> vr::EVROverlayError {
-        todo!()
+        crate::warn_unimplemented!("AcquireOverlayView");
+        vr::EVROverlayError::InvalidHandle
     }
 }
