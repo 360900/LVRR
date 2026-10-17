@@ -7,6 +7,7 @@ pub mod vive_controller;
 pub mod vive_focus3;
 #[cfg(feature = "monado")]
 pub mod vive_tracker;
+pub mod vrlink_hand;
 use super::{
     BoundPoseType, action_manifest::ControllerType, legacy::LegacyBindings,
     skeletal::SkeletalInputBindings,
@@ -119,6 +120,7 @@ pub fn run_for_all_profiles(runner: &mut impl RunWithProfile) {
     profile!(ViveWands);
     profile!(FrameController);
     profile!(Knuckles);
+    profile!(vrlink_hand::VRLinkHand);
     profile!(MetaTouchPlus);
     profile!(OculusTouch);
     profile!(ViveFocus3);

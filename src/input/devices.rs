@@ -1,8 +1,12 @@
 use std::any::TypeId;
 use std::collections::HashMap;
+use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
 use std::ffi::{CStr, CString};
 use std::mem::MaybeUninit;
-use std::sync::Mutex;
+use std::sync::{
+    Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 use glam::{Mat4, Quat, Vec3};
 use openvr as vr;
@@ -23,7 +27,7 @@ use log::trace;
 
 use super::{
     Input, InteractionProfile,
-    profiles::{self, MainAxisType, RunWithProfile},
+    profiles::{self, MainAxisType, RunWithProfile, vrlink_hand::VRLinkHand},
 };
 
 #[derive(Clone)]
@@ -38,6 +42,7 @@ pub enum TrackedDeviceType {
         hand: Hand,
         hand_tracker: Option<xr::HandTracker>,
         skeleton_cache: Mutex<HashMap<u64, Option<HandSkeleton>>>,
+        pose_is_synthesised: AtomicBool,
     },
     #[cfg(feature = "monado")]
     GenericTracker {
@@ -50,7 +55,7 @@ impl std::fmt::Debug for TrackedDeviceType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TrackedDeviceType::Hmd => write!(f, "HMD"),
-            TrackedDeviceType::Controller { hand, .. } => write!(f, "Controller ({:?})", hand),
+            TrackedDeviceType::Controller { hand, .. } => write!(f, "Controller ({hand:?})"),
             #[cfg(feature = "monado")]
             TrackedDeviceType::GenericTracker { serial, .. } => {
                 write!(f, "Generic Tracker ({})", serial.to_string_lossy())
@@ -154,9 +159,102 @@ fn get_controller_pose(
     controller: &TrackedDevice,
     origin: vr::ETrackingUniverseOrigin,
 ) -> Option<vr::TrackedDevicePose_t> {
+    let TrackedDeviceType::Controller {
+        hand,
+        hand_tracker,
+        pose_is_synthesised,
+        ..
+    } = controller.get_type()
+    else {
+        return None;
+    };
+    let hand = *hand;
+    // Try to synthesise a grip pose from palm joint
+    let pose_from_hand_tracking = || {
+        let pose = hand_tracker.as_ref().and_then(|tracker| {
+            session_data
+                .tracking_space()
+                .relate_hand_joints(tracker, xr_time)
+                .ok()
+                .flatten()
+        });
+        if let Some((joints, velocities)) = pose {
+            let bone = joints[xr::HandJointEXT::PALM];
+            let velocity = velocities[xr::HandJointEXT::PALM];
+            if !bone
+                .location_flags
+                .contains(xr::SpaceLocationFlags::ORIENTATION_VALID)
+            {
+                trace!("Palm bone is untracked, returning empty pose");
+                pose_is_synthesised.store(false, Ordering::Relaxed);
+                return (xr::SpaceLocation::default(), xr::SpaceVelocity::default());
+            }
+
+            let pose = {
+                let position = bone.pose.position;
+                let orientation = bone.pose.orientation;
+                let mut pose = Mat4::from_rotation_translation(
+                    Quat::from_xyzw(orientation.x, orientation.y, orientation.z, orientation.w),
+                    Vec3::from_array([position.x, position.y, position.z]),
+                );
+
+                let mut offset = Mat4::from_translation(match hand {
+                    Hand::Left => Vec3::from_array([0.09, -0.03, -0.09]),
+                    Hand::Right => Vec3::from_array([-0.09, -0.03, -0.09]),
+                });
+                offset *= Mat4::from_euler(
+                    glam::EulerRot::XYZ,
+                    0.0,
+                    if hand == Hand::Left {
+                        -FRAC_PI_4
+                    } else {
+                        FRAC_PI_4
+                    },
+                    if hand == Hand::Left {
+                        -FRAC_PI_2
+                    } else {
+                        FRAC_PI_2
+                    },
+                );
+
+                pose *= offset;
+
+                let (_, rot, pos) = pose.to_scale_rotation_translation();
+                xr::Posef {
+                    position: xr::Vector3f {
+                        x: pos.x,
+                        y: pos.y,
+                        z: pos.z,
+                    },
+                    orientation: xr::Quaternionf {
+                        x: rot.x,
+                        y: rot.y,
+                        z: rot.z,
+                        w: rot.w,
+                    },
+                }
+            };
+
+            pose_is_synthesised.store(true, Ordering::Relaxed);
+            (
+                xr::SpaceLocation {
+                    location_flags: bone.location_flags,
+                    pose,
+                },
+                xr::SpaceVelocity {
+                    velocity_flags: velocity.velocity_flags,
+                    linear_velocity: velocity.linear_velocity,
+                    angular_velocity: velocity.angular_velocity,
+                },
+            )
+        } else {
+            trace!("No hand tracking available, returning empty pose");
+            (xr::SpaceLocation::default(), xr::SpaceVelocity::default())
+        }
+    };
     let pose_data = session_data.input_data.pose_data.get()?;
 
-    let spaces = match controller.get_controller_hand().unwrap() {
+    let spaces = match hand {
         Hand::Left => &pose_data.left_space,
         Hand::Right => &pose_data.right_space,
     };
@@ -164,11 +262,22 @@ fn get_controller_pose(
     let (location, mut velocity) = if let Some(raw) =
         spaces.try_get_or_init_raw(&controller.profile_data, session_data, pose_data)
     {
-        raw.relate(session_data.get_space_for_origin(origin), xr_time)
-            .ok()?
+        let pose = raw
+            .relate(session_data.get_space_for_origin(origin), xr_time)
+            .ok();
+
+        pose.filter(|(loc, _vel)| {
+            loc.location_flags
+                .contains(xr::SpaceLocationFlags::ORIENTATION_VALID)
+        })
+        .inspect(|_| {
+            pose_is_synthesised.store(false, Ordering::Relaxed);
+        })
+        .unwrap_or_else(pose_from_hand_tracking)
     } else {
-        trace!("Failed to get raw space, returning empty pose");
-        (xr::SpaceLocation::default(), xr::SpaceVelocity::default())
+        trace!("Failed to get raw space, trying hand tracking");
+
+        pose_from_hand_tracking()
     };
 
     if crate::quirks::synthesized_velocity()
@@ -355,6 +464,22 @@ impl TrackedDevice {
         }
     }
 
+    pub fn is_connected(
+        &self,
+        xr_data: &OpenXrData<impl openxr_data::Compositor>,
+        session_data: &SessionData,
+    ) -> bool {
+        match self.get_type() {
+            TrackedDeviceType::Controller { .. } => {
+                self.connected
+                    || self
+                        .get_hand_skeleton(xr_data, session_data.tracking_space())
+                        .is_some()
+            }
+            _ => self.connected,
+        }
+    }
+
     pub fn has_connected_changed(&mut self) -> bool {
         if self.previous_connected != self.connected {
             self.previous_connected = self.connected;
@@ -369,8 +494,8 @@ impl TrackedDevice {
     }
 
     pub fn get_controller_hand(&self) -> Option<Hand> {
-        match self.device_type {
-            TrackedDeviceType::Controller { hand, .. } => Some(hand),
+        match &self.device_type {
+            TrackedDeviceType::Controller { hand, .. } => Some(*hand),
             _ => None,
         }
     }
@@ -389,7 +514,23 @@ impl TrackedDevice {
                 .find_map(|controller| controller.profile_data.as_ref())
                 .map(|data| data.properties)
                 .or(last_profile),
-            _ => self.profile_data.as_ref().map(|data| data.properties),
+            _ => self
+                .profile_data
+                .as_ref()
+                .map(|data| data.properties)
+                .or_else(|| self.synthesised_profile()),
+        }
+    }
+
+    /// The interaction profile reported when the controller has no bound
+    /// interaction profile but is tracked through hand tracking (e.g. WiVRn).
+    fn synthesised_profile(&self) -> Option<&'static ProfileProperties> {
+        match self.device_type {
+            TrackedDeviceType::Controller {
+                hand_tracker: Some(_),
+                ..
+            } => Some(VRLinkHand::properties()),
+            _ => None,
         }
     }
 
@@ -494,10 +635,19 @@ impl TrackedDevice {
         }
     }
 
-    fn get_int_property(&self, property: vr::ETrackedDeviceProperty) -> Option<i32> {
+    fn get_int_property(
+        &self,
+        _xr_data: &OpenXrData<impl openxr_data::Compositor>,
+        _session_data: &SessionData,
+        property: vr::ETrackedDeviceProperty,
+    ) -> Option<i32> {
         match self.device_type {
             TrackedDeviceType::Controller { .. } => {
-                let data = self.profile_data.as_ref()?.properties;
+                let data = self
+                    .profile_data
+                    .as_ref()
+                    .map(|data| data.properties)
+                    .or_else(|| self.synthesised_profile())?;
 
                 match property {
                     vr::ETrackedDeviceProperty::Axis0Type_Int32 => match data.main_axis {
@@ -523,10 +673,19 @@ impl TrackedDevice {
         }
     }
 
-    fn get_uint_property(&self, property: vr::ETrackedDeviceProperty) -> Option<u64> {
+    fn get_uint_property(
+        &self,
+        _xr_data: &OpenXrData<impl openxr_data::Compositor>,
+        _session_data: &SessionData,
+        property: vr::ETrackedDeviceProperty,
+    ) -> Option<u64> {
         match self.device_type {
             TrackedDeviceType::Controller { .. } => {
-                let data = self.profile_data.as_ref()?.properties;
+                let data = self
+                    .profile_data
+                    .as_ref()
+                    .map(|data| data.properties)
+                    .or_else(|| self.synthesised_profile())?;
 
                 match property {
                     vr::ETrackedDeviceProperty::SupportedButtons_Uint64 => {
@@ -562,10 +721,47 @@ pub struct TrackedDeviceList {
     devices: Vec<TrackedDevice>,
 }
 
-impl Default for TrackedDeviceList {
-    fn default() -> Self {
+impl TrackedDeviceList {
+    pub fn new(session: &xr::Session<xr::AnyGraphics>) -> Self {
+        let create_hand_tracker = |hand: Hand| {
+            session
+                .create_hand_tracker(hand.into())
+                .inspect_err(|e| {
+                    if !matches!(
+                        *e,
+                        xr::sys::Result::ERROR_EXTENSION_NOT_PRESENT
+                            | xr::sys::Result::ERROR_FEATURE_UNSUPPORTED
+                    ) {
+                        log::debug!("Failed to create hand tracker for hand {hand:?}: {e}");
+                    }
+                })
+                .ok()
+        };
+
         Self {
-            devices: vec![TrackedDevice::new(TrackedDeviceType::Hmd, None, None)],
+            devices: vec![
+                TrackedDevice::new(TrackedDeviceType::Hmd, None, None),
+                TrackedDevice::new(
+                    TrackedDeviceType::Controller {
+                        hand: Hand::Left,
+                        hand_tracker: create_hand_tracker(Hand::Left),
+                        skeleton_cache: Mutex::new(Default::default()),
+                        pose_is_synthesised: false.into(),
+                    },
+                    None,
+                    None,
+                ),
+                TrackedDevice::new(
+                    TrackedDeviceType::Controller {
+                        hand: Hand::Right,
+                        hand_tracker: create_hand_tracker(Hand::Right),
+                        skeleton_cache: Mutex::new(Default::default()),
+                        pose_is_synthesised: false.into(),
+                    },
+                    None,
+                    None,
+                ),
+            ],
         }
     }
 }
@@ -616,7 +812,7 @@ impl TrackedDeviceList {
     #[cfg(feature = "monado")]
     pub(super) fn create_monado_generic_trackers(
         &mut self,
-        xr_data: &OpenXrData<impl crate::openxr_data::Compositor>,
+        xr_data: &OpenXrData<impl openxr_data::Compositor>,
         session_data: &SessionData,
     ) -> xr::Result<()> {
         if !xr_data
@@ -761,7 +957,9 @@ impl<C: openxr_data::Compositor> Input<C> {
         let session_data = self.openxr.session_data.get();
         let devices = session_data.input_data.devices.read().unwrap();
 
-        devices.get_device(index).is_some_and(|d| d.connected)
+        devices
+            .get_device(index)
+            .is_some_and(|d| d.is_connected(&self.openxr, &session_data))
     }
 
     pub fn device_index_to_tracked_device_class(
@@ -821,7 +1019,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         let devices = session_data.input_data.devices.read().unwrap();
         let device = devices.get_device(index)?;
 
-        device.get_int_property(property)
+        device.get_int_property(&self.openxr, &session_data, property)
     }
 
     pub fn get_device_uint_tracked_property(
@@ -833,7 +1031,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         let devices = session_data.input_data.devices.read().unwrap();
         let device = devices.get_device(index)?;
 
-        device.get_uint_property(property)
+        device.get_uint_property(&self.openxr, &session_data, property)
     }
 }
 
@@ -857,15 +1055,15 @@ mod tests {
 
         // we need to wait two frames for the tracker to be connected.
         frame();
-        assert!(f.input.device_index_to_tracked_device_class(2).is_none());
+        assert!(f.input.device_index_to_tracked_device_class(3).is_none());
         frame();
         assert!(
-            f.input.device_index_to_tracked_device_class(2)
+            f.input.device_index_to_tracked_device_class(3)
                 == Some(vr::ETrackedDeviceClass::GenericTracker)
         );
 
         let pose2 = f.input.get_device_pose(
-            2,
+            3,
             Some(vr::ETrackingUniverseOrigin::Seated),
             f.input.openxr.display_time.get(),
             None,
@@ -888,16 +1086,16 @@ mod tests {
 
         // we need to wait two frames for the tracker to be connected.
         frame();
-        assert!(f.input.device_index_to_tracked_device_class(2).is_none());
+        assert!(f.input.device_index_to_tracked_device_class(3).is_none());
         frame();
         assert!(
-            f.input.device_index_to_tracked_device_class(2)
+            f.input.device_index_to_tracked_device_class(3)
                 == Some(vr::ETrackedDeviceClass::GenericTracker)
         );
 
         let serial = f
             .input
-            .get_device_string_tracked_property(2, vr::ETrackedDeviceProperty::SerialNumber_String)
+            .get_device_string_tracked_property(3, vr::ETrackedDeviceProperty::SerialNumber_String)
             .unwrap();
         assert_eq!(serial.to_str().unwrap(), "FAKEXR-SERIAL");
     }
