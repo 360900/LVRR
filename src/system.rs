@@ -361,27 +361,43 @@ impl vr::IVRSystem026_Interface for System {
             *top = view.fov.angle_down.tan();
         }
     }
+    // The OpenXR runtime applies lens distortion itself, so the app's view is undistorted.
     fn ComputeDistortion(
         &self,
         _: vr::EVREye,
-        _: f32,
-        _: f32,
-        _: *mut vr::DistortionCoordinates_t,
+        u: f32,
+        v: f32,
+        coords: *mut vr::DistortionCoordinates_t,
     ) -> bool {
-        crate::warn_unimplemented!("ComputeDistortion");
-        false
+        if coords.is_null() {
+            return false;
+        }
+        unsafe {
+            coords.write(vr::DistortionCoordinates_t {
+                rfRed: [u, v],
+                rfGreen: [u, v],
+                rfBlue: [u, v],
+            })
+        };
+        true
     }
     fn ComputeDistortionSet(
         &self,
         _: openvr::EVREye,
         _: openvr::EVRDistortionChannel,
         _: bool,
-        _: u32,
-        _: *const openvr::DistortionCoordinate_t,
-        _: *mut openvr::DistortionCoordinate_t,
+        count: u32,
+        input: *const openvr::DistortionCoordinate_t,
+        output: *mut openvr::DistortionCoordinate_t,
     ) -> bool {
-        crate::warn_unimplemented!("ComputeDistortionSet");
-        false
+        if count == 0 {
+            return true;
+        }
+        if input.is_null() || output.is_null() {
+            return false;
+        }
+        unsafe { std::ptr::copy(input, output, count as usize) };
+        true
     }
     fn GetEyeToHeadTransform(&self, eye: vr::EVREye) -> vr::HmdMatrix34_t {
         let views = self.get_views(xr::ReferenceSpaceType::VIEW).views;
@@ -1342,6 +1358,36 @@ mod tests {
     use crate::{clientcore::Injector, openxr_data::OpenXrData};
     use std::ffi::CStr;
     use vr::IVRSystem022_Interface;
+
+    #[test]
+    fn distortion_is_identity() {
+        let xr =
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
+        let system = System::new(xr, &Injector::default());
+
+        let mut coords = vr::DistortionCoordinates_t::default();
+        assert!(system.ComputeDistortion(vr::EVREye::Left, 0.25, 0.75, &mut coords));
+        assert_eq!(coords.rfRed, [0.25, 0.75]);
+        assert_eq!(coords.rfGreen, [0.25, 0.75]);
+        assert_eq!(coords.rfBlue, [0.25, 0.75]);
+        assert!(!system.ComputeDistortion(vr::EVREye::Left, 0.0, 0.0, std::ptr::null_mut()));
+
+        let input = [
+            vr::DistortionCoordinate_t { u: 0.1, v: 0.2 },
+            vr::DistortionCoordinate_t { u: 0.9, v: 0.8 },
+        ];
+        let mut output = [vr::DistortionCoordinate_t::default(); 2];
+        assert!(vr::IVRSystem026_Interface::ComputeDistortionSet(
+            &system,
+            vr::EVREye::Right,
+            vr::EVRDistortionChannel::Green,
+            false,
+            2,
+            input.as_ptr(),
+            output.as_mut_ptr(),
+        ));
+        assert_eq!(output.map(|c| (c.u, c.v)), [(0.1, 0.2), (0.9, 0.8)]);
+    }
 
     #[test]
     fn unity_required_properties() {
