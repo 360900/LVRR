@@ -42,7 +42,7 @@ impl InteractionProfile for VRLinkHand {
             },
             tracking_system_name: c"vrlink",
             manufacturer_name: c"VRLink",
-            input_profile_path: c"",
+            input_profile_path: c"{vrlink}/input/svl_hand_interaction_augmented_input_profile.json",
             legacy_buttons_mask: button_mask_from_ids!(
                 EVRButtonId::System,
                 EVRButtonId::ApplicationMenu,
