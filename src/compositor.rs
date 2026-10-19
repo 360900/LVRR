@@ -26,7 +26,7 @@ pub struct CompositorSessionData(Mutex<Option<DynFrameController>>);
 #[derive(macros::InterfaceImpl)]
 #[interface = "IVRCompositor"]
 #[versions(
-    029, 028, 027, 026, 022, 021, 020, 019, 018, 016, 015, 014, 013, 012, 011, 009
+    029, 028, 027, 026, 024, 022, 021, 020, 019, 018, 017, 016, 015, 014, 013, 012, 011, 009
 )]
 pub struct Compositor {
     vtables: Vtables,
@@ -1063,7 +1063,7 @@ impl Compositor {
     }
 }
 
-impl vr::IVRCompositor016On018 for Compositor {
+impl vr::IVRCompositor016On017 for Compositor {
     fn GetFrameTiming(
         &self,
         timing: *mut vr::vr_1_0_3::Compositor_FrameTiming,
@@ -2011,7 +2011,7 @@ mod tests {
             m_nSize: std::mem::size_of::<vr::vr_1_0_3::Compositor_FrameTiming>() as u32,
             ..Default::default()
         };
-        assert!(vr::IVRCompositor016On018::GetFrameTiming(
+        assert!(vr::IVRCompositor016On017::GetFrameTiming(
             &*f.comp,
             &mut timing,
             0
@@ -2052,12 +2052,12 @@ mod tests {
             m_nSize: 4,
             ..Default::default()
         };
-        assert!(!vr::IVRCompositor016On018::GetFrameTiming(
+        assert!(!vr::IVRCompositor016On017::GetFrameTiming(
             &*f.comp,
             &mut timing,
             0
         ));
-        assert!(!vr::IVRCompositor016On018::GetFrameTiming(
+        assert!(!vr::IVRCompositor016On017::GetFrameTiming(
             &*f.comp,
             std::ptr::null_mut(),
             0

@@ -97,6 +97,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
         version!(1, 23, 8),
         version!(1, 16, 8),
         version!(1, 14, 15),
+        version!(1, 9, 16),
         version!(1, 8, 19),
         version!(1, 7, 15),
         version!(1, 4, 18),
@@ -135,10 +136,22 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     pruned_headers[0].1.push_str(&clientcore2);
 
+    // Valve never published IVRCompositor_017, but The Lab uses it. It's 018 without
+    // GetCurrentFadeColor and GetCurrentGridAlpha, so derive it from the 1.0.4 header.
+    let compositor017: String = prune_header(
+        header_dir.join("openvr-1.0.4.h").to_str().unwrap(),
+        "1_0_4_17",
+    )
+    .lines()
+    .filter(|l| !l.contains("GetCurrentFadeColor(") && !l.contains("GetCurrentGridAlpha("))
+    .map(|l| l.replace("\"IVRCompositor_018\"", "\"IVRCompositor_017\"") + "\n")
+    .collect();
+
     let mut builder = bindgen::builder();
     for (header, content) in pruned_headers {
         builder = builder.header_contents(header, &content);
     }
+    builder = builder.header_contents("openvr-1.0.4-compositor017.h", &compositor017);
 
     // Interfaces to generate bindings for.
     const INTERFACES: &[&str] = &[
