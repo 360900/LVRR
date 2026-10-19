@@ -68,7 +68,7 @@ impl vr::IVRChaperoneSetup006_Interface for ChaperoneSetup {
         crate::warn_unimplemented!("SetWorkingCollisionBoundsInfo");
     }
 
-    fn SetWorkingPerimeter(&self, _: *mut HmdVector2_t, _: u32) {
+    fn SetWorkingPerimeter(&self, _: *const HmdVector2_t, _: u32) {
         crate::warn_unimplemented!("SetWorkingPerimeter");
     }
 

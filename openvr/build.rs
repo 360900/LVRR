@@ -486,7 +486,7 @@ impl PartialOrd for HeaderVersion {
             Some(std::cmp::Ordering::Greater)
         } else if self.major < other.major {
             Some(std::cmp::Ordering::Less)
-        } else if self.minor > other.major {
+        } else if self.minor > other.minor {
             Some(std::cmp::Ordering::Greater)
         } else if self.minor < other.minor {
             Some(std::cmp::Ordering::Less)
