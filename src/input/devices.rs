@@ -630,7 +630,14 @@ impl TrackedDevice {
                 TrackedDeviceType::Hmd => unreachable!(),
             },
             vr::ETrackedDeviceProperty::ManufacturerName_String => Some(data.manufacturer_name),
-            vr::ETrackedDeviceProperty::InputProfilePath_String => Some(data.input_profile_path),
+            // Per the OpenVR docs this defaults to the tracking system name
+            vr::ETrackedDeviceProperty::InputProfilePath_String => {
+                if data.input_profile_path.is_empty() {
+                    Some(data.tracking_system_name)
+                } else {
+                    Some(data.input_profile_path)
+                }
+            }
             _ => None,
         }
     }
