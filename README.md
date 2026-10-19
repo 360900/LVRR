@@ -1,106 +1,100 @@
 # xrizer-edge
 
-A fork of [xrizer](https://github.com/Supreeeme/xrizer) that carries open upstream PRs and extra fixes. See [PICKS.md](PICKS.md) for what's included.
+An OpenVR implementation on top of OpenXR. Run OpenVR games through any OpenXR runtime (Monado, WiVRn, etc.) without SteamVR.
 
-## xrizer - XR-ize your OpenVR games
+xrizer-edge started as a fork of [xrizer](https://github.com/Supreeeme/xrizer) and is developed independently. It includes many upstream PRs that weren't merged there (see [PICKS.md](PICKS.md)) plus its own fixes and API coverage. Missing OpenVR functions log a warning and return a safe default instead of crashing the game.
 
-xrizer is a reimplementation of OpenVR on top of OpenXR. This enables you to run OpenVR games through any OpenXR runtime without running SteamVR.
+Things will still break. Please open issues here, not on upstream xrizer.
 
-Note that xrizer is currently immature. Many things are likely broken, so please open bugs! For a more mature solution, check out [OpenComposite](https://gitlab.com/znixian/OpenComposite), which some of the code in this repo is based on.
+# Download
 
-# Download & Usage
+- [Latest nightly](https://nightly.link/360900/xrizer-edge/workflows/ci/main/xrizer-nightly-release.zip)
+- [Releases](https://github.com/360900/xrizer-edge/releases)
 
-[Latest nightly](https://nightly.link/360900/xrizer-edge/workflows/ci/main/xrizer-nightly-release.zip) - Bleeding edge!
+Unzip it anywhere.
 
-[Releases](https://github.com/360900/xrizer-edge/releases)
+# Usage
 
-Choose a download and click it to download a zip. Unzip it and place it wherever you like.
+OpenVR games need to be pointed at xrizer-edge instead of SteamVR. Either:
 
-In order to use xrizer, you must change where OpenVR games search for the runtime. There are two ways to accomplish this:
+1. Add its path to `$XDG_CONFIG_HOME/openvr/openvrpaths.vrpath`, or
+2. Set `VR_OVERRIDE` when launching: `VR_OVERRIDE=/path/to/xrizer-edge %command%` in Steam launch options.
+   - This still requires a valid `openvrpaths.vrpath` to exist, though xrizer doesn't need to be in it.
 
-1. Add the path to xrizer to `$XDG_CONFIG_HOME/openvr/openvrpaths.vrpath`.
-2. Set the `VR_OVERRIDE` environment variable when launching a game: `VR_OVERRIDE=/path/to/xrizer <command>` (steam launch options: `VR_OVERRIDE=/path/to/xrizer %command%`)
-   - Note that if you do this method, you must have an existing valid `openvrpaths.vrpath` file, though xrizer doesn't need to be in it.
+With WiVRn, you can instead set the xrizer-edge path as the OpenVR compatibility library in the WiVRn settings.
 
 ## openvrpaths.vrpath
 
-This file is a JSON file read by OpenVR games to determine where the runtime is located. If you have SteamVR installed and have run it before, you can simply add the path to xrizer to the "runtime" section.
-If you haven't, here is a sample file that can be placed in `$XDG_CONFIG_HOME/openvr/openvrpaths.vrpath` (be sure to update the path!):
+A JSON file OpenVR games read to find the runtime. If you've run SteamVR before, add the xrizer path to the `runtime` list. Otherwise, create `$XDG_CONFIG_HOME/openvr/openvrpaths.vrpath`:
+
 ```json
 {
     "version": 1,
     "runtime": [
-        "/path/to/xrizer"
+        "/path/to/xrizer-edge"
     ]
 }
 ```
 
 ## Steam Linux Runtime
 
-When running games through the Steam Linux Runtime - which is all of them when using Proton 6 or newer - filesystem paths will not work the same way since it's a container. Some things to keep in mind are:
-- Any path in your home directory will always be available
-- Paths under `/usr` will be available at `/run/host/usr`
-- Some paths will be completely unavailable.
+Games running in the Steam Linux Runtime (all Proton 6+ games) are in a container, so paths behave differently:
+- Paths in your home directory are always available.
+- `/usr` is available at `/run/host/usr`.
+- Some paths are unavailable.
 
-You can make paths available within the container using the `PRESSURE_VESSEL_FILESYSTEMS_RW` env var. An example of what you might put in your game's steam launch option if you want to use xrizer with Monado installed systemwide is:
+Use `PRESSURE_VESSEL_FILESYSTEMS_RW` to expose more. Example launch options for a systemwide Monado install:
+
 ```
-XR_RUNTIME_JSON=/run/host/usr/share/openxr/1/openxr_monado.json VR_OVERRIDE=/path/to/xrizer PRESSURE_VESSEL_FILESYSTEMS_RW=$XDG_RUNTIME_DIR/monado_comp_ipc
+XR_RUNTIME_JSON=/run/host/usr/share/openxr/1/openxr_monado.json VR_OVERRIDE=/path/to/xrizer-edge PRESSURE_VESSEL_FILESYSTEMS_RW=$XDG_RUNTIME_DIR/monado_comp_ipc %command%
 ```
-For more info on the container, see [Valve's docs on Pressure Vessel](https://gitlab.steamos.cloud/steamrt/steam-runtime-tools/-/blob/main/pressure-vessel/wrap.1.md).
 
-# FAQ
+See [Valve's Pressure Vessel docs](https://gitlab.steamos.cloud/steamrt/steam-runtime-tools/-/blob/main/pressure-vessel/wrap.1.md).
 
-## What games work on xrizer?
+# Environment variables
 
-You tell me! The aim is for all standard (non overlay/utility/background) OpenVR apps to function as they would on SteamVR. Obviously this is not 100% the case, so open issues as you run into games that don't work properly and they will be addressed in time.
+`RUST_LOG` - Log filter, see [env_logger](https://docs.rs/env_logger/latest/env_logger/#enabling-logging). Useful extra targets:
+- `openvr_calls` - every OpenVR function called
+- `tracked_property` - every tracked device property requested, with device index
 
-## Why rewrite OpenComposite?
+If a launcher strips `RUST_LOG`, put the same filter string in a file named `log_filter` in the log directory. It's only read when `RUST_LOG` is unset.
 
-OpenComposite has several years of existence over xrizer, so rewriting it is no small task. However, OpenComposite also lacks sufficient testing infrastructure, making it easy to inadvertently introduce regressions, and the way it's architected makes it difficult to write simple tests. OpenComposite was also not originally designed to utilize OpenXR, and there's still some legacy stuff from that period remaining in the codebase, which can make it more convoluted to understand. Dealing with these issues for a while led me to conclude that it would be more productive to rewrite it.
+`XRIZER_SYNTHESIZED_VELOCITY` - `1` computes controller linear velocity from position deltas, `0` forces the runtime's. Helps with throwing on runtimes that under-report velocity. Enabled automatically for games known to need it.
 
-## Why Rust?
+`XRIZER_CUSTOM_BINDINGS_DIR` - Extra directory to search for controller bindings files. The format is undocumented; copy an existing file or read the parser.
 
-I like Rust. I don't like CMake.
+`XRIZER_MAX_TRACKERS` - Max number of generic trackers to expose. Trackers appear as Vive Trackers, which can confuse some games' controller detection. `0` hides them. Set automatically for games known to need it.
+
+`XRIZER_TRACKER_SERIALS` - `;` separated list of device serials to expose as generic trackers, e.g. to use controllers as FBT trackers.
+
+`XRIZER_PROFILE_PROBE` - `0` skips the startup interaction profile probe, a short throwaway session used to learn the controller type before the game's first frame. Background and utility apps never probe.
+
+# Reporting bugs
+
+Attach a log. Logs are in `$XDG_STATE_HOME/xrizer` (or `~/.local/state/xrizer`), one file per process named `xrizer-<timestamp>-<pid>.txt`. The newest is usually the one you want; launchers often start a short-lived process first to check for a headset. Logs older than two days are deleted on startup.
 
 # Building
-```
-# dev build
-cargo xbuild
 
-# release build
-cargo xbuild --release
+```
+cargo xbuild            # debug, output in target/debug
+cargo xbuild --release  # release, output in target/release
 ```
 
-After building, the output directory can be used as a runtime directory. If you built the dev build, this will be `<path to xrizer repo>/target/debug`, and for the release build this is `<path to xrizer repo>/target/release`.
+The output directory is the runtime directory.
 
-The version xrizer reports comes from `git describe`, via the default `git-version` feature. Builds that don't have a git checkout - distribution packages and other builds from a source tarball - can disable that feature with `--no-default-features` (re-enabling the other default features they want, e.g. `--features monado`) and set `XRIZER_VERSION` at build time instead. `XRIZER_VERSION` takes precedence over `git describe` whenever it is set.
+The reported version comes from `git describe` via the default `git-version` feature. For builds without a git checkout (distro packages, tarballs), use `--no-default-features` (re-adding what you need, e.g. `--features monado`) and set `XRIZER_VERSION` at build time. `XRIZER_VERSION` always takes precedence when set.
 
 # Contributing
 
-All contributions welcome.
-- If you're opening a bug, please submit a log. Logs are written to `$XDG_STATE_HOME/xrizer`, or `$HOME/.local/state/xrizer` if `$XDG_STATE_HOME` is not set. Each process gets its own file named `xrizer-<timestamp>-<pid>.txt` - the most recent one is usually the one you want, as launchers often start a short-lived process to check for a headset before the game itself runs. Files older than two days are removed on startup.
-- If submitting pull requests, please consider writing a test if possible/helpful - OpenVR is a large API surface and games are fickle, so ensuring things are well tested prevents future unintentional breakage.
+PRs welcome. Please add tests where it makes sense; OpenVR is a large API and games are fickle, so tests are what prevent regressions.
 
-# Environment Variables
-_RUST_LOG_ - This is used for adjusting the logging of xrizer. See the [env_logger documentation](https://docs.rs/env_logger/latest/env_logger/#enabling-logging) for understanding how this works. Here are some useful nonstandard logging targets:
-- `openvr_calls` - logs the name of each OpenVR function as they are called
-- `tracked_property` - logs the name and device index of each requested tracked device property.
+# Credits
 
-_XRIZER_SYNTHESIZED_VELOCITY_ - Set to `1` to report controller linear velocities computed from position deltas rather than the ones the OpenXR runtime reports, or `0` to force the runtime's. Some runtimes under-report linear velocity, which makes throwing objects in games difficult; xrizer enables this automatically for games known to need it.
-
-If `RUST_LOG` doesn't reach xrizer - some launchers sanitize the environment before starting a game - you can put the same filter string in a file named `log_filter` in the log directory instead. It's only read when `RUST_LOG` is unset.
-
-_XRIZER_CUSTOM_BINDINGS_DIR_ - This can be used to supply a directory that xrizer will search for controller bindings files. Note that the format of these bindings aren't actually documented anywhere, but it's easy enough to modify an existing file, and xrizer parses them so you can read the source too.
-
-_XRIZER_MAX_TRACKERS_ - The maximum number of generic trackers to expose. Trackers identify as Vive Trackers, and some games check for those to decide which controller scheme to use, so a game can behave oddly when it sees one; set this to `0` to hide them entirely. xrizer already does that automatically for games known to need it.
-
-_XRIZER_TRACKER_SERIALS_ - This is a semi-colon (`;`) separated list of device serial numbers to use as generic trackers. Can be used to assign controllers as FBT trackers.
-
-_XRIZER_PROFILE_PROBE_ - Set to `0` to skip the interaction profile probe at startup, a short throwaway session xrizer uses to learn the controller type before the game's first frame. Some games pick their control scheme from it at init. Background and utility apps never probe.
+- [xrizer](https://github.com/Supreeeme/xrizer) and its contributors, which this project is built on. Merged upstream PRs keep their original authors.
+- [OpenComposite](https://gitlab.com/znixian/OpenOVR), which parts of xrizer were based on.
 
 # See also
 
-- [OpenComposite](https://gitlab.com/znixian/OpenOVR) - The original OpenVR/OpenXR implementation, much more mature than xrizer. Some of the code in this repo was rewritten based on OpenComposite.
 - [OpenVR](https://github.com/ValveSoftware/openvr)
-- [Monado](https://gitlab.freedesktop.org/monado/monado) - An open source OpenXR runtime
-- [WiVRn](https://github.com/WiVRn/WiVRn) - An OpenXR streaming runtime for standalone headsets, based on Monado.
+- [Monado](https://gitlab.freedesktop.org/monado/monado) - Open source OpenXR runtime
+- [WiVRn](https://github.com/WiVRn/WiVRn) - OpenXR streaming runtime for standalone headsets, based on Monado
