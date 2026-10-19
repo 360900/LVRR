@@ -3,7 +3,7 @@ use std::os::raw::c_char;
 
 #[derive(Default, macros::InterfaceImpl)]
 #[interface = "IVRChaperoneSetup"]
-#[versions(006)]
+#[versions(006, 005, 004)]
 pub struct ChaperoneSetup {
     vtables: Vtables,
 }
@@ -112,5 +112,32 @@ impl vr::IVRChaperoneSetup006_Interface for ChaperoneSetup {
 
     fn RoomSetupStarting(&self) {
         crate::warn_unimplemented!("RoomSetupStarting");
+    }
+}
+
+impl vr::IVRChaperoneSetup005On006 for ChaperoneSetup {
+    fn SetWorkingCollisionBoundsTagsInfo(&self, _: *mut u8, _: u32) {
+        crate::warn_unimplemented!("SetWorkingCollisionBoundsTagsInfo");
+    }
+
+    fn GetLiveCollisionBoundsTagsInfo(&self, _: *mut u8, tag_count: *mut u32) -> bool {
+        crate::warn_unimplemented!("GetLiveCollisionBoundsTagsInfo");
+        if let Some(tag_count) = unsafe { tag_count.as_mut() } {
+            *tag_count = 0;
+        }
+        false
+    }
+
+    fn SetWorkingPhysicalBoundsInfo(&self, _: *mut HmdQuad_t, _: u32) -> bool {
+        crate::warn_unimplemented!("SetWorkingPhysicalBoundsInfo");
+        false
+    }
+
+    fn GetLivePhysicalBoundsInfo(&self, _: *mut HmdQuad_t, quads_count: *mut u32) -> bool {
+        crate::warn_unimplemented!("GetLivePhysicalBoundsInfo");
+        if let Some(quads_count) = unsafe { quads_count.as_mut() } {
+            *quads_count = 0;
+        }
+        false
     }
 }

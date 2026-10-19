@@ -149,7 +149,7 @@ fn get_render_model_data(render_model_name: &CStr) -> Option<&RenderModelObjLz4>
 
 #[derive(Default, macros::InterfaceImpl)]
 #[interface = "IVRRenderModels"]
-#[versions(006, 005, 004)]
+#[versions(006, 005, 004, 002)]
 pub struct RenderModels {
     vtables: Vtables,
     data: Mutex<RenderModelData>,
@@ -495,6 +495,46 @@ impl vr::IVRRenderModels006_Interface for RenderModels {
             *out_render_model = ptr;
         }
         vr::EVRRenderModelError::None
+    }
+}
+
+// Pre-async interface. Our loads complete immediately, so these just wrap the async versions.
+#[allow(non_snake_case)]
+impl vr::IVRRenderModels002On004 for RenderModels {
+    fn LoadRenderModel(
+        &self,
+        render_model_name: *const std::ffi::c_char,
+        out_render_model: *mut *mut vr::RenderModel_t,
+    ) -> bool {
+        vr::IVRRenderModels006_Interface::LoadRenderModel_Async(
+            self,
+            render_model_name,
+            out_render_model,
+        ) == vr::EVRRenderModelError::None
+    }
+    fn LoadTexture(
+        &self,
+        tex_id: vr::TextureID_t,
+        out_texture_map: *mut *mut vr::RenderModel_TextureMap_t,
+    ) -> bool {
+        vr::IVRRenderModels006_Interface::LoadTexture_Async(self, tex_id, out_texture_map)
+            == vr::EVRRenderModelError::None
+    }
+    fn GetComponentState(
+        &self,
+        render_model_name: *const std::ffi::c_char,
+        component_name: *const std::ffi::c_char,
+        controller_state: *const vr::VRControllerState_t,
+        state: *mut vr::RenderModel_ComponentState_t,
+    ) -> bool {
+        vr::IVRRenderModels006_Interface::GetComponentState(
+            self,
+            render_model_name,
+            component_name,
+            controller_state,
+            ptr::null(),
+            state,
+        )
     }
 }
 
@@ -1193,5 +1233,39 @@ mod tests {
                 "{name}: vertex count mismatch"
             );
         }
+    }
+
+    #[test]
+    fn sync_load_002() {
+        use vr::IVRRenderModels002On004;
+        let rm = RenderModels::default();
+        let name = CString::new(*RENDER_MODELS.keys().next().unwrap()).unwrap();
+
+        let mut model: *mut vr::RenderModel_t = ptr::null_mut();
+        assert!(!IVRRenderModels002On004::LoadRenderModel(
+            &rm,
+            c"unknown_model".as_ptr(),
+            &mut model
+        ));
+        assert!(IVRRenderModels002On004::LoadRenderModel(
+            &rm,
+            name.as_ptr(),
+            &mut model
+        ));
+        assert!(!model.is_null());
+
+        let mut tex: *mut vr::RenderModel_TextureMap_t = ptr::null_mut();
+        assert!(IVRRenderModels002On004::LoadTexture(
+            &rm,
+            unsafe { (*model).diffuseTextureId },
+            &mut tex
+        ));
+        assert!(!tex.is_null());
+
+        rm.FreeTexture(tex);
+        rm.FreeRenderModel(model);
+        let data = rm.data.lock().unwrap();
+        assert!(data.loaded_model_data.is_empty());
+        assert!(data.loaded_textures.is_empty());
     }
 }

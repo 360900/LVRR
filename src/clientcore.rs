@@ -4,6 +4,8 @@ use crate::{
     chaperone_setup::ChaperoneSetup,
     compositor::Compositor,
     debug::Debug,
+    extended_display::ExtendedDisplay,
+    headset_view::HeadsetView,
     input::Input,
     misc_unknown::UnknownInterfaces,
     openxr_data::{OpenXrData, RealOpenXrData},
@@ -265,6 +267,8 @@ impl IVRClientCore003_Interface for ClientCore {
             .or_else(|| self.try_interface(interface, |_| Settings::default()))
             .or_else(|| self.try_interface(interface, |_| Debug::default()))
             .or_else(|| self.try_interface(interface, |_| ChaperoneSetup::default()))
+            .or_else(|| self.try_interface(interface, |_| ExtendedDisplay::new(openxr.clone())))
+            .or_else(|| self.try_interface(interface, |_| HeadsetView::default()))
             .or_else(|| self.try_interface(interface, |_| UnknownInterfaces::default()))
             .unwrap_or_else(|| {
                 warn!("app requested unknown interface {interface:?}");
@@ -290,6 +294,11 @@ impl IVRClientCore003_Interface for ClientCore {
                 Applications::supported_versions(),
                 OverlayView::supported_versions(),
                 Screenshots::supported_versions(),
+                Settings::supported_versions(),
+                Debug::supported_versions(),
+                ChaperoneSetup::supported_versions(),
+                ExtendedDisplay::supported_versions(),
+                HeadsetView::supported_versions(),
                 UnknownInterfaces::supported_versions(),
             ]
             .concat()
