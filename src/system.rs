@@ -423,9 +423,19 @@ impl vr::IVRSystem026_Interface for System {
             }
         }
     }
-    fn GetTimeSinceLastVsync(&self, _: *mut f32, _: *mut u64) -> bool {
-        crate::warn_unimplemented!("GetTimeSinceLastVsync");
-        false
+    fn GetTimeSinceLastVsync(&self, seconds: *mut f32, frame_counter: *mut u64) -> bool {
+        let Some((since, count)) = self.openxr.vsync_timing() else {
+            return false;
+        };
+        unsafe {
+            if let Some(seconds) = seconds.as_mut() {
+                *seconds = since.as_secs_f32();
+            }
+            if let Some(frame_counter) = frame_counter.as_mut() {
+                *frame_counter = count;
+            }
+        }
+        true
     }
     fn GetRuntimeVersion(&self) -> *const std::os::raw::c_char {
         static VERSION: &CStr = c"2.15.6";

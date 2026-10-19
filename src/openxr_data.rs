@@ -469,6 +469,20 @@ impl<C: Compositor> OpenXrData<C> {
             .unwrap_or_else(|_| get_fallback_rate())
     }
 
+    /// Time since the most recent vsync and a running vsync count, extrapolated from the last
+    /// predicted display time and period. `None` if the current time can't be queried.
+    pub fn vsync_timing(&self) -> Option<(Duration, u64)> {
+        if !self.enabled_extensions.khr_convert_timespec_time {
+            return None;
+        }
+        let now = self.instance.now().ok()?;
+        vsync_phase(
+            now.as_nanos(),
+            self.display_time.get().as_nanos(),
+            self.display_period_nanos.load(Ordering::Relaxed),
+        )
+    }
+
     fn end_session(&self, session_data: &mut SessionData) {
         self.exit_requested.store(true, Ordering::Relaxed);
         let mut state = session_data.state;
@@ -576,6 +590,17 @@ impl SessionCreateInfo {
     {
         Self::from(CreateInfo(info))
     }
+}
+
+/// Vsyncs are assumed at `display_time + k * period`. Returns the time since the last one at or
+/// before `now`, and that vsync's index counted from time zero.
+fn vsync_phase(now: i64, display_time: i64, period: i64) -> Option<(Duration, u64)> {
+    if period <= 0 {
+        return None;
+    }
+    let since = (now - display_time).rem_euclid(period);
+    let count = (now - since).div_euclid(period);
+    Some((Duration::from_nanos(since as u64), count.max(0) as u64))
 }
 
 pub struct SessionData {
@@ -950,7 +975,7 @@ pub use tests::FakeCompositor;
 
 #[cfg(test)]
 mod tests {
-    use super::{FrameStream, GraphicsBackend, OpenXrData, SessionCreateInfo};
+    use super::{FrameStream, GraphicsBackend, OpenXrData, SessionCreateInfo, vsync_phase};
     use crate::clientcore::Injector;
     use openxr as xr;
     use std::ffi::CStr;
@@ -1008,6 +1033,20 @@ mod tests {
                 barrier.wait();
             }
         }
+    }
+
+    #[test]
+    fn vsync_phase_extrapolates_from_display_time() {
+        use std::time::Duration;
+        let ms = Duration::from_millis;
+        let ns = |ms: i64| ms * 1_000_000;
+        // 10ms period, a vsync at 1000ms
+        assert_eq!(vsync_phase(ns(1003), ns(1000), ns(10)), Some((ms(3), 100)));
+        // Display time is usually in the future
+        assert_eq!(vsync_phase(ns(1003), ns(1020), ns(10)), Some((ms(3), 100)));
+        assert_eq!(vsync_phase(ns(1020), ns(1020), ns(10)), Some((ms(0), 102)));
+        assert_eq!(vsync_phase(ns(1029), ns(1020), ns(10)), Some((ms(9), 102)));
+        assert_eq!(vsync_phase(ns(1003), ns(1000), 0), None);
     }
 
     #[test]

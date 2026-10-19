@@ -606,8 +606,13 @@ impl vr::IVRCompositor029_Interface for Compositor {
         }
     }
     fn GetFrameTimeRemaining(&self) -> f32 {
-        crate::warn_unimplemented!("GetFrameTimeRemaining");
-        0.0
+        let Some((since, _)) = self.openxr.vsync_timing() else {
+            return 0.0;
+        };
+        let period = self.openxr.display_period_nanos.load(Ordering::Relaxed);
+        std::time::Duration::from_nanos(period.max(0) as u64)
+            .saturating_sub(since)
+            .as_secs_f32()
     }
     fn GetFrameTimings(&self, pTiming: *mut vr::Compositor_FrameTiming, nFrames: u32) -> u32 {
         if pTiming.is_null() || nFrames == 0 {
