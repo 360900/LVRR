@@ -282,6 +282,18 @@ impl System {
         views.get_views(&session, self.openxr.get_display_time(), ty)
     }
 
+    /// Copies an event into an app provided buffer, which may be an older, smaller VREvent_t.
+    pub fn copy_event(src: &vr::VREvent_t, dst: *mut vr::VREvent_t, size: u32) {
+        let len = (size as usize).min(std::mem::size_of::<vr::VREvent_t>());
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                (src as *const vr::VREvent_t).cast::<u8>(),
+                dst.cast(),
+                len,
+            )
+        };
+    }
+
     pub fn push_event(&self, event: vr::VREvent_t) {
         let mut events = self.events.lock().unwrap();
         events.push_back(event);
@@ -629,7 +641,7 @@ impl vr::IVRSystem026_Interface for System {
             return false;
         };
 
-        if let Some(handle) = overlay.get_next_overlay_event(event) {
+        if let Some(handle) = overlay.get_next_overlay_event(event, size) {
             if !overlay_handle.is_null() {
                 unsafe {
                     overlay_handle.write(handle);
@@ -666,6 +678,10 @@ impl vr::IVRSystem026_Interface for System {
                                 .write(queued.data.process.bConnectionLost);
                         }
 
+                        return true;
+                    }
+                    vr::EVREventType::KeyboardDone => {
+                        Self::copy_event(&queued, event, size);
                         return true;
                     }
                     _ => return true,
