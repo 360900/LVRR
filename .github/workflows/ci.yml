@@ -34,12 +34,12 @@ jobs:
       contents: read
     steps:
       - if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 2
           sparse-checkout: .github
       - id: changed
-        uses: tj-actions/changed-files@v45
+        uses: tj-actions/changed-files@v47
         with:
           files: ${{ env.UBUNTU_DOCKERFILE }}
       - id: name
@@ -58,13 +58,13 @@ jobs:
       id-token: write
 
     steps:
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           file: ${{ env.UBUNTU_DOCKERFILE }}
           push: true
@@ -83,7 +83,7 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
       with:
         fetch-depth: 0
     - name: Set version
@@ -106,7 +106,7 @@ jobs:
         cp -r -L target/release/bin out/xrizer
         cp -L target/i686-unknown-linux-gnu/release/bin/vrclient.so out/xrizer/bin/
     - name: Upload
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: xrizer-nightly-release
         path: out

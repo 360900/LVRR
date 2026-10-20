@@ -19,7 +19,7 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Vendor dependencies
       id: vendor
       run: |
@@ -28,7 +28,7 @@ jobs:
         echo "vendor=$(realpath vendor)" >> "$GITHUB_OUTPUT"
     - name: Upload artifact
       id: upload
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         path: ${{ steps.vendor.outputs.vendor }}
     outputs:
@@ -64,13 +64,13 @@ jobs:
             return runs.workflow_runs[0].id
       - name: Download build
         id: download-build
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v7
         with:
           name: xrizer-nightly-release
           run-id: ${{ steps.latest-build.outputs.result }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Download vendored dependencies
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v7
         with:
           path: vendor
           artifact-ids: ${{ needs.vendor-dependencies.outputs.artifact_id }}
@@ -84,7 +84,7 @@ jobs:
           zip -r xrizer-$VERSION.zip xrizer-$VERSION
           zip -r dependencies.zip vendor
       - name: Draft release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           draft: true
           files: |
