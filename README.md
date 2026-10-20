@@ -61,7 +61,11 @@ If a launcher strips `RUST_LOG`, put the same filter string in a file named `log
 
 `XRIZER_SYNTHESIZED_VELOCITY` - `1` computes controller linear velocity from position deltas, `0` forces the runtime's. Helps with throwing on runtimes that under-report velocity. Enabled automatically for games known to need it.
 
-`XRIZER_CUSTOM_BINDINGS_DIR` - Extra directory to search for controller bindings files. The format is undocumented; copy an existing file or read the parser.
+`XRIZER_CUSTOM_BINDINGS_DIR` - Directory with controller binding overrides, default `xrizer` in the game's working directory. A file named `<controller_type>.json` (e.g. `knuckles.json`) replaces the game's own bindings for that controller. Same format as SteamVR binding files.
+
+`XRIZER_ADDITIONAL_BINDINGS` - `;` separated list of controller types to load bindings for in addition to the ones the game lists, e.g. `knuckles;oculus_touch`. Each is read from the custom bindings directory, or `bindings_<controller_type>.json` next to the game's action manifest.
+
+`XRIZER_PRESERVE_VIEW_CANTING` - `1` keeps per-eye view rotations from canted-display headsets (e.g. Pimax) instead of flattening them to parallel views. Fixes FOV on those headsets, may confuse games that assume parallel views.
 
 `XRIZER_MAX_TRACKERS` - Max number of generic trackers to expose. Trackers appear as Vive Trackers, which can confuse some games' controller detection. `0` hides them. Set automatically for games known to need it.
 
