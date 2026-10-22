@@ -614,6 +614,7 @@ dependencies = [
  "ash",
  "crossbeam-utils",
  "glam",
+ "libc",
  "openxr-sys",
  "openxr_mndx_xdev_space",
  "paste",

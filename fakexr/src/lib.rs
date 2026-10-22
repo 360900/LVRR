@@ -132,6 +132,7 @@ thread_local! {
     static REJECTED_PROFILES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     static LOCATE_VIEWS_ERROR: Cell<Option<xr::Result>> = const { Cell::new(None) };
     static VISIBILITY_MASK: RefCell<Option<(Vec<xr::Vector2f>, Vec<u32>)>> = const { RefCell::new(None) };
+    static HEADLESS_SUPPORTED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Sets the vertices and indices xrGetVisibilityMaskKHR returns on this thread. Without one, it
@@ -155,6 +156,11 @@ pub fn advertise_extension(name: &'static [u8]) {
 /// runtime that doesn't know it.
 pub fn reject_profile(profile: &str) {
     REJECTED_PROFILES.with_borrow_mut(|profiles| profiles.push(profile.to_owned()));
+}
+
+/// Makes instances created on this thread offer XR_MND_headless and XR_KHR_convert_timespec_time.
+pub fn set_headless_supported(supported: bool) {
+    HEADLESS_SUPPORTED.set(supported);
 }
 
 /// Sets the interaction profile that new sessions created on this thread will bind for `hand`
@@ -554,6 +560,8 @@ pub unsafe extern "system" fn get_instance_proc_addr(
                     CreateHandTrackerEXT,
                     DestroyHandTrackerEXT,
                     LocateHandJointsEXT,
+                    ConvertTimespecTimeToTimeKHR,
+                    (ConvertTimeToTimespecTimeKHR),
                     {mndx::CreateXDevListMNDX},
                     {mndx::GetXDevListGenerationNumberMNDX},
                     {mndx::EnumerateXDevsMNDX},
@@ -594,7 +602,13 @@ extern "system" fn enumerate_instance_extension_properties(
         xr::EXT_HAND_TRACKING_DATA_SOURCE_EXTENSION_NAME,
         xr::EXT_USER_PRESENCE_EXTENSION_NAME,
     ];
-    let extra = EXTRA_EXTENSIONS.with_borrow(Clone::clone);
+    let mut extra = EXTRA_EXTENSIONS.with_borrow(Clone::clone);
+    if HEADLESS_SUPPORTED.get() {
+        extra.extend([
+            xr::MND_HEADLESS_EXTENSION_NAME,
+            xr::KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME,
+        ]);
+    }
     let count = (fixed.len() + extra.len()) as u32;
     unsafe { *property_count_output = count };
     if property_capacity_input >= count {
@@ -756,6 +770,8 @@ pub enum FrameState {
 struct Session {
     instance: Weak<Instance>,
     event_sender: mpsc::Sender<EventDataBuffer>,
+    /// Created without a graphics binding (XR_MND_headless).
+    headless: bool,
     vk_device: AtomicU64,
     attached_sets: OnceLock<Box<[xr::ActionSet]>>,
     left_hand: HandData,
@@ -1163,16 +1179,15 @@ extern "system" fn create_session(
         return error;
     }
     let info = unsafe { create_info.as_ref().unwrap() };
-    let vk = unsafe {
-        (info.next as *const xr::GraphicsBindingVulkanKHR)
-            .as_ref()
-            .unwrap()
-    };
-    assert_eq!(vk.ty, xr::GraphicsBindingVulkanKHR::TYPE);
+    let vk = unsafe { (info.next as *const xr::GraphicsBindingVulkanKHR).as_ref() };
+    if let Some(vk) = vk {
+        assert_eq!(vk.ty, xr::GraphicsBindingVulkanKHR::TYPE);
+    }
     let sess = Arc::new(Session {
         instance: Arc::downgrade(&instance),
         event_sender: instance.event_sender.clone(),
-        vk_device: (vk.device as u64).into(),
+        headless: vk.is_none(),
+        vk_device: vk.map_or(0, |vk| vk.device as u64).into(),
         attached_sets: OnceLock::new(),
         left_hand: Default::default(),
         right_hand: Default::default(),
@@ -1229,7 +1244,7 @@ extern "system" fn destroy_session(session: xr::Session) -> xr::Result {
     // Our Vulkan device needs to still exist when we destroy the session - a real runtime will use
     // it!
     let device = s.vk_device.load(Ordering::Relaxed);
-    if !vulkan::Device::validate(device) {
+    if !s.headless && !vulkan::Device::validate(device) {
         panic!("Vulkan device invalid ({device})")
     }
     destroy_handle(session);
@@ -1480,7 +1495,15 @@ fn send_event<T: Copy>(
     tx.send(EventDataBuffer { buffer, on_polled }).unwrap();
 }
 
-extern "system" fn begin_session(_: xr::Session, _: *const xr::SessionBeginInfo) -> xr::Result {
+extern "system" fn begin_session(
+    session: xr::Session,
+    _: *const xr::SessionBeginInfo,
+) -> xr::Result {
+    let session = get_handle!(session);
+    // Like Monado, headless sessions are focused right away since they never submit frames.
+    if session.headless {
+        session.synchronized();
+    }
     xr::Result::SUCCESS
 }
 
@@ -2092,15 +2115,17 @@ extern "system" fn destroy_swapchain(swapchain: xr::Swapchain) -> xr::Result {
 }
 
 extern "system" fn enumerate_swapchain_formats(
-    _session: xr::Session,
+    session: xr::Session,
     capacity: u32,
     output: *mut u32,
     formats: *mut i64,
 ) -> xr::Result {
+    // Headless sessions have no swapchain formats.
+    let count = u32::from(!get_handle!(session).headless);
     unsafe {
-        output.write(1);
+        output.write(count);
     }
-    if capacity >= 1 {
+    if count > 0 && capacity >= 1 {
         let formats = unsafe { std::slice::from_raw_parts_mut(formats, capacity as usize) };
         formats[0] = 0;
     }
@@ -2209,6 +2234,20 @@ extern "system" fn end_frame(session: xr::Session, info: *const xr::FrameEndInfo
     if session.state.load() == xr::SessionState::READY {
         session.synchronized();
     }
+    xr::Result::SUCCESS
+}
+
+extern "system" fn convert_timespec_time_to_time_k_h_r(
+    _: xr::Instance,
+    timespec: *const libc::timespec,
+    time: *mut xr::Time,
+) -> xr::Result {
+    let timespec = unsafe { timespec.as_ref().unwrap() };
+    unsafe {
+        time.write(xr::Time::from_nanos(
+            timespec.tv_sec * 1_000_000_000 + timespec.tv_nsec,
+        ))
+    };
     xr::Result::SUCCESS
 }
 
