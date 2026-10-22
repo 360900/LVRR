@@ -1,7 +1,7 @@
 #[path = "skeletal_generated.rs"]
 mod generated;
 
-use super::{Input, inactive_state};
+use super::{ActionKey, ActionSetKey, Input, inactive_state};
 use crate::input::TrackedDeviceType;
 use crate::input::devices::HandSkeleton;
 use crate::openxr_data::{self, Hand, SessionData};
@@ -11,6 +11,7 @@ use log::debug;
 use openvr as vr;
 use openxr::{self as xr};
 use paste::paste;
+use slotmap::KeyData;
 use std::cell::RefCell;
 use std::f32::consts::{FRAC_PI_2, PI};
 use std::sync::atomic::Ordering;
@@ -195,6 +196,77 @@ impl<C: openxr_data::Compositor> Input<C> {
 
         finalize_transforms(&mut transforms, space);
         Some(transforms)
+    }
+
+    pub(super) fn record_active_sets(&self, active_sets: &[vr::VRActiveActionSet_t]) {
+        let mut sets = self.active_sets.write().unwrap();
+        sets.clear();
+        let key = |handle| ActionSetKey::from(KeyData::from_ffi(handle));
+        for set in active_sets {
+            let restriction = self.subaction_path_from_handle(set.ulRestrictedToDevice);
+            sets.push((key(set.ulActionSet), restriction.unwrap_or(xr::Path::NULL)));
+            // Like UpdateActionState, activate the secondary set for the other hand.
+            if let Some(restriction) = restriction
+                && set.ulSecondaryActionSet != vr::k_ulInvalidInputValueHandle
+            {
+                let other_hand = if restriction == self.get_subaction_path(Hand::Left) {
+                    Hand::Right
+                } else {
+                    Hand::Left
+                };
+                sets.push((
+                    key(set.ulSecondaryActionSet),
+                    self.get_subaction_path(other_hand),
+                ));
+            }
+        }
+    }
+
+    /// A skeleton is active while its hand is present and its set was activated for that hand.
+    pub(super) fn is_skeleton_active(
+        &self,
+        session_data: &SessionData,
+        action: vr::VRActionHandle_t,
+        hand: Hand,
+    ) -> bool {
+        let connected = session_data
+            .input_data
+            .devices
+            .read()
+            .unwrap()
+            .get_controller(hand)
+            .is_some_and(|controller| controller.is_connected(&self.openxr, session_data));
+        if !connected {
+            return false;
+        }
+
+        // An action belongs to the set its path starts with, e.g. /actions/main/in/hand_left.
+        let action_map = self.action_map.read().unwrap();
+        let Some(set_name) = action_map
+            .get(ActionKey::from(KeyData::from_ffi(action)))
+            .and_then(|a| Some(a.path[..a.path.match_indices('/').nth(2)?.0].to_owned()))
+        else {
+            return false;
+        };
+        drop(action_map);
+        let Some(set) = self
+            .set_map
+            .read()
+            .unwrap()
+            .iter()
+            .find_map(|(key, name)| (*name == set_name).then_some(key))
+        else {
+            return false;
+        };
+
+        let hand_path = self.get_subaction_path(hand);
+        self.active_sets
+            .read()
+            .unwrap()
+            .iter()
+            .any(|(key, restriction)| {
+                *key == set && (*restriction == xr::Path::NULL || *restriction == hand_path)
+            })
     }
 
     pub(super) fn skeletal_tracking_level(
@@ -1103,5 +1175,53 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn skeleton_active_only_for_present_hands_and_active_sets() {
+        use crate::input::profiles::knuckles::Knuckles;
+        use fakexr::UserPath::*;
+        let mut f = Fixture::new();
+        f.load_actions(c"actions.json");
+        let skeleton = f.get_action_handle(c"/actions/set1/in/skellyl");
+        let set = f.get_action_set_handle(c"/actions/set1");
+        let left = f.get_input_source_handle(c"/user/hand/left");
+        let right = f.get_input_source_handle(c"/user/hand/right");
+        let data = |f: &Fixture| {
+            let mut data = vr::InputSkeletalActionData_t::default();
+            assert_eq!(
+                f.input.GetSkeletalActionData(
+                    skeleton,
+                    &mut data,
+                    std::mem::size_of_val(&data) as u32
+                ),
+                vr::EVRInputError::None
+            );
+            (data.bActive, data.activeOrigin)
+        };
+        let sync = |f: &mut Fixture, restrict| {
+            f.sync(vr::VRActiveActionSet_t {
+                ulActionSet: set,
+                ulRestrictedToDevice: restrict,
+                ..Default::default()
+            })
+        };
+
+        f.set_interaction_profile::<Knuckles>(LeftHand);
+        f.set_interaction_profile::<Knuckles>(RightHand);
+        // Before the first UpdateActionState
+        assert_eq!(data(&f), (false, vr::k_ulInvalidInputValueHandle));
+        sync(&mut f, vr::k_ulInvalidInputValueHandle);
+        assert_eq!(data(&f), (true, left));
+        sync(&mut f, right);
+        assert_eq!(data(&f), (false, vr::k_ulInvalidInputValueHandle));
+        sync(&mut f, left);
+        assert_eq!(data(&f), (true, left));
+
+        // The controller turns off.
+        fakexr::set_interaction_profile(f.raw_session(), LeftHand, openxr::Path::NULL);
+        sync(&mut f, left);
+        f.input.openxr.poll_events();
+        assert_eq!(data(&f), (false, vr::k_ulInvalidInputValueHandle));
     }
 }

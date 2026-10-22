@@ -117,6 +117,9 @@ pub struct Input<C: openxr_data::Compositor> {
     set_map: RwLock<SlotMap<ActionSetKey, String>>,
     loaded_actions_path: OnceLock<PathBuf>,
     legacy_state: legacy::LegacyState,
+    /// The sets activated by the last UpdateActionState, with the hand they're restricted to
+    /// (or NULL).
+    active_sets: RwLock<Vec<(ActionSetKey, xr::Path)>>,
     skeletal_bone_cache:
         [Mutex<Option<[vr::VRBoneTransform_t; HandSkeletonBone::Count as usize]>>; 2],
     estimated_finger_state: [Mutex<FingerState>; 2],
@@ -202,6 +205,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             left_hand_key,
             right_hand_key,
             legacy_state: Default::default(),
+            active_sets: Default::default(),
             skeletal_bone_cache: Default::default(),
             estimated_finger_state: [
                 Mutex::new(FingerState::new()),
@@ -1375,24 +1379,23 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         //    std::mem::size_of::<vr::InputSkeletalActionData_t>()
         //);
 
-        get_action_from_handle!(self, action, session_data, action);
+        let handle = action;
+        get_action_from_handle!(self, handle, session_data, action);
         let ActionData::Skeleton(hand) = action else {
             return vr::EVRInputError::WrongType;
         };
+        if action_data.is_null() {
+            return vr::EVRInputError::InvalidParam;
+        }
 
-        let origin = match hand {
-            Hand::Left => self.left_hand_key.data().as_ffi(),
-            Hand::Right => self.right_hand_key.data().as_ffi(),
+        let active = self.is_skeleton_active(&session_data, handle, *hand);
+        let origin = match (active, hand) {
+            (false, _) => vr::k_ulInvalidInputValueHandle,
+            (true, Hand::Left) => self.left_hand_key.data().as_ffi(),
+            (true, Hand::Right) => self.right_hand_key.data().as_ffi(),
         };
         unsafe {
-            std::ptr::addr_of_mut!((*action_data).bActive).write(
-                self.get_bones_from_hand_tracking(
-                    &session_data,
-                    vr::EVRSkeletalTransformSpace::Parent,
-                    *hand,
-                )
-                .is_some(),
-            );
+            std::ptr::addr_of_mut!((*action_data).bActive).write(active);
             std::ptr::addr_of_mut!((*action_data).activeOrigin).write(origin);
         }
         vr::EVRInputError::None
@@ -1786,6 +1789,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
                 return vr::EVRInputError::IPCError;
             }
         }
+        self.record_active_sets(active_sets);
 
         let hands = [
             (
