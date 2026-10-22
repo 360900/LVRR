@@ -2,6 +2,7 @@ use super::{Input, PoseData, TrackedDeviceList, WriteOnDrop};
 use crate::{
     input::{
         LoadedActions, ManifestLoadedActions,
+        devices::ProfileData,
         profiles::{self, RunWithProfile},
     },
     openxr_data::{self, Hand},
@@ -27,6 +28,10 @@ struct HandState {
     trigger_touched: bool,
     /// Whether `main_xy_deflect` passed the press threshold.
     stick_deflected: bool,
+    /// Whether the trigger value passed the profile's legacy press threshold.
+    trigger_pressed: bool,
+    /// Whether the squeeze value passed the profile's legacy grip press threshold.
+    grip_pressed: bool,
 }
 
 impl LegacyState {
@@ -265,6 +270,9 @@ impl<C: openxr_data::Compositor> Input<C> {
                 &legacy.actions,
                 session,
                 self.get_subaction_path(hand),
+                devices
+                    .get_controller(hand)
+                    .and_then(|controller| controller.profile_data.as_ref()),
                 &hand_state,
             );
             new.state.unPacketNum = packet_num;
@@ -328,6 +336,7 @@ fn read_hand_state(
     actions: &LegacyActions,
     session: &xr::Session<xr::AnyGraphics>,
     hand_path: xr::Path,
+    profile: Option<&ProfileData>,
     previous: &HandState,
 ) -> HandState {
     let bool_state = |action: &xr::Action<bool>| {
@@ -345,6 +354,14 @@ fn read_hand_state(
     // SteamVR's legacy bindings also touch the trigger once it is pulled, which is all
     // controllers without a capacitive trigger can report.
     let trigger_touched = threshold(previous.trigger_touched, trigger, 0.1, 0.05);
+    let squeeze = float_state(&actions.squeeze);
+    // Some of SteamVR's legacy bindings also press these from the analog values.
+    let trigger_pressed = profile
+        .and_then(|p| p.legacy_trigger_click)
+        .is_some_and(|(on, off)| threshold(previous.trigger_pressed, trigger, on, off));
+    let grip_pressed = profile
+        .and_then(|p| p.legacy_grip_click)
+        .is_some_and(|(on, off)| threshold(previous.grip_pressed, squeeze, on, off));
     let deflection = actions
         .main_xy_deflect
         .state(session, hand_path)
@@ -372,7 +389,7 @@ fn read_hand_state(
     );
     set_button(
         vr::EVRButtonId::SteamVR_Trigger,
-        bool_state(&actions.trigger_click),
+        bool_state(&actions.trigger_click) || trigger_pressed,
         bool_state(&actions.trigger_touch) || trigger_touched,
     );
     set_button(
@@ -388,7 +405,7 @@ fn read_hand_state(
     let squeeze_click = bool_state(&actions.squeeze_click);
     set_button(
         vr::EVRButtonId::Grip,
-        squeeze_click || bool_state(&actions.grip_click),
+        squeeze_click || bool_state(&actions.grip_click) || grip_pressed,
         bool_state(&actions.grip_touch),
     );
     set_button(vr::EVRButtonId::Axis2, squeeze_click, false);
@@ -402,12 +419,14 @@ fn read_hand_state(
         y: main_xy.y,
     };
     state.rAxis[1].x = trigger;
-    state.rAxis[2].x = float_state(&actions.squeeze);
+    state.rAxis[2].x = squeeze;
 
     HandState {
         state,
         trigger_touched,
         stick_deflected,
+        trigger_pressed,
+        grip_pressed,
     }
 }
 
@@ -699,12 +718,18 @@ mod tests {
     fn legacy_fixture(
         get_action: impl FnOnce(&super::LegacyActions) -> openxr::sys::Action,
     ) -> (Fixture, openxr::sys::Action) {
+        legacy_fixture_for::<Knuckles>(get_action)
+    }
+
+    fn legacy_fixture_for<P: InteractionProfile>(
+        get_action: impl FnOnce(&super::LegacyActions) -> openxr::sys::Action,
+    ) -> (Fixture, openxr::sys::Action) {
         use fakexr::UserPath::*;
         let mut f = Fixture::new();
         f.input.openxr.restart_session().unwrap();
 
-        f.set_interaction_profile::<Knuckles>(LeftHand);
-        f.set_interaction_profile::<Knuckles>(RightHand);
+        f.set_interaction_profile::<P>(LeftHand);
+        f.set_interaction_profile::<P>(RightHand);
         f.input.frame_start_update();
         f.input.openxr.poll_events();
         let action = legacy_action(&f, get_action);
@@ -1100,6 +1125,41 @@ mod tests {
         f.input.frame_start_update();
         assert!(f.input.openxr.is_lost());
         assert_eq!(get_state(), (false, 0));
+    }
+
+    #[test]
+    fn analog_click_thresholds() {
+        use fakexr::UserPath::*;
+        let (trigger_id, grip_id) = (vr::EVRButtonId::SteamVR_Trigger, vr::EVRButtonId::Grip);
+        let pressed = |f: &Fixture, action, value, id| {
+            fakexr::set_action_state(action, fakexr::ActionState::Float(value), LeftHand);
+            f.input.frame_start_update();
+            get_state(f, 1).ulButtonPressed & super::button_mask_from_id(id) != 0
+        };
+
+        // Like SteamVR's legacy bindings for them, the Index and the Frame press the trigger
+        // from 0.55 until it drops below 0.5.
+        for (f, trigger) in [
+            legacy_fixture(|actions| actions.trigger.as_raw()),
+            legacy_fixture_for::<FrameController>(|actions| actions.trigger.as_raw()),
+        ] {
+            assert!(!pressed(&f, trigger, 0.5, trigger_id));
+            assert!(pressed(&f, trigger, 0.55, trigger_id));
+            assert!(pressed(&f, trigger, 0.5, trigger_id));
+            assert!(!pressed(&f, trigger, 0.45, trigger_id));
+        }
+
+        // The Frame grip presses from 0.1 until it drops below 0.05.
+        let (f, squeeze) =
+            legacy_fixture_for::<FrameController>(|actions| actions.squeeze.as_raw());
+        assert!(!pressed(&f, squeeze, 0.08, grip_id));
+        assert!(pressed(&f, squeeze, 0.1, grip_id));
+        assert!(pressed(&f, squeeze, 0.06, grip_id));
+        assert!(!pressed(&f, squeeze, 0.04, grip_id));
+
+        // Others only press at the trigger's click.
+        let (f, trigger) = legacy_fixture_for::<OculusTouch>(|actions| actions.trigger.as_raw());
+        assert!(!pressed(&f, trigger, 0.9, trigger_id));
     }
 
     #[test]

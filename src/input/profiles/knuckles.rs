@@ -17,6 +17,8 @@ impl InteractionProfile for Knuckles {
     // The finger curl sensors measure the fingers only partially.
     const SKELETAL_TRACKING_LEVEL: Option<openvr::EVRSkeletalTrackingLevel> =
         Some(openvr::EVRSkeletalTrackingLevel::Partial);
+    // From legacy_bindings_index_controller.json
+    const LEGACY_TRIGGER_CLICK: Option<(f32, f32)> = Some((0.55, 0.5));
     type LegalPaths = legal_paths![
         Both::<
             (System, Click),

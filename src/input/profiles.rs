@@ -37,6 +37,11 @@ pub trait InteractionProfile: SupportedProfile + Sized + 'static {
     /// The skeletal tracking level SteamVR always reports for this controller, if it doesn't
     /// depend on what the runtime tracks.
     const SKELETAL_TRACKING_LEVEL: Option<openvr::EVRSkeletalTrackingLevel> = None;
+    /// The trigger values (activate, deactivate) at which SteamVR's legacy binding for this
+    /// controller presses and releases k_EButton_SteamVR_Trigger, besides the trigger's click.
+    const LEGACY_TRIGGER_CLICK: Option<(f32, f32)> = None;
+    /// Likewise for k_EButton_Grip and the legacy squeeze value.
+    const LEGACY_GRIP_CLICK: Option<(f32, f32)> = None;
     type LegalPaths: LegalPathsT;
     fn profile_path() -> &'static str;
     fn has_required_extensions(enabled_extensions: &xr::ExtensionSet) -> bool;

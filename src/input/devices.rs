@@ -76,6 +76,10 @@ pub struct ProfileData {
     /// determine the curl value for the thumb.
     pub force_estimated_thumb: bool,
     pub skeletal_tracking_level: Option<vr::EVRSkeletalTrackingLevel>,
+    /// See [`InteractionProfile::LEGACY_TRIGGER_CLICK`].
+    pub legacy_trigger_click: Option<(f32, f32)>,
+    /// See [`InteractionProfile::LEGACY_GRIP_CLICK`].
+    pub legacy_grip_click: Option<(f32, f32)>,
 }
 
 impl ProfileData {
@@ -86,6 +90,8 @@ impl ProfileData {
             get_pose_transformation: P::pose_transformation,
             force_estimated_thumb: TypeId::of::<P>() == TypeId::of::<Knuckles>(),
             skeletal_tracking_level: P::SKELETAL_TRACKING_LEVEL,
+            legacy_trigger_click: P::LEGACY_TRIGGER_CLICK,
+            legacy_grip_click: P::LEGACY_GRIP_CLICK,
         }
     }
 
