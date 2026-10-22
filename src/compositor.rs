@@ -58,6 +58,44 @@ pub struct Compositor {
     timing_mode: Mutex<vr::EVRCompositorTimingMode>,
     frame_state: Mutex<FrameState>,
     focused: Once,
+    /// The scene and background fades.
+    fades: Mutex<[Fade; 2]>,
+}
+
+#[derive(Copy, Clone)]
+struct Fade {
+    from: vr::HmdColor_t,
+    to: vr::HmdColor_t,
+    start: Instant,
+    seconds: f32,
+}
+
+impl Default for Fade {
+    fn default() -> Self {
+        Self {
+            from: Default::default(),
+            to: Default::default(),
+            start: Instant::now(),
+            seconds: 0.0,
+        }
+    }
+}
+
+impl Fade {
+    fn color(&self, now: Instant) -> vr::HmdColor_t {
+        let t = if self.seconds > 0.0 {
+            (now.duration_since(self.start).as_secs_f32() / self.seconds).min(1.0)
+        } else {
+            1.0
+        };
+        let lerp = |from: f32, to: f32| from + (to - from) * t;
+        vr::HmdColor_t {
+            r: lerp(self.from.r, self.to.r),
+            g: lerp(self.from.g, self.to.g),
+            b: lerp(self.from.b, self.to.b),
+            a: lerp(self.from.a, self.to.a),
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -125,6 +163,7 @@ impl Compositor {
             timing_mode: vr::EVRCompositorTimingMode::Implicit.into(),
             frame_state: FrameState::Submitted.into(),
             focused: Once::new(),
+            fades: Mutex::default(),
         }
     }
 
@@ -683,19 +722,41 @@ impl vr::IVRCompositor029_Interface for Compositor {
             .iter_mut()
             .for_each(|ctrl| ctrl.with_any_graphics_mut::<set_fade_grid>(bFadeGridIn));
     }
-    fn GetCurrentFadeColor(&self, _bBackground: bool) -> vr::HmdColor_t {
-        vr::HmdColor_t::default()
+    fn GetCurrentFadeColor(&self, bBackground: bool) -> vr::HmdColor_t {
+        self.fades.lock().unwrap()[bBackground as usize].color(Instant::now())
     }
     fn FadeToColor(
         &self,
-        _fSeconds: f32,
-        _fRed: f32,
-        _fGreen: f32,
-        _fBlue: f32,
-        _fAlpha: f32,
-        _bBackground: bool,
+        fSeconds: f32,
+        fRed: f32,
+        fGreen: f32,
+        fBlue: f32,
+        fAlpha: f32,
+        bBackground: bool,
     ) {
-        crate::warn_unimplemented!("FadeToColor");
+        if !bBackground
+            && !self
+                .openxr
+                .enabled_extensions
+                .khr_composition_layer_color_scale_bias
+        {
+            crate::warn_once!(
+                "Can't show fades: runtime does not support KHR_composition_layer_color_scale_bias"
+            );
+        }
+        let now = Instant::now();
+        let fade = &mut self.fades.lock().unwrap()[bBackground as usize];
+        *fade = Fade {
+            from: fade.color(now),
+            to: vr::HmdColor_t {
+                r: fRed,
+                g: fGreen,
+                b: fBlue,
+                a: fAlpha,
+            },
+            start: now,
+            seconds: fSeconds,
+        };
     }
     fn GetCumulativeStats(
         &self,
@@ -851,12 +912,20 @@ impl vr::IVRCompositor029_Interface for Compositor {
             display_time: xr::Time,
             overlays: Option<&OverlayMan>,
             max_layers: usize,
+            fade: Option<vr::HmdColor_t>,
         ) -> xr::Result<bool>
         where
             for<'b> &'b crate::overlay::AnySwapchainMap:
                 TryInto<&'b crate::overlay::SwapchainMap<G::Api>, Error: std::fmt::Display>,
         {
-            ctrl.end_frame(session_data, system, display_time, overlays, max_layers)
+            ctrl.end_frame(
+                session_data,
+                system,
+                display_time,
+                overlays,
+                max_layers,
+                fade,
+            )
         }
 
         if self.openxr.is_lost() {
@@ -878,6 +947,12 @@ impl vr::IVRCompositor029_Interface for Compositor {
         // Even if the frame took long enough for get_display_time to use the current time.
         let display_time = self.openxr.waited_display_time();
         let overlays = self.overlays.get();
+        let fade = self
+            .openxr
+            .enabled_extensions
+            .khr_composition_layer_color_scale_bias
+            .then(|| self.GetCurrentFadeColor(false))
+            .filter(|fade| fade.a > 0.0);
 
         let result = ctrl.with_any_graphics_mut::<end_frame>((
             &session_data,
@@ -885,6 +960,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
             display_time,
             overlays.as_deref(),
             self.openxr.max_layer_count,
+            fade,
         ));
         // A frame that failed to end is discarded by the next xrBeginFrame.
         let submitted = self.openxr.check("Ending frame", result).unwrap_or(false);
@@ -1737,7 +1813,7 @@ impl<G: GraphicsBackend> FrameController<G> {
         Ok(())
     }
 
-    /// Returns whether the frame had app content.
+    /// Returns whether the frame had app content. `fade` is blended over the app content.
     fn end_frame(
         &mut self,
         session_data: &SessionData,
@@ -1745,6 +1821,7 @@ impl<G: GraphicsBackend> FrameController<G> {
         display_time: xr::Time,
         overlays: Option<&OverlayMan>,
         max_layers: usize,
+        fade: Option<vr::HmdColor_t>,
     ) -> xr::Result<bool>
     where
         for<'b> &'b crate::overlay::AnySwapchainMap:
@@ -1807,14 +1884,41 @@ impl<G: GraphicsBackend> FrameController<G> {
                 .collect()
         }
 
+        let color_scale_bias = fade.map(|fade| {
+            let a = fade.a.clamp(0.0, 1.0);
+            xr::sys::CompositionLayerColorScaleBiasKHR {
+                ty: xr::sys::CompositionLayerColorScaleBiasKHR::TYPE,
+                next: std::ptr::null(),
+                color_scale: xr::Color4f {
+                    r: 1.0 - a,
+                    g: 1.0 - a,
+                    b: 1.0 - a,
+                    a: 1.0,
+                },
+                color_bias: xr::Color4f {
+                    r: fade.r * a,
+                    g: fade.g * a,
+                    b: fade.b * a,
+                    a: 0.0,
+                },
+            }
+        });
+
         let mut proj_layer = None;
         if !proj_layer_views.is_empty() {
             trace!("projection layer present");
-            proj_layer = Some(
-                xr::CompositionLayerProjection::new()
-                    .space(session_data.tracking_space())
-                    .views(&proj_layer_views),
-            );
+            let layer = xr::CompositionLayerProjection::new()
+                .space(session_data.tracking_space())
+                .views(&proj_layer_views);
+            proj_layer = Some(match &color_scale_bias {
+                Some(color_scale_bias) => {
+                    let mut raw = layer.into_raw();
+                    raw.next = std::ptr::from_ref(color_scale_bias).cast();
+                    // SAFETY: color_scale_bias outlives the layer.
+                    unsafe { xr::CompositionLayerProjection::from_raw(raw) }
+                }
+                None => layer,
+            });
         }
 
         let mut layers: Vec<&xr::CompositionLayerBase<_>> = Vec::new();
@@ -3414,6 +3518,52 @@ mod tests {
             let color = C29::GetCurrentFadeColor(c, background);
             assert_eq!([color.r, color.g, color.b, color.a], [0.0; 4]);
         }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn fade_to_color() {
+        use vr::IVRCompositor029_Interface as C29;
+        let f = Fixture::new();
+        assert!(
+            f.comp
+                .openxr
+                .enabled_extensions
+                .khr_composition_layer_color_scale_bias
+        );
+        f.ensure_real_session(false);
+        fakexr::record_projection_layers(f.comp.openxr.session_data.get().session.as_raw());
+        let frame = || {
+            assert_eq!(f.wait_get_poses(), None);
+            assert_eq!(f.submit(vr::EVREye::Left), None);
+            assert_eq!(f.submit(vr::EVREye::Right), None);
+            assert_eq!(f.wait_get_poses(), None);
+            let session = f.comp.openxr.session_data.get().session.as_raw();
+            fakexr::last_projection_layer(session)
+                .expect("no projection layer")
+                .color_scale_bias
+                .map(|(scale, bias)| [scale, bias].map(|c| [c.r, c.g, c.b, c.a]))
+        };
+        let color = |background| {
+            let c = C29::GetCurrentFadeColor(&*f.comp, background);
+            [c.r, c.g, c.b, c.a]
+        };
+
+        C29::FadeToColor(&*f.comp, 0.0, 1.0, 0.5, 0.0, 0.5, false);
+        assert_eq!(color(false), [1.0, 0.5, 0.0, 0.5]);
+        assert_eq!(color(true), [0.0; 4]);
+        assert_eq!(frame(), Some([[0.5, 0.5, 0.5, 1.0], [0.5, 0.25, 0.0, 0.0]]));
+
+        // Background fades don't cover the scene.
+        C29::FadeToColor(&*f.comp, 0.0, 0.0, 0.0, 0.0, 0.0, false);
+        C29::FadeToColor(&*f.comp, 0.0, 0.0, 0.0, 0.0, 1.0, true);
+        assert_eq!(color(true), [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(frame(), Option::None);
+
+        // Fades start from the current color.
+        C29::FadeToColor(&*f.comp, 1000.0, 1.0, 1.0, 1.0, 1.0, false);
+        let [r, _, _, a] = color(false);
+        assert!(r < 0.01 && a < 0.01, "{r} {a}");
     }
 
     #[test]
