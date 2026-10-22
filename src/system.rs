@@ -562,17 +562,18 @@ impl vr::IVRSystem026_Interface for System {
         crate::warn_unimplemented!("PerformFirmwareUpdate");
         vr::EVRFirmwareError::Fail
     }
+    // The runtime holding input focus is our equivalent of the SteamVR dashboard being open.
     fn ShouldApplicationReduceRenderingWork(&self) -> bool {
-        false
+        self.openxr.input_focus_captured()
     }
     fn ShouldApplicationPause(&self) -> bool {
-        false
+        self.openxr.input_focus_captured()
     }
     fn IsSteamVRDrawingControllers(&self) -> bool {
-        false
+        self.openxr.input_focus_captured()
     }
     fn IsInputAvailable(&self) -> bool {
-        true
+        !self.openxr.input_focus_captured()
     }
     fn GetControllerAxisTypeNameFromEnum(
         &self,
@@ -1361,7 +1362,7 @@ impl vr::IVRSystem019On020 for System {
 
 impl vr::IVRSystem017On019 for System {
     fn IsInputFocusCapturedByAnotherProcess(&self) -> bool {
-        false
+        self.openxr.input_focus_captured()
     }
     fn ReleaseInputFocus(&self) {}
     fn CaptureInputFocus(&self) -> bool {
@@ -2115,6 +2116,42 @@ mod tests {
             event.eventType,
             vr::EVREventType::ChaperoneUniverseHasChanged as u32
         );
+    }
+
+    #[test]
+    fn runtime_focus_loss_pauses_app() {
+        let (xr, system) = system_with_events();
+        let set_state = |state| {
+            fakexr::set_session_state(session(&xr), state);
+            xr.poll_events();
+        };
+
+        // Gaining focus at startup doesn't release anything.
+        set_state(xr::SessionState::SYNCHRONIZED);
+        set_state(xr::SessionState::VISIBLE);
+        set_state(xr::SessionState::FOCUSED);
+        assert!(next_event(&system).is_none());
+        assert!(system.IsInputAvailable());
+        assert!(!system.ShouldApplicationPause());
+
+        set_state(xr::SessionState::VISIBLE);
+        let event = next_event(&system).expect("no event");
+        assert_eq!(event.eventType, vr::EVREventType::InputFocusCaptured as u32);
+        assert_eq!(unsafe { event.data.process.oldPid }, 0);
+        assert!(!system.IsInputAvailable());
+        assert!(system.ShouldApplicationPause());
+        assert!(system.ShouldApplicationReduceRenderingWork());
+        assert!(vr::IVRSystem017On019::IsInputFocusCapturedByAnotherProcess(
+            &*system
+        ));
+
+        set_state(xr::SessionState::FOCUSED);
+        let event = next_event(&system).expect("no event");
+        assert_eq!(event.eventType, vr::EVREventType::InputFocusReleased as u32);
+        assert_eq!(unsafe { event.data.process.pid }, 0);
+        assert!(system.IsInputAvailable());
+        assert!(!system.ShouldApplicationPause());
+        assert!(next_event(&system).is_none());
     }
 
     #[test]

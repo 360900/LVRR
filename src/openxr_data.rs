@@ -76,6 +76,8 @@ pub struct OpenXrData<C: Compositor> {
     pub max_layer_count: usize,
     /// Runtime errors already logged as warnings, so one that repeats every frame is logged once.
     logged_errors: Mutex<HashSet<(&'static str, i32)>>,
+    /// Set while the runtime holds the input focus it took from us (e.g. its system menu).
+    input_focus_captured: AtomicBool,
     /// Change time of a runtime recenter of LOCAL that hasn't taken effect yet.
     pending_recenter: parking_lot::Mutex<Option<xr::Time>>,
 
@@ -306,6 +308,7 @@ impl<C: Compositor> OpenXrData<C> {
             session_creation_failed: false.into(),
             max_layer_count,
             logged_errors: Mutex::default(),
+            input_focus_captured: false.into(),
             pending_recenter: parking_lot::Mutex::new(None),
             input: injector.inject(),
             compositor: injector.inject(),
@@ -361,8 +364,10 @@ impl<C: Compositor> OpenXrData<C> {
                     if is_stale(event.session(), &event.state()) {
                         continue;
                     }
+                    let previous = polled.state.unwrap_or(session_data.state);
                     polled.state = Some(event.state());
                     info!("OpenXR session state changed: {:?}", event.state());
+                    self.update_input_focus(previous, event.state());
                     let exit_requested = self.exit_requested.load(Ordering::Relaxed);
                     match event.state() {
                         xr::SessionState::STOPPING if exit_requested => {
@@ -404,6 +409,43 @@ impl<C: Compositor> OpenXrData<C> {
         }
 
         polled
+    }
+
+    /// Mirrors SteamVR's dashboard taking input focus when the runtime does (e.g. its system menu
+    /// opens), and handing it back.
+    fn update_input_focus(&self, previous: xr::SessionState, state: xr::SessionState) {
+        let captured = match state {
+            xr::SessionState::FOCUSED => false,
+            // We also lose focus while ending the session ourselves, that's not the runtime.
+            xr::SessionState::VISIBLE
+                if previous == xr::SessionState::FOCUSED
+                    && !self.exit_requested.load(Ordering::Relaxed) =>
+            {
+                true
+            }
+            _ => return,
+        };
+        // Only release what we captured, so the new session after a restart doesn't unpause a
+        // game that never paused.
+        if self.input_focus_captured.swap(captured, Ordering::Relaxed) == captured {
+            return;
+        }
+        // The SteamVR Unity plugin only reacts to a capture with oldPid 0 and a release with pid
+        // 0. u32::MAX stands in for the runtime.
+        let mut data = vr::VREvent_Data_t::default();
+        let ty = if captured {
+            data.process.pid = u32::MAX;
+            vr::EVREventType::InputFocusCaptured
+        } else {
+            data.process.oldPid = u32::MAX;
+            vr::EVREventType::InputFocusReleased
+        };
+        self.push_event(ty, data);
+    }
+
+    /// Whether the runtime holds the input focus, i.e. the app shouldn't expect input.
+    pub fn input_focus_captured(&self) -> bool {
+        self.input_focus_captured.load(Ordering::Relaxed)
     }
 
     /// Pushes a system event that isn't about a particular device.
