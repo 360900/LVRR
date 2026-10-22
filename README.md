@@ -81,7 +81,7 @@ If a launcher strips `RUST_LOG`, put the same filter string in a file named `log
 
 `XRIZER_TRACKER_SERIALS` - `;` separated list of device serials to expose as generic trackers, e.g. to use controllers as FBT trackers.
 
-`XRIZER_PROFILE_PROBE` - `0` skips the startup interaction profile probe, a short throwaway session used to learn the controller type before the game's first frame. Background and utility apps never probe.
+`XRIZER_PROFILE_PROBE` - `0` skips the startup interaction profile probe, a short throwaway session used to learn the controller type before the game's first frame. Only scene apps probe.
 
 `XRIZER_HMD_PRESENT` - `1` or `0` answers games asking whether a headset is connected before starting VR, instead of briefly connecting to the runtime to find out.
 
