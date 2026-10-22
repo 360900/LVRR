@@ -118,6 +118,8 @@ pub enum InitError {
     InstanceCreationFailed(xr::sys::Result),
     SystemCreationFailed(xr::sys::Result),
     SessionCreationFailed(SessionCreationError),
+    /// The application type needs a headless session, which the runtime doesn't support.
+    HeadlessUnsupported(vr::EVRApplicationType),
 }
 
 impl From<SessionCreationError> for InitError {
@@ -201,10 +203,9 @@ impl<C: Compositor> OpenXrData<C> {
             .map_err(InitError::EnumeratingExtensionsFailed)?;
 
         let headless = match application_type {
-            vr::EVRApplicationType::Utility => {
-                supported_exts.mnd_headless && supported_exts.khr_convert_timespec_time
-            }
-            vr::EVRApplicationType::Background => {
+            vr::EVRApplicationType::Background
+            | vr::EVRApplicationType::Overlay
+            | vr::EVRApplicationType::Utility => {
                 if !supported_exts.mnd_headless {
                     error!("XR_MND_headless extension required for headless not supported!");
                     false
@@ -219,6 +220,16 @@ impl<C: Compositor> OpenXrData<C> {
             }
             _ => false,
         };
+        // A graphics session for these could take the display from the app that renders. Background
+        // apps still fall back to one, since Proton's helper inits as Background on any runtime.
+        if !headless
+            && matches!(
+                application_type,
+                vr::EVRApplicationType::Overlay | vr::EVRApplicationType::Utility
+            )
+        {
+            return Err(InitError::HeadlessUnsupported(application_type));
+        }
 
         let mut exts = xr::ExtensionSet::default();
         if headless {

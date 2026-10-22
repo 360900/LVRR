@@ -138,6 +138,8 @@ fn init_error_code(
             xr::sys::Result::ERROR_FORM_FACTOR_UNAVAILABLE
             | xr::sys::Result::ERROR_FORM_FACTOR_UNSUPPORTED,
         ) => vr::EVRInitError::Init_HmdNotFound,
+        // Overlay and Utility apps need a headless session.
+        InitError::HeadlessUnsupported(_) => vr::EVRInitError::Init_InvalidApplicationType,
         _ => vr::EVRInitError::Init_VRServiceStartupFailed,
     }
 }
@@ -209,16 +211,6 @@ impl IVRClientCore003_Interface for ClientCore {
         application_type: vr::EVRApplicationType,
         startup_info: *const c_char,
     ) -> vr::EVRInitError {
-        if !matches!(
-            application_type,
-            vr::EVRApplicationType::Scene // Standard apps
-            | vr::EVRApplicationType::Background // Proton
-            | vr::EVRApplicationType::Other // Config utilities
-        ) {
-            error!("Unsupported application type: {application_type:?}");
-            return vr::EVRInitError::Init_InvalidApplicationType;
-        }
-
         let manifest_path = (!startup_info.is_null())
             .then(|| {
                 let info = unsafe { CStr::from_ptr(startup_info) };
@@ -249,6 +241,18 @@ impl IVRClientCore003_Interface for ClientCore {
             }
 
             return vr::EVRInitError::None;
+        }
+
+        if !matches!(
+            application_type,
+            vr::EVRApplicationType::Scene // Standard apps
+            | vr::EVRApplicationType::Background // Proton
+            | vr::EVRApplicationType::Other // Config utilities
+            | vr::EVRApplicationType::Overlay // Overlays and tracking tools, headless
+            | vr::EVRApplicationType::Utility // Headless
+        ) {
+            error!("Unsupported application type: {application_type:?}");
+            return vr::EVRInitError::Init_InvalidApplicationType;
         }
 
         match OpenXrData::new(
@@ -663,6 +667,11 @@ mod tests {
                 App::Scene,
                 E::Init_VRServiceStartupFailed,
             ),
+            (
+                InitError::HeadlessUnsupported(App::Overlay),
+                App::Overlay,
+                E::Init_InvalidApplicationType,
+            ),
         ];
         for (error, app_type, expected) in cases {
             assert_eq!(init_error_code(&error, app_type), expected, "{error:?}");
@@ -730,6 +739,48 @@ mod tests {
             );
             assert_eq!(error, vr::EVRInitError::None, "{version:?}");
         }
+    }
+
+    #[test]
+    fn overlay_and_utility_apps_are_headless() {
+        for app_type in [
+            vr::EVRApplicationType::Overlay,
+            vr::EVRApplicationType::Utility,
+        ] {
+            let core = ClientCore::new(c"IVRClientCore_003").unwrap();
+            assert_eq!(
+                core.clone().Init(app_type, std::ptr::null()),
+                vr::EVRInitError::Init_InvalidApplicationType,
+                "{app_type:?} without headless support"
+            );
+            assert!(core.openxr.read().unwrap().is_none());
+
+            fakexr::set_headless_supported(true);
+            assert_eq!(
+                core.clone().Init(app_type, std::ptr::null()),
+                vr::EVRInitError::None,
+                "{app_type:?}"
+            );
+            fakexr::set_headless_supported(false);
+            assert!(core.openxr.read().unwrap().as_ref().unwrap().headless);
+            core.clone().Cleanup();
+        }
+    }
+
+    /// A second Init (e.g. from an overlay mod inside a game) must not fail the first one.
+    #[test]
+    fn init_again_with_unsupported_type() {
+        let core = ClientCore::new(c"IVRClientCore_003").unwrap();
+        assert_eq!(
+            core.clone()
+                .Init(vr::EVRApplicationType::Scene, std::ptr::null()),
+            vr::EVRInitError::None
+        );
+        assert_eq!(
+            core.clone()
+                .Init(vr::EVRApplicationType::VRMonitor, std::ptr::null()),
+            vr::EVRInitError::None
+        );
     }
 
     #[test]
