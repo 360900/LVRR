@@ -1,7 +1,7 @@
 #[path = "skeletal_generated.rs"]
 mod generated;
 
-use super::{ActionKey, Input, inactive_state};
+use super::{ActionKey, Input, ManifestLoadedActions, inactive_state};
 use crate::input::TrackedDeviceType;
 use crate::input::devices::HandSkeleton;
 use crate::openxr_data::{self, Hand, SessionData};
@@ -214,6 +214,7 @@ impl<C: openxr_data::Compositor> Input<C> {
     pub(super) fn is_skeleton_active(
         &self,
         session_data: &SessionData,
+        loaded: &ManifestLoadedActions,
         action: vr::VRActionHandle_t,
         hand: Hand,
     ) -> bool {
@@ -228,21 +229,9 @@ impl<C: openxr_data::Compositor> Input<C> {
             return false;
         }
 
-        // An action belongs to the set its path starts with, e.g. /actions/main/in/hand_left.
-        let action_map = self.action_map.read().unwrap();
-        let Some(set_name) = action_map
+        let Some(set) = loaded
+            .skeleton_sets
             .get(ActionKey::from(KeyData::from_ffi(action)))
-            .and_then(|a| Some(a.path[..a.path.match_indices('/').nth(2)?.0].to_owned()))
-        else {
-            return false;
-        };
-        drop(action_map);
-        let Some(set) = self
-            .set_map
-            .read()
-            .unwrap()
-            .iter()
-            .find_map(|(key, name)| (*name == set_name).then_some(key))
         else {
             return false;
         };
@@ -253,7 +242,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             .unwrap()
             .iter()
             .any(|(key, restriction)| {
-                *key == set && (*restriction == xr::Path::NULL || *restriction == hand_path)
+                key == set && (*restriction == xr::Path::NULL || *restriction == hand_path)
             })
     }
 

@@ -1380,7 +1380,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         //);
 
         let handle = action;
-        get_action_from_handle!(self, handle, session_data, action);
+        get_action_from_handle!(self, handle, session_data, action, loaded);
         let ActionData::Skeleton(hand) = action else {
             return vr::EVRInputError::WrongType;
         };
@@ -1388,7 +1388,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             return vr::EVRInputError::InvalidParam;
         }
 
-        let active = self.is_skeleton_active(&session_data, handle, *hand);
+        let active = self.is_skeleton_active(&session_data, loaded, handle, *hand);
         let origin = match (active, hand) {
             (false, _) => vr::k_ulInvalidInputValueHandle,
             (true, Hand::Left) => self.left_hand_key.data().as_ffi(),
@@ -2799,6 +2799,8 @@ struct ManifestLoadedActions {
     _info_action: xr::Action<bool>,
     haptic_set: xr::ActionSet,
     haptic_action: xr::Action<xr::Haptic>,
+    /// The set each skeleton action belongs to.
+    skeleton_sets: SecondaryMap<ActionKey, ActionSetKey>,
 }
 
 impl ManifestLoadedActions {

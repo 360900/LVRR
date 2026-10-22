@@ -259,6 +259,20 @@ impl<C: openxr_data::Compositor> Input<C> {
             .map(|(k, v)| (k, action_map_to_secondary(&mut act_guard, v)))
             .collect();
 
+        // An action belongs to the set its path starts with, e.g. /actions/main/in/hand_left.
+        let skeleton_sets = actions
+            .iter()
+            .filter(|(_, data)| matches!(data, super::ActionData::Skeleton(_)))
+            .filter_map(|(key, _)| {
+                let path = &act_guard[key].path;
+                let set_name = &path[..path.match_indices('/').nth(2)?.0];
+                let set = set_guard
+                    .iter()
+                    .find_map(|(set, name)| (name == set_name).then_some(set))?;
+                Some((key, set))
+            })
+            .collect();
+
         let loaded = super::ManifestLoadedActions {
             sets,
             hand_restrictable_sets,
@@ -272,6 +286,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             info_set,
             haptic_action,
             haptic_set,
+            skeleton_sets,
         };
 
         session_data
