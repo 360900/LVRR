@@ -63,6 +63,7 @@ pub struct OpenXrData<C: Compositor> {
     /// The interaction profiles that were bound when we probed at init - see
     /// [crate::input::probe_interaction_profiles].
     pub probed_profiles: crate::input::ProbedProfiles,
+    pub application_type: vr::EVRApplicationType,
     pub headless: bool,
     /// Set while we are ending the session ourselves (restart or shutdown), so the resulting
     /// STOPPING state isn't reported to the application as a Quit.
@@ -314,6 +315,7 @@ impl<C: Compositor> OpenXrData<C> {
             frame_loop_started: false.into(),
             enabled_extensions: exts,
             probed_profiles,
+            application_type,
             headless,
             exit_requested: false.into(),
             exiting: false.into(),

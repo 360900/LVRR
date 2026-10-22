@@ -874,6 +874,20 @@ impl vr::IVRCompositor029_Interface for Compositor {
         bounds: *const vr::VRTextureBounds_t,
         submit_flags: vr::EVRSubmitFlags,
     ) -> vr::EVRCompositorError {
+        // Like SteamVR. These apps get headless sessions where available, which can't render.
+        if matches!(
+            self.openxr.application_type,
+            vr::EVRApplicationType::Background
+                | vr::EVRApplicationType::Overlay
+                | vr::EVRApplicationType::Utility
+        ) {
+            crate::warn_once!(
+                "{:?} application tried to submit a frame",
+                self.openxr.application_type
+            );
+            return vr::EVRCompositorError::IsNotSceneApplication;
+        }
+
         let bounds = unsafe { bounds.as_ref() }
             .copied()
             .unwrap_or(vr::VRTextureBounds_t {
@@ -2021,6 +2035,31 @@ mod tests {
             }
         }
         quits
+    }
+
+    /// Submitting from a headless session used to restart it with the texture's graphics API and
+    /// panic, since headless sessions can't be anything but headless.
+    #[test]
+    fn non_scene_app_submit_is_rejected() {
+        crate::init_logging();
+        for headless in [true, false] {
+            fakexr::set_headless_supported(headless);
+            let xr = Arc::new(
+                OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Background).unwrap(),
+            );
+            fakexr::set_headless_supported(false);
+            assert_eq!(xr.headless, headless);
+            let vk = Arc::new(VulkanData::new_temporary(&xr.instance, xr.system_id));
+            let comp = Arc::new(Compositor::new(xr.clone(), &Injector::default()));
+            xr.compositor.set(Arc::downgrade(&comp));
+            let f = Fixture { comp, vk };
+
+            let session = xr.session_data.get().session.as_raw();
+            assert_eq!(f.wait_get_poses(), None);
+            assert_eq!(f.submit(vr::EVREye::Left), IsNotSceneApplication);
+            assert_eq!(xr.session_data.get().session.as_raw(), session);
+            assert!(xr.session_data.get().comp_data.0.lock().unwrap().is_none());
+        }
     }
 
     #[test]
