@@ -1299,12 +1299,27 @@ impl vr::IVRSystem026_Interface for System {
             return;
         }
 
-        unsafe {
-            *device = self
-                .openxr
+        let Some(device) = (unsafe { device.as_mut() }) else {
+            return;
+        };
+        // 0 means failure.
+        *device = 0;
+        // IVRSystem_016 has no instance to pass, and runtimes don't check it.
+        if instance.is_null() {
+            warn!("GetOutputDevice called without a Vulkan instance");
+            return;
+        }
+        // Without the extension, the openxr crate panics instead of returning an error.
+        if !self.openxr.enabled_extensions.khr_vulkan_enable {
+            return;
+        }
+        match unsafe {
+            self.openxr
                 .instance
                 .vulkan_graphics_device(self.openxr.system_id, instance as _)
-                .expect("Failed to get vulkan physical device") as _;
+        } {
+            Ok(physical_device) => *device = physical_device as _,
+            Err(e) => warn!("Failed to get the Vulkan physical device: {e}"),
         }
     }
     fn GetDXGIOutputInfo(&self, output_info: *mut i32) {
@@ -1659,6 +1674,22 @@ mod tests {
         );
         assert!(mesh.pVertexData.is_null());
         assert_eq!(mesh.unTriangleCount, 0);
+    }
+
+    #[test]
+    fn output_device_without_instance() {
+        let xr =
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
+        let system = System::new(xr, &Injector::default());
+
+        let mut device = u64::MAX;
+        vr::IVRSystem016On017::GetOutputDevice(&system, &mut device, vr::ETextureType::Vulkan);
+        assert_eq!(device, 0);
+        system.GetOutputDevice(
+            std::ptr::null_mut(),
+            vr::ETextureType::Vulkan,
+            std::ptr::null_mut(),
+        );
     }
 
     #[test]

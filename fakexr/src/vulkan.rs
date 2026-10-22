@@ -212,9 +212,13 @@ pub(crate) mod xr {
     pub extern "system" fn get_vulkan_graphics_device_k_h_r(
         _: xr::Instance,
         _: xr::SystemId,
-        _: xr::platform::VkInstance,
+        vulkan_instance: xr::platform::VkInstance,
         _: *mut xr::platform::VkPhysicalDevice,
     ) -> xr::Result {
+        // Monado can't enumerate physical devices without an instance.
+        if vulkan_instance.is_null() {
+            return xr::Result::ERROR_RUNTIME_FAILURE;
+        }
         xr::Result::SUCCESS
     }
 
