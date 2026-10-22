@@ -2989,6 +2989,26 @@ mod tests {
         assert_eq!(f.layers(false).len(), 1);
     }
 
+    /// A session restart takes the overlay swapchains with it. Overlays come back once they get a
+    /// texture again, since the app's old textures may be gone by now.
+    #[test]
+    fn overlays_across_session_restart() {
+        let f = RealSessionFixture::new();
+        let first = f.textured_overlay(c"first");
+        let second = f.textured_overlay(c"second");
+        assert_eq!(f.layers(false).len(), 2);
+
+        f.xr.restart_session();
+        assert_eq!(f.layers(false).len(), 0);
+        for (overlay, count) in [(first, 1), (second, 2)] {
+            assert_eq!(
+                f.man.SetOverlayTexture(overlay, &f.texture()),
+                vr::EVROverlayError::None
+            );
+            assert_eq!(f.layers(false).len(), count);
+        }
+    }
+
     #[test]
     fn removed_overlays_release_swapchains() {
         let f = RealSessionFixture::new();
