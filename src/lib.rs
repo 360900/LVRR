@@ -316,8 +316,9 @@ pub unsafe extern "C-unwind" fn VRClientCoreFactory(
             vtable
         });
 
+        // A racing call may have set it first; ours is leaked like any other.
         if let Some(c) = ret {
-            C.set(ClientCorePtr(c)).unwrap_or_else(|_| unreachable!());
+            let _ = C.set(ClientCorePtr(c));
         }
     }
 

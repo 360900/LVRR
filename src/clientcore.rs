@@ -350,10 +350,9 @@ impl<T: InterfaceImpl> Injected<T> {
             .get()
             .or_else(|| {
                 let item: Arc<ErasedInterface> = self.store.lock().unwrap().get::<T>()?;
-                self.item
-                    .set(Arc::downgrade(&item))
-                    .unwrap_or_else(|_| unreachable!());
-                Some(self.item.get().unwrap())
+                // Another thread may have cached the same item in the meantime.
+                let _ = self.item.set(Arc::downgrade(&item));
+                self.item.get()
             })
             .and_then(|i| Some(i.upgrade()?.downcast().unwrap()))
     }
@@ -588,5 +587,34 @@ mod tests {
 
         assert_eq!(Arc::as_ptr(&injected2), Arc::as_ptr(&interface1));
         assert_eq!(Arc::as_ptr(&injected3), Arc::as_ptr(&interface1));
+    }
+
+    #[test]
+    fn inject_get_while_forcing() {
+        let core = ClientCore::new(c"IVRClientCore_003").unwrap();
+
+        core.try_interface(c"two", |injector| Interface2(injector.inject()));
+        let interface2 = core
+            .get_interface::<Interface2>()
+            .expect("Interface2 missing from store");
+
+        let barrier = std::sync::Barrier::new(2);
+        let (forced, got) = std::thread::scope(|s| {
+            let injected = &interface2.0;
+            let forced = s.spawn(|| {
+                injected.force(|_| {
+                    barrier.wait();
+                    // Let the other thread find the item unset and wait on the store.
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    Interface1
+                })
+            });
+            barrier.wait();
+            let got = injected.get();
+            (forced.join().unwrap(), got)
+        });
+
+        let got = got.expect("Interface1 not injected");
+        assert_eq!(Arc::as_ptr(&got), Arc::as_ptr(&forced));
     }
 }
