@@ -965,8 +965,36 @@ impl Action {
     fn get_hand_state(&self, path: xr::Path) -> ActionStateData {
         let instance = self.instance.upgrade().expect("Failed to get instance");
         match instance.get_user_path(path).unwrap() {
-            None | Some(UserPath::LeftHand) => self.state.left.load(),
+            None => self.combined_state(),
+            Some(UserPath::LeftHand) => self.state.left.load(),
             Some(UserPath::RightHand) => self.state.right.load(),
+        }
+    }
+
+    /// The state without a subaction path, combined from both hands as OpenXR specifies.
+    fn combined_state(&self) -> ActionStateData {
+        let (left, right) = (self.state.left.load(), self.state.right.load());
+        match (left.state, right.state) {
+            (ActionState::Bool(l), ActionState::Bool(r)) => {
+                let previous = |data: &ActionStateData, state: bool| state != data.changed;
+                let state = l || r;
+                ActionStateData {
+                    state: ActionState::Bool(state),
+                    changed: state != (previous(&left, l) || previous(&right, r)),
+                    last_change_time: xr::Time::from_nanos(
+                        left.last_change_time
+                            .as_nanos()
+                            .max(right.last_change_time.as_nanos()),
+                    ),
+                }
+            }
+            (ActionState::Float(l), ActionState::Float(r)) if r.abs() > l.abs() => right,
+            (ActionState::Vector2(lx, ly), ActionState::Vector2(rx, ry))
+                if rx * rx + ry * ry > lx * lx + ly * ly =>
+            {
+                right
+            }
+            _ => left,
         }
     }
 }

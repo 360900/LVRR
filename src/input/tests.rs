@@ -2112,6 +2112,52 @@ fn restricted_set_without_openxr_actions() {
 }
 
 #[test]
+fn unrestricted_digital_action_origin() {
+    let mut f = Fixture::new();
+    let set1 = f.get_action_set_handle(c"/actions/set1");
+    let boolact = f.get_action_handle(c"/actions/set1/in/boolact");
+    f.load_actions(c"actions.json");
+    f.set_interaction_profile::<Knuckles>(LeftHand);
+    f.set_interaction_profile::<Knuckles>(RightHand);
+    let left = f.get_input_source_handle(c"/user/hand/left");
+    let right = f.get_input_source_handle(c"/user/hand/right");
+    let action = f.get_action::<bool>(boolact);
+    let sync = |f: &mut Fixture| {
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: set1,
+            ..Default::default()
+        })
+    };
+
+    sync(&mut f);
+    let state = f.get_bool_state(boolact).unwrap();
+    assert!(!state.bActive);
+    assert_eq!(state.activeOrigin, 0);
+
+    fakexr::set_action_state(action, true.into(), RightHand);
+    sync(&mut f);
+    let state = f.get_bool_state(boolact).unwrap();
+    assert!(state.bState);
+    assert_eq!(state.activeOrigin, right);
+    assert_eq!(
+        get_origin_info(&f, state.activeOrigin).trackedDeviceIndex,
+        Hand::Right as u32
+    );
+
+    // Active but not pressed still has an origin.
+    fakexr::set_action_state(action, false.into(), RightHand);
+    sync(&mut f);
+    sync(&mut f);
+    let state = f.get_bool_state(boolact).unwrap();
+    assert!(state.bActive && !state.bState);
+    assert_ne!(state.activeOrigin, 0);
+
+    fakexr::set_action_state(action, true.into(), LeftHand);
+    sync(&mut f);
+    assert_eq!(f.get_bool_state(boolact).unwrap().activeOrigin, left);
+}
+
+#[test]
 fn skeletal_tracking_level_follows_hand_tracking() {
     use vr::EVRSkeletalTrackingLevel::*;
     use xr::HandTrackingDataSourceEXT as Source;

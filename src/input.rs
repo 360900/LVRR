@@ -438,6 +438,31 @@ impl<C: openxr_data::Compositor> Input<C> {
     }
 }
 
+impl<C: openxr_data::Compositor> Input<C> {
+    /// The hand whose natively bound inputs drive an unrestricted read of a boolean action, if
+    /// any is active.
+    fn native_bool_origin(
+        &self,
+        action: &xr::Action<bool>,
+        session: &xr::Session<xr::AnyGraphics>,
+    ) -> vr::VRInputValueHandle_t {
+        [
+            (self.subaction_paths.left, self.left_hand_key),
+            (self.subaction_paths.right, self.right_hand_key),
+        ]
+        .into_iter()
+        .filter_map(|(path, key)| {
+            let state = action.state(session, path).ok()?;
+            state.is_active.then(|| (binding_rank(&state), key))
+        })
+        // Left wins ties.
+        .reduce(|best, hand| if hand.0 > best.0 { hand } else { best })
+        .map_or(vr::k_ulInvalidInputValueHandle, |(_, key)| {
+            key.data().as_ffi()
+        })
+    }
+}
+
 /// Ranking used to decide which of an action's bindings should represent it. Highest wins.
 fn binding_rank(state: &xr::ActionState<bool>) -> (bool, bool, i64) {
     (
@@ -1576,9 +1601,13 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         let mut state = action
             .state(&session_data.session, subaction_path)
             .unwrap_or_else(inactive_state);
+        let mut active_hand = if subaction_path == xr::Path::NULL {
+            self.native_bool_origin(action, &session_data.session)
+        } else {
+            restrict_to_device
+        };
 
         // An action can be driven both by a natively bound input and by a custom binding.
-        let mut active_hand = restrict_to_device;
         if let Some((binding_state, binding_source)) =
             self.state_from_bindings(handle, restrict_to_device)
             && binding_state.is_active
