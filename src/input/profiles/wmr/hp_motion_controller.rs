@@ -133,19 +133,15 @@ impl InteractionProfile for ReverbG2Controller {
         }
     }
 
-    fn offset_grip_pose(hand: Hand) -> Mat4 {
+    fn offset_grip_pose(_: Hand) -> Mat4 {
+        // The inverse of SteamVR's "body" component, which is where OpenXR puts the grip.
+        // Taken from OpenComposite's ReverbG2InteractionProfile with the rotation sign flipped:
+        // only that sign reproduces Monado's aim-to-grip offset from SteamVR's body and tip.
         Mat4::from_rotation_translation(
-            Quat::from_xyzw(0.300705, 0.0, 0.0, 0.953717),
-            Vec3::new(
-                0.000683
-                    * match hand {
-                        Hand::Left => 1.0,
-                        Hand::Right => -1.0,
-                    },
-                -0.015332,
-                0.068270,
-            ),
+            Quat::from_rotation_x(5.037_f32.to_radians()),
+            Vec3::new(0.0, -0.00553, 0.09689),
         )
+        .inverse()
     }
 
     fn pose_transformation(_pose: BoundPoseType) -> Option<PoseTransformations> {
@@ -157,6 +153,29 @@ impl InteractionProfile for ReverbG2Controller {
 mod tests {
     use super::*;
     use crate::input::tests::Fixture;
+
+    #[test]
+    fn grip_offset_matches_monado_aim_offset() {
+        for (hand, sign) in [(Hand::Left, 1.0), (Hand::Right, -1.0)] {
+            // Monado's G2 grip in its aim frame (P_HP_G2_*_aim_grip in wmr_controller_hp.c).
+            let aim_to_grip = Mat4::from_rotation_translation(
+                Quat::from_xyzw(0.300705, 0.0, 0.0, 0.953717),
+                Vec3::new(0.000683 * sign, -0.015332, 0.068270),
+            );
+            // SteamVR's "tip" component, which Monado's aim matches.
+            let raw_to_tip = Mat4::from_rotation_translation(
+                Quat::from_rotation_x(-0.49944_f32.asin()),
+                Vec3::new(-0.00068 * sign, -0.02634, 0.03009),
+            );
+
+            let aim_to_raw = aim_to_grip * ReverbG2Controller::offset_grip_pose(hand);
+            assert!(
+                aim_to_raw.abs_diff_eq(raw_to_tip.inverse(), 1e-4),
+                "{hand:?}: {aim_to_raw} != {}",
+                raw_to_tip.inverse()
+            );
+        }
+    }
 
     #[test]
     fn verify_bindings() {
