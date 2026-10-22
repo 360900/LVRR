@@ -1,0 +1,40 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/set1",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/set1/in/click",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/set1/in/long",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/set1/in/held",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/set1/in/single",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/set1/in/double",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/set1/in/single_now",
+			"type": "boolean"
+		}
+	],
+	"default_bindings": [
+		{
+			"controller_type": "knuckles",
+			"binding_url": "knuckles_timed.json"
+		}
+	]
+}

@@ -8,7 +8,7 @@ use crate::input::{ActionData, BoundPoseType};
 use crate::{
     input::custom_bindings::{
         BoolBindingType, DoubleTapData, DpadData, DpadDirection, GrabBindingData,
-        ThresholdBindingData, ToggleData, Vector2Inversion,
+        ThresholdBindingData, TimedPress, TimedPressData, ToggleData, Vector2Inversion,
     },
     openxr_data::Hand,
 };
@@ -22,6 +22,7 @@ use serde::{
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::str::FromStr;
+use std::time::Duration;
 
 /**
  * Structure for binding files
@@ -389,10 +390,14 @@ struct ButtonInput {
     /// Nonstandard slot some games use for grip bindings in button mode
     /// (e.g. Half-Life 2: VR); SteamVR treats it like click, so we do too.
     grab: Option<ActionBindingOutput<paths::Click>>,
-    /// SteamVR activates this after the button is held for a moment
-    /// (e.g. SUPERHOT VR binds its menu to a long press); approximate it
-    /// as a regular click rather than dropping the binding.
+    /// Active once the button has been held for the long press delay.
     long: Option<ActionBindingOutput<paths::Click>>,
+    /// Like long.
+    held: Option<ActionBindingOutput<paths::Click>>,
+    /// A press that isn't part of a double tap or a long press.
+    single: Option<ActionBindingOutput<paths::Click>>,
+    #[serde(flatten)]
+    unknown: HashMap<String, IgnoredAny>,
 }
 
 #[derive(Deserialize)]
@@ -421,6 +426,8 @@ struct ScalarConstantParameters {
 struct ButtonParameters {
     #[serde(default, deserialize_with = "ButtonForceInput::default_deserialize")]
     force_input: Option<ButtonForceInput>,
+    /// Seconds
+    long_press_delay: Option<StringOrTyped<f32>>,
     #[serde(flatten)]
     click_threshold: ClickThresholdParams,
 }
@@ -629,6 +636,27 @@ pub fn handle_dpad_binding(
     }
 }
 
+/// A threshold on an analog input (or a boolean one, read as 0 or 1), if `output` can have one.
+fn threshold_binding(
+    output: &ActionPath,
+    input: DynInputPath,
+    params: Option<&ClickThresholdParams>,
+    action_set_name: &str,
+    action_set: &xr::ActionSet,
+    context: &mut BindingsProfileLoadContext,
+) -> Option<BoolBindingType> {
+    if !context.accepts_custom_binding(output) {
+        return None;
+    }
+    Some(if input.component.is_none() {
+        let action = context.input_action(action_set_name, action_set, input)?;
+        BoolBindingType::ThresholdVec2(ThresholdBindingData::new(action, params))
+    } else {
+        let action = context.input_action(action_set_name, action_set, input)?;
+        BoolBindingType::ThresholdFloat(ThresholdBindingData::new(action, params))
+    })
+}
+
 /// Binds an analog input (or a boolean one, read as 0 or 1) through a threshold.
 fn bind_threshold(
     output: &ActionPath,
@@ -638,22 +666,38 @@ fn bind_threshold(
     action_set: &xr::ActionSet,
     context: &mut BindingsProfileLoadContext,
 ) {
-    if !context.accepts_custom_binding(output) {
-        return;
+    if let Some(ty) = threshold_binding(output, input, params, action_set_name, action_set, context)
+    {
+        trace!("suggesting {input} for {} (threshold)", output.path);
+        context.add_custom_binding(output, input.hand, input, ty);
     }
-    let ty = if input.component.is_none() {
-        let Some(action) = context.input_action(action_set_name, action_set, input) else {
-            return;
-        };
-        BoolBindingType::ThresholdVec2(ThresholdBindingData::new(action, params))
-    } else {
-        let Some(action) = context.input_action(action_set_name, action_set, input) else {
-            return;
-        };
-        BoolBindingType::ThresholdFloat(ThresholdBindingData::new(action, params))
+}
+
+/// The input a button mode press reads: the component picked by `force_input`, else the click.
+/// The flag says whether it is (or stands in for) the click, which is bound as is.
+fn button_press_input(
+    path: DynInputPath,
+    force_input: Option<ButtonForceInput>,
+    validate_path: &dyn PathValidator,
+) -> Option<(DynInputPath, bool)> {
+    // Default to value for clicky components, because the click point
+    // does not necessarily match SteamVR's click point.
+    let target = force_input.unwrap_or(ButtonForceInput::Value);
+    let complete_path = match target {
+        ButtonForceInput::Click => path.with_component(DynComponent::Click),
+        ButtonForceInput::Value => path.with_component(DynComponent::Value),
+        ButtonForceInput::Force => path.with_component(DynComponent::Force),
+        ButtonForceInput::Position => path, // No component = 2D binding
     };
-    trace!("suggesting {input} for {} (threshold)", output.path);
-    context.add_custom_binding(output, input.hand, input, ty);
+    match validate_path(complete_path) {
+        Some(input) if input.component != Some(DynComponent::Click) => Some((input, false)),
+        _ => {
+            if !matches!(target, ButtonForceInput::Click) {
+                debug!("falling back to click component on {path} (target: {target:?})");
+            }
+            validate_path(path.with_component(DynComponent::Click)).map(|input| (input, true))
+        }
+    }
 }
 
 /// Binds a touch output. SteamVR reports any pull as a touch on inputs without a touch sensor,
@@ -778,12 +822,18 @@ pub fn handle_sources(
                             double,
                             grab,
                             long,
+                            held,
+                            single,
+                            unknown,
                         },
                     parameters,
                 }) = data.validate_path()
                 else {
                     continue;
                 };
+                for slot in unknown.keys() {
+                    warn!("Ignoring unknown button input {slot} on {path}");
+                }
 
                 if let Some(touch) = touch {
                     bind_touch(
@@ -812,53 +862,78 @@ pub fn handle_sources(
                     );
                 }
 
-                for click in [click, grab, long].into_iter().flatten() {
-                    let target = parameters.and_then(|x| x.force_input).unwrap_or(
-                        // Default to value for clicky components, because the click point
-                        // does not necessarily match SteamVR's click point.
-                        ButtonForceInput::Value,
-                    );
+                let Some((press, is_click)) =
+                    button_press_input(path, parameters.and_then(|p| p.force_input), validate_path)
+                else {
+                    for output in [click, grab, long, held, single].into_iter().flatten() {
+                        InvalidActionPath(click_path, &output.output.path).warn();
+                    }
+                    continue;
+                };
+                let thresholds = parameters.map(|b| &b.click_threshold);
 
-                    let complete_path = match target {
-                        ButtonForceInput::Click => path.with_component(DynComponent::Click),
-                        ButtonForceInput::Value => path.with_component(DynComponent::Value),
-                        ButtonForceInput::Force => path.with_component(DynComponent::Force),
-                        ButtonForceInput::Position => path, // No component = 2D binding
+                // A single press only has to wait when it could turn into something else.
+                let long_delay = long.as_ref().or(held.as_ref()).map(|_| {
+                    parameters
+                        .and_then(|p| p.long_press_delay.as_deref().copied())
+                        .filter(|delay| delay.is_finite() && *delay >= 0.0)
+                        .map_or(
+                            TimedPressData::DEFAULT_LONG_PRESS_DELAY,
+                            Duration::from_secs_f32,
+                        )
+                });
+                let single_waits = double.is_some() || long_delay.is_some();
+                let immediate = [
+                    click.as_ref(),
+                    grab.as_ref(),
+                    single.as_ref().filter(|_| !single_waits),
+                ];
+                for click in immediate.into_iter().flatten() {
+                    if is_click {
+                        // The runtime's click point is used for clicks.
+                        context.try_suggest_binding::<bool>(click.output.path.clone(), press);
+                    } else {
+                        bind_threshold(
+                            &click.output,
+                            press,
+                            thresholds,
+                            action_set_name,
+                            action_set,
+                            context,
+                        );
+                    }
+                }
+
+                let timed = [
+                    (long.as_ref(), long_delay.map(TimedPress::Long)),
+                    (held.as_ref(), long_delay.map(TimedPress::Long)),
+                    (
+                        single.as_ref().filter(|_| single_waits),
+                        Some(TimedPress::Single {
+                            double: double.is_some(),
+                            long_delay,
+                        }),
+                    ),
+                ];
+                for (output, kind) in timed {
+                    let (Some(output), Some(kind)) = (output, kind) else {
+                        continue;
                     };
-
-                    let complete_path = match validate_path(complete_path) {
-                        None
-                        // If the translated path we get is just the click component, there's no need
-                        // to create and bind to our threshold action.
-                        | Some(DynInputPath {
-                            component: Some(DynComponent::Click),
-                            ..
-                        }) => {
-                            if !matches!(target, ButtonForceInput::Click) {
-                                debug!(
-                                    "falling back to click component for {} on {} (target: {:?})",
-                                    click.output.path, path, target
-                                );
-                            }
-                            let _ = click
-                                .try_bind_with_component(
-                                    path,
-                                    context,
-                                    validate_path,
-                                )
-                                .inspect_err(InvalidActionPath::warn);
-                            continue;
-                        }
-                        Some(path) => path,
-                    };
-
-                    bind_threshold(
-                        &click.output,
-                        complete_path,
-                        parameters.map(|b| &b.click_threshold),
+                    let Some(press_binding) = threshold_binding(
+                        &output.output,
+                        press,
+                        thresholds,
                         action_set_name,
                         action_set,
                         context,
+                    ) else {
+                        continue;
+                    };
+                    context.add_custom_binding(
+                        &output.output,
+                        path.hand,
+                        press,
+                        BoolBindingType::Timed(TimedPressData::new(press_binding, kind)),
                     );
                 }
             }

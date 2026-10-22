@@ -7,7 +7,7 @@ use openxr as xr;
 use std::f32::consts::{FRAC_PI_4, PI};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use xr::{Haptic, HapticVibration};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
@@ -140,6 +140,7 @@ pub enum BoolBindingType {
     Grab(GrabBindingData),
     ThresholdFloat(ThresholdBindingData<f32>),
     ThresholdVec2(ThresholdBindingData<xr::Vector2f>),
+    Timed(TimedPressData),
 }
 
 impl BoolBindingType {
@@ -155,6 +156,7 @@ impl BoolBindingType {
             Self::Grab(grab) => grab.state(session, subaction_path),
             Self::ThresholdFloat(threshold) => threshold.state(session, subaction_path),
             Self::ThresholdVec2(threshold) => threshold.state(session, subaction_path),
+            Self::Timed(timed) => timed.state(session, subaction_path),
         }
     }
 
@@ -175,6 +177,7 @@ impl BoolBindingType {
                 .collect(),
             Self::ThresholdFloat(threshold) => vec![threshold.action.as_raw()],
             Self::ThresholdVec2(threshold) => vec![threshold.action.as_raw()],
+            Self::Timed(timed) => timed.press.actions(),
         }
     }
 }
@@ -604,6 +607,102 @@ impl DoubleTapData {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum TimedPress {
+    /// Active from the given hold time until release.
+    Long(Duration),
+    /// Active for one sync after a press that isn't the start of a double tap (if one is bound)
+    /// or a long press (if one is bound, lasting the given time).
+    Single {
+        double: bool,
+        long_delay: Option<Duration>,
+    },
+}
+
+#[derive(Default)]
+struct TimedPressState {
+    pressed_at: Option<Instant>,
+    /// When a press that may become a single press was released.
+    released_at: Option<Instant>,
+    /// The current press is the second one of a double tap.
+    double: bool,
+    last_state: bool,
+}
+
+/// Button presses that depend on how long the button is held, timed at each sync.
+pub(super) struct TimedPressData {
+    press: Box<BoolBindingType>,
+    kind: TimedPress,
+    state: Mutex<TimedPressState>,
+}
+
+impl TimedPressData {
+    pub const DEFAULT_LONG_PRESS_DELAY: Duration = Duration::from_millis(500);
+
+    pub fn new(press: BoolBindingType, kind: TimedPress) -> Self {
+        Self {
+            press: press.into(),
+            kind,
+            state: Default::default(),
+        }
+    }
+
+    fn state(
+        &self,
+        session: &xr::Session<xr::AnyGraphics>,
+        subaction_path: xr::Path,
+    ) -> xr::Result<Option<xr::ActionState<bool>>> {
+        let mut state = self.state.lock().unwrap();
+        let Some(press) = self.press.state(session, subaction_path)? else {
+            *state = Default::default();
+            return Ok(None);
+        };
+        let now = Instant::now();
+        let pressed = press.current_state;
+
+        let current_state = match self.kind {
+            TimedPress::Long(delay) => {
+                if pressed {
+                    now - *state.pressed_at.get_or_insert(now) >= delay
+                } else {
+                    state.pressed_at = None;
+                    false
+                }
+            }
+            TimedPress::Single { double, long_delay } => {
+                if pressed && state.pressed_at.is_none() {
+                    state.pressed_at = Some(now);
+                    state.double = state.released_at.take().is_some();
+                } else if !pressed && let Some(pressed_at) = state.pressed_at.take() {
+                    let long = long_delay.is_some_and(|delay| now - pressed_at >= delay);
+                    if !std::mem::take(&mut state.double) && !long {
+                        state.released_at = Some(now);
+                    }
+                }
+                let wait = if double {
+                    Duration::from_millis(DoubleTapData::TIMEOUT_MS as u64)
+                } else {
+                    Duration::ZERO
+                };
+                let fired = state.released_at.is_some_and(|at| now - at >= wait);
+                if fired {
+                    state.released_at = None;
+                }
+                fired
+            }
+        };
+
+        let changed_since_last_sync = state.last_state != current_state;
+        state.last_state = current_state;
+        Ok(Some(xr::ActionState {
+            current_state,
+            changed_since_last_sync,
+            last_change_time: press.last_change_time,
+            is_active: true,
+        }))
+    }
+}
+
 enum BindingState {
     Unsynced,
     Synced(Option<xr::ActionState<bool>>),
@@ -663,6 +762,7 @@ mod tests {
     use openvr as vr;
     use slotmap::Key;
     use std::ffi::CStr;
+    use std::time::Duration;
 
     macro_rules! get_dpad_action {
         ($fixture:expr, $handle:expr, $dpad_data:ident, $profile:ident) => {
@@ -1767,6 +1867,80 @@ mod tests {
         set_action_late(true);
         f.sync(active_set);
         f.verify_bool_state(boolact, active_state.set_changed());
+    }
+
+    #[test]
+    fn timed_presses() {
+        let mut f = Fixture::new();
+        let set1 = vr::VRActiveActionSet_t {
+            ulActionSet: f.get_action_set_handle(c"/actions/set1"),
+            ..Default::default()
+        };
+        let [click, long, held, single, double, single_now] = [
+            c"/actions/set1/in/click",
+            c"/actions/set1/in/long",
+            c"/actions/set1/in/held",
+            c"/actions/set1/in/single",
+            c"/actions/set1/in/double",
+            c"/actions/set1/in/single_now",
+        ]
+        .map(|name| f.get_action_handle(name));
+        f.load_actions(c"actions_timed.json");
+        f.set_interaction_profile::<Knuckles>(LeftHand);
+        f.set_interaction_profile::<Knuckles>(RightHand);
+
+        let a_click = f.get_action::<bool>(click);
+        let a_bool = f.get_action::<bool>(
+            f.get_action_handle(c"/user/hand/left/input/a/click-/actions/set1-bool"),
+        );
+        let a_float = f
+            .get_action::<f32>(f.get_action_handle(c"/user/hand/left/input/a/click-/actions/set1"));
+        let time = std::cell::Cell::new(0);
+        let press_a = |pressed: bool| {
+            // Presses a second apart, so only the timed bindings see them close together.
+            time.set(time.get() + 1_000_000_000);
+            fakexr::set_action_state(a_click, pressed.into(), LeftHand);
+            fakexr::set_action_state_with_time(
+                a_bool,
+                pressed.into(),
+                LeftHand,
+                xr::Time::from_nanos(time.get()),
+            );
+            fakexr::set_action_state(a_float, ActionState::Float(pressed as u8 as f32), LeftHand);
+        };
+        let states = |f: &mut Fixture| {
+            f.sync(set1);
+            [click, long, held, single, double].map(|a| f.get_bool_state(a).unwrap().bState)
+        };
+
+        // Holding past the long press delay.
+        press_a(false);
+        assert_eq!(states(&mut f), [false; 5]);
+        press_a(true);
+        assert_eq!(states(&mut f), [true, false, false, false, false]);
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(states(&mut f), [true, true, true, false, false]);
+        press_a(false);
+        // Not a single press either.
+        assert_eq!(states(&mut f), [false; 5]);
+        std::thread::sleep(Duration::from_millis(DoubleTapData::TIMEOUT_MS as u64 + 10));
+        assert_eq!(states(&mut f), [false; 5]);
+
+        // A short press is a single press once a double tap is ruled out.
+        press_a(true);
+        assert_eq!(states(&mut f), [true, false, false, false, false]);
+        press_a(false);
+        assert_eq!(states(&mut f), [false; 5]);
+        std::thread::sleep(Duration::from_millis(DoubleTapData::TIMEOUT_MS as u64 + 10));
+        assert_eq!(states(&mut f), [false, false, false, true, false]);
+        assert_eq!(states(&mut f), [false; 5]);
+
+        // Without a double or long binding, single is a click.
+        let b_click = f.get_action::<bool>(single_now);
+        fakexr::set_action_state(b_click, true.into(), RightHand);
+        f.sync(set1);
+        let right = f.get_input_source_handle(c"/user/hand/right");
+        assert!(f.get_bool_state_hand(single_now, right).unwrap().bState);
     }
 
     #[test]

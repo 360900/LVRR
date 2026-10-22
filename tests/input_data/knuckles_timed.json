@@ -1,0 +1,44 @@
+{
+	"bindings": {
+		"/actions/set1": {
+			"sources": [
+				{
+					"mode": "button",
+					"path": "/user/hand/left/input/a",
+					"inputs": {
+						"click": {
+							"output": "/actions/set1/in/click"
+						},
+						"long": {
+							"output": "/actions/set1/in/long"
+						},
+						"held": {
+							"output": "/actions/set1/in/held"
+						},
+						"single": {
+							"output": "/actions/set1/in/single"
+						},
+						"double": {
+							"output": "/actions/set1/in/double"
+						}
+					},
+					"parameters": {
+						"long_press_delay": "0.05"
+					}
+				},
+				{
+					"mode": "button",
+					"path": "/user/hand/right/input/b",
+					"inputs": {
+						"single": {
+							"output": "/actions/set1/in/single_now"
+						},
+						"triple": {
+							"output": "/actions/set1/in/click"
+						}
+					}
+				}
+			]
+		}
+	}
+}
