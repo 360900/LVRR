@@ -89,6 +89,12 @@ struct FrameMetrics {
     system_start: Instant,
     index: AtomicU32,
     time: AtomicF64,
+    /// Vsyncs the runtime had to show an older frame for, before the latest frame and in total.
+    last_dropped: AtomicU32,
+    dropped: AtomicU32,
+    /// Frames with app content, and the sum of their display periods in milliseconds.
+    submits: AtomicU32,
+    target_frame_times: AtomicF64,
 }
 
 struct TempBackendData<G: GraphicsBackend> {
@@ -111,6 +117,10 @@ impl Compositor {
                 system_start: Instant::now(),
                 index: 0.into(),
                 time: 0.0.into(),
+                last_dropped: 0.into(),
+                dropped: 0.into(),
+                submits: 0.into(),
+                target_frame_times: 0.0.into(),
             },
             timing_mode: vr::EVRCompositorTimingMode::Implicit.into(),
             frame_state: FrameState::Submitted.into(),
@@ -143,11 +153,11 @@ impl Compositor {
         #[macros::any_graphics(DynFrameController)]
         fn wait_frame<G: GraphicsBackend + 'static>(
             ctrl: &mut FrameController<G>,
-        ) -> xr::Result<(xr::Time, i64)> {
+        ) -> xr::Result<(xr::Time, i64, u32)> {
             ctrl.wait_frame()
         }
 
-        let Some((display_time, display_period)) = self.openxr.check(
+        let Some((display_time, display_period, dropped)) = self.openxr.check(
             "Waiting for frame",
             ctrl.with_any_graphics_mut::<wait_frame>(()),
         ) else {
@@ -155,6 +165,8 @@ impl Compositor {
             *self.frame_state.lock().unwrap() = FrameState::Submitted;
             return false;
         };
+        self.metrics.last_dropped.store(dropped, Ordering::Relaxed);
+        self.metrics.dropped.fetch_add(dropped, Ordering::Relaxed);
         self.openxr.set_frame_timing(display_time, display_period);
         true
     }
@@ -690,11 +702,25 @@ impl vr::IVRCompositor029_Interface for Compositor {
         pStats: *mut vr::Compositor_CumulativeStats,
         nStatsSizeInBytes: u32,
     ) {
-        crate::warn_unimplemented!("GetCumulativeStats");
-        if !pStats.is_null() {
-            let len = (nStatsSizeInBytes as usize).min(size_of::<vr::Compositor_CumulativeStats>());
-            unsafe { pStats.cast::<u8>().write_bytes(0, len) };
+        if pStats.is_null() {
+            return;
         }
+        let metrics = &self.metrics;
+        let dropped = metrics.dropped.load(Ordering::Relaxed);
+        // The runtime may reproject, but OpenXR doesn't tell us, so dropped frames include them.
+        let stats = vr::Compositor_CumulativeStats {
+            m_nPid: std::process::id(),
+            m_nNumFramePresents: metrics.index.load(Ordering::Relaxed).wrapping_add(dropped),
+            m_nNumDroppedFrames: dropped,
+            m_nNumFrameSubmits: metrics.submits.load(Ordering::Relaxed),
+            m_flSumTargetFrameTimes: metrics.target_frame_times.load(),
+            ..Default::default()
+        };
+        // Older versions of the struct are smaller.
+        let len = (nStatsSizeInBytes as usize).min(size_of::<vr::Compositor_CumulativeStats>());
+        unsafe {
+            std::ptr::copy_nonoverlapping((&raw const stats).cast::<u8>(), pStats.cast(), len)
+        };
     }
     fn GetFrameTimeRemaining(&self) -> f32 {
         let Some((since, _)) = self.openxr.vsync_timing() else {
@@ -729,7 +755,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
         }
         nFrames
     }
-    fn GetFrameTiming(&self, timing: *mut vr::Compositor_FrameTiming, _frames_ago: u32) -> bool {
+    fn GetFrameTiming(&self, timing: *mut vr::Compositor_FrameTiming, frames_ago: u32) -> bool {
         if timing.is_null() || !timing.is_aligned() {
             return false;
         }
@@ -744,6 +770,30 @@ impl vr::IVRCompositor029_Interface for Compositor {
         {
             return false;
         }
+        // Fields we have no value for are zeroed, as far as the app's struct version has them.
+        let len = size.min(size_of::<vr::Compositor_FrameTiming>());
+        unsafe {
+            timing
+                .cast::<u8>()
+                .add(size_of::<u32>())
+                .write_bytes(0, len - size_of::<u32>())
+        };
+        // Only the latest frame's pose and dropped frames are known.
+        let latest = frames_ago == 0;
+        let hmd_pose = self.input.get().filter(|_| latest).and_then(|input| {
+            input.get_device_pose(
+                vr::k_unTrackedDeviceIndex_Hmd,
+                None,
+                self.openxr.display_time.get(),
+                None,
+            )
+        });
+        let dropped = if latest {
+            self.metrics.last_dropped.load(Ordering::Relaxed)
+        } else {
+            0
+        };
+
         // We're using raw pointers here because the Compositor_FrameTiming struct can be a
         // varaible size, so we don't want to create a reference to a struct with an incorrect
         // (to us) size, because that would be Undefined Behavior.
@@ -760,6 +810,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
             set!(m_nFrameIndex, self.metrics.index.load(Ordering::Relaxed));
             set!(m_nNumFramePresents, 1);
             set!(m_nNumMisPresented, 0);
+            set!(m_nNumDroppedFrames, dropped);
             set!(m_nReprojectionFlags, 0);
             set!(m_flSystemTimeInSeconds, self.metrics.time.load());
             set!(m_flPreSubmitGpuMs, 8.0);
@@ -784,6 +835,9 @@ impl vr::IVRCompositor029_Interface for Compositor {
             set!(m_flCompositorUpdateStartMs, 0.0);
             set!(m_flCompositorUpdateEndMs, 0.0);
             set!(m_flCompositorRenderStartMs, 0.0);
+            if let Some(pose) = hmd_pose {
+                set!(m_HmdPose, pose);
+            }
         }
 
         true
@@ -797,7 +851,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
             display_time: xr::Time,
             overlays: Option<&OverlayMan>,
             max_layers: usize,
-        ) -> xr::Result<()>
+        ) -> xr::Result<bool>
         where
             for<'b> &'b crate::overlay::AnySwapchainMap:
                 TryInto<&'b crate::overlay::SwapchainMap<G::Api>, Error: std::fmt::Display>,
@@ -833,13 +887,19 @@ impl vr::IVRCompositor029_Interface for Compositor {
             self.openxr.max_layer_count,
         ));
         // A frame that failed to end is discarded by the next xrBeginFrame.
-        self.openxr.check("Ending frame", result);
+        let submitted = self.openxr.check("Ending frame", result).unwrap_or(false);
 
         self.frame_state
             .lock()
             .unwrap()
             .advance_to(FrameState::Submitted);
 
+        if submitted {
+            self.metrics.submits.fetch_add(1, Ordering::Relaxed);
+            let period = self.openxr.display_period_nanos.load(Ordering::Relaxed);
+            let target_ms = self.metrics.target_frame_times.load() + period as f64 / 1e6;
+            self.metrics.target_frame_times.store(target_ms);
+        }
         self.metrics.index.fetch_add(1, Ordering::Relaxed);
         self.metrics
             .time
@@ -1407,6 +1467,7 @@ struct FrameController<G: GraphicsBackend> {
     app_fade_grid: bool,
     eyes_submitted: [Option<SubmittedEye>; 2],
     submitting_null: bool,
+    last_display_time: Option<xr::Time>,
 }
 supported_backends_enum!(enum DynFrameController: FrameController);
 
@@ -1497,6 +1558,7 @@ impl<G: GraphicsBackend> FrameController<G> {
             app_fade_grid: false,
             eyes_submitted: Default::default(),
             submitting_null: false,
+            last_display_time: None,
             backend,
         }
     }
@@ -1544,16 +1606,20 @@ impl<G: GraphicsBackend> FrameController<G> {
         Ok(())
     }
 
-    fn wait_frame(&mut self) -> xr::Result<(xr::Time, i64)> {
+    /// Returns the predicted display time and period, and the vsyncs missed since the last frame.
+    fn wait_frame(&mut self) -> xr::Result<(xr::Time, i64, u32)> {
         let frame_state = {
             tracy_span!("wait frame");
             self.waiter.wait()?
         };
         self.should_render = frame_state.should_render && !self.app_suspend_render;
-        Ok((
-            frame_state.predicted_display_time,
-            frame_state.predicted_display_period.as_nanos(),
-        ))
+        let display_time = frame_state.predicted_display_time;
+        let period = frame_state.predicted_display_period.as_nanos();
+        let missed = self
+            .last_display_time
+            .replace(display_time)
+            .map_or(0, |last| missed_vsyncs(last, display_time, period));
+        Ok((display_time, period, missed))
     }
 
     fn begin_frame(&mut self) -> xr::Result<()> {
@@ -1664,6 +1730,7 @@ impl<G: GraphicsBackend> FrameController<G> {
         Ok(())
     }
 
+    /// Returns whether the frame had app content.
     fn end_frame(
         &mut self,
         session_data: &SessionData,
@@ -1671,7 +1738,7 @@ impl<G: GraphicsBackend> FrameController<G> {
         display_time: xr::Time,
         overlays: Option<&OverlayMan>,
         max_layers: usize,
-    ) -> xr::Result<()>
+    ) -> xr::Result<bool>
     where
         for<'b> &'b crate::overlay::AnySwapchainMap:
             TryInto<&'b crate::overlay::SwapchainMap<G::Api>, Error: std::fmt::Display>,
@@ -1769,8 +1836,18 @@ impl<G: GraphicsBackend> FrameController<G> {
             .end(display_time, xr::EnvironmentBlendMode::OPAQUE, &layers)?;
 
         trace!("frame submitted");
-        Ok(())
+        Ok(proj_layer.is_some())
     }
+}
+
+/// Vsyncs between two consecutive frames' display times for which an older frame was shown.
+fn missed_vsyncs(last: xr::Time, next: xr::Time, period: i64) -> u32 {
+    if period <= 0 {
+        return 0;
+    }
+    // Rounded, since predicted display times jitter a little.
+    let vsyncs = (next.as_nanos() - last.as_nanos() + period / 2) / period;
+    (vsyncs - 1).clamp(0, u32::MAX.into()) as u32
 }
 
 pub fn is_usable_swapchain<G: xr::Graphics, F>(
@@ -2553,16 +2630,111 @@ mod tests {
                 .write(std::mem::size_of::<vr::Compositor_FrameTiming>() as u32);
         }
         assert!(f.comp.GetFrameTiming(timing.as_mut_ptr(), 1));
-        let small_size = std::mem::offset_of!(vr::Compositor_FrameTiming, m_HmdPose)
-            + std::mem::size_of::<vr::TrackedDevicePose_t>();
         unsafe {
-            (&raw mut (*timing.as_mut_ptr()).m_nSize).write(small_size as u32);
+            (&raw mut (*timing.as_mut_ptr()).m_nSize).write(FRAME_TIMING_MIN_SIZE as u32);
         }
         assert!(f.comp.GetFrameTiming(timing.as_mut_ptr(), 1));
         unsafe {
             (&raw mut (*timing.as_mut_ptr()).m_nSize).write(0);
         }
         assert!(!f.comp.GetFrameTiming(timing.as_mut_ptr(), 1));
+    }
+
+    const FRAME_TIMING_MIN_SIZE: usize =
+        std::mem::offset_of!(vr::Compositor_FrameTiming, m_HmdPose)
+            + std::mem::size_of::<vr::TrackedDevicePose_t>();
+
+    /// Bytes of a frame timing struct the app filled with garbage, plus a canary after it.
+    #[repr(C)]
+    struct FrameTimingBuffer {
+        timing: [u8; size_of::<vr::Compositor_FrameTiming>()],
+        canary: u32,
+    }
+
+    impl FrameTimingBuffer {
+        fn new(size: usize) -> Self {
+            let mut buf = Self {
+                timing: [0xaa; size_of::<vr::Compositor_FrameTiming>()],
+                canary: u32::MAX,
+            };
+            buf.timing[..4].copy_from_slice(&(size as u32).to_ne_bytes());
+            buf
+        }
+
+        fn ptr(&mut self) -> *mut vr::Compositor_FrameTiming {
+            self.timing.as_mut_ptr().cast()
+        }
+
+        fn pose_valid(&self) -> u8 {
+            self.timing[std::mem::offset_of!(vr::Compositor_FrameTiming, m_HmdPose)
+                + std::mem::offset_of!(vr::TrackedDevicePose_t, bPoseIsValid)]
+        }
+    }
+
+    /// Fields without a value must not keep whatever the app's buffer had in them.
+    #[test]
+    fn get_frame_timing_initializes_struct() {
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+        // fakexr can't locate the HMD in the stage space.
+        f.comp.SetTrackingSpace(vr::ETrackingUniverseOrigin::Seated);
+        let input = Arc::new(Input::new(f.comp.openxr.clone()));
+        f.comp.input.set(Arc::downgrade(&input));
+        f.comp.openxr.input.set(Arc::downgrade(&input));
+        assert_eq!(f.wait_get_poses(), None);
+
+        let full = size_of::<vr::Compositor_FrameTiming>();
+        let mut buf = FrameTimingBuffer::new(full);
+        assert!(f.comp.GetFrameTiming(buf.ptr(), 0));
+        let timing = unsafe { buf.ptr().read() };
+        assert_eq!({ timing.m_nNumDroppedFrames }, 0);
+        assert_eq!({ timing.m_nNumVSyncsReadyForUse }, 0);
+        assert_eq!({ timing.m_flTransferLatencyMs }, 0.0);
+        assert_eq!(buf.pose_valid(), 1);
+        assert_eq!(buf.canary, u32::MAX);
+
+        // Older frames have no pose.
+        let mut buf = FrameTimingBuffer::new(full);
+        assert!(f.comp.GetFrameTiming(buf.ptr(), 1));
+        assert_eq!(buf.pose_valid(), 0);
+
+        // An older, smaller struct only has its own bytes written.
+        let mut buf = FrameTimingBuffer::new(FRAME_TIMING_MIN_SIZE);
+        assert!(f.comp.GetFrameTiming(buf.ptr(), 0));
+        assert!(
+            buf.timing[4..FRAME_TIMING_MIN_SIZE]
+                .iter()
+                .any(|b| *b != 0xaa)
+        );
+        assert!(
+            buf.timing[FRAME_TIMING_MIN_SIZE..]
+                .iter()
+                .all(|b| *b == 0xaa)
+        );
+
+        // Every entry of GetFrameTimings is initialized.
+        let words = FRAME_TIMING_MIN_SIZE / 4;
+        let mut bufs = vec![0xaaaa_aaaau32; 3 * words];
+        bufs[0] = FRAME_TIMING_MIN_SIZE as u32;
+        assert_eq!(
+            vr::IVRCompositor029_Interface::GetFrameTimings(&*f.comp, bufs.as_mut_ptr().cast(), 3),
+            3
+        );
+        let dropped = std::mem::offset_of!(vr::Compositor_FrameTiming, m_nNumDroppedFrames) / 4;
+        for entry in bufs.chunks(words) {
+            assert_eq!(entry[dropped], 0);
+        }
+    }
+
+    #[test]
+    fn missed_vsyncs_between_frames() {
+        let t = xr::Time::from_nanos;
+        assert_eq!(missed_vsyncs(t(100), t(110), 10), 0);
+        assert_eq!(missed_vsyncs(t(100), t(119), 10), 1);
+        assert_eq!(missed_vsyncs(t(100), t(131), 10), 2);
+        assert_eq!(missed_vsyncs(t(100), t(100), 10), 0);
+        assert_eq!(missed_vsyncs(t(100), t(50), 10), 0);
+        assert_eq!(missed_vsyncs(t(100), t(200), 0), 0);
     }
 
     #[test]
@@ -3254,7 +3426,7 @@ mod tests {
     }
 
     #[test]
-    fn get_cumulative_stats_zeroes_requested_bytes() {
+    fn get_cumulative_stats() {
         use vr::IVRCompositor029_Interface as C29;
         // The canary sits right after the stats and must never be written.
         #[repr(C)]
@@ -3272,20 +3444,30 @@ mod tests {
         let size = size_of::<vr::Compositor_CumulativeStats>();
         let f = Fixture::new();
         let c = &*f.comp;
+        // Two frames without app content (the session isn't synchronized yet), then two with it.
+        f.ensure_real_session(false);
+        for _ in 0..3 {
+            assert_eq!(f.submit(vr::EVREye::Left), None);
+            assert_eq!(f.submit(vr::EVREye::Right), None);
+            assert_eq!(f.wait_get_poses(), None);
+        }
 
         // a size larger than the struct is clamped to the struct
         let mut buf = buffer();
         C29::GetCumulativeStats(c, &mut buf.stats, size_of::<Buffer>() as u32);
-        assert_eq!(buf.stats.m_nPid, 0);
-        assert_eq!(buf.stats.m_nNumFrameSubmits, 0);
+        assert_eq!(buf.stats.m_nPid, std::process::id());
+        assert_eq!(buf.stats.m_nNumFramePresents, 4);
+        assert_eq!(buf.stats.m_nNumDroppedFrames, 0);
+        assert_eq!(buf.stats.m_nNumFrameSubmits, 2);
+        assert!(buf.stats.m_flSumTargetFrameTimes > 0.0);
         assert_eq!(buf.stats.m_flSumCompositorCPUTimeMS, 0.0);
         assert_eq!(buf.canary, u64::MAX);
 
-        // an older, smaller struct only has its own bytes zeroed
+        // an older, smaller struct only has its own bytes written
         let mut buf = buffer();
         C29::GetCumulativeStats(c, &mut buf.stats, 8);
-        assert_eq!(buf.stats.m_nPid, 0);
-        assert_eq!(buf.stats.m_nNumFramePresents, 0);
+        assert_eq!(buf.stats.m_nPid, std::process::id());
+        assert_eq!(buf.stats.m_nNumFramePresents, 4);
         assert_eq!(buf.stats.m_nNumDroppedFrames, u32::MAX);
 
         C29::GetCumulativeStats(c, std::ptr::null_mut(), size as u32);
