@@ -2391,12 +2391,13 @@ impl<C: openxr_data::Compositor> vr::IVRInput004On005 for Input<C> {
         name_array: *mut c_char,
         name_array_size: u32,
     ) -> vr::EVRInputError {
+        // IVRInput_004 has no section mask and returns the whole name (VRInputString_All).
         <Self as vr::IVRInput010_Interface>::GetOriginLocalizedName(
             self,
             origin,
             name_array,
             name_array_size,
-            0,
+            -1,
         )
     }
 

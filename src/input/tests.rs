@@ -2004,6 +2004,19 @@ fn action_origins() {
         buf_str(&name),
         "Left Hand / touch controller / /user/hand/left/input/trigger/touch"
     );
+
+    // IVRInput_004 has no section mask and gets the whole name.
+    let mut name_004 = [0 as std::ffi::c_char; 256];
+    assert_eq!(
+        vr::IVRInput004On005::GetOriginLocalizedName(
+            f.input.as_ref(),
+            origins[0],
+            name_004.as_mut_ptr(),
+            name_004.len() as u32,
+        ),
+        vr::EVRInputError::None
+    );
+    assert_eq!(buf_str(&name_004), buf_str(&name));
 }
 
 #[test]
