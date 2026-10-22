@@ -9,7 +9,7 @@ use glam::{Quat, Vec3, vec3};
 use log::{debug, trace};
 use openvr as vr;
 use openxr as xr;
-use slotmap::{Key, KeyData, SecondaryMap, SlotMap, new_key_type};
+use slotmap::{Key, KeyData, SecondaryMap, SlotMap, new_key_type, secondary::Entry};
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::{
@@ -140,7 +140,7 @@ impl OverlayMan {
             },
         ));
 
-        match overlay.set_texture(key, session_data, *texture) {
+        match overlay.set_texture(&self.openxr, key, session_data, *texture) {
             Ok(()) => {
                 skybox.push(key);
                 Ok(())
@@ -598,6 +598,7 @@ impl Overlay {
 
     fn set_texture(
         &mut self,
+        openxr: &OpenXrData<Compositor>,
         key: OverlayKey,
         session_data: RealSessionData<'_>,
         texture: vr::Texture_t,
@@ -625,6 +626,7 @@ impl Overlay {
         #[macros::any_graphics(SupportedBackend)]
         fn set_swapchain_texture<G: GraphicsBackend>(
             backend: &mut G,
+            openxr: &OpenXrData<Compositor>,
             session_data: &SessionData,
             texture_bounds: vr::VRTextureBounds_t,
             map: &mut AnySwapchainMap,
@@ -661,35 +663,33 @@ impl Overlay {
                 info.array_size = 1;
                 let initial_format = info.format;
                 session_data.check_format::<G>(&mut info);
-                let swapchain = session_data.create_swapchain(&info).unwrap();
-                let images = swapchain
-                    .enumerate_images()
-                    .expect("Couldn't enumerate swapchain images");
+                let swapchain = session_data.create_swapchain(&info)?;
+                let images = swapchain.enumerate_images()?;
                 backend.store_swapchain_images(images, G::from_openxr_format(info.format));
-                SwapchainData {
+                Ok(SwapchainData {
                     swapchain,
                     info,
                     initial_format,
-                }
+                })
+            };
+            let failed = |e| {
+                openxr.handle_error("Updating overlay swapchain", e);
+                vr::EVROverlayError::RequestFailed
             };
             let swapchain = {
-                let data = map
-                    .entry(key)
-                    .unwrap()
-                    .or_insert_with(&mut create_swapchain);
+                let data = match map.entry(key).unwrap() {
+                    Entry::Occupied(entry) => entry.into_mut(),
+                    Entry::Vacant(entry) => entry.insert(create_swapchain().map_err(failed)?),
+                };
                 if !is_usable_swapchain(
                     &data.info,
                     G::from_openxr_format(data.initial_format),
                     &tex_swapchain_info,
                     G::from_openxr_format(tex_swapchain_info.format),
                 ) {
-                    *data = create_swapchain();
+                    *data = create_swapchain().map_err(failed)?;
                 }
                 &mut data.swapchain
-            };
-            let failed = |e| {
-                log::warn!("Failed to update overlay swapchain: {e}");
-                vr::EVROverlayError::RequestFailed
             };
             let idx = swapchain.acquire_image().map_err(failed)?;
             swapchain
@@ -704,6 +704,7 @@ impl Overlay {
 
         let backend = self.compositor.as_mut().unwrap();
         let extent = backend.with_any_graphics_mut::<set_swapchain_texture>((
+            openxr,
             &session_data,
             self.bounds,
             swapchains,
@@ -1069,7 +1070,7 @@ impl vr::IVROverlay028_Interface for OverlayMan {
 
         let key = OverlayKey::from(KeyData::from_ffi(handle));
         get_overlay!(self, handle, mut overlay);
-        match overlay.set_texture(key, data, texture) {
+        match overlay.set_texture(&self.openxr, key, data, texture) {
             Err(e) => {
                 debug!(
                     "failed to set overlay texture for {:?}: {e:?}",

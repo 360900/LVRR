@@ -2818,6 +2818,30 @@ mod tests {
         assert_eq!(quit_events(&system), [true]);
     }
 
+    /// A loss first seen when SetOverlayTexture creates the overlay's swapchain.
+    #[test]
+    fn session_lost_on_overlay_texture() {
+        use vr::IVROverlay027_Interface;
+
+        let f = Fixture::new();
+        let system = f.system();
+        let overlays = f.overlay_man();
+        f.ensure_real_session(false);
+        let mut overlay = 0;
+        assert_eq!(
+            overlays.CreateOverlay(c"overlay".as_ptr(), c"overlay".as_ptr(), &mut overlay),
+            vr::EVROverlayError::None
+        );
+
+        fakexr::lose_session(f.raw_session());
+        assert_eq!(
+            overlays.SetOverlayTexture(overlay, &FakeGraphicsData::texture(&f.vk)),
+            vr::EVROverlayError::RequestFailed
+        );
+        assert!(f.comp.openxr.is_lost());
+        assert_eq!(quit_events(&system), [true]);
+    }
+
     /// WiVRn stops the app and loses its session if it doesn't quit in time. The app is only told
     /// to quit once.
     #[test]
