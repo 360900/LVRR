@@ -50,6 +50,9 @@ static RUST_ENUMS: &[&str] = &[
     "VROverlayTransformType",
 ];
 
+// Struct fields of a RUST_ENUMS type, only allowed where xrizer fills the struct.
+static RUST_ENUM_FIELDS: &[(&str, &str)] = &[("RenderModel_TextureMap_t", "format")];
+
 static BITFIELD_ENUMS: &[&str] = &["EVRSubmitFlags", "EVRComponentProperty", "EKeyboardFlags"];
 
 #[derive(Debug)]
@@ -428,6 +431,27 @@ fn extract_array_or_ptr_type(array: &mut syn::Type) -> &mut syn::Type {
     }
 }
 
+/// Apps can pass any struct in, so its fields can't be Rust enums unless xrizer fills it.
+fn check_rust_enum_fields<'a>(item: &syn::Ident, fields: impl IntoIterator<Item = &'a syn::Field>) {
+    for field in fields {
+        let mut ty = field.ty.clone();
+        let syn::Type::Path(path) = extract_array_or_ptr_type(&mut ty) else {
+            continue;
+        };
+        let ty = path.path.segments.last().unwrap().ident.to_string();
+        if !RUST_ENUMS.contains(&ty.as_str()) {
+            continue;
+        }
+        let field = field.ident.as_ref().unwrap();
+        assert!(
+            RUST_ENUM_FIELDS
+                .iter()
+                .any(|&(s, f)| item == s && field == f),
+            "{item}::{field} can be filled by the app, remove {ty} from RUST_ENUMS"
+        );
+    }
+}
+
 fn unversion_type(ty: &mut syn::Type) -> Result<(), String> {
     match extract_array_or_ptr_type(ty) {
         syn::Type::Path(ty) => {
@@ -786,6 +810,7 @@ fn process_vr_namespace_content(
             }
             syn::Item::Union(mut item) => {
                 unversion_fields(&mut item.fields.named);
+                check_rust_enum_fields(&item.ident, &item.fields.named);
                 if (vr_mod.ident == "vr_0_9_12"
                     || vr_mod.ident == "vr_0_9_15"
                     || vr_mod.ident == "vr_0_9_17"
@@ -842,6 +867,7 @@ fn process_vr_namespace_content(
                         reversion_type(&incompatible_items, &mut field.ty);
                     }
                 }
+                check_rust_enum_fields(&item.ident, &item.fields);
 
                 if should_reversion {
                     incompatible_items.insert(item.ident.to_string(), item.into());
