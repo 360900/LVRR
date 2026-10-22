@@ -709,7 +709,7 @@ impl vr::IVRSystem026_Interface for System {
                 .map(|v| v.v.map(f32::to_bits))
                 .collect::<Vec<_>>()
         };
-        let key = (eye as u32, ty as u32);
+        let key = (view_index(eye) as u32, ty.0);
         let mesh = match meshes.get(&key) {
             Some(&mesh) if bits(mesh) == bits(&vertices) => mesh,
             _ => {
@@ -1658,6 +1658,18 @@ mod tests {
             mesh(vr::EHiddenAreaMeshType::Standard).pVertexData,
             triangles.pVertexData
         );
+
+        // Anything that isn't the left eye shares the right eye's mesh.
+        let eye_mesh = |eye| {
+            vr::IVRSystem026_Interface::GetHiddenAreaMesh(
+                &system,
+                eye,
+                vr::EHiddenAreaMeshType::Standard,
+            )
+        };
+        let right = eye_mesh(vr::EVREye::Right);
+        assert_eq!(right.unTriangleCount, 2);
+        assert_eq!(eye_mesh(vr::EVREye(2)).pVertexData, right.pVertexData);
 
         // Runtimes may not have a mask yet.
         fakexr::set_visibility_mask(Some((Vec::new(), Vec::new())));
