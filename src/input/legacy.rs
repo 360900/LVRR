@@ -1122,6 +1122,42 @@ mod tests {
     }
 
     #[test]
+    fn buttons_held_across_connection_changes() {
+        use fakexr::UserPath::*;
+        use vr::EVREventType::*;
+        let mut f = Fixture::new();
+        f.input.openxr.restart_session();
+        f.input.frame_start_update();
+        let trigger = legacy_action(&f, |actions| actions.trigger_click.as_raw());
+        let expect_device_event = |f: &Fixture, ty: vr::EVREventType, index| {
+            let event = next_event(f).unwrap_or_else(|| panic!("Expected {ty:?}"));
+            assert_eq!((event.ty, event.index), (ty as u32, index));
+        };
+
+        // Turned on with the trigger held: the activation comes first.
+        fakexr::set_action_state(trigger, true.into(), LeftHand);
+        f.set_interaction_profile::<Knuckles>(LeftHand);
+        f.input.frame_start_update();
+        f.input.openxr.poll_events();
+        f.input.frame_start_update();
+        expect_device_event(&f, TrackedDeviceActivated, 0);
+        expect_device_event(&f, TrackedDeviceActivated, 1);
+        expect_button_event(&f, ButtonTouch, 1, vr::EVRButtonId::SteamVR_Trigger);
+        expect_button_event(&f, ButtonPress, 1, vr::EVRButtonId::SteamVR_Trigger);
+        expect_no_event(&f);
+
+        // Turned off with the trigger held: it is released before the deactivation.
+        fakexr::set_interaction_profile(f.raw_session(), LeftHand, xr::Path::NULL);
+        fakexr::deactivate_action(trigger);
+        f.input.frame_start_update();
+        f.input.openxr.poll_events();
+        expect_button_event(&f, ButtonUnpress, 1, vr::EVRButtonId::SteamVR_Trigger);
+        expect_button_event(&f, ButtonUntouch, 1, vr::EVRButtonId::SteamVR_Trigger);
+        expect_device_event(&f, TrackedDeviceDeactivated, 1);
+        expect_no_event(&f);
+    }
+
+    #[test]
     fn unpolled_button_events_are_bounded() {
         use fakexr::UserPath::*;
         let (f, trigger) = legacy_fixture(|actions| actions.trigger_click.as_raw());

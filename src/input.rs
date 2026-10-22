@@ -2717,7 +2717,12 @@ impl<C: openxr_data::Compositor> Input<C> {
         }
         let data = self.openxr.session_data.get();
         let devices = data.input_data.devices.read().unwrap();
+        let mut events = self.events.lock().unwrap();
 
+        // The frame update may already have queued button events for a device that connected
+        // since the last poll, so its activation goes ahead of them. A deactivation goes after
+        // the releases queued for it.
+        let mut activations = 0;
         for (i, device) in devices.iter().enumerate() {
             let current = device.connected;
 
@@ -2728,7 +2733,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                     if current { "" } else { "not " }
                 );
 
-                self.events.lock().unwrap().push_back(InputEvent {
+                let event = InputEvent {
                     ty: if current {
                         vr::EVREventType::TrackedDeviceActivated
                     } else {
@@ -2736,11 +2741,17 @@ impl<C: openxr_data::Compositor> Input<C> {
                     },
                     index: i as vr::TrackedDeviceIndex_t,
                     data: Default::default(),
-                });
+                };
+                if current {
+                    events.insert(activations, event);
+                    activations += 1;
+                } else {
+                    events.push_back(event);
+                }
             }
         }
 
-        if let Some(event) = self.events.lock().unwrap().pop_front() {
+        if let Some(event) = events.pop_front() {
             const MIN_CONTROLLER_EVENT_SIZE: usize = std::mem::offset_of!(vr::VREvent_t, data)
                 + std::mem::size_of::<vr::VREvent_Controller_t>();
             if size < MIN_CONTROLLER_EVENT_SIZE as u32 {
