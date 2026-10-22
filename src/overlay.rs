@@ -201,9 +201,8 @@ impl OverlayMan {
     where
         for<'b> &'b AnySwapchainMap: TryInto<&'b SwapchainMap<G>, Error: std::fmt::Display>,
     {
-        let input = self.openxr.input.get();
-        let display_time = self.openxr.get_display_time();
-        let mut overlays = self.overlays.write().unwrap();
+        let mut input = None;
+        let overlays = self.overlays.read().unwrap();
         let swapchains_guard = session.overlay_data.swapchains.lock().unwrap();
         let Some(swapchains) = swapchains_guard.as_ref() else {
             return OverlayLayers {
@@ -219,7 +218,7 @@ impl OverlayMan {
         });
 
         let mut layers = Vec::with_capacity(overlays.len());
-        for (key, overlay) in overlays.iter_mut() {
+        for (key, overlay) in overlays.iter() {
             if !overlay.visible || (overlay.z_order == SKYBOX_Z_ORDER && !render_skybox) {
                 continue;
             }
@@ -256,7 +255,9 @@ impl OverlayMan {
                     }
                     TransformKind::TrackedDeviceRelative(device) => {
                         // Not drawn while its device isn't tracked.
+                        let display_time = self.openxr.get_display_time();
                         let Some(device_pose) = input
+                            .get_or_insert_with(|| self.openxr.input.get())
                             .as_ref()
                             .and_then(|i| i.get_device_pose(device, None, display_time, None))
                             .filter(|p| p.bPoseIsValid)
