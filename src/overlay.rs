@@ -136,11 +136,10 @@ impl OverlayMan {
         overlay.z_order = SKYBOX_Z_ORDER;
         // SteamVR draws the skybox opaque, whatever the texture's alpha says.
         overlay.flags = vr::VROverlayFlags::IgnoreTextureAlpha as u32;
-        overlay.scale = (1.0, 1.0);
         overlay.bounds = bounds;
         overlay.visible = true;
-        overlay.transform = Some((
-            vr::ETrackingUniverseOrigin::Seated,
+        overlay.set_transform(
+            TransformKind::Absolute(vr::ETrackingUniverseOrigin::Seated),
             vr::HmdMatrix34_t {
                 m: [
                     [1.0, 0.0, 0.0, 0.0],
@@ -148,7 +147,7 @@ impl OverlayMan {
                     [0.0, 0.0, 1.0, -DISTANCE],
                 ],
             },
-        ));
+        );
 
         match overlay.set_texture(&self.openxr, key, session_data, *texture) {
             Ok(()) => {
@@ -180,6 +179,8 @@ impl OverlayMan {
     where
         for<'b> &'b AnySwapchainMap: TryInto<&'b SwapchainMap<G>, Error: std::fmt::Display>,
     {
+        let input = self.openxr.input.get();
+        let display_time = self.openxr.get_display_time();
         let mut overlays = self.overlays.write().unwrap();
         let swapchains_guard = session.overlay_data.swapchains.lock().unwrap();
         let Some(swapchains) = swapchains_guard.as_ref() else {
@@ -211,28 +212,50 @@ impl OverlayMan {
             let Some(SwapchainData { swapchain, .. }) = swapchains.get(key) else {
                 continue;
             };
-            let space = session.get_space_for_origin(
-                overlay
-                    .transform
-                    .as_ref()
-                    .map(|(o, _)| *o)
-                    .unwrap_or(session.current_origin),
-            );
-
             trace!("overlay rect: {rect:#?}");
 
-            let pose = overlay
-                .transform
-                .as_ref()
-                .map(|(_, t)| (*t).into())
-                .unwrap_or(xr::Posef {
-                    position: xr::Vector3f {
-                        x: 0.0,
-                        y: 0.0,
-                        z: -0.5,
+            let tracking_space = session.get_space_for_origin(session.current_origin);
+            let (space, pose) = match &overlay.transform {
+                None => (
+                    tracking_space,
+                    xr::Posef {
+                        position: xr::Vector3f {
+                            x: 0.0,
+                            y: 0.0,
+                            z: -0.5,
+                        },
+                        orientation: xr::Quaternionf::IDENTITY,
                     },
-                    orientation: xr::Quaternionf::IDENTITY,
-                });
+                ),
+                Some(transform) => match transform.kind {
+                    TransformKind::Absolute(origin) => {
+                        (session.get_space_for_origin(origin), transform.pose)
+                    }
+                    // The view space keeps head-locked overlays in place without any latency.
+                    TransformKind::TrackedDeviceRelative(vr::k_unTrackedDeviceIndex_Hmd)
+                    | TransformKind::TrackedComponent(vr::k_unTrackedDeviceIndex_Hmd, _) => {
+                        (&session.view_space, transform.pose)
+                    }
+                    TransformKind::TrackedDeviceRelative(device)
+                    | TransformKind::TrackedComponent(device, _) => {
+                        // Not drawn while its device isn't tracked.
+                        let Some(device_pose) = input
+                            .as_ref()
+                            .and_then(|i| i.get_device_pose(device, None, display_time, None))
+                            .filter(|p| p.bPoseIsValid)
+                        else {
+                            continue;
+                        };
+                        (
+                            tracking_space,
+                            pose_mul(
+                                &device_pose.mDeviceToAbsoluteTracking.into(),
+                                &transform.pose,
+                            ),
+                        )
+                    }
+                },
+            };
 
             // OpenVR overlays have straight alpha unless they say otherwise.
             let premultiplied = overlay.has_flag(vr::VROverlayFlags::IsPremultiplied);
@@ -306,13 +329,7 @@ impl OverlayMan {
                     let angle = (TAU * curvature).min(TAU - 1e-4);
                     let radius = width / angle;
                     // The pose is the middle of the arc, which faces the cylinder's axis.
-                    let pos = vec3(pose.position.x, pose.position.y, pose.position.z);
-                    let rot = Quat::from_xyzw(
-                        pose.orientation.x,
-                        pose.orientation.y,
-                        pose.orientation.z,
-                        pose.orientation.w,
-                    );
+                    let (rot, pos) = to_glam(&pose);
                     let center = pos + rot.mul_vec3(Vec3::Z * radius);
                     if !(is_positive(angle) && is_positive(radius) && center.is_finite()) {
                         crate::warn_once!(
@@ -569,11 +586,38 @@ fn is_positive(value: f32) -> bool {
 }
 
 fn is_valid_pose(pose: &xr::Posef) -> bool {
+    let (rotation, position) = to_glam(pose);
+    position.is_finite() && rotation.is_normalized()
+}
+
+fn to_glam(pose: &xr::Posef) -> (Quat, Vec3) {
     let xr::Posef {
         position: p,
         orientation: o,
     } = pose;
-    vec3(p.x, p.y, p.z).is_finite() && Quat::from_xyzw(o.x, o.y, o.z, o.w).is_normalized()
+    (Quat::from_xyzw(o.x, o.y, o.z, o.w), vec3(p.x, p.y, p.z))
+}
+
+fn from_glam(rotation: Quat, position: Vec3) -> xr::Posef {
+    xr::Posef {
+        position: xr::Vector3f {
+            x: position.x,
+            y: position.y,
+            z: position.z,
+        },
+        orientation: xr::Quaternionf {
+            x: rotation.x,
+            y: rotation.y,
+            z: rotation.z,
+            w: rotation.w,
+        },
+    }
+}
+
+/// `b` relative to `a`.
+fn pose_mul(a: &xr::Posef, b: &xr::Posef) -> xr::Posef {
+    let ((a_rot, a_pos), (b_rot, b_pos)) = (to_glam(a), to_glam(b));
+    from_glam((a_rot * b_rot).normalize(), a_pos + a_rot * b_pos)
 }
 
 /// Splits an overlay transform into its pose and the X and Y scale of its basis, which a pose can't
@@ -591,19 +635,7 @@ fn decompose_transform(transform: &vr::HmdMatrix34_t) -> (xr::Posef, (f32, f32))
         .map_or(Quat::IDENTITY, |(x, y)| {
             Quat::from_mat3(&Mat3::from_cols(x, y, x.cross(y))).normalize()
         });
-    let pose = xr::Posef {
-        position: xr::Vector3f {
-            x: m[0][3],
-            y: m[1][3],
-            z: m[2][3],
-        },
-        orientation: xr::Quaternionf {
-            x: rotation.x,
-            y: rotation.y,
-            z: rotation.z,
-            w: rotation.w,
-        },
-    };
+    let pose = from_glam(rotation, column(3));
     (pose, (x.length(), y.length()))
 }
 
@@ -612,13 +644,30 @@ enum OverlayKind {
     Curved { curvature: f32 },
 }
 
+#[derive(Debug)]
+enum TransformKind {
+    Absolute(vr::ETrackingUniverseOrigin),
+    TrackedDeviceRelative(vr::TrackedDeviceIndex_t),
+    /// We have no render model components to draw on, so these are attached to their device. All
+    /// of our components sit at the device's origin anyway.
+    TrackedComponent(vr::TrackedDeviceIndex_t, CString),
+}
+
+struct OverlayTransform {
+    kind: TransformKind,
+    /// As the app set it
+    matrix: vr::HmdMatrix34_t,
+    /// `matrix` without its scale, which goes into `Overlay::scale`
+    pose: xr::Posef,
+}
+
 struct Overlay {
     key: CString,
     name: CString,
     /// Only allowed to be Some if KHR_composition_layer_color_scale_bias is active
     alpha: Option<f32>,
     width: f32,
-    /// Scale factors from the transform matrix diagonal (m[0][0], m[1][1]).
+    /// Scale factors of the transform matrix.
     /// Applied to the quad size like OpenComposite does, so games that encode
     /// non-unit scale in the transform get the size they expect.
     scale: (f32, f32),
@@ -626,7 +675,7 @@ struct Overlay {
     kind: OverlayKind,
     z_order: i64,
     bounds: vr::VRTextureBounds_t,
-    transform: Option<(vr::ETrackingUniverseOrigin, vr::HmdMatrix34_t)>,
+    transform: Option<OverlayTransform>,
     compositor: Option<SupportedBackend>,
     rect: Option<xr::Rect2Di>,
     flags: u32,
@@ -945,6 +994,16 @@ impl Overlay {
         // });
 
         Ok(())
+    }
+
+    fn set_transform(&mut self, kind: TransformKind, matrix: vr::HmdMatrix34_t) {
+        let (pose, scale) = decompose_transform(&matrix);
+        debug!(
+            "setting overlay transform of {:?} to {kind:?} {pose:?}",
+            self.name
+        );
+        self.scale = scale;
+        self.transform = Some(OverlayTransform { kind, matrix, pose });
     }
 
     fn has_flag(&self, flag: vr::VROverlayFlags) -> bool {
@@ -1513,39 +1572,90 @@ impl vr::IVROverlay028_Interface for OverlayMan {
     }
     fn GetOverlayTransformTrackedDeviceComponent(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: *mut vr::TrackedDeviceIndex_t,
-        _: *mut c_char,
-        _: u32,
+        handle: vr::VROverlayHandle_t,
+        out_device: *mut vr::TrackedDeviceIndex_t,
+        buf: *mut c_char,
+        size: u32,
     ) -> vr::EVROverlayError {
-        crate::warn_unimplemented!("GetOverlayTransformTrackedDeviceComponent");
-        vr::EVROverlayError::RequestFailed
+        get_overlay!(self, handle, overlay);
+        let Some(TransformKind::TrackedComponent(device, component)) =
+            overlay.transform.as_ref().map(|t| &t.kind)
+        else {
+            return vr::EVROverlayError::WrongTransformType;
+        };
+        let component = component.as_bytes_with_nul();
+        if out_device.is_null() || buf.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        if (size as usize) < component.len() {
+            return vr::EVROverlayError::ArrayTooSmall;
+        }
+        unsafe {
+            out_device.write(*device);
+            std::ptr::copy_nonoverlapping(component.as_ptr().cast(), buf, component.len());
+        }
+        vr::EVROverlayError::None
     }
     fn SetOverlayTransformTrackedDeviceComponent(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: vr::TrackedDeviceIndex_t,
-        _: *const c_char,
+        handle: vr::VROverlayHandle_t,
+        device: vr::TrackedDeviceIndex_t,
+        component: *const c_char,
     ) -> vr::EVROverlayError {
-        crate::warn_unimplemented!("SetOverlayTransformTrackedDeviceComponent");
-        vr::EVROverlayError::RequestFailed
+        get_overlay!(self, handle, mut overlay);
+        if component.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        if device >= vr::k_unMaxTrackedDeviceCount {
+            return vr::EVROverlayError::InvalidTrackedDevice;
+        }
+        let component = unsafe { CStr::from_ptr(component) }.to_owned();
+        overlay.set_transform(
+            TransformKind::TrackedComponent(device, component),
+            xr::Posef::IDENTITY.into(),
+        );
+        vr::EVROverlayError::None
     }
     fn GetOverlayTransformTrackedDeviceRelative(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: *mut vr::TrackedDeviceIndex_t,
-        _: *mut vr::HmdMatrix34_t,
+        handle: vr::VROverlayHandle_t,
+        out_device: *mut vr::TrackedDeviceIndex_t,
+        out_transform: *mut vr::HmdMatrix34_t,
     ) -> vr::EVROverlayError {
-        crate::warn_unimplemented!("GetOverlayTransformTrackedDeviceRelative");
-        vr::EVROverlayError::RequestFailed
+        get_overlay!(self, handle, overlay);
+        let Some(OverlayTransform {
+            kind: TransformKind::TrackedDeviceRelative(device),
+            matrix,
+            ..
+        }) = &overlay.transform
+        else {
+            return vr::EVROverlayError::WrongTransformType;
+        };
+        if out_device.is_null() || out_transform.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        unsafe {
+            out_device.write(*device);
+            out_transform.write(*matrix);
+        }
+        vr::EVROverlayError::None
     }
     fn SetOverlayTransformTrackedDeviceRelative(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: vr::TrackedDeviceIndex_t,
-        _: *const vr::HmdMatrix34_t,
+        handle: vr::VROverlayHandle_t,
+        device: vr::TrackedDeviceIndex_t,
+        transform: *const vr::HmdMatrix34_t,
     ) -> vr::EVROverlayError {
-        crate::warn_unimplemented!("SetOverlayTransformTrackedDeviceRelative");
+        get_overlay!(self, handle, mut overlay);
+        if transform.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        if device >= vr::k_unMaxTrackedDeviceCount {
+            return vr::EVROverlayError::InvalidTrackedDevice;
+        }
+        overlay.set_transform(TransformKind::TrackedDeviceRelative(device), unsafe {
+            transform.read()
+        });
         vr::EVROverlayError::None
     }
     fn GetOverlayTransformAbsolute(
@@ -1554,17 +1664,21 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         out_origin: *mut vr::ETrackingUniverseOrigin,
         out_transform: *mut vr::HmdMatrix34_t,
     ) -> vr::EVROverlayError {
+        let current_origin = self.openxr.get_tracking_space();
         get_overlay!(self, handle, overlay);
+        let (origin, transform) = match &overlay.transform {
+            Some(OverlayTransform {
+                kind: TransformKind::Absolute(origin),
+                matrix,
+                ..
+            }) => (*origin, *matrix),
+            // if none, report the identity in the current tracking space
+            None => (current_origin, xr::Posef::IDENTITY.into()),
+            Some(_) => return vr::EVROverlayError::WrongTransformType,
+        };
         if out_origin.is_null() || out_transform.is_null() {
             return vr::EVROverlayError::InvalidParameter;
         }
-        // relative transforms are unimplemented, so stored transform is always absolute
-        let (origin, transform) = if let Some((origin, transform)) = overlay.transform {
-            (origin, transform)
-        } else {
-            // if none, report the identity in the current tracking space
-            (self.openxr.get_tracking_space(), xr::Posef::IDENTITY.into())
-        };
         unsafe {
             out_origin.write(origin);
             out_transform.write(transform);
@@ -1579,29 +1693,30 @@ impl vr::IVROverlay028_Interface for OverlayMan {
     ) -> vr::EVROverlayError {
         get_overlay!(self, handle, mut overlay);
         if transform.is_null() {
-            vr::EVROverlayError::InvalidParameter
-        } else {
-            let (transform, scale) = decompose_transform(unsafe { &*transform });
-            overlay.scale = scale;
-            overlay.transform = Some((origin, transform.into()));
-            debug!(
-                "set overlay transform origin to {origin:?} for {:?} ({transform:?})",
-                overlay.name
-            );
-            vr::EVROverlayError::None
+            return vr::EVROverlayError::InvalidParameter;
         }
+        overlay.set_transform(TransformKind::Absolute(origin), unsafe { transform.read() });
+        vr::EVROverlayError::None
     }
     fn GetOverlayTransformType(
         &self,
         handle: vr::VROverlayHandle_t,
         ty: *mut vr::VROverlayTransformType,
     ) -> vr::EVROverlayError {
-        get_overlay!(self, handle, _overlay);
+        get_overlay!(self, handle, overlay);
         if ty.is_null() {
             return vr::EVROverlayError::InvalidParameter;
         }
-        // relative transforms are unimplemented, so stored transform is always absolute
-        unsafe { ty.write(vr::VROverlayTransformType::Absolute) };
+        let kind = match overlay.transform.as_ref().map(|t| &t.kind) {
+            None | Some(TransformKind::Absolute(_)) => vr::VROverlayTransformType::Absolute,
+            Some(TransformKind::TrackedDeviceRelative(_)) => {
+                vr::VROverlayTransformType::TrackedDeviceRelative
+            }
+            Some(TransformKind::TrackedComponent(..)) => {
+                vr::VROverlayTransformType::TrackedComponent
+            }
+        };
+        unsafe { ty.write(kind) };
         vr::EVROverlayError::None
     }
     fn GetOverlayTextureBounds(
@@ -2219,6 +2334,214 @@ mod tests {
             vr::EVROverlayError::None
         );
         assert_eq!(ty, vr::VROverlayTransformType::Absolute);
+    }
+
+    fn transform_type(
+        man: &OverlayMan,
+        handle: vr::VROverlayHandle_t,
+    ) -> vr::VROverlayTransformType {
+        let mut ty = vr::VROverlayTransformType::Invalid;
+        assert_eq!(
+            man.GetOverlayTransformType(handle, &mut ty),
+            vr::EVROverlayError::None
+        );
+        ty
+    }
+
+    #[test]
+    fn transform_getters_follow_transform_type() {
+        let man = overlay_man();
+        let handle = create(&man, c"key", c"name");
+        let offset = vr::HmdMatrix34_t {
+            m: [
+                [2.0, 0.0, 0.0, 0.0],
+                [0.0, 2.0, 0.0, 0.1],
+                [0.0, 0.0, 2.0, -1.0],
+            ],
+        };
+        let (mut device, mut matrix, mut origin) =
+            (99, Default::default(), vr::ETrackingUniverseOrigin::Seated);
+        assert_eq!(
+            man.SetOverlayTransformTrackedDeviceRelative(handle, 1, &offset),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(
+            transform_type(&man, handle),
+            vr::VROverlayTransformType::TrackedDeviceRelative
+        );
+        assert_eq!(
+            man.GetOverlayTransformTrackedDeviceRelative(handle, &mut device, &mut matrix),
+            vr::EVROverlayError::None
+        );
+        assert_eq!((device, matrix.m), (1, offset.m));
+        assert_eq!(
+            man.GetOverlayTransformAbsolute(handle, &mut origin, &mut matrix),
+            vr::EVROverlayError::WrongTransformType
+        );
+
+        let mut name = [0 as c_char; 8];
+        assert_eq!(
+            man.SetOverlayTransformTrackedDeviceComponent(handle, 2, c"tip".as_ptr()),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(
+            transform_type(&man, handle),
+            vr::VROverlayTransformType::TrackedComponent
+        );
+        assert_eq!(
+            man.GetOverlayTransformTrackedDeviceComponent(
+                handle,
+                &mut device,
+                name.as_mut_ptr(),
+                8
+            ),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(device, 2);
+        assert_eq!(unsafe { CStr::from_ptr(name.as_ptr()) }, c"tip");
+        assert_eq!(
+            man.GetOverlayTransformTrackedDeviceRelative(handle, &mut device, &mut matrix),
+            vr::EVROverlayError::WrongTransformType
+        );
+
+        assert_eq!(
+            man.SetOverlayTransformAbsolute(handle, vr::ETrackingUniverseOrigin::Standing, &offset),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(
+            transform_type(&man, handle),
+            vr::VROverlayTransformType::Absolute
+        );
+        assert_eq!(
+            man.GetOverlayTransformAbsolute(handle, &mut origin, &mut matrix),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(
+            (origin, matrix.m),
+            (vr::ETrackingUniverseOrigin::Standing, offset.m)
+        );
+
+        assert_eq!(
+            man.SetOverlayTransformTrackedDeviceRelative(
+                handle,
+                vr::k_unTrackedDeviceIndexInvalid,
+                &offset
+            ),
+            vr::EVROverlayError::InvalidTrackedDevice
+        );
+    }
+
+    /// Head-locked overlays (UE stereo layers, subtitles) must follow the head.
+    #[test]
+    fn hmd_relative_overlay_is_in_view_space() {
+        let f = RealSessionFixture::new();
+        let handle = f.textured_overlay(c"key");
+        let view_space = f.xr.session_data.get().view_space.as_raw();
+        let quad = || match f.layers(false).as_slice() {
+            [TestLayer::Quad(quad, _)] => *quad,
+            other => panic!("expected one quad, got {other:?}"),
+        };
+
+        let offset = vr::HmdMatrix34_t {
+            m: [
+                [2.0, 0.0, 0.0, 0.0],
+                [0.0, 2.0, 0.0, -0.2],
+                [0.0, 0.0, 2.0, -1.0],
+            ],
+        };
+        assert_eq!(
+            f.man.SetOverlayTransformTrackedDeviceRelative(
+                handle,
+                vr::k_unTrackedDeviceIndex_Hmd,
+                &offset
+            ),
+            vr::EVROverlayError::None
+        );
+        let layer = quad();
+        assert_eq!(layer.space, view_space);
+        assert_eq!((layer.pose.position.y, layer.pose.position.z), (-0.2, -1.0));
+        assert_eq!(layer.size.width, 2.0);
+
+        assert_eq!(
+            f.man.SetOverlayTransformTrackedDeviceComponent(
+                handle,
+                vr::k_unTrackedDeviceIndex_Hmd,
+                c"tip".as_ptr()
+            ),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(quad().space, view_space);
+    }
+
+    #[test]
+    fn controller_relative_overlay_follows_controller() {
+        use fakexr::UserPath::LeftHand;
+        let f = RealSessionFixture::new();
+        let input = Arc::new(crate::input::Input::new(f.xr.clone()));
+        f.xr.input.set(Arc::downgrade(&input));
+        // fakexr can't locate spaces in the stage space.
+        f.xr.set_tracking_space(vr::ETrackingUniverseOrigin::Seated);
+        let handle = f.textured_overlay(c"key");
+        let offset = xr::Posef {
+            position: xr::Vector3f {
+                x: 0.0,
+                y: 0.0,
+                z: -0.1,
+            },
+            orientation: xr::Quaternionf::IDENTITY,
+        };
+        let left = 1;
+        assert_eq!(
+            f.man
+                .SetOverlayTransformTrackedDeviceRelative(handle, left, &offset.into()),
+            vr::EVROverlayError::None
+        );
+        // Not tracked yet
+        assert_eq!(f.layers(false).len(), 0);
+
+        let session = f.xr.session_data.get().session.as_raw();
+        fakexr::set_interaction_profile(
+            session,
+            LeftHand,
+            f.xr.instance
+                .string_to_path("/interaction_profiles/khr/simple_controller")
+                .unwrap(),
+        );
+        input.frame_start_update();
+        f.xr.poll_events();
+        let grip = xr::Posef {
+            position: xr::Vector3f {
+                x: 0.1,
+                y: 1.0,
+                z: -0.3,
+            },
+            orientation: xr::Quaternionf::IDENTITY,
+        };
+        fakexr::set_grip(session, LeftHand, grip);
+        input.frame_start_update();
+
+        let expected: xr::Posef = input
+            .get_device_pose(left, None, f.xr.get_display_time(), None)
+            .unwrap()
+            .mDeviceToAbsoluteTracking
+            .into();
+        let layers = f.layers(false);
+        let [TestLayer::Quad(quad, _)] = layers.as_slice() else {
+            panic!("expected one quad, got {layers:?}");
+        };
+        let session = f.xr.session_data.get();
+        assert_eq!(quad.space, session.tracking_space().as_raw());
+        let ((rot, pos), (expected_rot, expected_pos)) =
+            (to_glam(&quad.pose), to_glam(&pose_mul(&expected, &offset)));
+        assert!(
+            pos.abs_diff_eq(expected_pos, 1e-5),
+            "{pos} != {expected_pos}"
+        );
+        assert!(
+            rot.abs_diff_eq(expected_rot, 1e-5),
+            "{rot} != {expected_rot}"
+        );
+        assert!(pos.distance(vec3(0.1, 1.0, -0.4)) < 0.2, "{pos}");
     }
 
     #[test]
