@@ -2512,6 +2512,8 @@ impl<C: openxr_data::Compositor> vr::IVRInput003On004 for Input<C> {
         active_set_size: u32,
         active_set_count: u32,
     ) -> vr::EVRInputError {
+        // Like the current interface, even when there is nothing to update.
+        self.openxr.pump();
         if active_set_count == 0 || active_set_size == 0 {
             return vr::EVRInputError::NoActiveActionSet;
         }
