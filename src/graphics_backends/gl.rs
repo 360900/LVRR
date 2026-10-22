@@ -728,7 +728,8 @@ impl GlData {
         let (src, src_layer) = if info.samples > 0 {
             (unsafe { self.resolve(src, &info) }, 0)
         } else {
-            // Plain Submit has no layer index, so stereo array textures have a layer per eye.
+            // Plain Submit has no layer index, so assume stereo array textures have a layer per
+            // eye. Not verified against SteamVR.
             (src, if eye < info.layers { eye } else { 0 })
         };
 
