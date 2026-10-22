@@ -134,7 +134,9 @@ pub struct TrackedDevice {
     pub profile_data: Option<ProfileData>,
     pub profile_path: xr::Path,
     pub connected: bool,
-    pub previous_connected: bool,
+    /// The connection state last reported to the app. Atomic so polling events only needs a read
+    /// lock on the device list.
+    previous_connected: AtomicBool,
     pose_cache: Mutex<HashMap<i64, vr::TrackedDevicePose_t>>,
 }
 
@@ -377,7 +379,7 @@ impl TrackedDevice {
             profile_path: profile_path.unwrap_or(xr::Path::NULL),
             connected: matches!(device_type, TrackedDeviceType::Hmd),
             device_type,
-            previous_connected: false,
+            previous_connected: false.into(),
             pose_cache: Mutex::new(HashMap::new()),
         }
     }
@@ -480,13 +482,10 @@ impl TrackedDevice {
         }
     }
 
-    pub fn has_connected_changed(&mut self) -> bool {
-        if self.previous_connected != self.connected {
-            self.previous_connected = self.connected;
-            true
-        } else {
-            false
-        }
+    pub fn has_connected_changed(&self) -> bool {
+        self.previous_connected
+            .swap(self.connected, Ordering::Relaxed)
+            != self.connected
     }
 
     pub fn get_type(&self) -> &TrackedDeviceType {
@@ -889,9 +888,6 @@ impl TrackedDeviceList {
 
     pub fn iter(&self) -> impl Iterator<Item = &TrackedDevice> {
         self.devices.iter()
-    }
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut TrackedDevice> {
-        self.devices.iter_mut()
     }
 }
 

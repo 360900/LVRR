@@ -1178,6 +1178,37 @@ fn load_actions_race() {
     assert!(res.is_ok(), "{res:?}");
 }
 
+/// Polling events must not wait for threads reading the device list.
+#[test]
+fn poll_event_while_devices_are_read() {
+    let f = Fixture::new();
+    let data = f.input.openxr.session_data.get();
+    let devices = data.input_data.devices.read().unwrap();
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            let mut event = vr::VREvent_t::default();
+            let got = f
+                .input
+                .get_next_event(std::mem::size_of_val(&event) as u32, &mut event);
+            done_tx.send((got, event.eventType)).unwrap();
+        });
+        let polled = done_rx.recv_timeout(std::time::Duration::from_secs(10));
+        drop(devices);
+        let (got, ty) = polled.expect("PollNextEvent waited for a device list reader");
+        assert!(got);
+        assert_eq!(ty, vr::EVREventType::TrackedDeviceActivated as u32);
+    });
+
+    // The HMD's activation is only reported once.
+    let mut event = vr::VREvent_t::default();
+    assert!(
+        !f.input
+            .get_next_event(std::mem::size_of_val(&event) as u32, &mut event)
+    );
+}
+
 /// Legacy actions set up on the frame thread must not race an action manifest loaded on another
 /// thread - both would attach action sets to the same session.
 #[test]

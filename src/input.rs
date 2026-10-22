@@ -2386,9 +2386,9 @@ impl<C: openxr_data::Compositor> Input<C> {
             return false;
         }
         let data = self.openxr.session_data.get();
-        let mut devices = data.input_data.devices.write().unwrap();
+        let devices = data.input_data.devices.read().unwrap();
 
-        for (i, device) in devices.iter_mut().enumerate() {
+        for (i, device) in devices.iter().enumerate() {
             let current = device.connected;
 
             if device.has_connected_changed() {
