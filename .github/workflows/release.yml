@@ -49,8 +49,7 @@ jobs:
         # Keep the token away from dependency build scripts.
         persist-credentials: false
     - uses: ./.github/actions/build
-    - name: Run tests
-      run: cargo test --workspace --verbose
+    - uses: ./.github/actions/check
     - name: Upload
       uses: actions/upload-artifact@v6
       with:

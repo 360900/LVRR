@@ -89,14 +89,7 @@ jobs:
       with:
         fetch-depth: 0
     - uses: ./.github/actions/build
-    - name: Run tests
-      run: cargo test --workspace --verbose
-    - name: Run tests with miri
-      run: cargo +nightly miri test
-    - name: Format check
-      run: cargo fmt --check
-    - name: Clippy
-      run: cargo clippy --workspace --all-targets
+    - uses: ./.github/actions/check
     - name: MSRV check
       run: |
         rustup toolchain install 1.88 --profile minimal
