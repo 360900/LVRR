@@ -138,7 +138,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         let mut binding_context = context::BindingsLoadContext::new(
             &sets,
             actions,
-            &session_data.input_data.pose_data.get().unwrap().grip,
+            &session_data.input_data.pose_data.grip,
             &info_action,
             &haptic_action,
             skeletal_input,
@@ -162,7 +162,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         let xr_sets: Vec<_> = sets
             .values()
             .chain([
-                &session_data.input_data.pose_data.get().unwrap().set,
+                &session_data.input_data.pose_data.set,
                 &info_set,
                 &haptic_set,
                 &skeletal_input.set,

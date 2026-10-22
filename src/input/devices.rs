@@ -252,7 +252,7 @@ fn get_controller_pose(
             (xr::SpaceLocation::default(), xr::SpaceVelocity::default())
         }
     };
-    let pose_data = session_data.input_data.pose_data.get()?;
+    let pose_data = &session_data.input_data.pose_data;
 
     let spaces = match hand {
         Hand::Left => &pose_data.left_space,

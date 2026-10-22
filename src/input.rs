@@ -152,18 +152,6 @@ impl<C: openxr_data::Compositor> Input<C> {
         let left_hand_key = map.insert(c"/user/hand/left".into());
         let right_hand_key = map.insert(c"/user/hand/right".into());
         let subaction_paths = SubactionPaths::new(&openxr.instance);
-        let pose_data = PoseData::new(
-            &openxr.instance,
-            subaction_paths.left,
-            subaction_paths.right,
-        );
-        openxr
-            .session_data
-            .get()
-            .input_data
-            .pose_data
-            .set(pose_data)
-            .unwrap_or_else(|_| panic!("PoseData already setup"));
 
         // Until controllers actually show up, the HMD identity comes from whatever was bound at
         // init.
@@ -442,16 +430,17 @@ fn push_priority(
 pub struct InputSessionData {
     actions: OnceLock<LoadedActions>,
     estimated_skeleton_actions: OnceLock<SkeletalInputActionData>,
-    pose_data: OnceLock<PoseData>,
+    pose_data: PoseData,
     devices: RwLock<TrackedDeviceList>,
 }
 
 impl InputSessionData {
-    pub(crate) fn new(session: &xr::Session<xr::AnyGraphics>) -> Self {
+    pub(crate) fn new(instance: &xr::Instance, session: &xr::Session<xr::AnyGraphics>) -> Self {
+        let paths = SubactionPaths::new(instance);
         Self {
             actions: OnceLock::new(),
             estimated_skeleton_actions: OnceLock::new(),
-            pose_data: OnceLock::new(),
+            pose_data: PoseData::new(instance, paths.left, paths.right),
             devices: RwLock::new(TrackedDeviceList::new(session)),
         }
     }
@@ -472,11 +461,9 @@ impl InputSessionData {
     }
 
     pub(crate) fn interaction_profile_changed(&self) {
-        if let Some(data) = self.pose_data.get() {
-            // If the interaction profile changes the offsets must be updated too
-            // Delete the current raw spaces so they can be recreated later
-            data.reset_spaces();
-        }
+        // If the interaction profile changes the offsets must be updated too
+        // Delete the current raw spaces so they can be recreated later
+        self.pose_data.reset_spaces();
     }
 }
 enum ActionData {
@@ -1660,9 +1647,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             }
 
             let skeletal_input = data.input_data.estimated_skeleton_actions.get().unwrap();
-            sync_sets.push(xr::ActiveActionSet::new(
-                &data.input_data.pose_data.get().unwrap().set,
-            ));
+            sync_sets.push(xr::ActiveActionSet::new(&data.input_data.pose_data.set));
             sync_sets.push(xr::ActiveActionSet::new(&skeletal_input.set));
             sync_sets.push(xr::ActiveActionSet::new(&actions.haptic_set));
             self.legacy_state.on_action_sync();
@@ -2345,7 +2330,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                 data.session
                     .sync_actions(&[
                         xr::ActiveActionSet::new(&actions.set),
-                        xr::ActiveActionSet::new(&input_data.pose_data.get().unwrap().set),
+                        xr::ActiveActionSet::new(&input_data.pose_data.set),
                     ])
                     .unwrap();
 
@@ -2383,14 +2368,6 @@ impl<C: openxr_data::Compositor> Input<C> {
     pub fn post_session_restart(&self, data: &SessionData) {
         // This function is called while a write lock is called on the session, and as such should
         // not use self.openxr.session_data.get().
-        data.input_data
-            .pose_data
-            .set(PoseData::new(
-                &self.openxr.instance,
-                self.subaction_paths.left,
-                self.subaction_paths.right,
-            ))
-            .unwrap_or_else(|_| panic!("PoseData already setup"));
         if let Some(path) = self.loaded_actions_path.get() {
             let _ = self.load_action_manifest(data, path);
         }

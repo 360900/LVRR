@@ -786,7 +786,7 @@ impl SessionData {
             .map_err(SessionCreationError::BeginSessionFailed)?;
         info!("Began OpenXR session.");
 
-        let input_data = InputSessionData::new(&session);
+        let input_data = InputSessionData::new(instance, &session);
 
         Ok((
             SessionData {
@@ -1133,6 +1133,36 @@ mod tests {
             .recv_timeout(Duration::from_secs(10))
             .expect("nested session read deadlocked against a queued writer");
         reader.join().unwrap();
+    }
+
+    /// Interfaces are constructed under the interface store lock, and restart_session looks
+    /// interfaces up in the store while holding the session write lock. So constructing Input must
+    /// not wait for the session lock.
+    #[test]
+    fn input_construction_does_not_wait_for_session() {
+        crate::init_logging();
+        let data = Arc::new(
+            OpenXrData::<FakeCompositor>::new(
+                &Injector::default(),
+                openvr::EVRApplicationType::Other,
+            )
+            .unwrap(),
+        );
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let writer = data.session_data.0.write();
+        let constructor = {
+            let data = data.clone();
+            std::thread::spawn(move || {
+                let input = crate::input::Input::new(data);
+                done_tx.send(()).unwrap();
+                input
+            })
+        };
+        let done = done_rx.recv_timeout(Duration::from_secs(10));
+        drop(writer);
+        drop(constructor.join().unwrap());
+        done.expect("Input::new waited for the session lock");
     }
 
     #[test]

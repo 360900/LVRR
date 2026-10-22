@@ -78,17 +78,14 @@ impl<C: openxr_data::Compositor> Input<C> {
                             .string_to_path(P::profile_path())
                             .unwrap(),
                         &bindings
-                            .into_iter(
-                                &self.legacy.actions,
-                                self.input_data.pose_data.get().unwrap(),
-                            )
+                            .into_iter(&self.legacy.actions, &self.input_data.pose_data)
                             .collect::<Vec<_>>(),
                     )
                     .unwrap();
             }
         }
 
-        let pose_set = &input_data.pose_data.get().unwrap().set;
+        let pose_set = &input_data.pose_data.set;
 
         session
             .attach_action_sets(&[&legacy.set, pose_set])

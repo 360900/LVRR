@@ -56,7 +56,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             .into();
         let is_synthesised = pose_is_synthesised.load(Ordering::Relaxed);
 
-        let pose_data = session_data.input_data.pose_data.get().unwrap();
+        let pose_data = &session_data.input_data.pose_data;
 
         let raw = match hand {
             Hand::Left => &pose_data.left_space,
@@ -219,7 +219,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         summary_data: &mut vr::VRSkeletalSummaryData_t,
         hand: Hand,
     ) {
-        let pose_data = session_data.input_data.pose_data.get().unwrap();
+        let pose_data = &session_data.input_data.pose_data;
         let devices = session_data.input_data.devices.read().unwrap();
 
         let Some(controller) = devices.get_controller(hand) else {
