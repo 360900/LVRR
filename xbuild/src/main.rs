@@ -1,6 +1,6 @@
 use nanoserde::DeJson;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 // https://doc.rust-lang.org/cargo/reference/external-tools.html#json-messages
@@ -110,13 +110,9 @@ fn main() {
             .extension()
             .expect("build shared library should have an extension"),
     );
-    match std::os::unix::fs::symlink(&lib_path, vrclient_path) {
-        Ok(_) => (),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
-        err => {
-            eprintln!("Failed to create vrclient symlink: {err:?}");
-            std::process::exit(1);
-        }
+    if let Err(e) = link_vrclient(&lib_path, &vrclient_path) {
+        eprintln!("Failed to create vrclient symlink {vrclient_path:?}: {e}");
+        std::process::exit(1);
     }
 
     // Generate openvrpaths.vrpath file from template
@@ -155,6 +151,19 @@ fn main() {
     }
 }
 
+/// Points `vrclient_path` at `lib_path`, replacing a link to anything else
+/// (e.g. a library from before a crate rename) so games don't silently load a
+/// stale build. Fails rather than delete anything that isn't a symlink.
+fn link_vrclient(lib_path: &Path, vrclient_path: &Path) -> std::io::Result<()> {
+    match std::fs::read_link(vrclient_path) {
+        Ok(target) if target == lib_path => return Ok(()),
+        Ok(_) => std::fs::remove_file(vrclient_path)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+        Err(e) => return Err(e),
+    }
+    std::os::unix::fs::symlink(lib_path, vrclient_path)
+}
+
 impl DeJson for Message {
     fn de_json(
         state: &mut nanoserde::DeJsonState,
@@ -180,5 +189,59 @@ impl DeJson for Message {
             }
             _ => Ok(Self::Unknown),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::link_vrclient;
+    use std::path::PathBuf;
+
+    fn test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("xbuild-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn replaces_stale_link() {
+        let dir = test_dir("stale-link");
+        let old_lib = dir.join("libxrizer.so");
+        let new_lib = dir.join("libxrizer_edge.so");
+        let vrclient = dir.join("vrclient.so");
+        std::fs::write(&old_lib, "old").unwrap();
+        std::fs::write(&new_lib, "new").unwrap();
+
+        link_vrclient(&old_lib, &vrclient).unwrap();
+        link_vrclient(&new_lib, &vrclient).unwrap();
+        assert_eq!(std::fs::read_link(&vrclient).unwrap(), new_lib);
+        // unchanged link is kept
+        link_vrclient(&new_lib, &vrclient).unwrap();
+        assert_eq!(std::fs::read_link(&vrclient).unwrap(), new_lib);
+
+        // dangling link, e.g. after the checkout moved
+        std::fs::remove_file(&vrclient).unwrap();
+        std::os::unix::fs::symlink(dir.join("gone.so"), &vrclient).unwrap();
+        link_vrclient(&new_lib, &vrclient).unwrap();
+        assert_eq!(std::fs::read_link(&vrclient).unwrap(), new_lib);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn keeps_regular_file() {
+        let dir = test_dir("regular-file");
+        let lib = dir.join("libxrizer_edge.so");
+        let vrclient = dir.join("vrclient.so");
+        std::fs::write(&lib, "lib").unwrap();
+        std::fs::write(&vrclient, "copied").unwrap();
+
+        assert!(link_vrclient(&lib, &vrclient).is_err());
+        assert_eq!(std::fs::read_to_string(&vrclient).unwrap(), "copied");
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
