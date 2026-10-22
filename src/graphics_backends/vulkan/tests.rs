@@ -33,6 +33,7 @@ struct Gpu {
     bound_pipelines: Vec<vk::Pipeline>,
     push_constants: Vec<(vk::ShaderStageFlags, u32, Vec<u8>)>,
     draws: usize,
+    clears: usize,
     /// Pending work never finishes, so waits for it time out.
     hung: bool,
     /// Fails the next submission of command buffers.
@@ -496,6 +497,20 @@ unsafe extern "system" fn vkCmdCopyImage(
     });
 }
 
+unsafe extern "system" fn vkCmdClearColorImage(
+    buf: vk::CommandBuffer,
+    image: vk::Image,
+    _: vk::ImageLayout,
+    _: *const vk::ClearColorValue,
+    _: u32,
+    _: *const vk::ImageSubresourceRange,
+) {
+    gpu(|gpu| {
+        gpu.record(buf, image);
+        gpu.clears += 1;
+    });
+}
+
 fn proc_addr(name: &CStr) -> *const c_void {
     macro_rules! lookup {
         ($($f:ident),* $(,)?) => {
@@ -548,6 +563,7 @@ fn proc_addr(name: &CStr) -> *const c_void {
         vkCmdEndRenderPass,
         vkCmdPipelineBarrier,
         vkCmdCopyImage,
+        vkCmdClearColorImage,
     ]
 }
 
