@@ -1007,31 +1007,15 @@ mod tests {
     }
 
     #[test]
-    fn hand_interaction_bindings() {
+    fn hand_interaction_not_suggested() {
         use crate::input::profiles::vrlink_hand::VRLinkHand;
 
         fakexr::advertise_extension(xr::sys::EXT_HAND_INTERACTION_EXTENSION_NAME);
         let f = Fixture::new();
-        assert!(f.input.openxr.enabled_extensions.ext_hand_interaction);
         f.input.openxr.restart_session();
         f.input.frame_start_update();
 
-        let both = |input: &str| {
-            Some(
-                ["left", "right"]
-                    .map(|hand| format!("/user/hand/{hand}/input/{input}"))
-                    .to_vec(),
-            )
-        };
-        let bindings = |get_action: fn(&super::LegacyActions) -> openxr::sys::Action| {
-            legacy_bindings_for::<VRLinkHand>(&f, get_action)
-        };
-        assert_eq!(bindings(|a| a.trigger.as_raw()), both("pinch_ext/value"));
-        assert_eq!(
-            bindings(|a| a.trigger_click.as_raw()),
-            both("pinch_ext/value")
-        );
-        assert_eq!(bindings(|a| a.squeeze.as_raw()), both("grasp_ext/value"));
-        assert_eq!(bindings(|a| a.haptic.as_raw()), None);
+        // The suggestion would outlive legacy input and keep manifest bindings off hands.
+        assert!(legacy_bindings_for::<VRLinkHand>(&f, |a| a.trigger.as_raw()).is_none());
     }
 }

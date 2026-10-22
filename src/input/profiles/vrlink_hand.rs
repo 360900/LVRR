@@ -111,4 +111,17 @@ mod tests {
         exts.ext_hand_interaction = true;
         assert!(VRLinkHand::has_required_extensions(&exts));
     }
+
+    #[test]
+    fn hand_interaction_paths() {
+        use crate::input::profiles::{InputPath, Left, Right};
+        assert_eq!(
+            Left::<PinchExt, Value>::DYN.to_string(),
+            "/user/hand/left/input/pinch_ext/value"
+        );
+        assert_eq!(
+            Right::<GraspExt, Value>::DYN.to_string(),
+            "/user/hand/right/input/grasp_ext/value"
+        );
+    }
 }

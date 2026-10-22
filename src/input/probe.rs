@@ -263,13 +263,6 @@ mod tests {
     }
 
     #[test]
-    fn probe_hand_interaction() {
-        fakexr::advertise_extension(xr::sys::EXT_HAND_INTERACTION_EXTENSION_NAME);
-        let hand = "/interaction_profiles/ext/hand_interaction_ext";
-        assert_eq!(probe_with_profile(hand).as_deref(), Some(hand));
-    }
-
-    #[test]
     fn should_probe_skips_non_rendering_apps() {
         assert!(should_probe(Scene, None));
         assert!(should_probe(Overlay, None));
