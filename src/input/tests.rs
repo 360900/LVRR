@@ -1953,3 +1953,24 @@ fn input_003_update_action_state() {
     );
     assert!(state.bActive && state.bState);
 }
+
+#[test]
+fn input_003_compressed_skeletal_data_fails() {
+    use vr::IVRInput003On004;
+
+    let f = Fixture::new();
+    let mut required = u32::MAX;
+    assert_ne!(
+        IVRInput003On004::GetSkeletalActionDataCompressed(
+            &*f.input,
+            0,
+            vr::EVRSkeletalTransformSpace::Model,
+            0.0,
+            std::ptr::null_mut(),
+            0,
+            &mut required,
+        ),
+        vr::EVRInputError::None
+    );
+    assert_eq!(required, 0);
+}

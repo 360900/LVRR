@@ -2252,10 +2252,16 @@ impl<C: openxr_data::Compositor> vr::IVRInput003On004 for Input<C> {
         if !data.bActive {
             return vr::EVRInputError::None;
         }
+        // The beta's spaces are Action (now Model), Parent and Additive, which we treat as Parent.
+        let space = if bone_parent == vr::EVRSkeletalTransformSpace::Model {
+            vr::EVRSkeletalTransformSpace::Model
+        } else {
+            vr::EVRSkeletalTransformSpace::Parent
+        };
         <Self as vr::IVRInput010_Interface>::GetSkeletalBoneData(
             self,
             action,
-            bone_parent,
+            space,
             vr::EVRSkeletalMotionRange::WithController,
             transform_array,
             transform_array_count,
@@ -2269,10 +2275,14 @@ impl<C: openxr_data::Compositor> vr::IVRInput003On004 for Input<C> {
         _: f32,
         _: *mut c_void,
         _: u32,
-        _: *mut u32,
+        required_size: *mut u32,
     ) -> vr::EVRInputError {
         crate::warn_unimplemented!("GetSkeletalActionDataCompressed");
-        vr::EVRInputError::None
+        // An error, so the app doesn't size or uncompress a buffer we never filled.
+        if let Some(required_size) = unsafe { required_size.as_mut() } {
+            *required_size = 0;
+        }
+        vr::EVRInputError::InvalidParam
     }
 
     fn UncompressSkeletalActionData(
@@ -2284,7 +2294,8 @@ impl<C: openxr_data::Compositor> vr::IVRInput003On004 for Input<C> {
         _: u32,
     ) -> vr::EVRInputError {
         crate::warn_unimplemented!("UncompressSkeletalActionData");
-        vr::EVRInputError::None
+        // We never hand out compressed data.
+        vr::EVRInputError::InvalidCompressedData
     }
 
     fn TriggerHapticVibrationAction(
