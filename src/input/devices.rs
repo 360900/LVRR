@@ -1,5 +1,5 @@
 use std::any::TypeId;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
 use std::ffi::{CStr, CString};
 use std::mem::MaybeUninit;
@@ -180,7 +180,43 @@ pub struct TrackedDevice {
     previous_connected: AtomicBool,
     /// See [TrackedDevice::is_tracked_hand].
     tracked_hand: AtomicBool,
-    pose_cache: Mutex<HashMap<i64, vr::TrackedDevicePose_t>>,
+    pose_cache: Mutex<PoseCache>,
+}
+
+/// Raw poses this device was located at, so all queries for the same time and origin in a frame
+/// get the same pose.
+#[derive(Default)]
+struct PoseCache {
+    /// Bounded, since apps that never call WaitGetPoses never clear it, and "now" based queries
+    /// like GetDeviceToAbsoluteTrackingPose use a new time on every call.
+    recent: VecDeque<(i64, vr::ETrackingUniverseOrigin, vr::TrackedDevicePose_t)>,
+}
+
+impl PoseCache {
+    const MAX_RECENT: usize = 16;
+
+    fn get(
+        &self,
+        nanos: i64,
+        origin: vr::ETrackingUniverseOrigin,
+    ) -> Option<vr::TrackedDevicePose_t> {
+        self.recent
+            .iter()
+            .find(|(t, o, _)| *t == nanos && *o == origin)
+            .map(|(.., pose)| *pose)
+    }
+
+    fn insert(
+        &mut self,
+        nanos: i64,
+        origin: vr::ETrackingUniverseOrigin,
+        pose: vr::TrackedDevicePose_t,
+    ) {
+        if self.recent.len() == Self::MAX_RECENT {
+            self.recent.pop_front();
+        }
+        self.recent.push_back((nanos, origin, pose));
+    }
 }
 
 fn get_hmd_pose(
@@ -218,7 +254,7 @@ fn get_controller_pose(
     let pose_from_hand_tracking = || {
         let pose = hand_tracker.as_ref().and_then(|tracker| {
             session_data
-                .tracking_space()
+                .get_space_for_origin(origin)
                 .relate_hand_joints(tracker, xr_time)
                 .ok()
                 .flatten()
@@ -430,7 +466,7 @@ impl TrackedDevice {
             device_type,
             previous_connected: false.into(),
             tracked_hand: false.into(),
-            pose_cache: Mutex::new(HashMap::new()),
+            pose_cache: Mutex::default(),
         }
     }
 
@@ -443,8 +479,8 @@ impl TrackedDevice {
     ) -> Option<vr::TrackedDevicePose_t> {
         let nanos = xr_time.as_nanos();
         let mut pose_cache = self.pose_cache.lock().unwrap();
-        let pose = if let Some(pose) = pose_cache.get(&nanos) {
-            *pose
+        let pose = if let Some(pose) = pose_cache.get(nanos, origin) {
+            pose
         } else {
             let pose = match self.device_type {
                 TrackedDeviceType::Hmd => get_hmd_pose(xr_time, session_data, origin),
@@ -456,7 +492,8 @@ impl TrackedDevice {
                     get_generic_tracker_pose(xr_time, session_data, self, origin)
                 }
             }?;
-            *pose_cache.entry(nanos).or_insert(pose)
+            pose_cache.insert(nanos, origin, pose);
+            pose
         };
 
         // The cache holds the raw pose; the profile's pose transformation is
@@ -531,7 +568,7 @@ impl TrackedDevice {
     }
 
     pub fn clear_pose_cache(&self) {
-        self.pose_cache.lock().unwrap().clear();
+        self.pose_cache.lock().unwrap().recent.clear();
         if let TrackedDeviceType::Controller { skeleton_cache, .. } = self.get_type() {
             skeleton_cache.lock().unwrap().clear();
         }
@@ -1239,11 +1276,66 @@ impl<C: openxr_data::Compositor> Input<C> {
 
 #[cfg(test)]
 mod tests {
-    use super::TrackedDeviceType;
+    use super::{PoseCache, TrackedDeviceType};
     use crate::input::{profiles::knuckles::Knuckles, tests::Fixture};
     use crate::openxr_data::Hand;
     use openvr as vr;
     use openxr as xr;
+
+    fn hmd_height(f: &Fixture, origin: vr::ETrackingUniverseOrigin, nanos: i64) -> f32 {
+        let pose = f
+            .input
+            .get_device_pose(
+                vr::k_unTrackedDeviceIndex_Hmd,
+                Some(origin),
+                xr::Time::from_nanos(nanos),
+                None,
+            )
+            .unwrap();
+        assert!(pose.bPoseIsValid);
+        pose.mDeviceToAbsoluteTracking.m[1][3]
+    }
+
+    #[test]
+    fn pose_cache_is_per_origin() {
+        use vr::ETrackingUniverseOrigin::{Seated, Standing};
+
+        let f = Fixture::new();
+        fakexr::set_stage_pose(
+            f.raw_session(),
+            xr::Posef {
+                position: xr::Vector3f {
+                    x: 0.0,
+                    y: -1.5,
+                    z: 0.0,
+                },
+                ..xr::Posef::IDENTITY
+            },
+        );
+
+        assert_eq!(hmd_height(&f, Seated, 1), 0.0);
+        assert_eq!(hmd_height(&f, Standing, 1), 1.5);
+
+        assert_eq!(hmd_height(&f, Standing, 2), 1.5);
+        assert_eq!(hmd_height(&f, Seated, 2), 0.0);
+    }
+
+    #[test]
+    fn pose_cache_is_bounded() {
+        let f = Fixture::new();
+        // e.g. an app polling GetDeviceToAbsoluteTrackingPose without ever calling WaitGetPoses
+        for nanos in 1..=100 {
+            hmd_height(&f, vr::ETrackingUniverseOrigin::Seated, nanos);
+        }
+
+        let data = f.input.openxr.session_data.get();
+        let devices = data.input_data.devices.read().unwrap();
+        let hmd = devices.get_device(vr::k_unTrackedDeviceIndex_Hmd).unwrap();
+        assert_eq!(
+            hmd.pose_cache.lock().unwrap().recent.len(),
+            PoseCache::MAX_RECENT
+        );
+    }
 
     #[test]
     #[cfg_attr(not(feature = "monado"), ignore)]

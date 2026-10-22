@@ -229,6 +229,12 @@ pub fn set_stage_bounds(session: xr::Session, bounds: Option<xr::Extent2Df>) {
     session.stage_bounds.store(bounds);
 }
 
+/// Sets the pose of the STAGE origin in LOCAL space (identity by default).
+pub fn set_stage_pose(session: xr::Session, pose: xr::Posef) {
+    let session = session.to_handle().unwrap();
+    session.stage_pose.store(pose);
+}
+
 pub fn session_frame_state(session: xr::Session) -> FrameState {
     let session = session.to_handle().unwrap();
     session.frame_state.load()
@@ -702,6 +708,7 @@ struct Session {
     last_layer_count: AtomicCell<u32>,
     with_trackers: AtomicBool,
     stage_bounds: AtomicCell<Option<xr::Extent2Df>>,
+    stage_pose: AtomicCell<xr::Posef>,
     attach_hook: Hook,
     end_hook: Hook,
     end_frame_hook: Hook,
@@ -848,7 +855,10 @@ impl Space {
             .ok_or(xr::Result::ERROR_SESSION_LOST)?;
 
         let SpaceType::Action { hand, action } = &self.ty else {
-            let pose = xr::Posef::IDENTITY;
+            let pose = match self.ty {
+                SpaceType::Reference(xr::ReferenceSpaceType::STAGE) => session.stage_pose.load(),
+                _ => xr::Posef::IDENTITY,
+            };
             let mat = pose_to_mat(pose);
             let offset = pose_to_mat(self.offset);
 
@@ -1112,6 +1122,7 @@ extern "system" fn create_session(
         last_layer_count: 0.into(),
         with_trackers: false.into(),
         stage_bounds: None.into(),
+        stage_pose: xr::Posef::IDENTITY.into(),
         attach_hook: Mutex::default(),
         end_hook: Mutex::default(),
         end_frame_hook: Mutex::default(),
@@ -1923,9 +1934,9 @@ extern "system" fn locate_space(
     assert!(
         !matches!(
             base_space.ty,
-            SpaceType::Reference(xr::ReferenceSpaceType::STAGE | xr::ReferenceSpaceType::VIEW),
+            SpaceType::Reference(xr::ReferenceSpaceType::VIEW),
         ),
-        "stage/view locate unimplemented"
+        "view locate unimplemented"
     );
 
     let space = get_handle!(space);
