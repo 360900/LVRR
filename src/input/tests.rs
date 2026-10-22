@@ -2180,6 +2180,16 @@ fn pose_relative_to_now_in_the_past() {
             vr::EVRInputError::None
         );
     }
+
+    // Without XR_KHR_convert_timespec_time (fakexr has none), now is the display time.
+    f.input
+        .openxr
+        .display_time
+        .set(xr::Time::from_nanos(10_000_000_000));
+    let time_from_now = |seconds| f.input.openxr.time_from_now(seconds).as_nanos();
+    assert_eq!(time_from_now(-0.25), 9_750_000_000);
+    assert_eq!(time_from_now(f32::NAN), 10_000_000_000);
+    assert_eq!(time_from_now(f32::NEG_INFINITY), 10_000_000_000);
 }
 
 #[test]
