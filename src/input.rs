@@ -848,6 +848,16 @@ impl InputSessionData {
         // Delete the current raw spaces so they can be recreated later
         self.pose_data.reset_spaces();
     }
+
+    /// Forgets every pose located in the tracking spaces, for when they move.
+    pub(crate) fn forget_poses(&self) {
+        for device in self.devices.read().unwrap().iter() {
+            device.forget_poses();
+        }
+        for space in [&self.pose_data.left_space, &self.pose_data.right_space] {
+            space.pose_history.lock().unwrap().clear();
+        }
+    }
 }
 enum ActionData {
     Bool(xr::Action<bool>),

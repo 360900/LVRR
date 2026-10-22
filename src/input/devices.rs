@@ -1498,6 +1498,21 @@ mod tests {
     }
 
     #[test]
+    fn zero_pose_reset_forgets_last_pose() {
+        let mut f = Fixture::new();
+        lose_right_controller(&mut f);
+
+        // the last pose is in the old seated space
+        f.input
+            .openxr
+            .reset_tracking_space(vr::ETrackingUniverseOrigin::Seated);
+        let untracked = tip_pose(&f, Hand::Right, 2);
+        assert!(!untracked.bPoseIsValid);
+        assert!(untracked.bDeviceIsConnected);
+        assert_eq!(untracked.mDeviceToAbsoluteTracking.m, [[0.0; 4]; 3]);
+    }
+
+    #[test]
     #[cfg_attr(not(feature = "monado"), ignore)]
     fn get_tracker_pose() {
         let mut f = Fixture::new();

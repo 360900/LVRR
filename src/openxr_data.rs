@@ -548,6 +548,7 @@ impl<C: Compositor> OpenXrData<C> {
             local_space_adjusted,
             stage_space_reference,
             stage_space_adjusted,
+            input_data,
             ..
         } = &mut **guard;
 
@@ -591,6 +592,7 @@ impl<C: Compositor> OpenXrData<C> {
             );
             if let Some(space) = self.check("xrCreateReferenceSpace", space) {
                 *adjusted_space = space;
+                input_data.forget_poses();
             }
         };
 
