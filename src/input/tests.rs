@@ -831,6 +831,19 @@ fn bindings_with_mismatched_action_type_are_skipped() {
         c"/actions/default/in/move",
         ["/user/hand/right/input/thumbstick".into()],
     );
+    // Haptics, poses and skeletons naming an action of another type are skipped too.
+    f.verify_bindings::<xr::Haptic>(
+        path,
+        c"/actions/default/out/haptic",
+        ["/user/hand/right/output/haptic".into()],
+    );
+    let pose = f.get_action_handle(c"/actions/default/in/pose");
+    let profile = f.input.openxr.instance.string_to_path(path).unwrap();
+    let data = f.input.openxr.session_data.get();
+    let loaded = data.input_data.get_loaded_actions().unwrap();
+    let bound = loaded.try_get_pose(pose, profile).unwrap();
+    assert!(bound.left.is_none());
+    assert!(bound.right.is_some());
 }
 
 #[test]

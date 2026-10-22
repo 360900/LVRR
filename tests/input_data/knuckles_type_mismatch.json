@@ -47,6 +47,36 @@
 					"mode": "joystick",
 					"path": "/user/hand/right/input/thumbstick"
 				}
+			],
+			"haptics": [
+				{
+					"output": "/actions/default/in/use",
+					"path": "/user/hand/left/output/haptic"
+				},
+				{
+					"output": "/actions/default/out/haptic",
+					"path": "/user/hand/right/output/haptic"
+				}
+			],
+			"poses": [
+				{
+					"output": "/actions/default/in/use",
+					"path": "/user/hand/left/pose/raw"
+				},
+				{
+					"output": "/actions/default/in/pose",
+					"path": "/user/hand/right/pose/raw"
+				}
+			],
+			"skeleton": [
+				{
+					"output": "/actions/default/in/grabaxis",
+					"path": "/user/hand/left/input/skeleton/left"
+				},
+				{
+					"output": "/actions/default/in/skeleton",
+					"path": "/user/hand/left/input/skeleton/left"
+				}
 			]
 		}
 	}

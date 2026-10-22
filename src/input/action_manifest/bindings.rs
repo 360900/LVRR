@@ -1031,31 +1031,30 @@ pub fn handle_skeleton_bindings(
             continue;
         };
 
-        match &context.actions[&output.path] {
-            crate::input::ActionData::Skeleton(hand) => {
-                let bound_hand = match path.as_str() {
-                    "/user/hand/left/input/skeleton/left" => Hand::Left,
-                    "/user/hand/right/input/skeleton/right" => Hand::Right,
-                    other => {
-                        warn!(
-                            "Got invalid skeleton binding {other} for action {}",
-                            output.path
-                        );
-                        continue;
-                    }
-                };
-
-                if bound_hand != *hand {
-                    warn!(
-                        "Action {} was created with hand {hand:?}, but is bound to hand {bound_hand:?}",
-                        output.path
-                    );
-                }
-            }
-            _ => panic!(
-                "Expected skeleton action for skeleton binding {}",
+        let ActionData::Skeleton(hand) = &context.actions[&output.path] else {
+            warn!(
+                "Expected skeleton action for skeleton binding {}, skipping",
                 output.path
-            ),
+            );
+            continue;
+        };
+        let bound_hand = match path.as_str() {
+            "/user/hand/left/input/skeleton/left" => Hand::Left,
+            "/user/hand/right/input/skeleton/right" => Hand::Right,
+            other => {
+                warn!(
+                    "Got invalid skeleton binding {other} for action {}",
+                    output.path
+                );
+                continue;
+            }
+        };
+
+        if bound_hand != *hand {
+            warn!(
+                "Action {} was created with hand {hand:?}, but is bound to hand {bound_hand:?}",
+                output.path
+            );
         }
     }
 }
@@ -1077,14 +1076,13 @@ pub fn handle_haptic_bindings(
             continue;
         };
 
-        assert!(
-            matches!(
-                &context.actions[&output.path],
-                crate::input::ActionData::Haptic(_)
-            ),
-            "expected haptic action for haptic binding {path}, got {}",
-            output.path
-        );
+        if !matches!(&context.actions[&output.path], ActionData::Haptic(_)) {
+            warn!(
+                "Expected haptic action for haptic binding {path}, got {}, skipping",
+                output.path
+            );
+            continue;
+        }
         let xr_path = instance.string_to_path(path).unwrap();
         context.push_binding(output.path.clone(), xr_path);
     }
@@ -1100,14 +1098,13 @@ pub fn handle_pose_bindings(context: &mut BindingsProfileLoadContext, bindings: 
             continue;
         };
 
-        assert!(
-            matches!(
-                context.actions.get_mut(&output.path).unwrap(),
-                ActionData::Pose
-            ),
-            "Expected pose action for pose binding on {}",
-            output.path
-        );
+        if !matches!(&context.actions[&output.path], ActionData::Pose) {
+            warn!(
+                "Expected pose action for pose binding on {}, skipping",
+                output.path
+            );
+            continue;
+        }
 
         let bound = context
             .pose_bindings
