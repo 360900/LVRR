@@ -533,7 +533,9 @@ impl GraphicsBackend for GlData {
 
         xr::SwapchainCreateInfo {
             create_flags: xr::SwapchainCreateFlags::EMPTY,
-            usage_flags: xr::SwapchainUsageFlags::TRANSFER_DST,
+            // The blit path renders into the swapchain images.
+            usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT
+                | xr::SwapchainUsageFlags::TRANSFER_DST,
             format: fmt as u32,
             sample_count: 1,
             width: extent.width as u32,
