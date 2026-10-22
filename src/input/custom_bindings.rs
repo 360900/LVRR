@@ -199,8 +199,6 @@ pub(super) struct DpadData {
     pub actions: DpadActions,
     direction: DpadDirection,
     last_state: AtomicBool,
-    active: AtomicBool,
-    changed: AtomicBool,
 }
 
 impl DpadData {
@@ -215,8 +213,6 @@ impl DpadData {
             actions,
             direction,
             last_state: false.into(),
-            active: false.into(),
-            changed: false.into(),
         }
     }
 
@@ -254,13 +250,12 @@ impl DpadData {
             .unwrap_or(Ok(true))?;
 
         if !active {
-            let changed = self
+            // Still bound, so report the release edge like any other button.
+            ret_state.changed_since_last_sync = self
                 .last_state
                 .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok();
-            self.changed.store(changed, Ordering::Relaxed);
-            self.active.store(false, Ordering::Relaxed);
-            return Ok(None);
+            return Ok(Some(ret_state));
         }
 
         // convert to polar coordinates
@@ -305,10 +300,6 @@ impl DpadData {
                     .inspect_err(|e| error!("Couldn't activate dpad haptic: {e}"));
             }
         }
-
-        self.changed
-            .store(ret_state.changed_since_last_sync, Ordering::Relaxed);
-        self.active.store(true, Ordering::Relaxed);
 
         Ok(Some(ret_state))
     }
@@ -828,6 +819,43 @@ mod tests {
         assert!(state.bActive);
         assert!(state.bState);
         assert!(!state.bChanged);
+
+        // Lifting the finger still in the north wedge releases it.
+        fakexr::set_action_state(
+            dpad_data.click_or_touch.as_ref().unwrap().as_raw(),
+            fakexr::ActionState::Float(0.0),
+            LeftHand,
+        );
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: set1,
+            ..Default::default()
+        });
+        let state = f.get_bool_state(boolact).unwrap();
+        assert!(state.bActive);
+        assert!(!state.bState);
+        assert!(state.bChanged);
+
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: set1,
+            ..Default::default()
+        });
+        let state = f.get_bool_state(boolact).unwrap();
+        assert!(state.bActive);
+        assert!(!state.bState);
+        assert!(!state.bChanged);
+
+        fakexr::set_action_state(
+            dpad_data.click_or_touch.as_ref().unwrap().as_raw(),
+            fakexr::ActionState::Float(1.0),
+            LeftHand,
+        );
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: set1,
+            ..Default::default()
+        });
+        let state = f.get_bool_state(boolact).unwrap();
+        assert!(state.bState);
+        assert!(state.bChanged);
 
         fakexr::set_action_state(
             dpad_data.xy.as_raw(),
