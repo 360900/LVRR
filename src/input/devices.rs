@@ -626,7 +626,8 @@ impl TrackedDevice {
     /// Whether this controller is a hand the runtime tracks optically and binds to
     /// simple_controller (as Monado and WiVRn do), so it should be reported as a hand rather than
     /// a generic controller. This is latched until the interaction profile changes, so the
-    /// identity doesn't flip whenever the hand briefly loses tracking.
+    /// identity doesn't flip whenever the hand briefly loses tracking. Without
+    /// XR_EXT_hand_tracking_data_source, joints derived from a controller look the same.
     pub(super) fn is_tracked_hand(
         &self,
         xr_data: &OpenXrData<impl openxr_data::Compositor>,
@@ -640,6 +641,7 @@ impl TrackedDevice {
             }
         );
         if !has_tracker
+            || !xr_data.enabled_extensions.ext_hand_tracking_data_source
             || !self
                 .profile_data
                 .as_ref()
