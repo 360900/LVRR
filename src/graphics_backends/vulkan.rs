@@ -17,6 +17,8 @@ struct RealSessionData {
     overlay_pipeline: Option<PipelineData>,
     /// The extent last copied to each eye of each image, if any.
     eye_extents: Mutex<Vec<[Option<vk::Extent2D>; 2]>>,
+    /// Per eye, for multisampled textures that can't be resolved straight into the swapchain.
+    resolve_images: Mutex<[Option<ResolveImage>; 2]>,
 }
 
 impl RealSessionData {
@@ -28,6 +30,15 @@ impl RealSessionData {
         unsafe {
             if let Some(pipeline) = &self.overlay_pipeline {
                 pipeline.destroy(device);
+            }
+            for image in self
+                .resolve_images
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .flatten()
+            {
+                image.destroy(device);
             }
             for &fence in &self.fences {
                 device.destroy_fence(fence, None);
@@ -61,6 +72,116 @@ pub struct VulkanData {
     /// Whether we created the instance and device for the temporary session. Otherwise they
     /// belong to the app, even before any swapchain images are stored.
     owns_device: bool,
+}
+
+/// A single sampled image in the format and size of a multisampled eye texture.
+struct ResolveImage {
+    image: vk::Image,
+    memory: vk::DeviceMemory,
+    format: vk::Format,
+    extent: vk::Extent2D,
+}
+
+impl ResolveImage {
+    fn new(vk: &VulkanData, format: vk::Format, extent: vk::Extent2D) -> Result<Self, vk::Result> {
+        let device = &vk.device;
+        let image = unsafe {
+            device.create_image(
+                &vk::ImageCreateInfo::default()
+                    .image_type(vk::ImageType::TYPE_2D)
+                    .format(format)
+                    .extent(vk::Extent3D {
+                        width: extent.width,
+                        height: extent.height,
+                        depth: 1,
+                    })
+                    .mip_levels(1)
+                    .array_layers(1)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .tiling(vk::ImageTiling::OPTIMAL)
+                    .usage(vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST),
+                None,
+            )?
+        };
+        let requirements = unsafe { device.get_image_memory_requirements(image) };
+        let properties = unsafe {
+            vk.instance
+                .get_physical_device_memory_properties(vk.physical_device)
+        };
+        let allowed = |i: &u32| requirements.memory_type_bits & (1 << i) != 0;
+        let device_local = |i: &u32| {
+            properties.memory_types[*i as usize]
+                .property_flags
+                .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
+        };
+        let types = 0..properties.memory_type_count;
+        let memory = types
+            .clone()
+            .filter(allowed)
+            .find(device_local)
+            .or_else(|| types.clone().find(allowed))
+            .ok_or(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY)
+            .and_then(|memory_type| unsafe {
+                device.allocate_memory(
+                    &vk::MemoryAllocateInfo::default()
+                        .allocation_size(requirements.size)
+                        .memory_type_index(memory_type),
+                    None,
+                )
+            })
+            .inspect_err(|_| unsafe { device.destroy_image(image, None) })?;
+        let image = Self {
+            image,
+            memory,
+            format,
+            extent,
+        };
+        if let Err(e) = unsafe { device.bind_image_memory(image.image, memory, 0) } {
+            unsafe { image.destroy(device) };
+            return Err(e);
+        }
+        Ok(image)
+    }
+
+    /// # Safety
+    /// The GPU must be done with the image.
+    unsafe fn destroy(&self, device: &ash::Device) {
+        unsafe {
+            device.destroy_image(self.image, None);
+            device.free_memory(self.memory, None);
+        }
+    }
+}
+
+/// How an eye texture gets into a swapchain image.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum EyeCopy {
+    Resolve,
+    /// The swapchain has the texture's format, or its sRGB variant for gamma encoded textures.
+    Copy,
+    /// The swapchain format was substituted.
+    Blit,
+}
+
+impl EyeCopy {
+    /// `game_format` is the format of the texture's data, which may be the sRGB variant of
+    /// `texture_format`. vkCmdResolveImage needs both images to have the same format, and copies
+    /// and blits a single sampled source, so other multisampled textures are resolved into an image
+    /// of their own format first.
+    fn new(
+        texture_format: vk::Format,
+        game_format: vk::Format,
+        swapchain_format: vk::Format,
+        multisampled: bool,
+    ) -> Self {
+        if multisampled && swapchain_format == texture_format {
+            Self::Resolve
+        } else if swapchain_format == game_format {
+            Self::Copy
+        } else {
+            Self::Blit
+        }
+    }
 }
 
 impl Drop for VulkanData {
@@ -176,6 +297,7 @@ impl GraphicsBackend for VulkanData {
             fences,
             overlay_pipeline: Default::default(),
             eye_extents,
+            resolve_images: Default::default(),
         }) {
             data.destroy(&self.device);
         }
@@ -231,6 +353,24 @@ impl GraphicsBackend for VulkanData {
 
         let (extent, offset) = texture_extent_from_bounds(texture, bounds);
         log::trace!("{eye:?} extent: {extent:?} | bounds: {bounds:?}");
+        let xr_extent = xr::Extent2Di {
+            width: extent.width as _,
+            height: extent.height as _,
+        };
+
+        let texture_format = vk::Format::from_raw(texture.m_nFormat as _);
+        let game_format = get_colorspace_corrected_format(texture_format, color_space);
+        let multisampled = texture.m_nSampleCount > 1;
+        let method = EyeCopy::new(texture_format, game_format, data.format, multisampled);
+        let resolve_image = if multisampled && method != EyeCopy::Resolve {
+            let Some(image) = self.resolve_image(eye, texture) else {
+                return xr_extent;
+            };
+            Some(image)
+        } else {
+            None
+        };
+
         let clear = {
             let mut eye_extents = data.eye_extents.lock().unwrap();
             let last = &mut eye_extents[image_index][eye as usize];
@@ -308,12 +448,76 @@ impl GraphicsBackend for VulkanData {
 
             let game_image = vk::Image::from_raw(texture.m_nImage);
             let game_layer = array_data.map(|d| d.m_unArrayIndex).unwrap_or(0);
+            let game_subresource = vk::ImageSubresourceLayers {
+                base_array_layer: game_layer,
+                ..subresource
+            };
+
+            let (src_image, src_subresource) = match resolve_image {
+                Some(image) => {
+                    let range = vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    };
+                    // The old contents aren't needed, but earlier copies from it must be done.
+                    self.device.cmd_pipeline_barrier(
+                        buf,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[vk::ImageMemoryBarrier {
+                            src_access_mask: vk::AccessFlags::empty(),
+                            dst_access_mask: vk::AccessFlags::TRANSFER_WRITE,
+                            old_layout: vk::ImageLayout::UNDEFINED,
+                            new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            image,
+                            subresource_range: range,
+                            ..Default::default()
+                        }],
+                    );
+                    self.device.cmd_resolve_image(
+                        buf,
+                        game_image,
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        image,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &[vk::ImageResolve {
+                            src_subresource: game_subresource,
+                            src_offset: offset,
+                            dst_subresource: subresource,
+                            dst_offset: offset,
+                            extent,
+                        }],
+                    );
+                    self.device.cmd_pipeline_barrier(
+                        buf,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[vk::ImageMemoryBarrier {
+                            src_access_mask: vk::AccessFlags::TRANSFER_WRITE,
+                            dst_access_mask: vk::AccessFlags::TRANSFER_READ,
+                            old_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            new_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                            image,
+                            subresource_range: range,
+                            ..Default::default()
+                        }],
+                    );
+                    (image, subresource)
+                }
+                None => (game_image, game_subresource),
+            };
 
             let copy = vk::ImageResolve {
-                src_subresource: vk::ImageSubresourceLayers {
-                    base_array_layer: game_layer,
-                    ..subresource
-                },
+                src_subresource,
                 src_offset: offset,
                 dst_subresource: vk::ImageSubresourceLayers {
                     base_array_layer: eye.0,
@@ -323,20 +527,16 @@ impl GraphicsBackend for VulkanData {
                 extent,
             };
 
-            let game_format = get_colorspace_corrected_format(
-                vk::Format::from_raw(texture.m_nFormat as _),
-                color_space,
-            );
-            if texture.m_nSampleCount > 1 {
+            if method == EyeCopy::Resolve {
                 self.device.cmd_resolve_image(
                     buf,
-                    game_image,
+                    src_image,
                     vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                     swapchain_image,
                     vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                     &[copy],
                 );
-            } else if data.format != game_format {
+            } else if method == EyeCopy::Blit {
                 // Blits take the corners of each region instead of an extent.
                 let end = |offset: vk::Offset3D| vk::Offset3D {
                     x: offset.x + extent.width as i32,
@@ -345,7 +545,7 @@ impl GraphicsBackend for VulkanData {
                 };
                 self.device.cmd_blit_image(
                     buf,
-                    game_image,
+                    src_image,
                     vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                     swapchain_image,
                     vk::ImageLayout::TRANSFER_DST_OPTIMAL,
@@ -360,7 +560,7 @@ impl GraphicsBackend for VulkanData {
             } else {
                 self.device.cmd_copy_image(
                     buf,
-                    game_image,
+                    src_image,
                     vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                     swapchain_image,
                     vk::ImageLayout::TRANSFER_DST_OPTIMAL,
@@ -394,10 +594,7 @@ impl GraphicsBackend for VulkanData {
             );
         });
 
-        xr::Extent2Di {
-            width: extent.width as _,
-            height: extent.height as _,
-        }
+        xr_extent
     }
 
     fn copy_overlay_to_swapchain(
@@ -596,6 +793,45 @@ impl GraphicsBackend for VulkanData {
     }
 }
 impl VulkanData {
+    /// The image to resolve `eye`'s multisampled texture into, if it could be created.
+    fn resolve_image(
+        &self,
+        eye: vr::EVREye,
+        texture: &vr::VRVulkanTextureData_t,
+    ) -> Option<vk::Image> {
+        let data = self.real_data.as_ref()?;
+        let format = vk::Format::from_raw(texture.m_nFormat as _);
+        let extent = vk::Extent2D {
+            width: texture.m_nWidth,
+            height: texture.m_nHeight,
+        };
+        let mut images = data.resolve_images.lock().unwrap();
+        let slot = &mut images[usize::from(eye != vr::EVREye::Left)];
+        if let Some(image) = slot
+            .as_ref()
+            .filter(|image| image.format == format && image.extent == extent)
+        {
+            return Some(image.image);
+        }
+        if let Some(old) = slot.take() {
+            // Earlier copies may still use it.
+            if wait_for_fences(&self.device, &data.fences) {
+                unsafe { old.destroy(&self.device) };
+            } else {
+                warn!("Leaking an image the GPU may still use");
+            }
+        }
+        ResolveImage::new(self, format, extent)
+            .inspect_err(|e| {
+                crate::warn_once!(
+                    "Failed to create an image to resolve the eye texture in: {}",
+                    e
+                )
+            })
+            .ok()
+            .map(|image| slot.insert(image).image)
+    }
+
     /// Records and submits `bufs[idx]` once its previous submission has finished, or skips the
     /// copy if that never happens. Failures (e.g. a lost device) are only logged: the frame is lost
     /// either way, and the app finds out about a lost device from its own calls.

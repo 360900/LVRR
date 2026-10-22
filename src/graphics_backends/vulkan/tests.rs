@@ -867,3 +867,19 @@ fn clear_when_copied_area_shrinks() {
     assert!(needs_clear(Some(extent(10, 10)), extent(9, 10)));
     assert!(needs_clear(Some(extent(10, 10)), extent(20, 9)));
 }
+
+/// vkCmdResolveImage needs the same format on both sides.
+#[test]
+fn resolve_only_into_the_same_format() {
+    use vk::Format as F;
+    let (unorm, srgb) = (F::R8G8B8A8_UNORM, F::R8G8B8A8_SRGB);
+    // Gamma encoded textures get an sRGB swapchain.
+    assert_eq!(EyeCopy::new(unorm, srgb, srgb, true), EyeCopy::Copy);
+    assert_eq!(EyeCopy::new(unorm, srgb, srgb, false), EyeCopy::Copy);
+    assert_eq!(EyeCopy::new(srgb, srgb, srgb, true), EyeCopy::Resolve);
+    assert_eq!(EyeCopy::new(unorm, unorm, unorm, true), EyeCopy::Resolve);
+    // The runtime doesn't support the format.
+    let other = F::B8G8R8A8_SRGB;
+    assert_eq!(EyeCopy::new(unorm, srgb, other, true), EyeCopy::Blit);
+    assert_eq!(EyeCopy::new(unorm, srgb, other, false), EyeCopy::Blit);
+}
