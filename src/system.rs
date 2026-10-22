@@ -396,13 +396,7 @@ impl System {
     /// `origin`'s zero pose in the standing universe, identity if the runtime can't relate them.
     fn zero_pose_to_standing(&self, origin: vr::ETrackingUniverseOrigin) -> vr::HmdMatrix34_t {
         self.openxr
-            .session_data
-            .get()
-            .locate_origin(
-                origin,
-                vr::ETrackingUniverseOrigin::Standing,
-                self.openxr.get_display_time(),
-            )
+            .locate_origin(origin, vr::ETrackingUniverseOrigin::Standing)
             .unwrap_or(xr::Posef::IDENTITY)
             .into()
     }

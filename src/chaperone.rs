@@ -59,12 +59,9 @@ pub(crate) fn play_area_rect(openxr: &RealOpenXrData) -> Option<vr::HmdQuad_t> {
         position: p,
         orientation: o,
     } = openxr
-        .session_data
-        .get()
         .locate_origin(
             vr::ETrackingUniverseOrigin::RawAndUncalibrated,
             vr::ETrackingUniverseOrigin::Standing,
-            openxr.get_display_time(),
         )
         .unwrap_or(xr::Posef::IDENTITY);
     let (rotation, translation) = (

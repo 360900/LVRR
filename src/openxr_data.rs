@@ -337,6 +337,9 @@ impl<C: Compositor> OpenXrData<C> {
         if let Some(state) = state {
             self.session_data.0.write().state = state;
         }
+        if self.is_lost() {
+            return;
+        }
         if self.stage_moved.swap(false, Ordering::Relaxed) {
             // The runtime moved the stage, which replaces any standing zero pose the app set.
             self.move_origin(
@@ -518,12 +521,15 @@ impl<C: Compositor> OpenXrData<C> {
         }
         let mut session = self.session_data.0.write();
         for origin in origins {
-            let zero = session.head_zero_pose(origin, time).unwrap_or_else(|| {
-                warn!(
-                    "Couldn't locate the headset, resetting {origin:?} zero pose to the runtime's"
-                );
-                xr::Posef::IDENTITY
-            });
+            let zero = self
+                .check("xrLocateSpace", session.head_zero_pose(origin, time))
+                .flatten()
+                .unwrap_or_else(|| {
+                    warn!(
+                        "Couldn't locate the headset, resetting {origin:?} zero pose to the runtime's"
+                    );
+                    xr::Posef::IDENTITY
+                });
             self.move_origin(&mut session, origin, zero);
         }
         drop(session);
@@ -642,7 +648,10 @@ impl<C: Compositor> OpenXrData<C> {
                 // A runtime recenter seen while ending the session replaces these on the next
                 // poll.
                 for (origin, offset) in offsets {
-                    session.set_origin_offset(origin, offset);
+                    self.check(
+                        "xrCreateReferenceSpace",
+                        session.set_origin_offset(origin, offset),
+                    );
                 }
                 comp.post_session_restart(&session, waiter, stream);
                 (session, Ok(()))
@@ -666,7 +675,10 @@ impl<C: Compositor> OpenXrData<C> {
                         })
                         .0;
                 for (origin, offset) in offsets {
-                    session.set_origin_offset(origin, offset);
+                    self.check(
+                        "xrCreateReferenceSpace",
+                        session.set_origin_offset(origin, offset),
+                    );
                 }
                 (session, Err(RestartError::CreationFailed))
             }
@@ -727,7 +739,8 @@ impl<C: Compositor> OpenXrData<C> {
             }
         }
         let mut session = self.session_data.0.write();
-        match session.head_zero_pose(origin, self.get_display_time()) {
+        let zero = session.head_zero_pose(origin, self.get_display_time());
+        match self.check("xrLocateSpace", zero).flatten() {
             Some(zero) => self.move_origin(&mut session, origin, zero),
             None => warn!("Couldn't locate the headset, not resetting {origin:?} zero pose"),
         }
@@ -740,12 +753,32 @@ impl<C: Compositor> OpenXrData<C> {
         origin: vr::ETrackingUniverseOrigin,
         offset: xr::Posef,
     ) {
-        session.set_origin_offset(origin, offset);
+        self.check(
+            "xrCreateReferenceSpace",
+            session.set_origin_offset(origin, offset),
+        );
         // The projection layer goes out in the moved space, so views located in the old one
         // would put the frame where the app didn't render it.
         if let Some(system) = self.system.get() {
             system.clear_views();
         }
+    }
+
+    /// The pose of `origin`'s zero in the `base` universe now, if the runtime knows how the two
+    /// relate.
+    pub fn locate_origin(
+        &self,
+        origin: vr::ETrackingUniverseOrigin,
+        base: vr::ETrackingUniverseOrigin,
+    ) -> Option<xr::Posef> {
+        if self.is_lost() {
+            return None;
+        }
+        let located = self
+            .session_data
+            .get()
+            .locate_origin(origin, base, self.get_display_time());
+        self.check("xrLocateSpace", located).flatten()
     }
 
     pub fn get_refresh_rate(&self) -> f32 {
@@ -1284,49 +1317,43 @@ impl SessionData {
         }
     }
 
-    /// The pose of `origin`'s zero in the `base` universe, if the runtime knows how the two
-    /// relate.
-    pub fn locate_origin(
+    /// The pose of `origin`'s zero in the `base` universe, `None` if the runtime doesn't know how
+    /// the two relate.
+    fn locate_origin(
         &self,
         origin: vr::ETrackingUniverseOrigin,
         base: vr::ETrackingUniverseOrigin,
         time: xr::Time,
-    ) -> Option<xr::Posef> {
+    ) -> xr::Result<Option<xr::Posef>> {
         let location = self
             .origin_space(origin)
-            .locate(self.origin_space(base), time)
-            .inspect_err(|e| crate::warn_once!("Couldn't locate {:?} in {:?}: {}", origin, base, e))
-            .ok()?;
-        location
+            .locate(self.origin_space(base), time)?;
+        Ok(location
             .location_flags
             .contains(
                 xr::SpaceLocationFlags::POSITION_VALID | xr::SpaceLocationFlags::ORIENTATION_VALID,
             )
-            .then_some(location.pose)
+            .then_some(location.pose))
     }
 
     /// The zero pose resetting `origin` sets: the head's position and yaw in `origin`'s reference
-    /// space. The standing zero stays on the floor.
+    /// space. The standing zero stays on the floor. `None` if the headset isn't tracked.
     fn head_zero_pose(
         &self,
         origin: vr::ETrackingUniverseOrigin,
         time: xr::Time,
-    ) -> Option<xr::Posef> {
+    ) -> xr::Result<Option<xr::Posef>> {
         let reference = match origin {
             vr::ETrackingUniverseOrigin::Seated => &self.local_space_reference,
             vr::ETrackingUniverseOrigin::Standing => &self.stage_space_reference,
             // RawAndUncalibrated has no zero to reset, nor do unknown universes.
-            _ => return None,
+            _ => return Ok(None),
         };
-        let location = self
-            .view_space
-            .locate(reference, time)
-            .inspect_err(|e| warn!("Couldn't locate the headset: {e}"))
-            .ok()?;
+        let location = self.view_space.locate(reference, time)?;
         if !location.location_flags.contains(
             xr::SpaceLocationFlags::POSITION_VALID | xr::SpaceLocationFlags::ORIENTATION_VALID,
         ) {
-            return None;
+            return Ok(None);
         }
         let xr::Posef {
             mut position,
@@ -1346,7 +1373,7 @@ impl SessionData {
             position.y = 0.0;
         }
 
-        Some(xr::Posef {
+        Ok(Some(xr::Posef {
             position,
             orientation: xr::Quaternionf {
                 x: twist.x,
@@ -1354,11 +1381,15 @@ impl SessionData {
                 z: twist.z,
                 w: twist.w,
             },
-        })
+        }))
     }
 
     /// Moves `origin`'s zero to `offset`, a pose in its reference space.
-    fn set_origin_offset(&mut self, origin: vr::ETrackingUniverseOrigin, offset: xr::Posef) {
+    fn set_origin_offset(
+        &mut self,
+        origin: vr::ETrackingUniverseOrigin,
+        offset: xr::Posef,
+    ) -> xr::Result<()> {
         let (ty, space, stored) = match origin {
             vr::ETrackingUniverseOrigin::Seated => (
                 xr::ReferenceSpaceType::LOCAL,
@@ -1370,16 +1401,12 @@ impl SessionData {
                 &mut self.stage_space_adjusted,
                 &mut self.stage_offset,
             ),
-            _ => return,
+            _ => return Ok(()),
         };
-        match self.session.create_reference_space(ty, offset) {
-            Ok(adjusted) => {
-                *space = adjusted;
-                *stored = offset;
-                self.input_data.forget_poses();
-            }
-            Err(e) => warn!("Couldn't move {origin:?} zero pose: {e}"),
-        }
+        *space = self.session.create_reference_space(ty, offset)?;
+        *stored = offset;
+        self.input_data.forget_poses();
+        Ok(())
     }
 
     fn origin_offsets(&self) -> [(vr::ETrackingUniverseOrigin, xr::Posef); 2] {
@@ -1816,7 +1843,7 @@ mod tests {
         data.reset_tracking_space(Origin::Standing);
         data.reset_tracking_space(Origin::Seated);
 
-        data.restart_session();
+        data.restart_session().unwrap();
         let session = data.session_data.get().session.as_raw();
         fakexr::set_reference_space_pose(session, xr::ReferenceSpaceType::VIEW, head);
         assert_pose_eq(
@@ -1862,7 +1889,7 @@ mod tests {
             xr::Time::from_nanos(0),
         );
 
-        data.restart_session();
+        data.restart_session().unwrap();
         let moved = xr::Posef {
             position: xr::Vector3f {
                 x: -1.0,
@@ -1944,14 +1971,14 @@ mod tests {
         focus();
         // Runtimes take focus away when we end the session.
         fakexr::set_session_state(session(), S::VISIBLE);
-        data.restart_session();
+        data.restart_session().unwrap();
         assert!(!data.input_focus_captured());
         focus();
         assert!(!data.input_focus_captured());
 
         set_state(S::VISIBLE);
         assert!(data.input_focus_captured());
-        data.restart_session();
+        data.restart_session().unwrap();
         set_state(S::SYNCHRONIZED);
         set_state(S::VISIBLE);
         assert!(data.input_focus_captured());

@@ -64,11 +64,10 @@ impl ChaperoneSetup {
         if pose.is_null() {
             return false;
         }
-        let Some(zero) = self.openxr.session_data.get().locate_origin(
-            origin,
-            vr::ETrackingUniverseOrigin::RawAndUncalibrated,
-            self.openxr.get_display_time(),
-        ) else {
+        let Some(zero) = self
+            .openxr
+            .locate_origin(origin, vr::ETrackingUniverseOrigin::RawAndUncalibrated)
+        else {
             return false;
         };
         unsafe { pose.write(zero.into()) };
