@@ -366,7 +366,7 @@ impl IVRClientCore003_Interface for ClientCore {
             .or_else(|| self.try_interface(interface, |_| Screenshots::default()))
             .or_else(|| self.try_interface(interface, Settings::new))
             .or_else(|| self.try_interface(interface, |_| Debug::default()))
-            .or_else(|| self.try_interface(interface, |_| ChaperoneSetup::default()))
+            .or_else(|| self.try_interface(interface, |_| ChaperoneSetup::new(openxr.clone())))
             .or_else(|| self.try_interface(interface, |_| ExtendedDisplay::new(openxr.clone())))
             .or_else(|| self.try_interface(interface, |_| HeadsetView::default()))
             .or_else(|| self.try_interface(interface, |_| UnknownInterfaces::default()))
