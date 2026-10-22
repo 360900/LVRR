@@ -246,7 +246,7 @@ mod tests {
 
     fn probe_with_profile(profile: &str) -> Option<String> {
         fakexr::set_default_interaction_profile(fakexr::UserPath::LeftHand, Some(profile));
-        let xr = RealOpenXrData::new(&Injector::default(), App::Other).unwrap();
+        let xr = RealOpenXrData::new(&Injector::default(), App::Scene).unwrap();
         fakexr::set_default_interaction_profile(fakexr::UserPath::LeftHand, None);
         xr.probed_profiles.left.clone()
     }
