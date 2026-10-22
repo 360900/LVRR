@@ -229,13 +229,65 @@ pub fn set_stage_bounds(session: xr::Session, bounds: Option<xr::Extent2Df>) {
     session.stage_bounds.store(bounds);
 }
 
-/// Sets where the origin of a STAGE reference space is, relative to LOCAL.
+/// Sets where the origin of a VIEW or STAGE reference space is, relative to LOCAL. For VIEW this
+/// is the head pose.
 pub fn set_reference_space_pose(session: xr::Session, ty: xr::ReferenceSpaceType, pose: xr::Posef) {
     let session = session.to_handle().unwrap();
     match ty {
+        xr::ReferenceSpaceType::VIEW => session.view_pose.store(pose),
         xr::ReferenceSpaceType::STAGE => session.stage_pose.store(pose),
         other => panic!("can't move reference space {other:?}"),
     }
+}
+
+/// Queues XrEventDataReferenceSpaceChangePending for `ty`, taking effect immediately.
+pub fn reference_space_change_pending(session: xr::Session, ty: xr::ReferenceSpaceType) {
+    let s = session.to_handle().unwrap();
+    send_event(
+        &s.event_sender,
+        xr::EventDataReferenceSpaceChangePending {
+            ty: xr::EventDataReferenceSpaceChangePending::TYPE,
+            next: std::ptr::null(),
+            session,
+            reference_space_type: ty,
+            change_time: xr::Time::from_nanos(0),
+            pose_valid: false.into(),
+            pose_in_previous_space: xr::Posef::IDENTITY,
+        },
+        None,
+    );
+}
+
+/// Queues XrEventDataUserPresenceChangedEXT.
+pub fn set_user_presence(session: xr::Session, present: bool) {
+    let s = session.to_handle().unwrap();
+    send_event(
+        &s.event_sender,
+        xr::EventDataUserPresenceChangedEXT {
+            ty: xr::EventDataUserPresenceChangedEXT::TYPE,
+            next: std::ptr::null(),
+            session,
+            is_user_present: present.into(),
+        },
+        None,
+    );
+}
+
+/// Moves the session to `state`, like the runtime taking focus away or giving it back.
+pub fn set_session_state(session: xr::Session, state: xr::SessionState) {
+    let s = session.to_handle().unwrap();
+    s.state.store(state);
+    send_event(
+        &s.event_sender,
+        xr::EventDataSessionStateChanged {
+            ty: xr::EventDataSessionStateChanged::TYPE,
+            next: std::ptr::null(),
+            session,
+            state,
+            time: xr::Time::from_nanos(0),
+        },
+        None,
+    );
 }
 
 pub fn session_frame_state(session: xr::Session) -> FrameState {
@@ -525,7 +577,7 @@ extern "system" fn enumerate_instance_extension_properties(
     properties: *mut xr::ExtensionProperties,
 ) -> xr::Result {
     assert!(layer_name.is_null());
-    let fixed: [&[u8]; 10] = [
+    let fixed: [&[u8]; 11] = [
         xr::KHR_VULKAN_ENABLE_EXTENSION_NAME,
         openxr_mndx_xdev_space::XR_MNDX_XDEV_SPACE_EXTENSION_NAME.as_bytes(),
         xr::HTC_VIVE_FOCUS3_CONTROLLER_INTERACTION_EXTENSION_NAME,
@@ -536,6 +588,7 @@ extern "system" fn enumerate_instance_extension_properties(
         b"XR_VALVE_frame_controller_interaction\0",
         xr::EXT_HAND_TRACKING_EXTENSION_NAME,
         xr::EXT_HAND_TRACKING_DATA_SOURCE_EXTENSION_NAME,
+        xr::EXT_USER_PRESENCE_EXTENSION_NAME,
     ];
     let extra = EXTRA_EXTENSIONS.with_borrow(Clone::clone);
     let count = (fixed.len() + extra.len()) as u32;
@@ -711,6 +764,7 @@ struct Session {
     last_layer_count: AtomicCell<u32>,
     with_trackers: AtomicBool,
     stage_bounds: AtomicCell<Option<xr::Extent2Df>>,
+    view_pose: AtomicCell<xr::Posef>,
     stage_pose: AtomicCell<xr::Posef>,
     attach_hook: Hook,
     end_hook: Hook,
@@ -859,6 +913,7 @@ impl Space {
 
         let SpaceType::Action { hand, action } = &self.ty else {
             let pose = match self.ty {
+                SpaceType::Reference(xr::ReferenceSpaceType::VIEW) => session.view_pose.load(),
                 SpaceType::Reference(xr::ReferenceSpaceType::STAGE) => session.stage_pose.load(),
                 _ => xr::Posef::IDENTITY,
             };
@@ -1125,6 +1180,7 @@ extern "system" fn create_session(
         last_layer_count: 0.into(),
         with_trackers: false.into(),
         stage_bounds: None.into(),
+        view_pose: xr::Posef::IDENTITY.into(),
         stage_pose: xr::Posef::IDENTITY.into(),
         attach_hook: Mutex::default(),
         end_hook: Mutex::default(),
@@ -1393,6 +1449,14 @@ extern "system" fn get_system_properties(
         position_tracking: true.into(),
     };
     hand_tracking::fill_system_properties(properties.next as _);
+    let mut next = properties.next.cast::<xr::BaseOutStructure>();
+    while let Some(header) = unsafe { next.as_mut() } {
+        if header.ty == xr::SystemUserPresencePropertiesEXT::TYPE {
+            let presence = unsafe { &mut *next.cast::<xr::SystemUserPresencePropertiesEXT>() };
+            presence.supports_user_presence = true.into();
+        }
+        next = header.next;
+    }
     xr::Result::SUCCESS
 }
 
@@ -1426,7 +1490,6 @@ extern "system" fn create_reference_space(
     space: *mut xr::Space,
 ) -> xr::Result {
     let info = unsafe { create_info.as_ref().unwrap() };
-    assert_eq!(info.pose_in_reference_space, xr::Posef::IDENTITY);
     let session = get_handle!(session);
 
     unsafe {
@@ -1934,19 +1997,7 @@ extern "system" fn locate_space(
     if is_lost(&base_space.session) {
         return xr::Result::ERROR_SESSION_LOST;
     }
-    assert!(
-        !matches!(
-            base_space.ty,
-            SpaceType::Reference(xr::ReferenceSpaceType::VIEW),
-        ),
-        "view locate unimplemented"
-    );
-
     let space = get_handle!(space);
-    assert!(!matches!(
-        space.ty,
-        SpaceType::Reference(xr::ReferenceSpaceType::LOCAL)
-    ));
     let next = unsafe { (*location).next };
     let mut out_loc = xr::SpaceLocation {
         ty: xr::SpaceLocation::TYPE,
@@ -1971,16 +2022,17 @@ extern "system" fn locate_space(
             }
         }
     }
-    if matches!(
-        base_space.ty,
-        SpaceType::Reference(xr::ReferenceSpaceType::LOCAL)
-    ) {
+    if let SpaceType::Reference(xr::ReferenceSpaceType::LOCAL) = base_space.ty {
         match space.get_pose_relative_to_local() {
             Ok(loc) => {
                 out_loc = loc;
             }
             Err(e) => return e,
         };
+        if out_loc.location_flags.contains(*LOCATION_FLAGS_TRACKED) {
+            out_loc.pose =
+                mat_to_pose(pose_to_mat(base_space.offset).inverse() * pose_to_mat(out_loc.pose));
+        }
     } else {
         let base_loc = match base_space.get_pose_relative_to_local() {
             Ok(loc) => loc,
