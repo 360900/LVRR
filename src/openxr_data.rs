@@ -1053,18 +1053,44 @@ impl SessionData {
 
     #[inline]
     pub fn get_space_for_origin(&self, origin: vr::ETrackingUniverseOrigin) -> &xr::Space {
+        if origin == vr::ETrackingUniverseOrigin::RawAndUncalibrated {
+            crate::warn_unimplemented!("RawAndUncalibrated tracking space");
+        }
+        self.origin_space(origin)
+    }
+
+    #[inline]
+    fn origin_space(&self, origin: vr::ETrackingUniverseOrigin) -> &xr::Space {
         match origin {
             vr::ETrackingUniverseOrigin::Seated => &self.local_space_adjusted,
             vr::ETrackingUniverseOrigin::Standing => &self.stage_space_adjusted,
-            vr::ETrackingUniverseOrigin::RawAndUncalibrated => {
-                crate::warn_unimplemented!("RawAndUncalibrated tracking space");
-                &self.stage_space_reference
-            }
+            vr::ETrackingUniverseOrigin::RawAndUncalibrated => &self.stage_space_reference,
             _ => {
                 crate::warn_once!("Unknown tracking universe {:?}, using raw", origin);
                 &self.stage_space_reference
             }
         }
+    }
+
+    /// The pose of `origin`'s zero in the `base` universe, if the runtime knows how the two
+    /// relate.
+    pub fn locate_origin(
+        &self,
+        origin: vr::ETrackingUniverseOrigin,
+        base: vr::ETrackingUniverseOrigin,
+        time: xr::Time,
+    ) -> Option<xr::Posef> {
+        let location = self
+            .origin_space(origin)
+            .locate(self.origin_space(base), time)
+            .inspect_err(|e| crate::warn_once!("Couldn't locate {:?} in {:?}: {}", origin, base, e))
+            .ok()?;
+        location
+            .location_flags
+            .contains(
+                xr::SpaceLocationFlags::POSITION_VALID | xr::SpaceLocationFlags::ORIENTATION_VALID,
+            )
+            .then_some(location.pose)
     }
 
     /// The zero pose resetting `origin` sets: the head's position and yaw in `origin`'s reference

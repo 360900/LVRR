@@ -384,6 +384,20 @@ impl System {
         };
     }
 
+    /// `origin`'s zero pose in the standing universe, identity if the runtime can't relate them.
+    fn zero_pose_to_standing(&self, origin: vr::ETrackingUniverseOrigin) -> vr::HmdMatrix34_t {
+        self.openxr
+            .session_data
+            .get()
+            .locate_origin(
+                origin,
+                vr::ETrackingUniverseOrigin::Standing,
+                self.openxr.get_display_time(),
+            )
+            .unwrap_or(xr::Posef::IDENTITY)
+            .into()
+    }
+
     pub fn push_event(&self, event: vr::VREvent_t) {
         let mut events = self.events.lock().unwrap();
         events.push_back(event);
@@ -1257,10 +1271,10 @@ impl vr::IVRSystem026_Interface for System {
         0
     }
     fn GetRawZeroPoseToStandingAbsoluteTrackingPose(&self) -> vr::HmdMatrix34_t {
-        xr::Posef::IDENTITY.into()
+        self.zero_pose_to_standing(vr::ETrackingUniverseOrigin::RawAndUncalibrated)
     }
     fn GetSeatedZeroPoseToStandingAbsoluteTrackingPose(&self) -> vr::HmdMatrix34_t {
-        xr::Posef::IDENTITY.into()
+        self.zero_pose_to_standing(vr::ETrackingUniverseOrigin::Seated)
     }
     fn GetDeviceToAbsoluteTrackingPose(
         &self,
@@ -1991,6 +2005,63 @@ mod tests {
             std::ptr::null_mut(),
             vr::k_unMaxTrackedDeviceCount,
         );
+    }
+
+    fn system_with_events() -> (Arc<RealOpenXrData>, Arc<System>) {
+        let xr =
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
+        let system = Arc::new(System::new(xr.clone(), &Injector::default()));
+        xr.system.set(Arc::downgrade(&system));
+        (xr, system)
+    }
+
+    fn session(xr: &RealOpenXrData) -> xr::sys::Session {
+        xr.session_data.get().session.as_raw()
+    }
+
+    fn translation(m: vr::HmdMatrix34_t) -> [f32; 3] {
+        [m.m[0][3], m.m[1][3], m.m[2][3]]
+    }
+
+    #[test]
+    fn seated_zero_pose_in_standing() {
+        let (xr, system) = system_with_events();
+        // LOCAL at a fixed 1.6 m above the floor, like WiVRn.
+        fakexr::set_reference_space_pose(
+            session(&xr),
+            xr::ReferenceSpaceType::STAGE,
+            xr::Posef {
+                position: xr::Vector3f {
+                    x: 0.0,
+                    y: -1.6,
+                    z: 0.0,
+                },
+                ..xr::Posef::IDENTITY
+            },
+        );
+        let seated = system.GetSeatedZeroPoseToStandingAbsoluteTrackingPose();
+        assert_eq!(translation(seated), [0.0, 1.6, 0.0]);
+        let raw = system.GetRawZeroPoseToStandingAbsoluteTrackingPose();
+        assert_eq!(translation(raw), [0.0, 0.0, 0.0]);
+
+        fakexr::set_reference_space_pose(
+            session(&xr),
+            xr::ReferenceSpaceType::VIEW,
+            xr::Posef {
+                position: xr::Vector3f {
+                    x: 0.5,
+                    y: -0.4,
+                    z: 0.0,
+                },
+                ..xr::Posef::IDENTITY
+            },
+        );
+        xr.reset_tracking_space(vr::ETrackingUniverseOrigin::Standing);
+        // The standing zero moved under the head, the raw one stays where it was.
+        let raw = system.GetRawZeroPoseToStandingAbsoluteTrackingPose();
+        assert_eq!(translation(raw), [-0.5, 0.0, 0.0]);
+        let seated = system.GetSeatedZeroPoseToStandingAbsoluteTrackingPose();
+        assert_eq!(translation(seated), [-0.5, 1.6, 0.0]);
     }
 
     #[test]
