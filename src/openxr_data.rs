@@ -91,6 +91,7 @@ impl<C: Compositor> Drop for OpenXrData<C> {
 #[allow(dead_code)] // Results aren't used, but they're printed
 #[allow(clippy::enum_variant_names)]
 pub enum InitError {
+    LoaderUnavailable(String),
     EnumeratingExtensionsFailed(xr::sys::Result),
     InstanceCreationFailed(xr::sys::Result),
     SystemCreationFailed(xr::sys::Result),
@@ -143,19 +144,21 @@ impl<C: Compositor> OpenXrData<C> {
     ) -> Result<Self, InitError> {
         let platform_info = ();
 
+        // Games with a flat mode fall back to it on an init error, so don't abort.
         #[cfg(all(not(test), feature = "static-openxr"))]
-        let entry = xr::Entry::linked(&platform_info).expect("Failed to linked OpenXR loader");
+        let entry = xr::Entry::linked(&platform_info)
+            .map_err(|e| InitError::LoaderUnavailable(e.to_string()))?;
 
         #[cfg(all(not(test), not(feature = "static-openxr")))]
-        let entry = unsafe { xr::Entry::load(&platform_info) }.unwrap_or_else(|e| {
+        let entry = unsafe { xr::Entry::load(&platform_info) }.map_err(|e| {
             let hint = if cfg!(target_pointer_width = "32") {
                 "this is the 32-bit xrizer, which needs a 32-bit OpenXR loader \
                 (e.g. lib32-openxr) - alternatively, build with --features static-openxr"
             } else {
                 "is libopenxr-loader installed?"
             };
-            panic!("Failed to load OpenXR loader — {hint}: {e:?}");
-        });
+            InitError::LoaderUnavailable(format!("Failed to load OpenXR loader ({hint}): {e}"))
+        })?;
 
         #[cfg(test)]
         let entry = unsafe {
