@@ -897,9 +897,8 @@ impl vr::IVRCompositor029_Interface for Compositor {
             set!(m_flCompositorUpdateStartMs, 0.0);
             set!(m_flCompositorUpdateEndMs, 0.0);
             set!(m_flCompositorRenderStartMs, 0.0);
-            if let Some(pose) = hmd_pose {
-                set!(m_HmdPose, pose);
-            }
+            // Zeroed bytes aren't a valid ETrackingResult.
+            set!(m_HmdPose, hmd_pose.unwrap_or_default());
         }
 
         true
@@ -2949,6 +2948,12 @@ mod tests {
             self.timing[std::mem::offset_of!(vr::Compositor_FrameTiming, m_HmdPose)
                 + std::mem::offset_of!(vr::TrackedDevicePose_t, bPoseIsValid)]
         }
+
+        fn tracking_result(&self) -> u32 {
+            let offset = std::mem::offset_of!(vr::Compositor_FrameTiming, m_HmdPose)
+                + std::mem::offset_of!(vr::TrackedDevicePose_t, eTrackingResult);
+            u32::from_ne_bytes(self.timing[offset..offset + 4].try_into().unwrap())
+        }
     }
 
     /// Fields without a value must not keep whatever the app's buffer had in them.
@@ -2977,6 +2982,10 @@ mod tests {
         let mut buf = FrameTimingBuffer::new(full);
         assert!(f.comp.GetFrameTiming(buf.ptr(), 1));
         assert_eq!(buf.pose_valid(), 0);
+        assert_eq!(
+            buf.tracking_result(),
+            vr::ETrackingResult::Uninitialized as u32
+        );
 
         // An older, smaller struct only has its own bytes written.
         let mut buf = FrameTimingBuffer::new(FRAME_TIMING_MIN_SIZE);
@@ -3040,6 +3049,10 @@ mod tests {
             std::mem::size_of::<vr::vr_1_0_3::Compositor_FrameTiming>()
         );
         assert_eq!(frame_interval, interval);
+        // There is no input to get the pose from.
+        let pose = timing.m_HmdPose;
+        assert_eq!(pose.eTrackingResult, vr::ETrackingResult::Uninitialized);
+        assert!(!pose.bPoseIsValid);
 
         let mut timing = vr::vr_0_9_17::Compositor_FrameTiming {
             m_nSize: std::mem::size_of::<vr::vr_0_9_17::Compositor_FrameTiming>() as u32,
