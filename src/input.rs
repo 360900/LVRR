@@ -596,20 +596,6 @@ impl<C: openxr_data::Compositor> Input<C> {
         let action_map = self.action_map.read().unwrap();
         let mut sources = ActionSources::default();
 
-        let actions_by_handle: HashMap<xr::sys::Action, ActionKey> = loaded
-            .actions
-            .iter()
-            .filter_map(|(key, data)| {
-                let action = match data {
-                    ActionData::Bool(action) => action.as_raw(),
-                    ActionData::Vector1 { action, .. } => action.as_raw(),
-                    ActionData::Vector2 { action, .. } => action.as_raw(),
-                    _ => return None,
-                };
-                Some((action, key))
-            })
-            .collect();
-
         // Input path -> hand index and source.
         let mut source_paths = HashMap::<xr::Path, Option<(usize, xr::Path)>>::new();
         let mut source_of = |path: xr::Path| {
@@ -628,12 +614,13 @@ impl<C: openxr_data::Compositor> Input<C> {
         };
 
         for (key, data) in &loaded.actions {
-            let vector2_bindings = match data {
-                ActionData::Bool(_) | ActionData::Vector1 { .. } => &[][..],
-                ActionData::Vector2 { data, .. } => &data.bindings[..],
-                _ => continue,
-            };
-            // Only application actions, not the extra actions of custom bindings.
+            if !matches!(
+                data,
+                ActionData::Bool(_) | ActionData::Vector1 { .. } | ActionData::Vector2 { .. }
+            ) {
+                continue;
+            }
+            // Only application actions, not the input actions of custom bindings.
             let Some(set) = action_map
                 .get(key)
                 .and_then(|action| action.path.split_once("/in/"))
@@ -647,36 +634,10 @@ impl<C: openxr_data::Compositor> Input<C> {
             };
             sources.sets.insert(key, set);
 
-            // The OpenXR actions this action is driven by: its own, and those of its custom and
-            // inverted bindings.
-            let extra = loaded.extra_actions.get(key);
-            let driving: Vec<ActionKey> = std::iter::once(key)
-                .chain(
-                    extra
-                        .into_iter()
-                        .flat_map(|extra| {
-                            [
-                                extra.toggle_action.as_ref().map(|a| a.as_raw()),
-                                extra.analog_action.as_ref().map(|a| a.as_raw()),
-                                extra.double_action.as_ref().map(|a| a.as_raw()),
-                                extra.vector2_action.as_ref().map(|a| a.as_raw()),
-                                extra.grab_actions.as_ref().map(|g| g.force_action.as_raw()),
-                                extra.grab_actions.as_ref().map(|g| g.value_action.as_raw()),
-                            ]
-                        })
-                        .flatten()
-                        .chain(vector2_bindings.iter().map(|b| b.action.as_raw()))
-                        .filter_map(|action| actions_by_handle.get(&action).copied()),
-                )
-                .collect();
-
+            // The inputs of custom and inverted bindings are recorded under the action too.
             for (profile, input_paths) in &loaded.per_profile_input_paths {
                 let mut hands: [Vec<xr::Path>; 2] = Default::default();
-                for path in driving
-                    .iter()
-                    .filter_map(|key| input_paths.get(*key))
-                    .flatten()
-                {
+                for path in input_paths.get(key).into_iter().flatten() {
                     if let Some((hand, source)) = source_of(*path)
                         && !hands[hand].contains(&source)
                     {

@@ -2446,11 +2446,8 @@ fn action_set_priorities() {
     let throttle = f.get_action_handle(c"/actions/game/in/throttle");
     let move_ = f.get_action_handle(c"/actions/game/in/move");
     let select = f.get_action_handle(c"/actions/menu/in/select");
-    // So the menu's trigger comes from a custom binding's action.
-    assert!(
-        f.get_extra_action(select, ExtraActionType::Analog)
-            .is_some()
-    );
+    // So the menu's trigger comes from a custom binding.
+    f.custom_binding_action(select, Knuckles::profile_path(), |_| true);
     let left = f.get_input_source_handle(c"/user/hand/left");
     let right = f.get_input_source_handle(c"/user/hand/right");
     f.set_interaction_profile::<Knuckles>(LeftHand);
@@ -2529,9 +2526,9 @@ fn masked_toggle_ignores_presses() {
     let menu = f.get_action_set_handle(c"/actions/menu");
     let crouch = f.get_action_handle(c"/actions/game/in/crouch");
     f.set_interaction_profile::<Knuckles>(LeftHand);
-    let toggle = f
-        .get_extra_action(crouch, ExtraActionType::ToggleAction)
-        .unwrap();
+    let toggle = f.custom_binding_action(crouch, Knuckles::profile_path(), |ty| {
+        matches!(ty, BoolBindingType::Toggle(_))
+    });
     fakexr::set_action_state(toggle, false.into(), LeftHand);
     // The menu binds B too.
     let sync = |f: &mut Fixture, menu_priority| {
