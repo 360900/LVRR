@@ -2150,6 +2150,8 @@ mod tests {
     }
 
     #[test]
+    // Depends on wall clock time between syncs, which is far longer under miri.
+    #[cfg_attr(miri, ignore)]
     fn timed_presses() {
         let mut f = Fixture::new();
         let set1 = vr::VRActiveActionSet_t {
@@ -2295,6 +2297,8 @@ mod tests {
     }
 
     #[test]
+    // Depends on wall clock time between syncs, which is far longer under miri.
+    #[cfg_attr(miri, ignore)]
     fn scroll_and_deadzone() {
         let mut f = Fixture::new();
         let set = vr::VRActiveActionSet_t {
