@@ -124,6 +124,20 @@ pub fn set_interaction_profile(session: xr::Session, hand: UserPath, profile: xr
 
 thread_local! {
     static DEFAULT_PROFILES: RefCell<[Option<String>; 2]> = const { RefCell::new([None, None]) };
+    static EXTRA_EXTENSIONS: RefCell<Vec<&'static [u8]>> = const { RefCell::new(Vec::new()) };
+    static REJECTED_PROFILES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Advertises the extension `name` (nul terminated, like the `*_EXTENSION_NAME` constants) on
+/// this thread, in addition to the default ones.
+pub fn advertise_extension(name: &'static [u8]) {
+    EXTRA_EXTENSIONS.with_borrow_mut(|exts| exts.push(name));
+}
+
+/// Makes instances created on this thread reject binding suggestions for `profile`, like a
+/// runtime that doesn't know it.
+pub fn reject_profile(profile: &str) {
+    REJECTED_PROFILES.with_borrow_mut(|profiles| profiles.push(profile.to_owned()));
 }
 
 /// Sets the interaction profile that new sessions created on this thread will bind for `hand`
@@ -454,8 +468,10 @@ extern "system" fn enumerate_instance_extension_properties(
     properties: *mut xr::ExtensionProperties,
 ) -> xr::Result {
     assert!(layer_name.is_null());
-    unsafe { *property_count_output = 7 };
-    if property_capacity_input >= 7 {
+    let extra = EXTRA_EXTENSIONS.with_borrow(Clone::clone);
+    let count = 7 + extra.len() as u32;
+    unsafe { *property_count_output = count };
+    if property_capacity_input >= count {
         let props =
             unsafe { std::slice::from_raw_parts_mut(properties, property_capacity_input as usize) };
 
@@ -535,6 +551,18 @@ extern "system" fn enumerate_instance_extension_properties(
         let name =
             unsafe { std::slice::from_raw_parts(name.as_ptr() as *const c_char, name.len()) };
         props[6].extension_name[..name.len()].copy_from_slice(name);
+
+        for (prop, name) in props[7..].iter_mut().zip(extra) {
+            *prop = xr::ExtensionProperties {
+                ty: xr::ExtensionProperties::TYPE,
+                next: std::ptr::null_mut(),
+                extension_name: [0 as c_char; xr::MAX_EXTENSION_NAME_SIZE],
+                extension_version: 1,
+            };
+            for (dst, src) in prop.extension_name.iter_mut().zip(name) {
+                *dst = *src as c_char;
+            }
+        }
     }
     xr::Result::SUCCESS
 }
@@ -610,6 +638,8 @@ struct Instance {
     left_hand_key: DefaultKey,
     right_hand_key: DefaultKey,
     lost: AtomicBool,
+    enabled_extensions: Vec<CString>,
+    rejected_profiles: Vec<String>,
 }
 
 impl Instance {
@@ -990,9 +1020,13 @@ fn destroy_handle<T: XrType>(xr: T) -> xr::Result {
 }
 
 extern "system" fn create_instance(
-    _info: *const xr::InstanceCreateInfo,
+    info: *const xr::InstanceCreateInfo,
     instance: *mut xr::Instance,
 ) -> xr::Result {
+    let info = unsafe { info.as_ref().unwrap() };
+    let enabled_extensions = (0..info.enabled_extension_count as usize)
+        .map(|i| unsafe { CStr::from_ptr(*info.enabled_extension_names.add(i)) }.to_owned())
+        .collect();
     let (tx, rx) = mpsc::channel();
 
     let (left, right) = (
@@ -1018,6 +1052,8 @@ extern "system" fn create_instance(
         left_hand_key,
         right_hand_key,
         lost: false.into(),
+        enabled_extensions,
+        rejected_profiles: REJECTED_PROFILES.with_borrow(Clone::clone),
     });
     unsafe {
         *instance = inst.to_xr();
@@ -1485,11 +1521,49 @@ extern "system" fn end_session(session: xr::Session) -> xr::Result {
     xr::Result::SUCCESS
 }
 
+/// Interaction profiles that only exist with an extension enabled.
+const PROFILE_EXTENSIONS: &[(&str, &[u8])] = &[
+    (
+        HAND_INTERACTION_PROFILE,
+        xr::EXT_HAND_INTERACTION_EXTENSION_NAME,
+    ),
+    (
+        "/interaction_profiles/htc/vive_focus3_controller",
+        xr::HTC_VIVE_FOCUS3_CONTROLLER_INTERACTION_EXTENSION_NAME,
+    ),
+    (
+        "/interaction_profiles/meta/touch_controller_plus",
+        xr::META_TOUCH_CONTROLLER_PLUS_EXTENSION_NAME,
+    ),
+    (
+        "/interaction_profiles/hp/mixed_reality_controller",
+        xr::EXT_HP_MIXED_REALITY_CONTROLLER_EXTENSION_NAME,
+    ),
+    (
+        "/interaction_profiles/samsung/odyssey_controller",
+        xr::EXT_SAMSUNG_ODYSSEY_CONTROLLER_EXTENSION_NAME,
+    ),
+];
+
+const HAND_INTERACTION_PROFILE: &str = "/interaction_profiles/ext/hand_interaction_ext";
+const HAND_INTERACTION_INPUTS: &[&str] = &[
+    "/input/aim/pose",
+    "/input/grip/pose",
+    "/input/pinch_ext/pose",
+    "/input/poke_ext/pose",
+    "/input/pinch_ext/value",
+    "/input/pinch_ext/ready_ext",
+    "/input/aim_activate_ext/value",
+    "/input/aim_activate_ext/ready_ext",
+    "/input/grasp_ext/value",
+    "/input/grasp_ext/ready_ext",
+];
+
 extern "system" fn suggest_interaction_profile_bindings(
     instance: xr::Instance,
     binding: *const xr::InteractionProfileSuggestedBinding,
 ) -> xr::Result {
-    let _ = get_handle!(instance);
+    let instance = get_handle!(instance);
     let binding = unsafe { binding.as_ref().unwrap() };
 
     let profile_path = binding.interaction_profile;
@@ -1499,6 +1573,38 @@ extern "system" fn suggest_interaction_profile_bindings(
             binding.count_suggested_bindings as usize,
         )
     };
+
+    // Reject what Monado rejects: profiles whose extension isn't enabled and paths the profile
+    // doesn't have (only checked for hand_interaction_ext).
+    let profile = instance
+        .get_path_value(profile_path)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let missing_extension = PROFILE_EXTENSIONS.iter().any(|(p, ext)| {
+        *p == profile
+            && !instance
+                .enabled_extensions
+                .iter()
+                .any(|e| e.to_bytes_with_nul() == *ext)
+    });
+    let invalid_path = profile == HAND_INTERACTION_PROFILE
+        && bindings.iter().any(|b| {
+            let path = instance
+                .get_path_value(b.binding)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            ![UserPath::LeftHand, UserPath::RightHand]
+                .iter()
+                .any(|hand| {
+                    path.strip_prefix(hand.as_path())
+                        .is_some_and(|input| HAND_INTERACTION_INPUTS.contains(&input))
+                })
+        });
+    if missing_extension || invalid_path || instance.rejected_profiles.contains(&profile) {
+        return xr::Result::ERROR_PATH_UNSUPPORTED;
+    }
 
     for xr::ActionSuggestedBinding { action, binding } in bindings.iter().copied() {
         let action = get_handle!(action);

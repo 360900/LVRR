@@ -970,4 +970,49 @@ mod tests {
             fakexr::UserPath::RightHand
         ));
     }
+
+    fn legacy_bindings_for<P: crate::input::InteractionProfile>(
+        f: &Fixture,
+        get_action: impl FnOnce(&super::LegacyActions) -> openxr::sys::Action,
+    ) -> Option<Vec<String>> {
+        let data = f.input.openxr.session_data.get();
+        let action = get_action(&data.input_data.get_legacy_actions().unwrap().actions);
+        let profile = f
+            .input
+            .openxr
+            .instance
+            .string_to_path(P::profile_path())
+            .unwrap();
+        (!fakexr::check_no_suggested_bindings(action, profile))
+            .then(|| fakexr::get_suggested_bindings(action, profile))
+    }
+
+    #[test]
+    fn hand_interaction_bindings() {
+        use crate::input::profiles::vrlink_hand::VRLinkHand;
+
+        fakexr::advertise_extension(xr::sys::EXT_HAND_INTERACTION_EXTENSION_NAME);
+        let f = Fixture::new();
+        assert!(f.input.openxr.enabled_extensions.ext_hand_interaction);
+        f.input.openxr.restart_session();
+        f.input.frame_start_update();
+
+        let both = |input: &str| {
+            Some(
+                ["left", "right"]
+                    .map(|hand| format!("/user/hand/{hand}/input/{input}"))
+                    .to_vec(),
+            )
+        };
+        let bindings = |get_action: fn(&super::LegacyActions) -> openxr::sys::Action| {
+            legacy_bindings_for::<VRLinkHand>(&f, get_action)
+        };
+        assert_eq!(bindings(|a| a.trigger.as_raw()), both("pinch_ext/value"));
+        assert_eq!(
+            bindings(|a| a.trigger_click.as_raw()),
+            both("pinch_ext/value")
+        );
+        assert_eq!(bindings(|a| a.squeeze.as_raw()), both("grasp_ext/value"));
+        assert_eq!(bindings(|a| a.haptic.as_raw()), None);
+    }
 }

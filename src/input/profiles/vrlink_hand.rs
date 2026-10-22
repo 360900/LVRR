@@ -8,19 +8,19 @@ use crate::openxr_data::Hand;
 use glam::Mat4;
 use openvr::EVRButtonId;
 
-/// Synthetic interaction profile reported when a controller has no bound
-/// interaction profile but is tracked through hand tracking (e.g. WiVRn).
+/// Hand tracking: the XR_EXT_hand_interaction profile, and the identity reported when a
+/// controller has no bound interaction profile but is tracked through hand tracking (e.g. WiVRn).
 pub struct VRLinkHand;
 
 impl InteractionProfile for VRLinkHand {
-    type LegalPaths = legal_paths![Both::<(Select, Click)>];
+    type LegalPaths = legal_paths![Both::<(PinchExt, Value), (GraspExt, Value)>];
 
     fn profile_path() -> &'static str {
         "/interaction_profiles/ext/hand_interaction_ext"
     }
 
     fn has_required_extensions(enabled_extensions: &openxr::ExtensionSet) -> bool {
-        enabled_extensions.ext_hand_tracking
+        enabled_extensions.ext_hand_interaction
     }
 
     fn properties() -> &'static ProfileProperties {
@@ -66,16 +66,17 @@ impl InteractionProfile for VRLinkHand {
             extra: Bindings {
                 grip_pose: c.pose(),
             },
-            trigger: c.leftright::<Select, Click, _, _>(),
-            trigger_click: c.leftright::<Select, Click, _, _>(),
+            trigger: c.leftright::<PinchExt, Value, _, _>(),
+            trigger_click: c.leftright::<PinchExt, Value, _, _>(),
             app_menu: vec![],
             a: vec![],
-            squeeze: vec![],
-            squeeze_click: vec![],
+            squeeze: c.leftright::<GraspExt, Value, _, _>(),
+            squeeze_click: c.leftright::<GraspExt, Value, _, _>(),
             main_xy: vec![],
             main_xy_click: vec![],
             main_xy_touch: vec![],
-            haptic: c.haptics(),
+            // The profile has no haptic output.
+            haptic: vec![],
         }
     }
 
@@ -94,5 +95,20 @@ impl InteractionProfile for VRLinkHand {
 
     fn pose_transformation(_pose: BoundPoseType) -> Option<PoseTransformations> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requires_hand_interaction() {
+        // Hand tracking alone doesn't make runtimes accept this profile.
+        let mut exts = openxr::ExtensionSet::default();
+        exts.ext_hand_tracking = true;
+        assert!(!VRLinkHand::has_required_extensions(&exts));
+        exts.ext_hand_interaction = true;
+        assert!(VRLinkHand::has_required_extensions(&exts));
     }
 }

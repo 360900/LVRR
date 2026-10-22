@@ -236,7 +236,23 @@ impl<'a> EventPoller<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clientcore::Injector;
+    use crate::openxr_data::RealOpenXrData;
     use vr::EVRApplicationType::*;
+
+    fn probe_with_profile(profile: &str) -> Option<String> {
+        fakexr::set_default_interaction_profile(fakexr::UserPath::LeftHand, Some(profile));
+        let xr = RealOpenXrData::new(&Injector::default(), Other).unwrap();
+        fakexr::set_default_interaction_profile(fakexr::UserPath::LeftHand, None);
+        xr.probed_profiles.left.clone()
+    }
+
+    #[test]
+    fn probe_hand_interaction() {
+        fakexr::advertise_extension(xr::sys::EXT_HAND_INTERACTION_EXTENSION_NAME);
+        let hand = "/interaction_profiles/ext/hand_interaction_ext";
+        assert_eq!(probe_with_profile(hand).as_deref(), Some(hand));
+    }
 
     #[test]
     fn should_probe_skips_non_rendering_apps() {

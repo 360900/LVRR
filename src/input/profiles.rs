@@ -568,8 +568,18 @@ pub mod paths {
         }
     }
 
+    /// The path segment of a subpath: its lowercased name unless given explicitly.
+    macro_rules! subpath_str {
+        ($name:ident) => {
+            paste::paste!(stringify!([<$name:lower>]))
+        };
+        ($name:ident, $path:literal) => {
+            $path
+        };
+    }
+
     macro_rules! subpaths {
-        ($enum:ident, $($name:ident::<$component1:ident $(, $component_rest:ident)*>),+) => {
+        ($enum:ident, $($name:ident $(($path:literal))?::<$component1:ident $(, $component_rest:ident)*>),+) => {
             $(
                 pub struct $name;
                 impl Subpath for $name {
@@ -590,11 +600,9 @@ pub mod paths {
 
             impl Display for $enum {
                 fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                    paste::paste! {
-                        let s = match self {
-                            $(Self::$name => stringify!([<$name:lower>]),)+
-                        };
-                    }
+                    let s = match self {
+                        $(Self::$name => subpath_str!($name $(, $path)?),)+
+                    };
                     f.write_str(s)
                 }
             }
@@ -620,7 +628,9 @@ pub mod paths {
         Squeeze::<Click, Value, Force, Touch>,
         Thumbstick::<Click, Touch, Vec2X, Vec2Y>,
         Trackpad::<Click, Touch, Force, Vec2X, Vec2Y>,
-        Thumbrest::<Touch>
+        Thumbrest::<Touch>,
+        PinchExt("pinch_ext")::<Value>,
+        GraspExt("grasp_ext")::<Value>
     );
 
     // Vec2 impls
