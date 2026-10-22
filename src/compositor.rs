@@ -612,26 +612,11 @@ impl vr::IVRCompositor029_Interface for Compositor {
         if pTextures.is_null() {
             return vr::EVRCompositorError::RequestFailed;
         }
-        match unTextureCount {
-            1..=2 => {
-                if !self
-                    .openxr
-                    .enabled_extensions
-                    .khr_composition_layer_equirect2
-                {
-                    log::info!("Could not set skybox: khr_composition_layer_equirect2 unsupported");
-                    return vr::EVRCompositorError::None;
-                }
-                log::debug!("Setting new equirect skybox");
-            }
-            6 => {
-                log::debug!("Setting new box skybox");
-            }
-            _ => {
-                log::warn!("Invalid number of skybox textures: {unTextureCount}");
-                return vr::EVRCompositorError::RequestFailed;
-            }
+        if !matches!(unTextureCount, 1 | 2 | 6) {
+            log::warn!("Invalid number of skybox textures: {unTextureCount}");
+            return vr::EVRCompositorError::RequestFailed;
         }
+        log::debug!("Setting new skybox with {unTextureCount} textures");
 
         let textures = unsafe { std::slice::from_raw_parts(pTextures, unTextureCount as _) };
         if let Err(e) = overlays.set_skybox(textures) {
@@ -2776,6 +2761,23 @@ mod tests {
         assert_eq!(overlays.ShowOverlay(overlay), vr::EVROverlayError::None);
         f.comp.PostPresentHandoff();
         f.check_frame_state(fakexr::FrameState::Ended);
+    }
+
+    /// Without equirect layers, a lat-long skybox is still shown, just not all around the user.
+    #[test]
+    fn skybox_without_equirect_layers() {
+        let f = Fixture::new();
+        let overlays = f.overlay_man();
+        assert!(
+            !f.comp
+                .openxr
+                .enabled_extensions
+                .khr_composition_layer_equirect2
+        );
+        let texture = FakeGraphicsData::texture(&f.vk);
+        assert_eq!(f.comp.SetSkyboxOverride(&texture, 1), None);
+        let session = f.comp.openxr.session_data.get();
+        assert_eq!(overlays.get_layers::<FakeApi>(&session, true).len(), 1);
     }
 
     /// Submit and the overlay calls can race to set up the real session. The one that comes second

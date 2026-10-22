@@ -10,7 +10,7 @@ use log::{debug, trace};
 use openvr as vr;
 use openxr as xr;
 use slotmap::{Key, KeyData, SecondaryMap, SlotMap, new_key_type};
-use std::f32::consts::TAU;
+use std::f32::consts::{FRAC_PI_2, TAU};
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::{
@@ -93,17 +93,18 @@ impl OverlayMan {
     }
 
     pub fn set_skybox(&self, textures: &[vr::Texture_t]) -> Result<(), vr::EVRCompositorError> {
-        // Port of OpenComposite's SetSkyboxOverride behaviour: submit the first
-        // provided texture as a flat quad in front of the user. This is designed
-        // around rFactor2/GTR2 style loading screens where the "skybox" is really
-        // just a static image the game expects to be displayed while it prepares
-        // the scene. Handles both the 1..=2 (equirect) and 6 (cubemap) counts by
-        // simply taking pTextures[0] in either case.
-        let Some(texture) = textures.first() else {
+        let Some(first) = textures.first() else {
             return Err(vr::EVRCompositorError::RequestFailed);
         };
 
         self.clear_skybox();
+
+        let extensions = &self.openxr.enabled_extensions;
+        // One texture is a lat-long panorama, two are one per eye.
+        let equirect = textures.len() <= 2 && extensions.khr_composition_layer_equirect2;
+        // Otherwise, like OpenComposite, show the first texture (the front of a cubemap) in front
+        // of the user. rFactor2/GTR2 style loading screens are really just a static image there.
+        let textures = if equirect { textures } else { &textures[..1] };
 
         // Skybox faces come in with V flipped compared to normal overlays.
         let bounds = vr::VRTextureBounds_t {
@@ -114,7 +115,7 @@ impl OverlayMan {
         };
         // This may restart the session, so it has to happen before taking the overlay locks: the
         // frame thread takes those while holding the session lock.
-        let Ok(session_data) = self.get_real_session_data(texture, bounds) else {
+        let Ok(session_data) = self.get_real_session_data(first, bounds) else {
             log::warn!("Could not create swapchain for skybox texture; skipping");
             return Ok(());
         };
@@ -123,44 +124,63 @@ impl OverlayMan {
         let mut skybox = self.skybox.write().unwrap();
 
         let name = CString::new("__xrizer_skybox").unwrap();
-        let key = overlays.insert(Overlay::new(name.clone(), name));
-        let overlay = overlays.get_mut(key).unwrap();
+        let mut keys = Vec::with_capacity(textures.len());
+        for (index, texture) in textures.iter().enumerate() {
+            let key = overlays.insert(Overlay::new(name.clone(), name.clone()));
+            keys.push(key);
+            let overlay = overlays.get_mut(key).unwrap();
 
-        // A curved surface a couple of meters in front of the user, centered on them and wide
-        // enough to fill most of the forward view. The height follows the texture's aspect.
-        const DISTANCE: f32 = 2.0;
-        overlay.width = 4.0;
-        overlay.kind = OverlayKind::Curved {
-            curvature: overlay.width / (TAU * DISTANCE),
-        };
-        overlay.z_order = SKYBOX_Z_ORDER;
-        // SteamVR draws the skybox opaque, whatever the texture's alpha says.
-        overlay.flags = vr::VROverlayFlags::IgnoreTextureAlpha as u32;
-        overlay.bounds = bounds;
-        overlay.visible = true;
-        overlay.set_transform(
-            TransformKind::Absolute(vr::ETrackingUniverseOrigin::Seated),
-            vr::HmdMatrix34_t {
-                m: [
-                    [1.0, 0.0, 0.0, 0.0],
-                    [0.0, 1.0, 0.0, 0.0],
-                    [0.0, 0.0, 1.0, -DISTANCE],
-                ],
-            },
-        );
+            // Without an equirect layer, a curved surface a couple of meters in front of the user,
+            // centered on them and wide enough to fill most of the forward view. The height
+            // follows the texture's aspect.
+            const DISTANCE: f32 = 2.0;
+            overlay.width = 4.0;
+            overlay.kind = if equirect {
+                OverlayKind::Equirect {
+                    eye: match (textures.len(), index) {
+                        (1, _) => xr::EyeVisibility::BOTH,
+                        (_, 0) => xr::EyeVisibility::LEFT,
+                        _ => xr::EyeVisibility::RIGHT,
+                    },
+                }
+            } else if extensions.khr_composition_layer_cylinder {
+                OverlayKind::Curved {
+                    curvature: overlay.width / (TAU * DISTANCE),
+                }
+            } else {
+                OverlayKind::Quad
+            };
+            overlay.z_order = SKYBOX_Z_ORDER;
+            // SteamVR draws the skybox opaque, whatever the texture's alpha says.
+            overlay.flags = vr::VROverlayFlags::IgnoreTextureAlpha as u32;
+            overlay.bounds = bounds;
+            overlay.visible = true;
+            overlay.set_transform(
+                TransformKind::Absolute(vr::ETrackingUniverseOrigin::Seated),
+                vr::HmdMatrix34_t {
+                    m: [
+                        [1.0, 0.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0, 0.0],
+                        [0.0, 0.0, 1.0, -DISTANCE],
+                    ],
+                },
+            );
 
-        match overlay.set_texture(&self.openxr, key, session_data, *texture) {
-            Ok(()) => {
-                skybox.push(key);
-                Ok(())
-            }
-            Err(_) => {
-                overlays.remove(key);
+            if overlay
+                .set_texture(&self.openxr, key, &session_data, *texture)
+                .is_err()
+            {
+                for key in keys {
+                    overlays.remove(key);
+                    session_data.overlay_data.remove(key);
+                }
                 log::warn!("Could not create swapchain for skybox texture; skipping");
                 // Don't fail the game — just silently drop the skybox request.
-                Ok(())
+                return Ok(());
             }
         }
+        skybox.extend(keys);
+        Ok(())
     }
 
     pub fn clear_skybox(&self) {
@@ -324,7 +344,7 @@ impl OverlayMan {
                         .size(xr::Extent2Df { width, height });
                     OverlayLayerInner::Quad(lifetime_extend!(CompositionLayerQuad, layer))
                 }
-                // SetOverlayCurvature checks for khr_composition_layer_cylinder
+                // SetOverlayCurvature and set_skybox check for khr_composition_layer_cylinder
                 OverlayKind::Curved { curvature } => {
                     // OpenVR: curvature = width / (2π * radius), so a curvature of 1 closes the
                     // cylinder. OpenXR wants an angle below 2π, which f32 2π isn't.
@@ -356,6 +376,22 @@ impl OverlayMan {
                         });
                     OverlayLayerInner::Cylinder(lifetime_extend!(
                         CompositionLayerCylinderKHR,
+                        layer
+                    ))
+                }
+                // set_skybox checks for khr_composition_layer_equirect2
+                OverlayKind::Equirect { eye } => {
+                    use xr::CompositionLayerEquirect2KHR;
+                    // A radius of 0 is infinitely far away, like a skybox should be.
+                    let layer = layer_init!(CompositionLayerEquirect2KHR)
+                        .eye_visibility(eye)
+                        .pose(pose)
+                        .radius(0.0)
+                        .central_horizontal_angle(TAU)
+                        .upper_vertical_angle(FRAC_PI_2)
+                        .lower_vertical_angle(-FRAC_PI_2);
+                    OverlayLayerInner::Equirect2(lifetime_extend!(
+                        CompositionLayerEquirect2KHR,
                         layer
                     ))
                 }
@@ -553,8 +589,7 @@ pub enum OverlayLayerInner<'a, G: xr::Graphics> {
     Quad(xr::CompositionLayerQuad<'a, G>),
     // Curved overlays
     Cylinder(xr::CompositionLayerCylinderKHR<'a, G>),
-    // Skybox (reserved for KHR_composition_layer_equirect2)
-    #[allow(dead_code)]
+    // Lat-long skybox
     Equirect2(xr::CompositionLayerEquirect2KHR<'a, G>),
 }
 
@@ -680,7 +715,13 @@ fn decompose_transform(transform: &vr::HmdMatrix34_t) -> (xr::Posef, (f32, f32))
 
 enum OverlayKind {
     Quad,
-    Curved { curvature: f32 },
+    Curved {
+        curvature: f32,
+    },
+    /// A lat-long skybox
+    Equirect {
+        eye: xr::EyeVisibility,
+    },
 }
 
 #[derive(Debug)]
@@ -750,7 +791,7 @@ impl Overlay {
         &mut self,
         openxr: &OpenXrData<Compositor>,
         key: OverlayKey,
-        session_data: RealSessionData<'_>,
+        session_data: &RealSessionData<'_>,
         texture: vr::Texture_t,
     ) -> Result<(), vr::EVROverlayError> {
         let backend = match &self.compositor {
@@ -874,7 +915,7 @@ impl Overlay {
         let backend = self.compositor.as_mut().unwrap();
         let extent = backend.with_any_graphics_mut::<set_swapchain_texture>((
             openxr,
-            &session_data,
+            session_data,
             bounds,
             swapchains,
             key,
@@ -1257,7 +1298,7 @@ impl vr::IVROverlay028_Interface for OverlayMan {
 
         let key = OverlayKey::from(KeyData::from_ffi(handle));
         get_overlay!(self, handle, mut overlay);
-        match overlay.set_texture(&self.openxr, key, data, texture) {
+        match overlay.set_texture(&self.openxr, key, &data, texture) {
             Err(e) => {
                 debug!(
                     "failed to set overlay texture for {:?}: {e:?}",
@@ -2976,6 +3017,63 @@ mod tests {
             vr::EVROverlayError::None
         );
         assert_eq!(f.layers(true).len(), 1);
+    }
+
+    #[test]
+    fn skybox_layer_types() {
+        let cylinder_and_equirect = |e: &mut xr::ExtensionSet| {
+            e.khr_composition_layer_cylinder = true;
+            e.khr_composition_layer_equirect2 = true;
+        };
+
+        // A lat-long panorama, infinitely far away all around the user
+        let f = RealSessionFixture::with_extensions(cylinder_and_equirect);
+        assert_eq!(f.man.set_skybox(&[f.texture()]), Ok(()));
+        let layers = f.layers(true);
+        let [TestLayer::Equirect2(layer, _)] = layers.as_slice() else {
+            panic!("expected one equirect layer, got {layers:?}");
+        };
+        assert_eq!(layer.eye_visibility, xr::EyeVisibility::BOTH);
+        assert_eq!(layer.radius, 0.0);
+        assert_eq!(layer.central_horizontal_angle, TAU);
+        assert_eq!(
+            (layer.upper_vertical_angle, layer.lower_vertical_angle),
+            (FRAC_PI_2, -FRAC_PI_2)
+        );
+        // Opaque
+        assert!(
+            !layer
+                .layer_flags
+                .contains(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA)
+        );
+
+        // A stereo pair
+        assert_eq!(f.man.set_skybox(&[f.texture(), f.texture()]), Ok(()));
+        let eyes: Vec<_> = f
+            .layers(true)
+            .iter()
+            .map(|layer| match layer {
+                TestLayer::Equirect2(l, _) => l.eye_visibility,
+                other => panic!("expected an equirect layer, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(eyes.len(), 2);
+        assert!(
+            eyes.contains(&xr::EyeVisibility::LEFT) && eyes.contains(&xr::EyeVisibility::RIGHT)
+        );
+
+        // A cubemap only shows its front face.
+        let cubemap = [f.texture(); 6];
+        assert_eq!(f.man.set_skybox(&cubemap), Ok(()));
+        assert!(matches!(
+            f.layers(true).as_slice(),
+            [TestLayer::Cylinder(..)]
+        ));
+
+        // Runtimes without these layers get a quad.
+        let f = RealSessionFixture::new();
+        assert_eq!(f.man.set_skybox(&[f.texture()]), Ok(()));
+        assert!(matches!(f.layers(true).as_slice(), [TestLayer::Quad(..)]));
     }
 
     #[test]
