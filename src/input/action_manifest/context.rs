@@ -215,6 +215,13 @@ fn hand_to_path(hand: Hand) -> &'static str {
 }
 
 impl BindingsProfileLoadContext<'_> {
+    pub fn hand_path(&self, hand: Hand) -> xr::Path {
+        match hand {
+            Hand::Left => self.hands[0],
+            Hand::Right => self.hands[1],
+        }
+    }
+
     pub fn get_action_set(&self, p0: &String) -> Option<&xr::ActionSet> {
         self.action_sets.get(p0)
     }
@@ -316,7 +323,7 @@ impl BindingsProfileLoadContext<'_> {
         if let Ok(input) = self.instance.string_to_path(&input.to_string()) {
             self.push_input_path(&output.path, input);
         }
-        let hand_path = self.instance.string_to_path(hand_to_path(hand)).unwrap();
+        let hand_path = self.hand_path(hand);
         self.bindings_parsed
             .entry(output.path.clone())
             .or_default()

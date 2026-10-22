@@ -141,6 +141,7 @@ pub enum BoolBindingType {
     ThresholdFloat(ThresholdBindingData<f32>),
     ThresholdVec2(ThresholdBindingData<xr::Vector2f>),
     Timed(TimedPressData),
+    Chord(ChordData),
 }
 
 impl BoolBindingType {
@@ -157,6 +158,7 @@ impl BoolBindingType {
             Self::ThresholdFloat(threshold) => threshold.state(session, subaction_path),
             Self::ThresholdVec2(threshold) => threshold.state(session, subaction_path),
             Self::Timed(timed) => timed.state(session, subaction_path),
+            Self::Chord(chord) => chord.state(session),
         }
     }
 
@@ -178,6 +180,7 @@ impl BoolBindingType {
             Self::ThresholdFloat(threshold) => vec![threshold.action.as_raw()],
             Self::ThresholdVec2(threshold) => vec![threshold.action.as_raw()],
             Self::Timed(timed) => timed.press.actions(),
+            Self::Chord(chord) => chord.parts.iter().flat_map(|(_, p)| p.actions()).collect(),
         }
     }
 }
@@ -698,6 +701,62 @@ impl TimedPressData {
             current_state,
             changed_since_last_sync,
             last_change_time: press.last_change_time,
+            is_active: true,
+        }))
+    }
+}
+
+/// Active while all its parts are, each read on its own hand.
+pub(super) struct ChordData {
+    parts: Vec<(xr::Path, BoolBindingType)>,
+    last_state: AtomicBool,
+}
+
+impl ChordData {
+    pub fn new(parts: Vec<(xr::Path, BoolBindingType)>) -> Self {
+        Self {
+            parts,
+            last_state: false.into(),
+        }
+    }
+
+    fn state(
+        &self,
+        session: &xr::Session<xr::AnyGraphics>,
+    ) -> xr::Result<Option<xr::ActionState<bool>>> {
+        let mut current_state = true;
+        let mut last_change_time = xr::Time::from_nanos(0);
+        let mut active = true;
+        // Every part is read, as they keep their own state between syncs.
+        for (hand, part) in &self.parts {
+            match part.state(session, *hand)? {
+                Some(state) if state.is_active => {
+                    current_state &= state.current_state;
+                    if state.last_change_time.as_nanos() > last_change_time.as_nanos() {
+                        last_change_time = state.last_change_time;
+                    }
+                }
+                _ => active = false,
+            }
+        }
+        if !active {
+            self.last_state.store(false, Ordering::Relaxed);
+            return Ok(None);
+        }
+
+        let changed_since_last_sync = self
+            .last_state
+            .compare_exchange(
+                !current_state,
+                current_state,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .is_ok();
+        Ok(Some(xr::ActionState {
+            current_state,
+            changed_since_last_sync,
+            last_change_time,
             is_active: true,
         }))
     }
@@ -1941,6 +2000,77 @@ mod tests {
         f.sync(set1);
         let right = f.get_input_source_handle(c"/user/hand/right");
         assert!(f.get_bool_state_hand(single_now, right).unwrap().bState);
+    }
+
+    #[test]
+    fn chords() {
+        let mut f = Fixture::new();
+        let set = vr::VRActiveActionSet_t {
+            ulActionSet: f.get_action_set_handle(c"/actions/main"),
+            ..Default::default()
+        };
+        let [dodge, facepiece, sit, bad, grab] = [
+            c"/actions/main/in/dodge",
+            c"/actions/main/in/facepiece",
+            c"/actions/main/in/sit",
+            c"/actions/main/in/bad",
+            c"/actions/main/in/grab",
+        ]
+        .map(|name| f.get_action_handle(name));
+        let right = f.get_input_source_handle(c"/user/hand/right");
+        f.load_actions(c"actions_chords.json");
+        f.set_interaction_profile::<Knuckles>(LeftHand);
+        f.set_interaction_profile::<Knuckles>(RightHand);
+
+        let input = |path: &CStr| f.get_action_handle(path);
+        let left_grip =
+            f.get_action::<f32>(input(c"/user/hand/left/input/squeeze/value-/actions/main"));
+        let right_grip =
+            f.get_action::<f32>(input(c"/user/hand/right/input/squeeze/value-/actions/main"));
+        let right_a = f.get_action::<f32>(input(c"/user/hand/right/input/a/click-/actions/main"));
+        let right_stick =
+            f.get_action::<xr::Vector2f>(input(c"/user/hand/right/input/thumbstick-/actions/main"));
+        for (action, state) in [
+            (left_grip, ActionState::Float(0.0)),
+            (right_grip, ActionState::Float(0.0)),
+            (right_a, ActionState::Float(0.0)),
+        ] {
+            fakexr::set_action_state(action, state, LeftHand);
+            fakexr::set_action_state(action, state, RightHand);
+        }
+        fakexr::set_action_state(right_stick, ActionState::Vector2(0.0, 0.0), RightHand);
+
+        let check = |f: &mut Fixture, handle, state: BoolState| {
+            f.sync(set);
+            f.verify_bool_state(handle, state);
+        };
+        let idle = BoolState::default().set_active();
+        check(&mut f, dodge, idle);
+
+        // One input of the chord alone doesn't count, but still drives its own binding.
+        fakexr::set_action_state(left_grip, ActionState::Float(1.0), LeftHand);
+        check(&mut f, dodge, idle);
+        f.verify_bool_state(grab, idle.set_state().set_changed());
+        // Inputs on both hands.
+        fakexr::set_action_state(right_a, ActionState::Float(1.0), RightHand);
+        check(&mut f, dodge, idle.set_state().set_changed());
+        let s = f.get_bool_state_hand(dodge, right).unwrap();
+        assert!(s.bState);
+        check(&mut f, dodge, idle.set_state());
+        fakexr::set_action_state(left_grip, ActionState::Float(0.0), LeftHand);
+        check(&mut f, dodge, idle.set_changed());
+
+        // A dpad direction as part of a chord.
+        fakexr::set_action_state(right_grip, ActionState::Float(1.0), RightHand);
+        check(&mut f, facepiece, idle);
+        fakexr::set_action_state(right_stick, ActionState::Vector2(0.0, -0.8), RightHand);
+        check(&mut f, facepiece, idle.set_state().set_changed());
+
+        // Chords without inputs or with unknown ones are skipped.
+        for handle in [sit, bad] {
+            let s = f.get_bool_state(handle).unwrap();
+            assert!(!s.bActive);
+        }
     }
 
     #[test]

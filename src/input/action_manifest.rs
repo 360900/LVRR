@@ -447,6 +447,13 @@ impl<C: openxr_data::Compositor> Input<C> {
                 &set,
                 &bindings.sources,
             );
+            bindings::handle_chord_bindings(
+                &path_validator,
+                context,
+                action_set_name,
+                &set,
+                &bindings.chords,
+            );
         }
 
         let info_action_binding = *legacy_bindings

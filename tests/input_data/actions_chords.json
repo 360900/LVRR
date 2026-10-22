@@ -1,0 +1,36 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/main",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/main/in/dodge",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/facepiece",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/sit",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/bad",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/grab",
+			"type": "boolean"
+		}
+	],
+	"default_bindings": [
+		{
+			"controller_type": "knuckles",
+			"binding_url": "knuckles_chords.json"
+		}
+	]
+}

@@ -1,0 +1,62 @@
+{
+	"bindings": {
+		"/actions/main": {
+			"sources": [
+				{
+					"mode": "button",
+					"path": "/user/hand/left/input/grip",
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/grab"
+						}
+					}
+				}
+			],
+			"chords": [
+				{
+					"output": "/actions/main/in/dodge",
+					"inputs": [
+						[
+							"/user/hand/left/input/grip",
+							"click"
+						],
+						[
+							"/user/hand/right/input/a",
+							"click"
+						]
+					]
+				},
+				{
+					"output": "/actions/main/in/facepiece",
+					"inputs": [
+						[
+							"/user/hand/right/input/grip",
+							"click"
+						],
+						[
+							"/user/hand/right/input/thumbstick",
+							"south"
+						]
+					]
+				},
+				{
+					"output": "/actions/main/in/sit",
+					"inputs": []
+				},
+				{
+					"output": "/actions/main/in/bad",
+					"inputs": [
+						[
+							"/user/hand/left/input/a",
+							"wiggle"
+						],
+						[
+							"/user/hand/left/input/b",
+							"click"
+						]
+					]
+				}
+			]
+		}
+	}
+}

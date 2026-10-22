@@ -7,7 +7,7 @@ use crate::input::profiles::{Component, DynInputPath, paths};
 use crate::input::{ActionData, BoundPoseType};
 use crate::{
     input::custom_bindings::{
-        BoolBindingType, DoubleTapData, DpadData, DpadDirection, GrabBindingData,
+        BoolBindingType, ChordData, DoubleTapData, DpadData, DpadDirection, GrabBindingData,
         ThresholdBindingData, TimedPress, TimedPressData, ToggleData, Vector2Inversion,
     },
     openxr_data::Hand,
@@ -46,6 +46,16 @@ pub struct ActionSetBinding {
     pub haptics: Vec<SimpleActionBinding>,
     #[serde(default, deserialize_with = "lenient_vec")]
     pub skeleton: Vec<SimpleActionBinding>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub chords: Vec<ChordBinding>,
+}
+
+/// An output that is active while all of its inputs are.
+#[derive(Deserialize)]
+pub struct ChordBinding {
+    output: ActionPath,
+    /// Input paths and the slot of each (click, touch, a dpad direction...)
+    inputs: Vec<(MaybeInputPath, String)>,
 }
 
 /// Deserializes a list, skipping (and logging) the entries that don't parse.
@@ -400,7 +410,7 @@ struct ButtonInput {
     unknown: HashMap<String, IgnoredAny>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct ClickThresholdParams {
     pub click_activate_threshold: Option<StringOrTyped<f32>>,
     pub click_deactivate_threshold: Option<StringOrTyped<f32>>,
@@ -700,9 +710,31 @@ fn button_press_input(
     }
 }
 
-/// Binds a touch output. SteamVR reports any pull as a touch on inputs without a touch sensor,
-/// so analog inputs (picked by the profile or as a fallback) get a tiny threshold instead of the
-/// runtime's click point.
+/// The input a touch reads, with the thresholds to apply to it. SteamVR reports any pull as a
+/// touch on inputs without a touch sensor, so analog inputs (picked by the profile or as a
+/// fallback) get a tiny threshold instead of the runtime's click point.
+fn touch_input(
+    path: DynInputPath,
+    validate_path: &dyn PathValidator,
+) -> Option<(DynInputPath, ClickThresholdParams)> {
+    let touch_path = path.with_component(DynComponent::Touch);
+    match validate_path(touch_path) {
+        Some(
+            analog @ DynInputPath {
+                component: Some(DynComponent::Value | DynComponent::Force),
+                ..
+            },
+        ) => Some((analog, ClickThresholdParams::new_for_touch_conversion())),
+        Some(touch) => Some((touch, ClickThresholdParams::default())),
+        None => {
+            let pull = validate_path(path.with_component(DynComponent::Value))?;
+            debug!("Falling back to pull for touch on {path}");
+            Some((pull, ClickThresholdParams::new_for_touch_conversion()))
+        }
+    }
+}
+
+/// Binds a touch output.
 fn bind_touch(
     touch: &ActionBindingOutput<paths::Touch>,
     path: DynInputPath,
@@ -711,39 +743,23 @@ fn bind_touch(
     action_set: &xr::ActionSet,
     context: &mut BindingsProfileLoadContext,
 ) {
-    let touch_path = path.with_component(DynComponent::Touch);
-    let analog = match validate_path(touch_path) {
-        Some(
-            analog @ DynInputPath {
-                component: Some(DynComponent::Value | DynComponent::Force),
-                ..
-            },
-        ) => analog,
-        Some(touch_path) => {
-            context.try_suggest_binding::<bool>(touch.output.path.clone(), touch_path);
-            return;
-        }
-        None => {
-            let pull = path.with_component(DynComponent::Value);
-            let Some(pull) = validate_path(pull) else {
-                InvalidActionPath(touch_path, &touch.output.path).warn();
-                return;
-            };
-            debug!(
-                "Falling back to pull for touch on {path} (action {:?})",
-                touch.output.path
-            );
-            pull
-        }
+    let Some((input, params)) = touch_input(path, validate_path) else {
+        InvalidActionPath(path.with_component(DynComponent::Touch), &touch.output.path).warn();
+        return;
     };
-    bind_threshold(
-        &touch.output,
-        analog,
-        Some(&ClickThresholdParams::new_for_touch_conversion()),
-        action_set_name,
-        action_set,
-        context,
-    );
+    if input.component == Some(DynComponent::Value) || input.component == Some(DynComponent::Force)
+    {
+        bind_threshold(
+            &touch.output,
+            input,
+            Some(&params),
+            action_set_name,
+            action_set,
+            context,
+        );
+    } else {
+        context.try_suggest_binding::<bool>(touch.output.path.clone(), input);
+    }
 }
 
 /// Binds a boolean input to a custom binding built from an action reading it.
@@ -1173,6 +1189,97 @@ pub fn handle_sources(
                 }
             }
         }
+    }
+}
+
+pub fn handle_chord_bindings(
+    validate_path: &dyn PathValidator,
+    context: &mut BindingsProfileLoadContext,
+    action_set_name: &str,
+    action_set: &xr::ActionSet,
+    chords: &[ChordBinding],
+) {
+    'chords: for ChordBinding { output, inputs } in chords {
+        let Some((MaybeInputPath::Valid(last), _)) = inputs.last() else {
+            warn!("Ignoring chord without inputs for {}", output.path);
+            continue;
+        };
+        if !context.accepts_custom_binding(output) {
+            continue;
+        }
+
+        let mut parts = Vec::with_capacity(inputs.len());
+        for (path, slot) in inputs {
+            let path = match path {
+                MaybeInputPath::Valid(path) => *path,
+                MaybeInputPath::Invalid { path, error } => {
+                    warn!(
+                        "Ignoring chord for {}: invalid path {path} - {error}",
+                        output.path
+                    );
+                    continue 'chords;
+                }
+            };
+            let part = match slot.as_str() {
+                "click" | "single" | "long" | "held" | "double" => {
+                    button_press_input(path, None, validate_path).and_then(|(press, _)| {
+                        threshold_binding(output, press, None, action_set_name, action_set, context)
+                    })
+                }
+                "touch" => touch_input(path, validate_path).and_then(|(touch, params)| {
+                    threshold_binding(
+                        output,
+                        touch,
+                        Some(&params),
+                        action_set_name,
+                        action_set,
+                        context,
+                    )
+                }),
+                direction @ ("north" | "east" | "south" | "west" | "center") => {
+                    let direction = match direction {
+                        "north" => DpadDirection::North,
+                        "east" => DpadDirection::East,
+                        "south" => DpadDirection::South,
+                        "west" => DpadDirection::West,
+                        _ => DpadDirection::Center,
+                    };
+                    // Directions count without a click or touch, like a plain stick push.
+                    validate_path(path)
+                        .and_then(|parent| {
+                            context.get_dpad_actions(
+                                validate_path,
+                                parent,
+                                action_set_name,
+                                action_set,
+                                None,
+                            )
+                        })
+                        .map(|actions| BoolBindingType::Dpad(DpadData::new(actions, direction)))
+                }
+                other => {
+                    warn!("Ignoring chord for {}: unknown input {other}", output.path);
+                    continue 'chords;
+                }
+            };
+            let Some(part) = part else {
+                warn!(
+                    "Ignoring chord for {}: no {slot} on {path} for this controller",
+                    output.path
+                );
+                continue 'chords;
+            };
+            parts.push((context.hand_path(path.hand), part));
+        }
+
+        trace!("binding chord for {}", output.path);
+        // Owned by the hand of the last input, which usually completes the chord.
+        context.add_custom_binding(
+            output,
+            last.hand,
+            *last,
+            BoolBindingType::Chord(ChordData::new(parts)),
+        );
     }
 }
 
