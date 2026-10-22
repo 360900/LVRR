@@ -27,12 +27,20 @@
 			"type": "vector2"
 		},
 		{
+			"name": "/actions/game/in/crouch",
+			"type": "boolean"
+		},
+		{
 			"name": "/actions/menu/in/select",
 			"type": "boolean"
 		},
 		{
 			"name": "/actions/menu/in/scroll",
 			"type": "vector2"
+		},
+		{
+			"name": "/actions/menu/in/back",
+			"type": "boolean"
 		}
 	],
 	"default_bindings": [

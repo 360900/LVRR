@@ -2431,6 +2431,48 @@ fn action_set_priorities() {
 }
 
 #[test]
+fn masked_toggle_ignores_presses() {
+    let mut f = Fixture::new();
+    f.load_actions(c"actions_priority.json");
+    let game = f.get_action_set_handle(c"/actions/game");
+    let menu = f.get_action_set_handle(c"/actions/menu");
+    let crouch = f.get_action_handle(c"/actions/game/in/crouch");
+    f.set_interaction_profile::<Knuckles>(LeftHand);
+    let toggle = f
+        .get_extra_action(crouch, ExtraActionType::ToggleAction)
+        .unwrap();
+    fakexr::set_action_state(toggle, false.into(), LeftHand);
+    // The menu binds B too.
+    let sync = |f: &mut Fixture, menu_priority| {
+        f.sync_sets(&mut [
+            vr::VRActiveActionSet_t {
+                ulActionSet: game,
+                ..Default::default()
+            },
+            vr::VRActiveActionSet_t {
+                ulActionSet: menu,
+                nPriority: menu_priority,
+                ..Default::default()
+            },
+        ]);
+        let s = f.get_bool_state(crouch).unwrap();
+        (s.bActive, s.bState, s.bChanged)
+    };
+
+    assert_eq!(sync(&mut f, 0), (true, false, false));
+    assert_eq!(sync(&mut f, 1), (false, false, false));
+    fakexr::set_action_state(toggle, true.into(), LeftHand);
+    assert_eq!(sync(&mut f, 1), (false, false, false));
+    fakexr::set_action_state(toggle, false.into(), LeftHand);
+    assert_eq!(sync(&mut f, 1), (false, false, false));
+
+    // The press went to the menu, so the toggle is still off.
+    assert_eq!(sync(&mut f, 0), (true, false, false));
+    fakexr::set_action_state(toggle, true.into(), LeftHand);
+    assert_eq!(sync(&mut f, 0), (true, true, true));
+}
+
+#[test]
 fn extreme_set_priorities() {
     let mut f = Fixture::new();
     f.load_actions(c"actions.json");

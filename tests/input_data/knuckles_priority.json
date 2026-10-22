@@ -36,6 +36,15 @@
 					}
 				},
 				{
+					"path": "/user/hand/left/input/b",
+					"mode": "toggle_button",
+					"inputs": {
+						"click": {
+							"output": "/actions/game/in/crouch"
+						}
+					}
+				},
+				{
 					"path": "/user/hand/right/input/trigger",
 					"mode": "trigger",
 					"inputs": {
@@ -87,6 +96,15 @@
 					"inputs": {
 						"position": {
 							"output": "/actions/menu/in/scroll"
+						}
+					}
+				},
+				{
+					"path": "/user/hand/left/input/b",
+					"mode": "button",
+					"inputs": {
+						"click": {
+							"output": "/actions/menu/in/back"
 						}
 					}
 				},

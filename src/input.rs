@@ -721,6 +721,11 @@ impl<C: openxr_data::Compositor> Input<C> {
             if subaction_path != xr::Path::NULL && subaction_path != path {
                 continue;
             }
+            // Don't evaluate custom bindings of a hand that stays masked: like SteamVR's disabled
+            // bindings, they mustn't see inputs meant for the higher priority set (e.g. toggles).
+            if mask.previous[hand] && mask.current[hand] {
+                continue;
+            }
 
             let hand_origin = hand_key.data().as_ffi();
             let native = action.state(&session_data.session, path).ok();
@@ -740,10 +745,10 @@ impl<C: openxr_data::Compositor> Input<C> {
             };
 
             // A hand that was masked counts as unchanged, so unmasking a held input isn't a press.
-            previous |= match (mask.previous[hand], mask.current[hand]) {
-                (false, _) => hand_state.current_state != hand_state.changed_since_last_sync,
-                (true, false) => hand_state.current_state,
-                (true, true) => false,
+            previous |= if mask.previous[hand] {
+                hand_state.current_state
+            } else {
+                hand_state.current_state != hand_state.changed_since_last_sync
             };
             if mask.current[hand] || !hand_state.is_active {
                 continue;
