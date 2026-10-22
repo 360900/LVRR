@@ -70,11 +70,11 @@ impl InteractionProfile for Knuckles {
             tracking_system_name: c"lighthouse",
             manufacturer_name: c"Valve",
             input_profile_path: c"{indexcontroller}/input/index_controller_profile.json",
+            // Like SteamVR, without A, which is reported as Grip.
             legacy_buttons_mask: button_mask_from_ids!(
                 EVRButtonId::System,
                 EVRButtonId::ApplicationMenu,
                 EVRButtonId::Grip,
-                EVRButtonId::A,
                 EVRButtonId::Axis0,
                 EVRButtonId::Axis1,
                 EVRButtonId::Axis2

@@ -1016,6 +1016,8 @@ mod tests {
         check(|a| a.squeeze.as_raw(), &["squeeze/force"]);
         check(|a| a.app_menu.as_raw(), &["b/click"]);
         check(|a| a.app_menu_touch.as_raw(), &["b/touch"]);
+        // SteamVR's Prop_SupportedButtons_Uint64
+        assert_eq!(Knuckles::properties().legacy_buttons_mask, 0x7_0000_0007);
     }
 
     #[test]
