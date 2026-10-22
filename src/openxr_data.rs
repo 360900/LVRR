@@ -487,7 +487,7 @@ impl<C: Compositor> OpenXrData<C> {
     fn push_event(&self, ty: vr::EVREventType, data: vr::VREvent_Data_t) {
         if let Some(system) = self.system.get() {
             system.push_event(vr::VREvent_t {
-                eventType: ty as u32,
+                eventType: ty.0,
                 trackedDeviceIndex: vr::k_unTrackedDeviceIndex_Hmd,
                 eventAgeSeconds: 0.0,
                 data,
@@ -1315,7 +1315,8 @@ impl SessionData {
         let reference = match origin {
             vr::ETrackingUniverseOrigin::Seated => &self.local_space_reference,
             vr::ETrackingUniverseOrigin::Standing => &self.stage_space_reference,
-            vr::ETrackingUniverseOrigin::RawAndUncalibrated => return None,
+            // RawAndUncalibrated has no zero to reset, nor do unknown universes.
+            _ => return None,
         };
         let location = self
             .view_space
@@ -1369,7 +1370,7 @@ impl SessionData {
                 &mut self.stage_space_adjusted,
                 &mut self.stage_offset,
             ),
-            vr::ETrackingUniverseOrigin::RawAndUncalibrated => return,
+            _ => return,
         };
         match self.session.create_reference_space(ty, offset) {
             Ok(adjusted) => {
@@ -1772,7 +1773,7 @@ mod tests {
 
     #[test]
     fn reset_zero_pose_keeps_standing_floor() {
-        use openvr::ETrackingUniverseOrigin::*;
+        use openvr::ETrackingUniverseOrigin as Origin;
         crate::init_logging();
         let data = OpenXrData::<FakeCompositor>::new(
             &Injector::default(),
@@ -1783,20 +1784,23 @@ mod tests {
         let session = data.session_data.get().session.as_raw();
         fakexr::set_reference_space_pose(session, xr::ReferenceSpaceType::VIEW, head);
 
-        data.reset_tracking_space(Standing);
+        data.reset_tracking_space(Origin::Standing);
         assert_pose_eq(
-            head_pose(&data, Standing),
+            head_pose(&data, Origin::Standing),
             pitch_only(pitch, [0.0, 1.7, 0.0]),
         );
 
-        data.reset_tracking_space(Seated);
-        assert_pose_eq(head_pose(&data, Seated), pitch_only(pitch, [0.0, 0.0, 0.0]));
+        data.reset_tracking_space(Origin::Seated);
+        assert_pose_eq(
+            head_pose(&data, Origin::Seated),
+            pitch_only(pitch, [0.0, 0.0, 0.0]),
+        );
     }
 
     /// Zero poses the app set on the temporary session have to carry over to the real one.
     #[test]
     fn zero_poses_survive_session_restart() {
-        use openvr::ETrackingUniverseOrigin::*;
+        use openvr::ETrackingUniverseOrigin as Origin;
         crate::init_logging();
         let data = OpenXrData::<FakeCompositor>::new(
             &Injector::default(),
@@ -1809,17 +1813,20 @@ mod tests {
         let (head, pitch) = standing_head();
         let session = data.session_data.get().session.as_raw();
         fakexr::set_reference_space_pose(session, xr::ReferenceSpaceType::VIEW, head);
-        data.reset_tracking_space(Standing);
-        data.reset_tracking_space(Seated);
+        data.reset_tracking_space(Origin::Standing);
+        data.reset_tracking_space(Origin::Seated);
 
         data.restart_session();
         let session = data.session_data.get().session.as_raw();
         fakexr::set_reference_space_pose(session, xr::ReferenceSpaceType::VIEW, head);
         assert_pose_eq(
-            head_pose(&data, Standing),
+            head_pose(&data, Origin::Standing),
             pitch_only(pitch, [0.0, 1.7, 0.0]),
         );
-        assert_pose_eq(head_pose(&data, Seated), pitch_only(pitch, [0.0, 0.0, 0.0]));
+        assert_pose_eq(
+            head_pose(&data, Origin::Seated),
+            pitch_only(pitch, [0.0, 0.0, 0.0]),
+        );
 
         drop(data); // Session must be dropped before Vulkan data.
         drop(comp);
@@ -1829,7 +1836,7 @@ mod tests {
     /// session, instead of the app's getting carried over.
     #[test]
     fn runtime_recenter_during_session_restart() {
-        use openvr::ETrackingUniverseOrigin::*;
+        use openvr::ETrackingUniverseOrigin as Origin;
         crate::init_logging();
         let data = OpenXrData::<FakeCompositor>::new(
             &Injector::default(),
@@ -1842,8 +1849,8 @@ mod tests {
         let (head, pitch) = standing_head();
         let session = data.session_data.get().session.as_raw();
         fakexr::set_reference_space_pose(session, xr::ReferenceSpaceType::VIEW, head);
-        data.reset_tracking_space(Standing);
-        data.reset_tracking_space(Seated);
+        data.reset_tracking_space(Origin::Standing);
+        data.reset_tracking_space(Origin::Seated);
         fakexr::reference_space_change_pending(
             session,
             xr::ReferenceSpaceType::LOCAL,
@@ -1867,8 +1874,11 @@ mod tests {
         let session = data.session_data.get().session.as_raw();
         fakexr::set_reference_space_pose(session, xr::ReferenceSpaceType::VIEW, moved);
         data.poll_events();
-        assert_pose_eq(head_pose(&data, Seated), pitch_only(pitch, [0.0, 0.0, 0.0]));
-        assert_pose_eq(head_pose(&data, Standing), moved);
+        assert_pose_eq(
+            head_pose(&data, Origin::Seated),
+            pitch_only(pitch, [0.0, 0.0, 0.0]),
+        );
+        assert_pose_eq(head_pose(&data, Origin::Standing), moved);
 
         drop(data);
         drop(comp);
@@ -1878,7 +1888,7 @@ mod tests {
     /// keeping it on the floor.
     #[test]
     fn runtime_recenter_can_move_standing_zero() {
-        use openvr::ETrackingUniverseOrigin::*;
+        use openvr::ETrackingUniverseOrigin as Origin;
         crate::init_logging();
         let data = OpenXrData::<FakeCompositor>::new(
             &Injector::default(),
@@ -1897,10 +1907,13 @@ mod tests {
         data.poll_events_impl(&data.session_data.get());
         data.apply_pending_recenter(true);
         assert_pose_eq(
-            head_pose(&data, Standing),
+            head_pose(&data, Origin::Standing),
             pitch_only(pitch, [0.0, 1.7, 0.0]),
         );
-        assert_pose_eq(head_pose(&data, Seated), pitch_only(pitch, [0.0, 0.0, 0.0]));
+        assert_pose_eq(
+            head_pose(&data, Origin::Seated),
+            pitch_only(pitch, [0.0, 0.0, 0.0]),
+        );
     }
 
     /// Ending the session ourselves isn't the runtime taking input focus, and focus the runtime

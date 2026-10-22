@@ -2125,10 +2125,7 @@ mod tests {
         assert_eq!([position.x, position.y, position.z], [0.0, 0.0, 0.0]);
 
         let event = next_event(&system).expect("no event");
-        assert_eq!(
-            event.eventType,
-            vr::EVREventType::SeatedZeroPoseReset as u32
-        );
+        assert_eq!(event.eventType, vr::EVREventType::SeatedZeroPoseReset.0);
         assert!(unsafe { event.data.seatedZeroPoseReset.bResetBySystemMenu });
         assert!(next_event(&system).is_none());
 
@@ -2156,7 +2153,7 @@ mod tests {
         let event = next_event(&system).expect("no event");
         assert_eq!(
             event.eventType,
-            vr::EVREventType::ChaperoneUniverseHasChanged as u32
+            vr::EVREventType::ChaperoneUniverseHasChanged.0
         );
     }
 
@@ -2192,10 +2189,7 @@ mod tests {
         xr.poll_events();
         assert_eq!(seated(), [1.0, 0.0, 0.0]);
         let event = next_event(&system).expect("no event");
-        assert_eq!(
-            event.eventType,
-            vr::EVREventType::SeatedZeroPoseReset as u32
-        );
+        assert_eq!(event.eventType, vr::EVREventType::SeatedZeroPoseReset.0);
     }
 
     #[test]
@@ -2216,7 +2210,7 @@ mod tests {
 
         set_state(xr::SessionState::VISIBLE);
         let event = next_event(&system).expect("no event");
-        assert_eq!(event.eventType, vr::EVREventType::InputFocusCaptured as u32);
+        assert_eq!(event.eventType, vr::EVREventType::InputFocusCaptured.0);
         assert_eq!(unsafe { event.data.process.oldPid }, 0);
         assert!(!system.IsInputAvailable());
         assert!(system.ShouldApplicationPause());
@@ -2227,7 +2221,7 @@ mod tests {
 
         set_state(xr::SessionState::FOCUSED);
         let event = next_event(&system).expect("no event");
-        assert_eq!(event.eventType, vr::EVREventType::InputFocusReleased as u32);
+        assert_eq!(event.eventType, vr::EVREventType::InputFocusReleased.0);
         assert_eq!(unsafe { event.data.process.pid }, 0);
         assert!(system.IsInputAvailable());
         assert!(!system.ShouldApplicationPause());
@@ -2257,7 +2251,7 @@ mod tests {
         let event = next_event(&system).expect("no event");
         assert_eq!(
             event.eventType,
-            vr::EVREventType::TrackedDeviceUserInteractionEnded as u32
+            vr::EVREventType::TrackedDeviceUserInteractionEnded.0
         );
         assert_eq!(event.trackedDeviceIndex, vr::k_unTrackedDeviceIndex_Hmd);
         assert_eq!(activity(), vr::EDeviceActivityLevel::Idle);
@@ -2267,7 +2261,7 @@ mod tests {
         let event = next_event(&system).expect("no event");
         assert_eq!(
             event.eventType,
-            vr::EVREventType::TrackedDeviceUserInteractionStarted as u32
+            vr::EVREventType::TrackedDeviceUserInteractionStarted.0
         );
         assert_eq!(activity(), vr::EDeviceActivityLevel::UserInteraction);
     }
@@ -2292,7 +2286,7 @@ mod tests {
             std::mem::size_of_val(&event) as u32,
             &mut pose
         ));
-        assert_eq!(event.eventType, vr::EVREventType::Quit as u32);
+        assert_eq!(event.eventType, vr::EVREventType::Quit.0);
         assert_eq!(event.trackedDeviceIndex, vr::k_unTrackedDeviceIndexInvalid);
         assert!(!pose.bPoseIsValid);
     }
@@ -2327,10 +2321,7 @@ mod tests {
             &system,
             (&raw mut event).cast()
         ));
-        assert_eq!(
-            event.event_type,
-            vr::EVREventType::TrackedDeviceActivated as u32
-        );
+        assert_eq!(event.event_type, vr::EVREventType::TrackedDeviceActivated.0);
         assert_eq!(event.device, vr::k_unTrackedDeviceIndex_Hmd);
         assert_eq!(event.data, [0; 4]);
         assert_eq!(event.age, 0.0);
