@@ -127,6 +127,8 @@ impl OverlayMan {
 
         overlay.kind = OverlayKind::Curved { curvature: 1.0 };
         overlay.z_order = SKYBOX_Z_ORDER;
+        // SteamVR draws the skybox opaque, whatever the texture's alpha says.
+        overlay.flags = vr::VROverlayFlags::IgnoreTextureAlpha as u32;
         overlay.scale = (1.0, 1.0);
         overlay.bounds = bounds;
         // Wide enough to fill most of the forward view; height derived from
@@ -232,11 +234,22 @@ impl OverlayMan {
                     orientation: xr::Quaternionf::IDENTITY,
                 });
 
+            // OpenVR overlays have straight alpha unless they say otherwise.
+            let premultiplied = overlay.has_flag(vr::VROverlayFlags::IsPremultiplied);
+            let mut layer_flags = if premultiplied {
+                xr::CompositionLayerFlags::EMPTY
+            } else {
+                xr::CompositionLayerFlags::UNPREMULTIPLIED_ALPHA
+            };
+            if !overlay.has_flag(vr::VROverlayFlags::IgnoreTextureAlpha) {
+                layer_flags |= xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA;
+            }
+
             macro_rules! layer_init {
                 ($ty:ident) => {{
                     $ty::new()
                         .space(space)
-                        .layer_flags(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA)
+                        .layer_flags(layer_flags)
                         .eye_visibility(xr::EyeVisibility::BOTH)
                         .sub_image(
                             xr::SwapchainSubImage::new()
@@ -285,7 +298,10 @@ impl OverlayMan {
 
                     let layer = lifetime_extend!(CompositionLayerQuad, layer);
                     let mut layer = OverlayLayer::from(OverlayLayerInner::Quad(layer));
-                    overlay.alpha.iter().for_each(|a| layer.set_alpha(*a));
+                    overlay
+                        .alpha
+                        .iter()
+                        .for_each(|a| layer.set_alpha(*a, premultiplied));
                     layers.push((overlay.z_order, layer));
                 }
                 // SetOverlayCurvature checks for khr_composition_layer_cylinder
@@ -326,7 +342,10 @@ impl OverlayMan {
 
                     let layer = lifetime_extend!(CompositionLayerCylinderKHR, layer);
                     let mut layer = OverlayLayer::from(OverlayLayerInner::Cylinder(layer));
-                    overlay.alpha.iter().for_each(|a| layer.set_alpha(*a));
+                    overlay
+                        .alpha
+                        .iter()
+                        .for_each(|a| layer.set_alpha(*a, premultiplied));
                     layers.push((overlay.z_order, layer));
                 }
             }
@@ -426,22 +445,25 @@ pub struct OverlayLayer<'a, G: xr::Graphics> {
 }
 
 impl<G: xr::Graphics> OverlayLayer<'_, G> {
-    fn set_alpha(&mut self, alpha: f32) {
+    fn set_alpha(&mut self, alpha: f32, premultiplied: bool) {
         // only one instance is stored, so this would cause segfault due to UAF
         debug_assert!(
             self.color_bias_khr.is_none(),
             "attempted to set_alpha on the same CompositorLayer twice!"
         );
 
+        // Monado scales the color as submitted, without unpremultiplying it first, so
+        // premultiplied colors have to be scaled along with the alpha.
+        let rgb = if premultiplied { alpha } else { 1.0 };
         self.color_bias_khr = {
             let mut payload = Box::new(xr::sys::CompositionLayerColorScaleBiasKHR {
                 ty: xr::StructureType::COMPOSITION_LAYER_COLOR_SCALE_BIAS_KHR,
                 next: std::ptr::null(),
                 color_bias: Default::default(),
                 color_scale: xr::Color4f {
-                    r: 1.0,
-                    g: 1.0,
-                    b: 1.0,
+                    r: rgb,
+                    g: rgb,
+                    b: rgb,
                     a: alpha,
                 },
             });
@@ -872,6 +894,10 @@ impl Overlay {
         // });
 
         Ok(())
+    }
+
+    fn has_flag(&self, flag: vr::VROverlayFlags) -> bool {
+        self.flags & flag as u32 != 0
     }
 
     pub fn set_flag(&mut self, flag: vr::VROverlayFlags, value: bool) {
@@ -1727,7 +1753,7 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         if enabled.is_null() {
             return vr::EVROverlayError::InvalidParameter;
         }
-        unsafe { enabled.write(overlay.flags & flag.0 != 0) };
+        unsafe { enabled.write(overlay.has_flag(flag)) };
         vr::EVROverlayError::None
     }
     fn SetOverlayFlag(
@@ -2242,7 +2268,21 @@ mod tests {
         }
 
         fn with_app_type(app_type: vr::EVRApplicationType) -> Self {
-            let xr = Arc::new(OpenXrData::new(&Injector::default(), app_type).unwrap());
+            Self::build(app_type, |_| {})
+        }
+
+        /// fakexr doesn't check layers, so tests can pretend layer extensions are enabled.
+        fn with_extensions(enable: impl FnOnce(&mut xr::ExtensionSet)) -> Self {
+            Self::build(vr::EVRApplicationType::Other, enable)
+        }
+
+        fn build(
+            app_type: vr::EVRApplicationType,
+            enable: impl FnOnce(&mut xr::ExtensionSet),
+        ) -> Self {
+            let mut xr = OpenXrData::new(&Injector::default(), app_type).unwrap();
+            enable(&mut xr.enabled_extensions);
+            let xr = Arc::new(xr);
             let vk = Arc::new(crate::graphics_backends::VulkanData::new_temporary(
                 &xr.instance,
                 xr.system_id,
@@ -2263,6 +2303,38 @@ mod tests {
             crate::compositor::FakeGraphicsData::texture(&self.vk)
         }
 
+        /// Creates an overlay that is shown and has a texture.
+        fn textured_overlay(&self, key: &CStr) -> vr::VROverlayHandle_t {
+            let handle = create(&self.man, key, key);
+            assert_eq!(
+                self.man.SetOverlayTexture(handle, &self.texture()),
+                vr::EVROverlayError::None
+            );
+            assert_eq!(self.man.ShowOverlay(handle), vr::EVROverlayError::None);
+            handle
+        }
+
+        fn layers(&self, render_skybox: bool) -> Vec<TestLayer> {
+            type Api = <crate::compositor::FakeGraphicsData as GraphicsBackend>::Api;
+            let session = self.xr.session_data.get();
+            self.man
+                .get_layers::<Api>(&session, render_skybox)
+                .iter()
+                .map(|layer| {
+                    let color_scale = layer.color_bias_khr.as_ref().map(|c| c.color_scale);
+                    match layer.layer.as_ref().unwrap() {
+                        OverlayLayerInner::Quad(l) => TestLayer::Quad(*l.as_raw(), color_scale),
+                        OverlayLayerInner::Cylinder(l) => {
+                            TestLayer::Cylinder(*l.as_raw(), color_scale)
+                        }
+                        OverlayLayerInner::Equirect2(l) => {
+                            TestLayer::Equirect2(*l.as_raw(), color_scale)
+                        }
+                    }
+                })
+                .collect()
+        }
+
         /// Reports whether the overlay locks were free when the session got restarted.
         fn overlay_locks_free_on_restart(&self) -> std::sync::mpsc::Receiver<bool> {
             let (tx, rx) = std::sync::mpsc::channel();
@@ -2274,6 +2346,70 @@ mod tests {
             });
             rx
         }
+    }
+
+    /// The parts of an overlay layer the tests look at, along with its color scale.
+    #[derive(Debug)]
+    enum TestLayer {
+        Quad(xr::sys::CompositionLayerQuad, Option<xr::Color4f>),
+        Cylinder(xr::sys::CompositionLayerCylinderKHR, Option<xr::Color4f>),
+        Equirect2(xr::sys::CompositionLayerEquirect2KHR, Option<xr::Color4f>),
+    }
+
+    impl TestLayer {
+        fn flags(&self) -> xr::CompositionLayerFlags {
+            match self {
+                Self::Quad(l, _) => l.layer_flags,
+                Self::Cylinder(l, _) => l.layer_flags,
+                Self::Equirect2(l, _) => l.layer_flags,
+            }
+        }
+
+        fn color_scale(&self) -> Option<[f32; 4]> {
+            let (Self::Quad(_, c) | Self::Cylinder(_, c) | Self::Equirect2(_, c)) = self;
+            c.map(|c| [c.r, c.g, c.b, c.a])
+        }
+    }
+
+    #[test]
+    fn layer_alpha_follows_overlay_flags() {
+        use vr::VROverlayFlags::{IgnoreTextureAlpha, IsPremultiplied};
+        use xr::CompositionLayerFlags as Flags;
+
+        let f = RealSessionFixture::with_extensions(|e| {
+            e.khr_composition_layer_color_scale_bias = true
+        });
+        let handle = f.textured_overlay(c"key");
+        let set_flag = |flag, value| {
+            assert_eq!(
+                f.man.SetOverlayFlag(handle, flag, value),
+                vr::EVROverlayError::None
+            );
+        };
+        let layer = || {
+            let mut layers = f.layers(false);
+            assert_eq!(layers.len(), 1);
+            layers.pop().unwrap()
+        };
+
+        // OpenVR overlays have straight alpha by default.
+        assert_eq!(
+            layer().flags(),
+            Flags::BLEND_TEXTURE_SOURCE_ALPHA | Flags::UNPREMULTIPLIED_ALPHA
+        );
+        assert_eq!(
+            f.man.SetOverlayAlpha(handle, 0.5),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(layer().color_scale(), Some([1.0, 1.0, 1.0, 0.5]));
+
+        set_flag(IsPremultiplied, true);
+        assert_eq!(layer().flags(), Flags::BLEND_TEXTURE_SOURCE_ALPHA);
+        assert_eq!(layer().color_scale(), Some([0.5; 4]));
+
+        set_flag(IsPremultiplied, false);
+        set_flag(IgnoreTextureAlpha, true);
+        assert_eq!(layer().flags(), Flags::UNPREMULTIPLIED_ALPHA);
     }
 
     /// The frame thread takes the overlay lock while holding the session lock, so the first

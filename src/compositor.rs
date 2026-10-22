@@ -1909,7 +1909,10 @@ mod tests {
             _bounds: openvr::VRTextureBounds_t,
             _image_index: usize,
         ) -> openxr::Extent2Di {
-            xr::Extent2Di::default()
+            xr::Extent2Di {
+                width: SWAPCHAIN_WIDTH.get() as i32,
+                height: SWAPCHAIN_HEIGHT.get() as i32,
+            }
         }
     }
 
