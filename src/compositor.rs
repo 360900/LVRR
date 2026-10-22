@@ -2265,6 +2265,27 @@ mod tests {
     }
 
     #[test]
+    fn views_never_located() {
+        let f = Fixture::new();
+        fakexr::set_locate_views_error(Some(xr::sys::Result::ERROR_RUNTIME_FAILURE));
+        f.ensure_real_session(false);
+        let frame = || {
+            assert_eq!(f.submit(vr::EVREye::Left), None);
+            assert_eq!(f.submit(vr::EVREye::Right), None);
+            assert_eq!(f.wait_get_poses(), None);
+            let session = f.comp.openxr.session_data.get().session.as_raw();
+            fakexr::last_layer_count(session)
+        };
+
+        // The session renders from the second frame on. Without views, there's no FOV for the
+        // projection layer.
+        assert_eq!(frame(), 0);
+        assert_eq!(frame(), 0);
+        fakexr::set_locate_views_error(Option::None);
+        assert_eq!(frame(), 1);
+    }
+
+    #[test]
     fn zero_dims_texture() {
         let f = Fixture::new();
         SWAPCHAIN_WIDTH.set(0);

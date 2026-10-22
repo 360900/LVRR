@@ -209,6 +209,12 @@ pub fn session_frame_state(session: xr::Session) -> FrameState {
     session.frame_state.load()
 }
 
+/// The number of layers the last xrEndFrame call on `session` submitted.
+pub fn last_layer_count(session: xr::Session) -> u32 {
+    let session = session.to_handle().unwrap();
+    session.last_layer_count.load()
+}
+
 type Hook = Mutex<Option<Box<dyn FnOnce() + Send>>>;
 
 fn run_hook(hook: &Hook) {
@@ -729,6 +735,7 @@ struct Session {
     state_synced: AtomicBool,
     should_render: AtomicBool,
     frame_state: AtomicCell<FrameState>,
+    last_layer_count: AtomicCell<u32>,
     with_trackers: AtomicBool,
     stage_bounds: AtomicCell<Option<xr::Extent2Df>>,
     attach_hook: Hook,
@@ -1106,6 +1113,7 @@ extern "system" fn create_session(
         state_synced: true.into(),
         should_render: false.into(),
         frame_state: FrameState::Ended.into(),
+        last_layer_count: 0.into(),
         with_trackers: false.into(),
         stage_bounds: None.into(),
         attach_hook: Mutex::default(),
@@ -2120,6 +2128,9 @@ extern "system" fn end_frame(session: xr::Session, info: *const xr::FrameEndInfo
     if let Err(e) = transition_frame_state(&session.frame_state, FrameState::Ended) {
         return e;
     }
+    session
+        .last_layer_count
+        .store(unsafe { (*info).layer_count });
     if session.state.load() == xr::SessionState::READY {
         session.synchronized();
     }
