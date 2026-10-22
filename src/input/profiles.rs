@@ -610,7 +610,7 @@ pub mod paths {
 
             /// Represents a specific input on an input path
             /// The "a" in "/user/hand/input/a/click"
-            #[derive(Copy, Clone, PartialEq, Eq)]
+            #[derive(Copy, Clone, PartialEq, Eq, Debug)]
             pub enum $enum {
                 $($name,)+
             }

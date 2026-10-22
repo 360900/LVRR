@@ -1,13 +1,14 @@
 mod actions;
 mod bindings;
 mod context;
+mod fallback;
 
 pub(super) use actions::ControllerType;
 pub(super) use bindings::{ClickThresholdParams, GrabParameters};
 
 use crate::input::InteractionProfile;
 use crate::input::action_manifest::context::BindingsLoadContext;
-use crate::input::profiles::LegalPathsT;
+use crate::input::profiles::{DynInputPath, LegalPathsT, paths::DynSubpath};
 use crate::input::{ActionKey, Input, profiles::RunWithProfile, skeletal::SkeletalInputActionData};
 use crate::openxr_data::{self, Hand, SessionData};
 use log::{debug, error, info, warn};
@@ -327,6 +328,30 @@ fn read_bindings(
         .ok()
 }
 
+/// The path to bind for `path` on `P`: the path itself, or what the profile translates it to.
+fn validate_path<P: InteractionProfile>(path: DynInputPath) -> Option<DynInputPath> {
+    let legal = <P::LegalPaths as LegalPathsT>::is_legal;
+    // A translation that isn't legal either would fail the whole profile's suggestion.
+    legal(path)
+        .then_some(path)
+        .or_else(|| P::translate_path(path).filter(|path| legal(*path)))
+}
+
+/// Whether `P` has an input to bind for `subpath`.
+fn has_input<P: InteractionProfile>(hand: Hand, subpath: DynSubpath) -> bool {
+    use super::profiles::paths::DynComponent::*;
+    [None, Some(Click), Some(Touch), Some(Value), Some(Force)]
+        .into_iter()
+        .any(|component| {
+            validate_path::<P>(DynInputPath {
+                hand,
+                subpath,
+                component,
+            })
+            .is_some()
+        })
+}
+
 /// Whether two paths name the same file, even if spelled differently.
 fn same_file(a: &Path, b: &Path) -> bool {
     a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
@@ -355,7 +380,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             }));
         }
 
-        let mut loaded_types = HashSet::new();
+        let mut loaded = Vec::new();
         for actions::DefaultBindings {
             binding_url,
             controller_type,
@@ -367,7 +392,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             }
             // The first file that loads wins, like in SteamVR (e.g. Half-Life: Alyx lists
             // bindings_knuckles.json, then _left and _single variants).
-            if loaded_types.contains(&controller_type) {
+            if loaded.iter().any(|(loaded, _)| *loaded == controller_type) {
                 info!("skipping bindings in {binding_url:?}");
                 continue;
             }
@@ -380,18 +405,18 @@ impl<C: openxr_data::Compositor> Input<C> {
             let Some(bindings) = read_bindings(&bindings_path, &controller_type) else {
                 continue;
             };
-            loaded_types.insert(controller_type.clone());
 
-            let mut runner = Runner(self, context, bindings);
+            let mut runner = Runner(self, context, &bindings);
             controller_type.run_for_profile(&mut runner);
+            loaded.push((controller_type, bindings));
 
             // lifetime moment
-            struct Runner<'a, 'b, 'c, C: openxr_data::Compositor>(
+            struct Runner<'a, 'b, 'c, 'd, C: openxr_data::Compositor>(
                 &'a Input<C>,
                 &'b mut BindingsLoadContext<'c>,
-                bindings::Bindings,
+                &'d bindings::Bindings,
             );
-            impl<C: openxr_data::Compositor> RunWithProfile for Runner<'_, '_, '_, C> {
+            impl<C: openxr_data::Compositor> RunWithProfile for Runner<'_, '_, '_, '_, C> {
                 fn run<P: super::InteractionProfile>(&mut self) {
                     if let Some(mut context) = self.1.for_profile::<C, P>(self.0) {
                         self.0
@@ -402,6 +427,68 @@ impl<C: openxr_data::Compositor> Input<C> {
                             std::any::type_name::<P>()
                         );
                     }
+                }
+            }
+        }
+
+        // Controllers the game has no bindings for get bindings converted from the closest
+        // controller it has them for, so they still work and stay tracked.
+        let mut runner = FallbackRunner {
+            input: self,
+            context,
+            loaded: &loaded,
+            custom_bindings_dir: &custom_bindings_dir,
+        };
+        super::profiles::run_for_all_profiles(&mut runner);
+
+        struct FallbackRunner<'a, 'b, 'c, C: openxr_data::Compositor> {
+            input: &'a Input<C>,
+            context: &'b mut BindingsLoadContext<'c>,
+            loaded: &'a [(actions::ControllerType, bindings::Bindings)],
+            custom_bindings_dir: &'a Path,
+        }
+        impl<C: openxr_data::Compositor> RunWithProfile for FallbackRunner<'_, '_, '_, C> {
+            fn run<P: super::InteractionProfile>(&mut self) {
+                let profile = P::profile_path();
+                let Ok(profile_path) = self.input.openxr.instance.string_to_path(profile) else {
+                    return;
+                };
+                if self.context.suggested_profiles.contains(&profile_path) {
+                    return;
+                }
+                // Profiles no SteamVR controller type maps to (hand tracking) have no bindings.
+                let Some(native) = actions::ControllerType::known()
+                    .into_iter()
+                    .find(|ty| ty.covers::<P>())
+                else {
+                    return;
+                };
+
+                let custom_path = self.custom_bindings_dir.join(format!("{native}.json"));
+                let source = native
+                    .conversion_sources()
+                    .into_iter()
+                    .find_map(|ty| self.loaded.iter().find(|(loaded, _)| *loaded == ty));
+                let bindings = if let Some(custom) = custom_path
+                    .exists()
+                    .then(|| read_bindings(&custom_path, &native))
+                    .flatten()
+                {
+                    info!("Using {} for {profile}", custom_path.display());
+                    custom
+                } else if let Some((source, bindings)) = source {
+                    info!("No {native} bindings for {profile}, converting the {source} bindings");
+                    let mut bindings = bindings.clone();
+                    fallback::convert(&mut bindings, source, has_input::<P>);
+                    bindings
+                } else {
+                    info!("No bindings to convert for {profile}");
+                    bindings::Bindings::default()
+                };
+
+                if let Some(mut context) = self.context.for_profile::<C, P>(self.input) {
+                    self.input
+                        .load_bindings_for_profile::<P>(&bindings.bindings, &mut context);
                 }
             }
         }
@@ -422,11 +509,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             .instance
             .string_to_path(P::profile_path())
             .unwrap();
-        let path_validator = |path| {
-            <P::LegalPaths as LegalPathsT>::is_legal(path)
-                .then_some(path)
-                .or_else(|| P::translate_path(path))
-        };
+        let path_validator = validate_path::<P>;
 
         for (action_set_name, bindings) in bindings.iter() {
             let Some(set) = context.get_action_set(action_set_name) else {

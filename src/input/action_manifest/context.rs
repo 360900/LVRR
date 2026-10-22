@@ -18,6 +18,8 @@ pub(super) struct BindingsLoadContext<'a> {
     pub names: XrNames,
     /// Sets that got actions for custom bindings.
     pub extra_action_sets: HashSet<String>,
+    /// Interaction profiles that got bindings.
+    pub suggested_profiles: HashSet<xr::Path>,
     pub per_profile_bindings: HashMap<xr::Path, HashMap<String, Vec<BoolBindingData>>>,
     pub per_profile_pose_bindings: HashMap<xr::Path, HashMap<String, BoundPose>>,
     /// Maps each interaction profile path → action name → bound input paths.
@@ -44,6 +46,7 @@ impl<'a> BindingsLoadContext<'a> {
             actions,
             names,
             extra_action_sets: Default::default(),
+            suggested_profiles: Default::default(),
             per_profile_bindings: Default::default(),
             per_profile_pose_bindings: Default::default(),
             per_profile_input_paths: Default::default(),
@@ -81,6 +84,7 @@ impl BindingsLoadContext<'_> {
             input.get_subaction_path(Hand::Right),
         ];
 
+        self.suggested_profiles.insert(interaction_profile);
         let bindings_parsed = self
             .per_profile_bindings
             .entry(interaction_profile)

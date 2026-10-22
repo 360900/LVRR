@@ -29,7 +29,7 @@ use std::time::Duration;
  * Structure for binding files
  */
 
-#[derive(Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 pub struct Bindings {
     #[serde(deserialize_with = "lenient_sets")]
     pub bindings: HashMap<String, ActionSetBinding>,
@@ -37,7 +37,7 @@ pub struct Bindings {
 
 // SteamVR skips what it doesn't understand, so one odd entry (an unknown mode, a missing
 // field, a tracker pose path...) only drops that entry rather than the whole file.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct ActionSetBinding {
     #[serde(default, deserialize_with = "lenient_vec")]
     pub sources: Vec<ActionBinding>,
@@ -52,7 +52,7 @@ pub struct ActionSetBinding {
 }
 
 /// An output that is active while all of its inputs are.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct ChordBinding {
     output: ActionPath,
     /// Input paths and the slot of each (click, touch, a dpad direction...)
@@ -112,7 +112,7 @@ fn lenient_sets<'de, D: serde::Deserializer<'de>>(
         .collect())
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ActionPath {
     /// This is the full path as pulled from the manifest, but set to lowercase
     /// Action handles appear to be case insensitive.
@@ -150,7 +150,7 @@ impl<'de> Deserialize<'de> for ActionPath {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct PoseBinding {
     output: ActionPath,
     #[serde(deserialize_with = "parse_pose_binding")]
@@ -199,16 +199,16 @@ fn parse_pose_binding<'de, D: serde::Deserializer<'de>>(
     Ok((hand, pose))
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct SimpleActionBinding {
     output: ActionPath,
     path: String,
 }
 
 /// Note that when this is used, it's typically missing the final component
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(from = "String")]
-enum MaybeInputPath {
+pub enum MaybeInputPath {
     Valid(DynInputPath),
     Invalid { path: String, error: String },
 }
@@ -222,7 +222,7 @@ impl From<String> for MaybeInputPath {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ActionBinding {
     None(IgnoredAny),
@@ -242,7 +242,42 @@ pub enum ActionBinding {
     Joystick(ActionBindingData<Vector2Input, Vector2Parameters>),
 }
 
-#[derive(Deserialize)]
+impl ActionBinding {
+    fn path_mut(&mut self) -> Option<&mut MaybeInputPath> {
+        match self {
+            Self::None(_) => None,
+            Self::Button(data) => Some(&mut data.path),
+            Self::ToggleButton(data) => Some(&mut data.path),
+            Self::Dpad(data) | Self::DpadClick(data) | Self::DpadTouch(data) => {
+                Some(&mut data.path)
+            }
+            Self::Trigger(data) => Some(&mut data.path),
+            Self::ScalarConstant(data) => Some(&mut data.path),
+            Self::ForceSensor(data) => Some(&mut data.path),
+            Self::Grab(data) => Some(&mut data.path),
+            Self::Scroll(data) => Some(&mut data.path),
+            Self::Trackpad(data) | Self::Joystick(data) => Some(&mut data.path),
+        }
+    }
+}
+
+impl Bindings {
+    /// Every input path of the bindings, so they can be moved to another controller.
+    pub fn input_paths_mut(&mut self) -> impl Iterator<Item = &mut MaybeInputPath> {
+        self.bindings.values_mut().flat_map(|set| {
+            set.sources
+                .iter_mut()
+                .filter_map(ActionBinding::path_mut)
+                .chain(
+                    set.chords
+                        .iter_mut()
+                        .flat_map(|chord| chord.inputs.iter_mut().map(|(path, _)| path)),
+                )
+        })
+    }
+}
+
+#[derive(Clone, Deserialize)]
 #[serde(bound(deserialize = "Inputs: Deserialize<'de>, Parameters: serde::de::DeserializeOwned"))]
 struct ActionBindingData<Inputs, Parameters = ()> {
     path: MaybeInputPath,
@@ -282,6 +317,16 @@ struct ActionBindingOutput<C> {
     output: ActionPath,
     #[serde(skip)]
     _marker: PhantomData<C>,
+}
+
+// Not derived, as that would require the marker to be Clone.
+impl<C> Clone for ActionBindingOutput<C> {
+    fn clone(&self) -> Self {
+        Self {
+            output: self.output.clone(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 /// Marker for actions that should be bound to a custom binding
@@ -392,7 +437,7 @@ where
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct ButtonInput {
     touch: Option<ActionBindingOutput<paths::Touch>>,
     /// Click can be overridden to use a different path via the `force_input` parameter.
@@ -411,7 +456,7 @@ struct ButtonInput {
     unknown: HashMap<String, IgnoredAny>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Clone, Deserialize, Default)]
 pub struct ClickThresholdParams {
     pub click_activate_threshold: Option<StringOrTyped<f32>>,
     pub click_deactivate_threshold: Option<StringOrTyped<f32>>,
@@ -426,13 +471,13 @@ impl ClickThresholdParams {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct ScalarConstantParameters {
     #[serde(rename = "on/x")]
     on_x: Option<StringOrTyped<f32>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct ButtonParameters {
     #[serde(default, deserialize_with = "ButtonForceInput::default_deserialize")]
     force_input: Option<ButtonForceInput>,
@@ -467,7 +512,7 @@ impl ButtonForceInput {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug)]
 struct DpadInput {
     east: Option<ActionBindingOutput<Custom>>,
     south: Option<ActionBindingOutput<Custom>>,
@@ -476,7 +521,7 @@ struct DpadInput {
     center: Option<ActionBindingOutput<Custom>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(default)]
 pub struct DpadParameters {
     pub sub_mode: DpadSubMode,
@@ -503,60 +548,60 @@ pub enum DpadSubMode {
     Touch,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct TriggerInput {
     pull: Option<ActionBindingOutput<paths::Value>>,
     touch: Option<ActionBindingOutput<paths::Touch>>,
     click: Option<ActionBindingOutput<paths::Click>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct ScalarConstantInput {
     value: ActionBindingOutput<paths::Value>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct ForceSensorInput {
     force: ActionBindingOutput<paths::Force>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct ForceSensorParameters {
     #[allow(unused)]
     haptic_amplitude: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct GrabInput {
     grab: ActionBindingOutput<Custom>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct GrabParameters {
     pub value_hold_threshold: Option<StringOrTyped<f32>>,
     pub value_release_threshold: Option<StringOrTyped<f32>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct ScrollInput {
     scroll: ActionBindingOutput<()>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct ScrollParameters {
     /// "discrete" (default) or "smooth"
     scroll_mode: Option<String>,
     smooth_scroll_multiplier: Option<StringOrTyped<f32>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Vector2Input {
     position: Option<ActionBindingOutput<()>>,
     click: Option<ActionBindingOutput<paths::Click>>,
     touch: Option<ActionBindingOutput<paths::Touch>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Vector2Parameters {
     #[serde(default)]
     invert: Vector2Inversion,

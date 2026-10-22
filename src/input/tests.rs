@@ -687,6 +687,72 @@ fn index_finger_curls() {
     }
 }
 
+#[test]
+fn bindings_converted_for_unlisted_controllers() {
+    let f = Fixture::new();
+    // Only Vive wand bindings: other controllers get them by input role.
+    f.load_actions(c"actions_vive_only.json");
+
+    let touch = OculusTouch::profile_path();
+    f.verify_bindings::<bool>(
+        touch,
+        c"/actions/main/in/boolact",
+        [
+            "/user/hand/left/input/menu/click".into(),
+            "/user/hand/right/input/b/click".into(),
+            "/user/hand/right/input/trigger/value".into(),
+        ],
+    );
+    f.verify_bindings::<xr::Vector2f>(
+        touch,
+        c"/actions/main/in/vec2act",
+        ["/user/hand/left/input/thumbstick".into()],
+    );
+    f.verify_custom_bindings(
+        touch,
+        c"/actions/main/in/dpadact",
+        [
+            "/user/hand/right/input/thumbstick".into(),
+            "/user/hand/right/input/thumbstick/click".into(),
+        ],
+    );
+    f.verify_threshold_bindings(
+        touch,
+        c"/actions/main/in/gripact",
+        ["/user/hand/left/input/squeeze/value".into()],
+    );
+
+    // Index has no menu button: it goes to the upper face button.
+    f.verify_bindings::<bool>(
+        Knuckles::profile_path(),
+        c"/actions/main/in/boolact",
+        [
+            "/user/hand/left/input/b/click".into(),
+            "/user/hand/right/input/b/click".into(),
+            "/user/hand/right/input/trigger/click".into(),
+        ],
+    );
+    f.verify_bindings::<xr::Vector2f>(
+        Knuckles::profile_path(),
+        c"/actions/main/in/vec2act",
+        ["/user/hand/left/input/thumbstick".into()],
+    );
+}
+
+#[test]
+fn controllers_tracked_without_bindings() {
+    let f = Fixture::new();
+    f.load_actions(c"actions_no_bindings.json");
+
+    let data = f.input.openxr.session_data.get();
+    let grip = data.input_data.pose_data.grip.as_raw();
+    for profile in [OculusTouch::profile_path(), Knuckles::profile_path()] {
+        let profile = f.input.openxr.instance.string_to_path(profile).unwrap();
+        let suggested = fakexr::get_suggested_bindings(grip, profile);
+        assert!(suggested.contains(&"/user/hand/left/input/grip/pose".to_string()));
+    }
+}
+
 #[track_caller]
 pub fn compare_pose(expected: xr::Posef, actual: xr::Posef) {
     fn float_eq(a: f32, b: f32) -> bool {
