@@ -70,17 +70,6 @@ impl_action_type!(xr::Vector2f, "vector2", ActionData::Vector2{ action, .. } => 
 impl_action_type!(xr::Haptic, "haptic", ActionData::Haptic(a) => a.as_raw());
 //impl_action_type!(xr::Posef, "pose", ActionData::Pose { action, .. } => action.as_raw());
 
-#[derive(Debug, Copy, Clone)]
-#[allow(dead_code)]
-pub enum ExtraActionType {
-    Analog,
-    GrabTouch,
-    GrabForce,
-    DpadDirection,
-    ToggleAction,
-    Double,
-}
-
 impl Fixture {
     pub fn new() -> Self {
         crate::init_logging();
@@ -175,45 +164,99 @@ impl Fixture {
         )
     }
 
+    /// Checks the inputs read by an action's custom bindings in a profile.
     #[track_caller]
-    pub fn verify_extra_bindings(
+    pub fn verify_custom_bindings(
         &self,
         interaction_profile: &str,
         action_name: &CStr,
-        extra_action_type: ExtraActionType,
         expected_bindings: impl Into<HashSet<String>>,
     ) {
-        let handle = self.get_action_handle(action_name);
-        let action = self
-            .get_extra_action(handle, extra_action_type)
-            .unwrap_or_else(|| panic!("No extra action {extra_action_type:?} for {action_name:?}"));
-
-        self.verify_bindings_core(
-            action,
+        self.verify_custom_bindings_of(
             interaction_profile,
             action_name,
-            &format!("{extra_action_type:?}"),
-            expected_bindings.into(),
+            |_| true,
+            expected_bindings,
+        );
+    }
+
+    /// Checks the inputs read by an action's threshold bindings in a profile.
+    #[track_caller]
+    pub fn verify_threshold_bindings(
+        &self,
+        interaction_profile: &str,
+        action_name: &CStr,
+        expected_bindings: impl Into<HashSet<String>>,
+    ) {
+        self.verify_custom_bindings_of(
+            interaction_profile,
+            action_name,
+            |ty| {
+                matches!(
+                    ty,
+                    BoolBindingType::ThresholdFloat(_) | BoolBindingType::ThresholdVec2(_)
+                )
+            },
+            expected_bindings,
         );
     }
 
     #[track_caller]
-    pub fn verify_no_extra_bindings(
+    fn verify_custom_bindings_of(
         &self,
         interaction_profile: &str,
         action_name: &CStr,
-        extra_action_type: ExtraActionType,
+        filter: impl Fn(&BoolBindingType) -> bool,
+        expected_bindings: impl Into<HashSet<String>>,
     ) {
         let handle = self.get_action_handle(action_name);
-        if let Some(action) = self.get_extra_action(handle, extra_action_type) {
-            self.verify_bindings_core(
-                action,
-                interaction_profile,
-                action_name,
-                &format!("{extra_action_type:?}"),
-                [].into(),
-            );
-        }
+        let profile = self
+            .input
+            .openxr
+            .instance
+            .string_to_path(interaction_profile)
+            .unwrap();
+        let data = self.input.openxr.session_data.get();
+        let loaded = data.input_data.get_loaded_actions().unwrap();
+        let found: HashSet<String> = loaded
+            .try_get_bindings(handle, profile)
+            .into_iter()
+            .flatten()
+            .filter(|binding| filter(&binding.ty))
+            .flat_map(|binding| binding.ty.actions())
+            .flat_map(|action| fakexr::get_suggested_bindings(action, profile))
+            .collect();
+        assert_eq!(
+            found,
+            expected_bindings.into(),
+            "custom bindings for {action_name:?}"
+        );
+    }
+
+    /// The first OpenXR action read by a custom binding of `handle` in a profile that matches.
+    #[track_caller]
+    pub fn custom_binding_action(
+        &self,
+        handle: vr::VRActionHandle_t,
+        interaction_profile: &str,
+        matches: impl Fn(&BoolBindingType) -> bool,
+    ) -> xr::sys::Action {
+        let profile = self
+            .input
+            .openxr
+            .instance
+            .string_to_path(interaction_profile)
+            .unwrap();
+        let data = self.input.openxr.session_data.get();
+        let loaded = data.input_data.get_loaded_actions().unwrap();
+        loaded
+            .try_get_bindings(handle, profile)
+            .unwrap()
+            .iter()
+            .find(|binding| matches(&binding.ty))
+            .expect("no matching custom binding")
+            .ty
+            .actions()[0]
     }
 }
 
@@ -278,29 +321,6 @@ impl Fixture {
         });
 
         T::get_xr_action(action).expect("Couldn't get OpenXR handle for action")
-    }
-
-    #[track_caller]
-    pub fn get_extra_action(
-        &self,
-        handle: vr::VRActionHandle_t,
-        extra_action_type: ExtraActionType,
-    ) -> Option<xr::sys::Action> {
-        let data = self.input.openxr.session_data.get();
-        let actions = data
-            .input_data
-            .get_loaded_actions()
-            .expect("Actions aren't loaded");
-        let extras = actions.try_get_extra(handle).ok()?;
-
-        Some(match extra_action_type {
-            ExtraActionType::Analog => extras.analog_action.as_ref()?.as_raw(),
-            ExtraActionType::GrabTouch => extras.grab_actions.as_ref()?.value_action.as_raw(),
-            ExtraActionType::GrabForce => extras.grab_actions.as_ref()?.force_action.as_raw(),
-            ExtraActionType::DpadDirection => extras.vector2_action.as_ref()?.as_raw(),
-            ExtraActionType::ToggleAction => extras.toggle_action.as_ref()?.as_raw(),
-            ExtraActionType::Double => extras.double_action.as_ref()?.as_raw(),
-        })
     }
 
     pub fn get_pose(
@@ -581,6 +601,19 @@ fn awkward_action_names() {
     }
     assert_eq!(localized(c"/actions/main/in/mixedcase"), "Mixed Case");
     f.get_action::<xr::Haptic>(f.get_action_handle(c"/actions/main/out/grab"));
+
+    // Custom bindings of a long action get actions of their own.
+    f.verify_custom_bindings(
+        Knuckles::profile_path(),
+        c"/actions/main/in/a_long_action_name_for_a_button_bound_through_extra_actions_x",
+        [
+            "/user/hand/left/input/trigger/value".into(),
+            "/user/hand/left/input/trigger/click".into(),
+            "/user/hand/left/input/squeeze/force".into(),
+            "/user/hand/left/input/squeeze/value".into(),
+            "/user/hand/left/input/a/click".into(),
+        ],
+    );
 
     let data = f.input.openxr.session_data.get();
     let loaded = data.input_data.get_loaded_actions().unwrap();
@@ -1501,9 +1534,9 @@ fn release_edge_with_native_and_threshold_bindings() {
     f.set_interaction_profile::<Knuckles>(LeftHand);
 
     let native = f.get_action::<bool>(boolact);
-    let threshold = f
-        .get_extra_action(boolact, ExtraActionType::Analog)
-        .expect("grip should have become a threshold binding");
+    let threshold = f.custom_binding_action(boolact, Knuckles::profile_path(), |ty| {
+        matches!(ty, BoolBindingType::ThresholdFloat(_))
+    });
 
     let sync = |f: &mut Fixture| {
         f.sync(vr::VRActiveActionSet_t {

@@ -367,9 +367,9 @@ mod tests {
             ],
         );
 
-        f.verify_bindings::<f32>(
+        f.verify_threshold_bindings(
             path,
-            c"/actions/set1/boolact_asfloat",
+            c"/actions/set1/in/boolact",
             [
                 "/user/hand/left/input/squeeze/value".into(),
                 "/user/hand/right/input/squeeze/value".into(),

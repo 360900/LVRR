@@ -335,9 +335,9 @@ mod tests {
         );
 
         // bindings for boolact reading from float inputs
-        f.verify_bindings::<f32>(
+        f.verify_threshold_bindings(
             path,
-            c"/actions/set1/boolact_asfloat",
+            c"/actions/set1/in/boolact",
             [
                 "/user/hand/left/input/trigger/value".into(),
                 "/user/hand/right/input/trigger/value".into(),

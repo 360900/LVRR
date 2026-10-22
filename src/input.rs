@@ -25,7 +25,7 @@ use crate::{
     openxr_data::{self, Hand, OpenXrData, RestartError, SessionData},
     tracy_span,
 };
-use custom_bindings::{BoolBindingData, GrabActions, Vector2ActionData};
+use custom_bindings::{BoolBindingData, Vector2ActionData};
 use glam::Quat;
 use legacy::LegacyActionData;
 use log::{debug, info, trace, warn};
@@ -412,12 +412,11 @@ impl<C: openxr_data::Compositor> Input<C> {
         let bindings = loaded_actions
             .try_get_bindings(action, interaction_profile)
             .ok()?;
-        let extra_data = loaded_actions.try_get_extra(action).ok()?;
 
         let mut best_state: Option<xr::ActionState<bool>> = None;
 
         for x in bindings.iter() {
-            let Ok(Some(state)) = x.state(&session, extra_data, subaction) else {
+            let Ok(Some(state)) = x.state(&session, subaction) else {
                 continue;
             };
             if !state.is_active {
@@ -514,15 +513,6 @@ enum ActionData {
     Pose,
     Skeleton(Hand),
     Haptic(xr::Action<xr::Haptic>),
-}
-
-#[derive(Default)]
-struct ExtraActionData {
-    toggle_action: Option<xr::Action<bool>>,
-    analog_action: Option<xr::Action<f32>>,
-    double_action: Option<xr::Action<bool>>,
-    vector2_action: Option<xr::Action<xr::Vector2f>>,
-    grab_actions: Option<GrabActions<custom_bindings::Actions>>,
 }
 
 #[derive(Debug, Default)]
@@ -2790,7 +2780,6 @@ struct ManifestLoadedActions {
     /// Sets that contain OpenXR actions (and thus the hand subaction paths).
     hand_restrictable_sets: HashSet<ActionSetKey>,
     actions: SecondaryMap<ActionKey, ActionData>,
-    extra_actions: SecondaryMap<ActionKey, ExtraActionData>,
     actions_with_custom_bindings: HashSet<ActionKey>,
     per_profile_pose_bindings: HashMap<xr::Path, SecondaryMap<ActionKey, BoundPose>>,
     per_profile_bindings: HashMap<xr::Path, SecondaryMap<ActionKey, Vec<BoolBindingData>>>,
@@ -2826,16 +2815,6 @@ impl ManifestLoadedActions {
             .get(key)
             .ok_or(vr::EVRInputError::InvalidHandle)
             .inspect_err(|_| trace!("didn't find action for {key:?}"))
-    }
-
-    fn try_get_extra(
-        &self,
-        handle: vr::VRActionHandle_t,
-    ) -> Result<&ExtraActionData, vr::EVRInputError> {
-        let key = ActionKey::from(KeyData::from_ffi(handle));
-        self.extra_actions
-            .get(key)
-            .ok_or(vr::EVRInputError::InvalidHandle)
     }
 
     fn try_get_pose(

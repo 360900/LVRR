@@ -1,21 +1,23 @@
-use super::actions::LoadedActionDataMap;
+use super::actions::{LoadedActionDataMap, XrNames};
 use super::bindings::{ActionPath, DpadParameters, DpadSubMode};
 use crate::input::custom_bindings::{
-    AsActionData, AsIter, BoolBindingData, CustomBindingHelper, Names, Vector2BindingData,
-    Vector2Inversion,
+    BoolBindingData, BoolBindingType, DpadActions, Vector2BindingData, Vector2Inversion,
 };
 use crate::input::profiles::{DynInputPath, paths};
 use crate::input::skeletal::SkeletalInputActionData;
-use crate::input::{ActionData, BoundPose, ExtraActionData, Input, InteractionProfile};
+use crate::input::{ActionData, BoundPose, Input, InteractionProfile};
 use crate::openxr_data::{self, Hand};
 use log::{info, trace, warn};
 use openxr as xr;
-use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 
 pub(super) struct BindingsLoadContext<'a> {
     pub action_sets: &'a HashMap<String, xr::ActionSet>,
     pub actions: LoadedActionDataMap,
-    pub extra_actions: HashMap<String, ExtraActionData>,
+    pub names: XrNames,
+    /// Sets that got actions for custom bindings.
+    pub extra_action_sets: HashSet<String>,
     pub per_profile_bindings: HashMap<xr::Path, HashMap<String, Vec<BoolBindingData>>>,
     pub per_profile_pose_bindings: HashMap<xr::Path, HashMap<String, BoundPose>>,
     /// Maps each interaction profile path → action name → bound input paths.
@@ -31,6 +33,7 @@ impl<'a> BindingsLoadContext<'a> {
     pub fn new(
         action_sets: &'a HashMap<String, xr::ActionSet>,
         actions: LoadedActionDataMap,
+        names: XrNames,
         grip_action: &'a xr::Action<xr::Posef>,
         info_action: &'a xr::Action<bool>,
         haptic_action: &'a xr::Action<xr::Haptic>,
@@ -39,7 +42,8 @@ impl<'a> BindingsLoadContext<'a> {
         BindingsLoadContext {
             action_sets,
             actions,
-            extra_actions: Default::default(),
+            names,
+            extra_action_sets: Default::default(),
             per_profile_bindings: Default::default(),
             per_profile_pose_bindings: Default::default(),
             per_profile_input_paths: Default::default(),
@@ -93,7 +97,8 @@ impl BindingsLoadContext<'_> {
             interaction_profile,
             action_sets: self.action_sets,
             actions: &mut self.actions,
-            extra_actions: &mut self.extra_actions,
+            names: &mut self.names,
+            extra_action_sets: &mut self.extra_action_sets,
             bindings_parsed,
             pose_bindings,
             input_paths_out,
@@ -113,7 +118,8 @@ pub(super) struct BindingsProfileLoadContext<'a> {
     interaction_profile: xr::Path,
     pub action_sets: &'a HashMap<String, xr::ActionSet>,
     pub actions: &'a mut LoadedActionDataMap,
-    extra_actions: &'a mut HashMap<String, ExtraActionData>,
+    names: &'a mut XrNames,
+    extra_action_sets: &'a mut HashSet<String>,
     bindings_parsed: &'a mut HashMap<String, Vec<BoolBindingData>>,
     pub pose_bindings: &'a mut HashMap<String, BoundPose>,
     /// Input paths bound to each action in the current profile, keyed by action name.
@@ -126,18 +132,6 @@ pub(super) struct BindingsProfileLoadContext<'a> {
     pub hands: [xr::Path; 2],
     pub bindings: Vec<(String, xr::Path)>,
     use_force_for_dpad: bool,
-}
-
-pub(super) struct DpadActivatorData {
-    pub key: String,
-    pub action: xr::Action<f32>,
-    pub binding: xr::Path,
-}
-
-pub(super) struct DpadHapticData {
-    pub key: String,
-    pub action: xr::Action<xr::Haptic>,
-    pub binding: xr::Path,
 }
 
 pub trait WithActionPattern {
@@ -159,6 +153,59 @@ macro_rules! action_match {
 action_match!(bool, ActionData::Bool(_) | ActionData::Vector1 { .. });
 action_match!(f32, ActionData::Vector1 { .. });
 action_match!(xr::Vector2f, ActionData::Vector2 { .. });
+
+/// Types of the actions xrizer binds to single inputs to compute custom bindings from.
+pub trait InputActionType: xr::ActionTy {
+    /// Distinguishes actions of different types bound to the same input.
+    const KEY_SUFFIX: &'static str;
+    fn into_data(action: xr::Action<Self>) -> ActionData;
+    fn from_data(data: &ActionData) -> Option<&xr::Action<Self>>;
+}
+
+impl InputActionType for bool {
+    const KEY_SUFFIX: &'static str = "-bool";
+    fn into_data(action: xr::Action<Self>) -> ActionData {
+        ActionData::Bool(action)
+    }
+    fn from_data(data: &ActionData) -> Option<&xr::Action<Self>> {
+        match data {
+            ActionData::Bool(action) => Some(action),
+            _ => None,
+        }
+    }
+}
+
+impl InputActionType for f32 {
+    const KEY_SUFFIX: &'static str = "";
+    fn into_data(action: xr::Action<Self>) -> ActionData {
+        ActionData::Vector1 {
+            action,
+            last_value: Default::default(),
+        }
+    }
+    fn from_data(data: &ActionData) -> Option<&xr::Action<Self>> {
+        match data {
+            ActionData::Vector1 { action, .. } => Some(action),
+            _ => None,
+        }
+    }
+}
+
+impl InputActionType for xr::Vector2f {
+    const KEY_SUFFIX: &'static str = "";
+    fn into_data(action: xr::Action<Self>) -> ActionData {
+        ActionData::Vector2 {
+            action,
+            data: Default::default(),
+        }
+    }
+    fn from_data(data: &ActionData) -> Option<&xr::Action<Self>> {
+        match data {
+            ActionData::Vector2 { action, .. } => Some(action),
+            _ => None,
+        }
+    }
+}
 
 fn hand_to_path(hand: Hand) -> &'static str {
     match hand {
@@ -211,43 +258,69 @@ impl BindingsProfileLoadContext<'_> {
         }
     }
 
-    pub fn add_custom_binding<T: CustomBindingHelper>(
+    /// Whether `output` can get a custom (boolean) binding. Checked before creating the actions
+    /// the binding reads.
+    #[track_caller]
+    pub fn accepts_custom_binding(&self, output: &ActionPath) -> bool {
+        if !self.find_action(&output.path) {
+            return false;
+        }
+        let ok = bool::check_match(&self.actions[&output.path]);
+        if !ok {
+            warn!(
+                "{} can't get a boolean binding: action data didn't match pattern {}",
+                output.path,
+                bool::PATTERN
+            );
+        }
+        ok
+    }
+
+    /// Returns an action bound to just `input` in this profile. Custom bindings read inputs
+    /// through these, so one input's value never mixes with another's. The action is shared by
+    /// every custom binding reading this input in the set, and across profiles.
+    pub fn input_action<T: InputActionType>(
         &mut self,
-        output: &ActionPath,
-        hand: openxr_data::Hand,
         action_set_name: &str,
         action_set: &xr::ActionSet,
-        params: Option<&T::BindingParams>,
-    ) -> T::ExtraActions<Names> {
-        let extra_data = self.extra_actions.entry(output.path.clone()).or_default();
-        let names = T::extra_action_names(&output.cleaned_name());
-        let full_names: Vec<String> = names
-            .as_iter()
-            .map(|name| format!("{action_set_name}/{name}"))
-            .collect();
-
-        if let Some(actions) = T::get_actions(extra_data)
-            && actions.is_none()
-        {
-            let extra_actions = T::create_actions(&names, action_set, &self.hands);
-            for (name, action) in full_names.iter().zip(extra_actions.as_action_data()) {
-                trace!("creating custom binding: {name}");
-                self.actions.insert(name.clone(), action);
+        input: DynInputPath,
+    ) -> Option<xr::Action<T>> {
+        let key = format!("{input}-{action_set_name}{}", T::KEY_SUFFIX);
+        let binding = self.instance.string_to_path(&input.to_string()).ok()?;
+        let action = match self.actions.entry(key.clone()) {
+            Entry::Occupied(entry) => T::from_data(entry.get())?.clone(),
+            Entry::Vacant(entry) => {
+                let name = self.names.action_name(action_set_name, "xrizer-input");
+                let action = action_set
+                    .create_action::<T>(&name, &name, &self.hands)
+                    .inspect_err(|e| warn!("Couldn't create action for {input}: {e}"))
+                    .ok()?;
+                trace!("created {name} for {input} ({action_set_name})");
+                self.extra_action_sets.insert(action_set_name.to_owned());
+                entry.insert(T::into_data(action.clone()));
+                action
             }
+        };
+        self.bindings.push((key, binding));
+        Some(action)
+    }
 
-            *actions = Some(extra_actions);
+    /// Adds a custom binding for `output`, which reads `input` on `hand`.
+    pub fn add_custom_binding(
+        &mut self,
+        output: &ActionPath,
+        hand: Hand,
+        input: DynInputPath,
+        ty: BoolBindingType,
+    ) {
+        if let Ok(input) = self.instance.string_to_path(&input.to_string()) {
+            self.push_input_path(&output.path, input);
         }
-
         let hand_path = self.instance.string_to_path(hand_to_path(hand)).unwrap();
         self.bindings_parsed
             .entry(output.path.clone())
             .or_default()
-            .push(BoolBindingData::new(
-                T::create_binding_data(params),
-                hand_path,
-            ));
-
-        T::ExtraActions::from_iter(full_names)
+            .push(BoolBindingData::new(ty, hand_path));
     }
 
     pub fn add_vector2_binding(
@@ -255,6 +328,7 @@ impl BindingsProfileLoadContext<'_> {
         output: &ActionPath,
         path: DynInputPath,
         invert: Vector2Inversion,
+        action_set_name: &str,
         action_set: &xr::ActionSet,
     ) {
         if !self.find_action(&output.path) {
@@ -268,22 +342,13 @@ impl BindingsProfileLoadContext<'_> {
             );
             return;
         }
-        // Every transformed source gets a distinct action, including sources for
-        // the same output, hand or path in another interaction profile.
-        let name = format!("xrizer-vector2-invert-{}", self.actions.len());
-        let action = action_set
-            .create_action::<xr::Vector2f>(&name, &name, &self.hands)
-            .unwrap();
-        let key = format!("{}/{name}", output.action_set_name().unwrap_or_default());
-        self.actions.insert(
-            key.clone(),
-            ActionData::Vector2 {
-                action: action.clone(),
-                data: Default::default(),
-            },
-        );
-        let binding_path = self.instance.string_to_path(&path.to_string()).unwrap();
-        self.push_binding(key, binding_path);
+        let Some(action) = self.input_action::<xr::Vector2f>(action_set_name, action_set, path)
+        else {
+            return;
+        };
+        if let Ok(input) = self.instance.string_to_path(&path.to_string()) {
+            self.push_input_path(&output.path, input);
+        }
         let hand = self
             .instance
             .string_to_path(hand_to_path(path.hand))
@@ -316,134 +381,73 @@ impl BindingsProfileLoadContext<'_> {
             .push(path);
     }
 
-    pub fn get_dpad_parent(
+    pub fn get_dpad_actions(
         &mut self,
-        string_to_path: &impl Fn(&str) -> Option<xr::Path>,
+        validate_path: &dyn Fn(DynInputPath) -> Option<DynInputPath>,
         parent_path: DynInputPath,
-        parent_action_key: &str,
         action_set_name: &str,
         action_set: &xr::ActionSet,
         parameters: Option<&DpadParameters>,
-    ) -> (
-        xr::Action<xr::Vector2f>,
-        Option<DpadActivatorData>,
-        Option<DpadHapticData>,
-    ) {
-        // Share parent actions that use the same action set and same bound path
-        let parent_action = self
-            .actions
-            .entry(parent_action_key.to_string())
-            .or_insert_with(|| {
-                let clean_parent_path = parent_path.to_string().replace("/", "_");
-                let parent_action_name = format!("xrizer-dpad-parent-{clean_parent_path}");
-                let localized = format!("XRizer dpad parent ({parent_path})");
-                let action = action_set
-                    .create_action::<xr::Vector2f>(&parent_action_name, &localized, &self.hands)
-                    .unwrap();
-
-                trace!("created new dpad parent ({parent_action_key})");
-
-                ActionData::Vector2 {
-                    action,
-                    data: Default::default(),
-                }
-            });
-        let ActionData::Vector2 {
-            action: parent_action,
-            ..
-        } = parent_action
-        else {
-            unreachable!();
-        };
-        // Remove lifetime
-        let parent_action = parent_action.clone();
+    ) -> Option<DpadActions> {
+        // Shared by every dpad (and other custom binding) on the same path and set
+        let xy = self.input_action(action_set_name, action_set, parent_path)?;
         let use_force =
             self.use_force_for_dpad && matches!(parent_path.subpath, paths::DynSubpath::Trackpad);
 
-        // Create our path to our parent click/touch, if such a path exists
-        let (activator_binding_str, activator_binding_path) = parameters
-            .as_ref()
-            .and_then(|p| {
-                let name = match p.sub_mode {
-                    DpadSubMode::Click => {
-                        if use_force {
-                            format!("{parent_path}/force")
-                        } else {
-                            format!("{parent_path}/click")
-                        }
-                    }
-                    DpadSubMode::Touch => {
-                        format!("{parent_path}/touch")
-                    }
-                };
-                string_to_path(&name).map(|p| (name, p))
+        // The click or touch that activates the dpad, if such a path exists
+        let click_or_touch = parameters
+            .map(|p| match p.sub_mode {
+                DpadSubMode::Click if use_force => paths::DynComponent::Force,
+                DpadSubMode::Click => paths::DynComponent::Click,
+                DpadSubMode::Touch => paths::DynComponent::Touch,
             })
-            .unzip();
+            .and_then(|component| validate_path(parent_path.with_component(component)))
+            .and_then(|path| self.input_action(action_set_name, action_set, path));
 
-        let activator_key = activator_binding_str
-            .as_ref()
-            .map(|n| format!("{n}-{action_set_name}"));
-        // Action only needs to exist if our path was successfully created
-        let len = self.actions.len();
-        let activator_action = activator_key.as_ref().map(|key| {
-            let action = self.actions.entry(key.clone()).or_insert_with(|| {
-                let dpad_activator_name = format!("xrizer-dpad-active{len}");
-                let localized = format!("XRizer dpad active ({len})");
-
-                ActionData::Vector1 {
-                    action: action_set
-                        .create_action(&dpad_activator_name, &localized, &self.hands)
-                        .unwrap(),
-                    last_value: Default::default(),
-                }
-            });
-
-            let ActionData::Vector1 { action, .. } = action else {
-                unreachable!();
-            };
-            action
-        });
-        // Remove lifetime
-        let click_or_touch = activator_action.cloned();
-
-        let haptic_data = if use_force {
+        let haptic = if use_force {
             // the need for haptic coincides with force-using dpads for now
-            let hand_path =
-                string_to_path(&format!("{}/output/haptic", hand_to_path(parent_path.hand)));
-            let haptic_key = format!("{parent_path}-{action_set_name}-haptic");
-            hand_path.map(|hand_path| {
-                let action = self.actions.entry(haptic_key.clone()).or_insert_with(|| {
-                    let haptic_name = format!("xrizer-dpad-haptic{len}");
-                    let localized = format!("XRizer dpad haptic ({len})");
-
-                    ActionData::Haptic(
-                        action_set
-                            .create_action(&haptic_name, &localized, &self.hands)
-                            .unwrap(),
-                    )
-                });
-
-                let ActionData::Haptic(action) = action else {
-                    unreachable!();
-                };
-                DpadHapticData {
-                    action: action.clone(),
-                    key: haptic_key,
-                    binding: hand_path,
-                }
-            })
+            self.dpad_haptic(parent_path, action_set_name, action_set)
         } else {
             None
         };
 
-        (
-            parent_action,
-            click_or_touch.map(|action| DpadActivatorData {
-                key: activator_key.unwrap(),
-                action,
-                binding: activator_binding_path.unwrap(),
-            }),
-            haptic_data,
-        )
+        Some(DpadActions {
+            xy,
+            click_or_touch,
+            haptic,
+        })
+    }
+
+    fn dpad_haptic(
+        &mut self,
+        parent_path: DynInputPath,
+        action_set_name: &str,
+        action_set: &xr::ActionSet,
+    ) -> Option<xr::Action<xr::Haptic>> {
+        let haptic_path = format!("{}/output/haptic", hand_to_path(parent_path.hand));
+        let binding = self.instance.string_to_path(&haptic_path).ok()?;
+        let key = format!("{parent_path}-{action_set_name}-haptic");
+        let action = match self.actions.entry(key.clone()) {
+            Entry::Occupied(entry) => {
+                let ActionData::Haptic(action) = entry.get() else {
+                    return None;
+                };
+                action.clone()
+            }
+            Entry::Vacant(entry) => {
+                let name = self
+                    .names
+                    .action_name(action_set_name, "xrizer-dpad-haptic");
+                let action = action_set
+                    .create_action::<xr::Haptic>(&name, &name, &self.hands)
+                    .inspect_err(|e| warn!("Couldn't create dpad haptic action: {e}"))
+                    .ok()?;
+                self.extra_action_sets.insert(action_set_name.to_owned());
+                entry.insert(ActionData::Haptic(action.clone()));
+                action
+            }
+        };
+        self.bindings.push((key, binding));
+        Some(action)
     }
 }

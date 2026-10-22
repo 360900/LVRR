@@ -1,17 +1,14 @@
 #![allow(private_interfaces)]
 
-use super::context::{BindingsProfileLoadContext, DpadActivatorData, DpadHapticData};
+use super::context::BindingsProfileLoadContext;
 use crate::input::action_manifest::context;
 use crate::input::profiles::paths::DynComponent;
 use crate::input::profiles::{Component, DynInputPath, paths};
-use crate::input::{ActionData, BoundPoseType, custom_bindings::DpadDirection};
+use crate::input::{ActionData, BoundPoseType};
 use crate::{
-    input::{
-        GrabActions,
-        custom_bindings::{
-            DoubleTapData, DpadActions, DpadBindingParams, DpadData, GrabBindingData,
-            ThresholdBindingFloat, ThresholdBindingVector2, ToggleData, Vector2Inversion,
-        },
+    input::custom_bindings::{
+        BoolBindingType, DoubleTapData, DpadData, DpadDirection, GrabBindingData,
+        ThresholdBindingData, ToggleData, Vector2Inversion,
     },
     openxr_data::Hand,
 };
@@ -572,7 +569,7 @@ fn vector2_inversion_parse() {
 }
 
 pub fn handle_dpad_binding(
-    string_to_path: impl Fn(&str) -> Option<xr::Path>,
+    validate_path: &dyn PathValidator,
     parent_path: DynInputPath,
     action_set_name: &str,
     action_set: &xr::ActionSet,
@@ -589,40 +586,22 @@ pub fn handle_dpad_binding(
     // Would love to use the dpad extension here, but it doesn't seem to
     // support touch trackpad dpads.
     // TODO: actually take the deadzone and overlap into account
-
-    // Workaround weird closure lifetime quirks.
-    const fn constrain<F>(f: F) -> F
-    where
-        F: for<'a> Fn(
-            &'a Option<ActionBindingOutput<Custom>>,
-            DpadDirection,
-        ) -> Option<&'a ActionPath>,
-    {
-        f
-    }
-    let maybe_find_action = constrain(|a, direction| {
-        let output = &a.as_ref()?.output;
-        let ret = context.actions.contains_key(&output.path);
-        if !ret {
-            warn!(
-                "Couldn't find dpad action {} (for path {parent_path}, {direction:?})",
-                output.path
-            );
-        }
-        ret.then_some(output)
-    });
-
     use DpadDirection::*;
 
     let bound_actions: Vec<(&ActionPath, DpadDirection)> = [
-        (maybe_find_action(north, North), North),
-        (maybe_find_action(east, East), East),
-        (maybe_find_action(south, South), South),
-        (maybe_find_action(west, West), West),
-        (maybe_find_action(center, Center), Center),
+        (north, North),
+        (east, East),
+        (south, South),
+        (west, West),
+        (center, Center),
     ]
     .into_iter()
-    .flat_map(|(name, direction)| name.zip(Some(direction)))
+    .filter_map(|(output, direction)| {
+        let output = &output.as_ref()?.output;
+        context
+            .accepts_custom_binding(output)
+            .then_some((output, direction))
+    })
     .collect();
 
     if bound_actions.is_empty() {
@@ -630,54 +609,69 @@ pub fn handle_dpad_binding(
         return;
     }
 
-    let parent_action_key = format!("{parent_path}-{action_set_name}");
-
-    let parent_xr_path = string_to_path(&parent_path.to_string());
-
-    let (xy, click_or_touch_data, haptic_data) = context.get_dpad_parent(
-        &string_to_path,
+    let Some(actions) = context.get_dpad_actions(
+        validate_path,
         parent_path,
-        &parent_action_key,
         action_set_name,
         action_set,
         parameters,
-    );
+    ) else {
+        return;
+    };
 
     for (path, direction) in bound_actions {
-        // Dpad directions are driven through the parent path; record it so
-        // GetActionBindingInfo/GetActionOrigins can resolve the input source.
-        if let Some(parent_xr_path) = parent_xr_path {
-            context.push_input_path(&path.path, parent_xr_path);
-        }
-        context.add_custom_binding::<DpadData>(
+        context.add_custom_binding(
             path,
             parent_path.hand,
-            action_set_name,
-            action_set,
-            Some(&DpadBindingParams {
-                actions: DpadActions {
-                    xy: xy.clone(),
-                    click_or_touch: click_or_touch_data.as_ref().map(|d| d.action.clone()),
-                    haptic: haptic_data.as_ref().map(|d| d.action.clone()),
-                },
-                direction,
-            }),
+            parent_path,
+            BoolBindingType::Dpad(DpadData::new(actions.clone(), direction)),
         );
     }
+}
 
-    let activator_binding = click_or_touch_data
-        .as_ref()
-        .map(|DpadActivatorData { key, binding, .. }| (key.clone(), *binding));
-    let haptic_binding = haptic_data
-        .as_ref()
-        .map(|DpadHapticData { key, binding, .. }| (key.clone(), *binding));
-    context.push_binding(parent_action_key, parent_xr_path.unwrap());
-    if let Some((s, p)) = activator_binding {
-        context.push_binding(s, p);
+/// Binds an analog input (or a boolean one, read as 0 or 1) through a threshold.
+fn bind_threshold(
+    output: &ActionPath,
+    input: DynInputPath,
+    params: Option<&ClickThresholdParams>,
+    action_set_name: &str,
+    action_set: &xr::ActionSet,
+    context: &mut BindingsProfileLoadContext,
+) {
+    if !context.accepts_custom_binding(output) {
+        return;
     }
-    if let Some((s, p)) = haptic_binding {
-        context.push_binding(s, p);
+    let ty = if input.component.is_none() {
+        let Some(action) = context.input_action(action_set_name, action_set, input) else {
+            return;
+        };
+        BoolBindingType::ThresholdVec2(ThresholdBindingData::new(action, params))
+    } else {
+        let Some(action) = context.input_action(action_set_name, action_set, input) else {
+            return;
+        };
+        BoolBindingType::ThresholdFloat(ThresholdBindingData::new(action, params))
+    };
+    trace!("suggesting {input} for {} (threshold)", output.path);
+    context.add_custom_binding(output, input.hand, input, ty);
+}
+
+/// Binds a boolean input to a custom binding built from an action reading it.
+fn bind_bool_input(
+    output: &ActionPath,
+    input: DynInputPath,
+    action_set_name: &str,
+    action_set: &xr::ActionSet,
+    context: &mut BindingsProfileLoadContext,
+    make: impl FnOnce(xr::Action<bool>) -> BoolBindingType,
+) {
+    if !context.accepts_custom_binding(output) {
+        return;
     }
+    let Some(action) = context.input_action(action_set_name, action_set, input) else {
+        return;
+    };
+    context.add_custom_binding(output, input.hand, input, make(action));
 }
 
 pub fn handle_sources(
@@ -709,28 +703,17 @@ pub fn handle_sources(
                 if let Some(click) = click {
                     let click_path = path.with_component(DynComponent::Click);
                     let Some(click_path) = validate_path(click_path) else {
+                        InvalidActionPath(click_path, &click.output.path).warn();
                         continue;
                     };
-
-                    if !context.find_action(&click.output.path) {
-                        continue;
-                    }
-
-                    let action = context.add_custom_binding::<ToggleData>(
+                    trace!("suggesting {click_path} for {} (toggle)", click.output.path);
+                    bind_bool_input(
                         &click.output,
-                        path.hand,
+                        click_path,
                         action_set_name,
                         action_set,
-                        None,
-                    );
-
-                    trace!("suggesting {click_path} for {} (toggle)", click.output.path);
-                    context.push_binding(
-                        action,
-                        context
-                            .instance
-                            .string_to_path(&click_path.to_string())
-                            .unwrap(),
+                        context,
+                        |action| BoolBindingType::Toggle(ToggleData::new(action)),
                     );
                 }
             }
@@ -763,20 +746,13 @@ pub fn handle_sources(
                         .ok_or_else(|| InvalidActionPath(click_path, &double.output.path))
                         .inspect_err(InvalidActionPath::warn)
                 {
-                    let name = context.add_custom_binding::<DoubleTapData>(
+                    bind_bool_input(
                         &double.output,
-                        complete_path.hand,
+                        complete_path,
                         action_set_name,
                         action_set,
-                        None,
-                    );
-
-                    context.push_binding(
-                        name,
-                        context
-                            .instance
-                            .string_to_path(&complete_path.to_string())
-                            .unwrap(),
+                        context,
+                        |action| BoolBindingType::DoubleTap(DoubleTapData::new(action)),
                     );
                 }
 
@@ -820,31 +796,13 @@ pub fn handle_sources(
                         Some(path) => path,
                     };
 
-                    let params = parameters.map(|b| &b.click_threshold);
-                    let float_name_with_as = if complete_path.component.is_none() {
-                        context.add_custom_binding::<ThresholdBindingVector2>(
-                            &click.output,
-                            complete_path.hand,
-                            action_set_name,
-                            action_set,
-                            params,
-                        )
-                    } else {
-                        context.add_custom_binding::<ThresholdBindingFloat>(
-                            &click.output,
-                            complete_path.hand,
-                            action_set_name,
-                            action_set,
-                            params,
-                        )
-                    };
-
-                    context.push_binding(
-                        float_name_with_as,
-                        context
-                            .instance
-                            .string_to_path(&complete_path.to_string())
-                            .unwrap(),
+                    bind_threshold(
+                        &click.output,
+                        complete_path,
+                        parameters.map(|b| &b.click_threshold),
+                        action_set_name,
+                        action_set,
+                        context,
                     );
                 }
             }
@@ -875,28 +833,13 @@ pub fn handle_sources(
                 });
                 let parameters = legacy_parameters.as_ref().or(parameters);
 
-                if validate_path(path).is_none() {
+                let Some(parent_path) = validate_path(path) else {
                     InvalidActionPath(path, &format!("{inputs:#?}")).warn();
                     continue;
-                }
+                };
                 handle_dpad_binding(
-                    |s| {
-                        // TODO: don't do this conversion dance
-                        let Ok(path) = s.parse::<DynInputPath>() else {
-                            warn!("invalid path {s} for dpad binding");
-                            return None;
-                        };
-
-                        if let Some(path) = validate_path(path)
-                            .map(|path| context.instance.string_to_path(&path.to_string()).unwrap())
-                        {
-                            return Some(path);
-                        }
-
-                        InvalidActionPath(path, s).warn();
-                        None
-                    },
-                    path,
+                    validate_path,
+                    parent_path,
                     action_set_name,
                     action_set,
                     context,
@@ -938,21 +881,13 @@ pub fn handle_sources(
                     // SteamVR fallbacks "touch" bindings on triggers to "any pull amount" if there's no native capsense
                     let with_pull = path.with_component(DynComponent::Value);
                     if let Some(with_pull) = validate_path(with_pull) {
-                        let parameters = ClickThresholdParams::new_for_touch_conversion();
-                        let float_name_with_as = context
-                            .add_custom_binding::<ThresholdBindingFloat>(
-                                &touch.output,
-                                with_pull.hand,
-                                action_set_name,
-                                action_set,
-                                Some(&parameters),
-                            );
-                        context.push_binding(
-                            float_name_with_as,
-                            context
-                                .instance
-                                .string_to_path(&with_pull.to_string())
-                                .unwrap(),
+                        bind_threshold(
+                            &touch.output,
+                            with_pull,
+                            Some(&ClickThresholdParams::new_for_touch_conversion()),
+                            action_set_name,
+                            action_set,
+                            context,
                         );
                     } else {
                         warn!(
@@ -1017,37 +952,33 @@ pub fn handle_sources(
                     continue;
                 };
 
-                if !context.find_action(&grab.output.path) {
+                if !context.accepts_custom_binding(&grab.output) {
                     continue;
                 }
-
-                let GrabActions {
-                    force_action,
-                    value_action,
-                } = context.add_custom_binding::<GrabBindingData>(
-                    &grab.output,
-                    path.hand,
-                    action_set_name,
-                    action_set,
-                    parameters,
-                );
+                let Some(force_action) =
+                    context.input_action(action_set_name, action_set, force_path)
+                else {
+                    continue;
+                };
+                let Some(value_action) =
+                    context.input_action(action_set_name, action_set, value_path)
+                else {
+                    continue;
+                };
 
                 trace!(
-                    "suggesting {force_path} and {value_path} for {force_action} (grab binding)"
+                    "suggesting {force_path} and {value_path} for {} (grab binding)",
+                    grab.output.path
                 );
-                context.push_binding(
-                    force_action,
-                    context
-                        .instance
-                        .string_to_path(&force_path.to_string())
-                        .unwrap(),
-                );
-                context.push_binding(
-                    value_action,
-                    context
-                        .instance
-                        .string_to_path(&value_path.to_string())
-                        .unwrap(),
+                context.add_custom_binding(
+                    &grab.output,
+                    path.hand,
+                    value_path,
+                    BoolBindingType::Grab(GrabBindingData::new(
+                        Some(force_action),
+                        value_action,
+                        parameters,
+                    )),
                 );
             }
             ActionBinding::Scroll(data) => {
@@ -1094,7 +1025,13 @@ pub fn handle_sources(
                     if invert == Vector2Inversion::None {
                         let _ = position.try_bind_with_component(path, context, validate_path);
                     } else if let Some(path) = validate_path(path) {
-                        context.add_vector2_binding(&position.output, path, invert, action_set);
+                        context.add_vector2_binding(
+                            &position.output,
+                            path,
+                            invert,
+                            action_set_name,
+                            action_set,
+                        );
                     } else {
                         InvalidActionPath(path, &position.output.path).warn();
                     }

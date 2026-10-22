@@ -1,0 +1,38 @@
+{
+	"bindings": {
+		"/actions/main": {
+			"sources": [
+				{
+					"mode": "button",
+					"path": "/user/hand/left/input/trigger",
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/a_long_action_name_for_a_button_bound_through_extra_actions_x"
+						},
+						"double": {
+							"output": "/actions/main/in/a_long_action_name_for_a_button_bound_through_extra_actions_x"
+						}
+					}
+				},
+				{
+					"mode": "grab",
+					"path": "/user/hand/left/input/grip",
+					"inputs": {
+						"grab": {
+							"output": "/actions/main/in/a_long_action_name_for_a_button_bound_through_extra_actions_x"
+						}
+					}
+				},
+				{
+					"mode": "toggle_button",
+					"path": "/user/hand/left/input/a",
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/a_long_action_name_for_a_button_bound_through_extra_actions_x"
+						}
+					}
+				}
+			]
+		}
+	}
+}

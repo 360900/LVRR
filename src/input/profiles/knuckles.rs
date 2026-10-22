@@ -323,7 +323,7 @@ impl InteractionProfile for Knuckles {
 #[cfg(test)]
 mod tests {
     use super::{InteractionProfile, Knuckles};
-    use crate::input::{ActionData, tests::Fixture};
+    use crate::input::{ActionData, custom_bindings::BoolBindingType, tests::Fixture};
     use openxr as xr;
 
     #[test]
@@ -353,9 +353,9 @@ mod tests {
             ],
         );
 
-        f.verify_bindings::<f32>(
+        f.verify_threshold_bindings(
             path,
-            c"/actions/set1/boolact_asfloat",
+            c"/actions/set1/in/boolact",
             [
                 "/user/hand/left/input/trigger/value".into(),
                 "/user/hand/right/input/trigger/value".into(),
@@ -365,23 +365,21 @@ mod tests {
 
         f.verify_bindings::<f32>(
             path,
-            c"/user/hand/left/input/trackpad/click-/actions/set1",
+            c"/user/hand/left/input/trackpad/force-/actions/set1",
             ["/user/hand/left/input/trackpad/force".into()],
         );
 
         let handle = f.get_action_handle(c"/actions/set1/in/boolact");
         let data = f.input.openxr.session_data.get();
         let actions = data.input_data.get_loaded_actions().unwrap();
-        let action = actions.try_get_action(handle).unwrap();
-        let extra = actions.try_get_extra(handle).unwrap();
-
-        let ActionData::Bool(_) = action else {
+        let ActionData::Bool(_) = actions.try_get_action(handle).unwrap() else {
             panic!("no");
         };
 
-        let grab_data = extra.grab_actions.as_ref().unwrap();
+        let grab_force =
+            f.custom_binding_action(handle, path, |ty| matches!(ty, BoolBindingType::Grab(_)));
         let p = f.input.openxr.instance.string_to_path(path).unwrap();
-        let suggested = fakexr::get_suggested_bindings(grab_data.force_action.as_raw(), p);
+        let suggested = fakexr::get_suggested_bindings(grab_force, p);
         assert!(suggested.contains(&"/user/hand/right/input/squeeze/force".to_string()));
 
         f.verify_bindings::<f32>(

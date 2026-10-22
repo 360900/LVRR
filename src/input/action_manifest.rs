@@ -150,6 +150,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         let mut binding_context = context::BindingsLoadContext::new(
             &sets,
             actions,
+            names,
             &session_data.input_data.pose_data.grip,
             &info_action,
             &haptic_action,
@@ -164,7 +165,7 @@ impl<C: openxr_data::Compositor> Input<C> {
 
         let context::BindingsLoadContext {
             actions,
-            extra_actions,
+            extra_action_sets,
             per_profile_bindings,
             per_profile_pose_bindings,
             per_profile_input_paths,
@@ -205,10 +206,9 @@ impl<C: openxr_data::Compositor> Input<C> {
                     super::ActionData::Pose | super::ActionData::Skeleton(_)
                 )
             })
-            .map(|(path, _)| path)
-            .chain(extra_actions.keys())
-            .filter_map(|path| path.match_indices('/').nth(2).map(|(idx, _)| &path[..idx]))
+            .filter_map(|(path, _)| path.match_indices('/').nth(2).map(|(idx, _)| &path[..idx]))
             .map(str::to_string)
+            .chain(extra_action_sets)
             .collect();
         let mut hand_restrictable_sets = HashSet::new();
 
@@ -234,7 +234,6 @@ impl<C: openxr_data::Compositor> Input<C> {
 
         let mut act_guard = self.action_map.write().unwrap();
         let actions = action_map_to_secondary(&mut act_guard, actions);
-        let extra_actions = action_map_to_secondary(&mut act_guard, extra_actions);
 
         let mut actions_with_custom_bindings = HashSet::new();
         let per_profile_bindings = per_profile_bindings
@@ -290,7 +289,6 @@ impl<C: openxr_data::Compositor> Input<C> {
             hand_restrictable_sets,
             actions,
             actions_with_custom_bindings,
-            extra_actions,
             per_profile_bindings,
             per_profile_pose_bindings,
             per_profile_input_paths,
@@ -455,9 +453,12 @@ impl<C: openxr_data::Compositor> Input<C> {
             .trigger_click
             .first()
             .unwrap_or_else(|| panic!("Missing trigger_click binding for {}", P::profile_path()));
+        // Custom bindings on the same input share an action.
+        let mut seen = HashSet::new();
         let bindings: Vec<xr::Binding<'_>> = context
             .bindings
             .iter()
+            .filter(|binding| seen.insert(*binding))
             .map(|(name, path)| {
                 use super::ActionData::*;
                 let path = *path;
