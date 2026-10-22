@@ -157,7 +157,7 @@ impl<C: Compositor> OpenXrData<C> {
             } else {
                 "is libopenxr-loader installed?"
             };
-            InitError::LoaderUnavailable(format!("Failed to load OpenXR loader ({hint}): {e}"))
+            InitError::LoaderUnavailable(format!("Failed to load OpenXR loader ({hint}): {e:?}"))
         })?;
 
         #[cfg(test)]
