@@ -474,9 +474,9 @@ impl<C: openxr_data::Compositor> Input<C> {
             if masked {
                 continue;
             }
-            let Ok(mut current) = action.state(&session_data.session, path) else {
-                continue;
-            };
+            let mut current = action
+                .state(&session_data.session, path)
+                .unwrap_or_else(inactive_state);
             let mut origin = hand_key.data().as_ffi();
 
             // It's generally not clear how SteamVR handles float actions with multiple bindings,
@@ -690,20 +690,18 @@ impl<C: openxr_data::Compositor> Input<C> {
             }
 
             let hand_origin = hand_key.data().as_ffi();
-            let native = action.state(&session_data.session, path).ok();
+            let native = action
+                .state(&session_data.session, path)
+                .unwrap_or_else(inactive_state);
             let (hand_state, hand_origin) = match self.state_from_bindings(handle, hand_origin) {
                 Some((binding, source))
                     if binding.is_active
-                        && native.is_none_or(|native| {
-                            !native.is_active || binding_rank(&binding) > binding_rank(&native)
-                        }) =>
+                        && (!native.is_active
+                            || binding_rank(&binding) > binding_rank(&native)) =>
                 {
                     (binding, source)
                 }
-                _ => match native {
-                    Some(native) => (native, hand_origin),
-                    None => continue,
-                },
+                _ => (native, hand_origin),
             };
 
             // A hand that was masked counts as unchanged, so unmasking a held input isn't a press.
@@ -744,7 +742,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         ]
         .into_iter()
         .filter_map(|(path, key)| {
-            let state = action.state(session, path).ok()?;
+            let state = action.state(session, path).unwrap_or_else(inactive_state);
             state.is_active.then(|| (binding_rank(&state), key))
         })
         // Left wins ties.
