@@ -701,7 +701,12 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             return vr::EVRInputError::None;
         }
 
-        if binding_info_size as usize != std::mem::size_of::<vr::InputBindingInfo_t>() {
+        // IVRInput_007's struct ends before rchInputSourceType.
+        const LEGACY_SIZE: usize = std::mem::offset_of!(vr::InputBindingInfo_t, rchInputSourceType);
+        let binding_info_size = binding_info_size as usize;
+        if binding_info_size != std::mem::size_of::<vr::InputBindingInfo_t>()
+            && binding_info_size != LEGACY_SIZE
+        {
             if !returned_binding_info_count.is_null() {
                 unsafe { *returned_binding_info_count = 0 };
             }
@@ -713,9 +718,6 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             unsafe { *returned_binding_info_count = count as u32 };
         }
 
-        let infos =
-            unsafe { std::slice::from_raw_parts_mut(binding_info, binding_info_count as usize) };
-
         let action_is_bool = matches!(loaded.actions.get(action_key), Some(ActionData::Bool(_)));
         let action_name = self
             .action_map
@@ -726,8 +728,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             .unwrap_or_default();
 
         for (i, &xr_path) in paths.iter().take(count).enumerate() {
-            let info = &mut infos[i];
-            *info = unsafe { std::mem::zeroed() };
+            let mut info = vr::InputBindingInfo_t::default();
 
             let input_path_str = self
                 .openxr
@@ -778,6 +779,15 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             copy_cstr(&mut info.rchDevicePathName, device_path);
 
             copy_cstr(&mut info.rchInputSourceType, mode_name);
+
+            // Both layouts are only char arrays, the legacy one is a prefix of ours.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    (&raw const info).cast::<u8>(),
+                    binding_info.cast::<u8>().add(i * binding_info_size),
+                    binding_info_size,
+                );
+            }
 
             debug!(
                 "GetActionBindingInfo: action={action_name:?} raw={input_path_str} device={device_path} input={input_component_path} mode={mode_name} slot={slot}"

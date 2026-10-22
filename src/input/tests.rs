@@ -1617,6 +1617,61 @@ fn action_binding_info() {
 }
 
 #[test]
+fn legacy_action_binding_info() {
+    let mut f = Fixture::new();
+    let set1 = f.get_action_set_handle(c"/actions/set1");
+    f.load_actions(c"actions.json");
+    f.set_interaction_profile::<OculusTouch>(LeftHand);
+    f.set_interaction_profile::<OculusTouch>(RightHand);
+    f.sync(vr::VRActiveActionSet_t {
+        ulActionSet: set1,
+        ..Default::default()
+    });
+
+    let action = f.get_action_handle(c"/actions/set1/in/boolact");
+    let expected = get_binding_info(&f, action);
+    assert!(expected.len() > 1);
+
+    // IVRInput_007 apps pass an array of the struct without rchInputSourceType.
+    const LEGACY_SIZE: usize = 512;
+    let len = expected.len() * LEGACY_SIZE;
+    let mut buf = vec![0x55 as std::ffi::c_char; len + LEGACY_SIZE];
+    let mut count = 0;
+    assert_eq!(
+        vr::IVRInput007_Interface::GetActionBindingInfo(
+            f.input.as_ref(),
+            action,
+            buf.as_mut_ptr().cast(),
+            LEGACY_SIZE as u32,
+            expected.len() as u32,
+            &mut count,
+        ),
+        vr::EVRInputError::None
+    );
+    assert_eq!(count as usize, expected.len());
+    for (entry, expected) in buf.chunks(LEGACY_SIZE).zip(&expected) {
+        let field = |i: usize| buf_str(&entry[i * 128..][..128]);
+        assert_eq!(field(0), buf_str(&expected.rchDevicePathName));
+        assert_eq!(field(1), buf_str(&expected.rchInputPathName));
+        assert_eq!(field(2), buf_str(&expected.rchModeName));
+        assert_eq!(field(3), buf_str(&expected.rchSlotName));
+    }
+    assert!(buf[len..].iter().all(|&c| c == 0x55));
+
+    assert_eq!(
+        vr::IVRInput007_Interface::GetActionBindingInfo(
+            f.input.as_ref(),
+            action,
+            buf.as_mut_ptr().cast(),
+            LEGACY_SIZE as u32 + 4,
+            1,
+            &mut count,
+        ),
+        vr::EVRInputError::InvalidParam
+    );
+}
+
+#[test]
 fn action_origins() {
     let mut f = Fixture::new();
     let set1 = f.get_action_set_handle(c"/actions/set1");
