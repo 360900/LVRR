@@ -63,7 +63,7 @@ impl OverlayMan {
         bounds: vr::VRTextureBounds_t,
     ) -> Result<RealSessionData<'_>, vr::EVROverlayError> {
         if !SupportedBackend::is_texture_type_supported(texture.eType) {
-            log::warn!("Unsupported texture type: {:?}", texture.eType);
+            crate::warn_once!("Unsupported overlay texture type: {:?}", texture.eType);
             return Err(vr::EVROverlayError::InvalidTexture);
         }
         if self.openxr.is_lost() {
