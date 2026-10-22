@@ -1719,7 +1719,9 @@ impl<G: GraphicsBackend> FrameController<G> {
         }
         let overlay_layers;
         if let Some(overlay_man) = overlays {
-            overlay_layers = overlay_man.get_layers(session_data, self.app_fade_grid);
+            // Like SteamVR, show the skybox while the app isn't showing anything itself.
+            let render_skybox = proj_layer.is_none() || self.app_fade_grid;
+            overlay_layers = overlay_man.get_layers(session_data, render_skybox);
             // The layers are sorted by z order, so this drops the bottom ones.
             let excess = (layers.len() + overlay_layers.len())
                 .saturating_sub(max_layers)
