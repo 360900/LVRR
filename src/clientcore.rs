@@ -89,29 +89,31 @@ fn probe_hmd() -> bool {
     }
     .map_err(|e| format!("{e}"));
 
-    let result = entry
-        .and_then(|entry| {
-            entry
-                .create_instance(
-                    &xr::ApplicationInfo {
-                        application_name: "XRizer",
-                        engine_name: "XRizer",
-                        ..Default::default()
-                    },
-                    &xr::ExtensionSet::default(),
-                    &[],
-                    &platform_info,
-                )
-                .map_err(|e| format!("instance creation failed: {e}"))
-        })
-        .and_then(|instance| {
-            instance
-                .system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)
-                .map_err(|e| format!("no HMD system: {e}"))
-        });
+    let result = entry.and_then(|entry| {
+        let instance = match entry.create_instance(
+            &xr::ApplicationInfo {
+                application_name: "XRizer",
+                engine_name: "XRizer",
+                ..Default::default()
+            },
+            &xr::ExtensionSet::default(),
+            &[],
+            &platform_info,
+        ) {
+            Ok(instance) => instance,
+            // The loader allows one instance per process, so one exists already: Init is running
+            // or something still holds the last one. Either way the runtime is up.
+            Err(xr::sys::Result::ERROR_LIMIT_REACHED) => return Ok(()),
+            Err(e) => return Err(format!("instance creation failed: {e}")),
+        };
+        instance
+            .system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)
+            .map(drop)
+            .map_err(|e| format!("no HMD system: {e}"))
+    });
 
     match result {
-        Ok(_) => true,
+        Ok(()) => true,
         Err(e) => {
             debug!("reporting no HMD present: {e}");
             false
@@ -320,6 +322,10 @@ impl IVRClientCore003_Interface for ClientCore {
     fn BIsHmdPresent(&self) -> bool {
         if self.openxr.read().unwrap().is_some() {
             return true;
+        }
+        // For runtimes the probe can't see yet, or to keep flat launches from starting one.
+        if let Some(present) = crate::quirks::env_override("XRIZER_HMD_PRESENT") {
+            return present;
         }
 
         // Held across the probe so concurrent callers don't each create an instance.
@@ -680,6 +686,15 @@ mod tests {
         fakexr::set_get_system_result(xr::sys::Result::ERROR_FORM_FACTOR_UNAVAILABLE);
         assert!(core.BIsHmdPresent());
         fakexr::set_get_system_result(xr::sys::Result::SUCCESS);
+    }
+
+    #[test]
+    fn hmd_present_while_an_instance_exists() {
+        // What the loader says while Init or a leftover session has an instance.
+        fakexr::set_create_instance_result(xr::sys::Result::ERROR_LIMIT_REACHED);
+        let core = ClientCore::new(c"IVRClientCore_003").unwrap();
+        assert!(core.BIsHmdPresent());
+        fakexr::set_create_instance_result(xr::sys::Result::SUCCESS);
     }
 
     #[test]

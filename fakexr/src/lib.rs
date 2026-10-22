@@ -162,7 +162,13 @@ pub fn set_default_interaction_profile(hand: UserPath, profile: Option<&str>) {
 }
 
 thread_local! {
+    static CREATE_INSTANCE_RESULT: Cell<xr::Result> = const { Cell::new(xr::Result::SUCCESS) };
     static GET_SYSTEM_RESULT: Cell<xr::Result> = const { Cell::new(xr::Result::SUCCESS) };
+}
+
+/// Makes xrCreateInstance on this thread fail with `result`, or succeed again with SUCCESS.
+pub fn set_create_instance_result(result: xr::Result) {
+    CREATE_INSTANCE_RESULT.set(result);
 }
 
 /// Makes xrGetSystem on this thread fail with `result` (e.g. no headset connected), or succeed
@@ -1053,6 +1059,10 @@ extern "system" fn create_instance(
     info: *const xr::InstanceCreateInfo,
     instance: *mut xr::Instance,
 ) -> xr::Result {
+    let result = CREATE_INSTANCE_RESULT.get();
+    if result != xr::Result::SUCCESS {
+        return result;
+    }
     let info = unsafe { info.as_ref().unwrap() };
     let enabled_extensions = (0..info.enabled_extension_count as usize)
         .map(|i| unsafe { CStr::from_ptr(*info.enabled_extension_names.add(i)) }.to_owned())
