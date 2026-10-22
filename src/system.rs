@@ -1268,12 +1268,56 @@ impl vr::IVRSystem026_Interface for System {
     }
     fn GetSortedTrackedDeviceIndicesOfClass(
         &self,
-        _: vr::ETrackedDeviceClass,
-        _: *mut vr::TrackedDeviceIndex_t,
-        _: u32,
-        _: vr::TrackedDeviceIndex_t,
+        class: vr::ETrackedDeviceClass,
+        indices: *mut vr::TrackedDeviceIndex_t,
+        capacity: u32,
+        relative_to: vr::TrackedDeviceIndex_t,
     ) -> u32 {
-        0
+        let mut found: Vec<_> = (0..vr::k_unMaxTrackedDeviceCount)
+            .filter(|&i| self.GetTrackedDeviceClass(i) == class && self.IsTrackedDeviceConnected(i))
+            .collect();
+
+        // Sorted right to left as seen from the relative device, or in tracking space if there is
+        // none. Devices without a pose go last.
+        if let Some(input) = self.input.get().filter(|_| found.len() > 1) {
+            let time = self.openxr.get_display_time();
+            let pose = |index| {
+                input
+                    .get_device_pose(index, None, time, None)
+                    .filter(|pose| pose.bPoseIsValid)
+                    .map(|pose| xr::Posef::from(pose.mDeviceToAbsoluteTracking))
+            };
+            let reference = if relative_to == vr::k_unTrackedDeviceIndexInvalid {
+                Some(xr::Posef::IDENTITY)
+            } else {
+                pose(relative_to)
+            };
+            if let Some(xr::Posef {
+                position: p,
+                orientation: o,
+            }) = reference
+            {
+                let to_reference = Quat::from_xyzw(o.x, o.y, o.z, o.w).inverse();
+                let x = |index| {
+                    pose(index).map(|xr::Posef { position: d, .. }| {
+                        (to_reference * Vec3::new(d.x - p.x, d.y - p.y, d.z - p.z)).x
+                    })
+                };
+                let mut keyed: Vec<_> = found.iter().map(|&index| (index, x(index))).collect();
+                keyed.sort_by(|(_, a), (_, b)| match (a, b) {
+                    (Some(a), Some(b)) => b.total_cmp(a),
+                    _ => b.is_some().cmp(&a.is_some()),
+                });
+                found = keyed.into_iter().map(|(index, _)| index).collect();
+            }
+        }
+
+        if !indices.is_null() {
+            let count = found.len().min(capacity as usize);
+            unsafe { std::slice::from_raw_parts_mut(indices, count) }
+                .copy_from_slice(&found[..count]);
+        }
+        found.len() as u32
     }
     fn GetRawZeroPoseToStandingAbsoluteTrackingPose(&self) -> vr::HmdMatrix34_t {
         self.zero_pose_to_standing(vr::ETrackingUniverseOrigin::RawAndUncalibrated)
@@ -2440,6 +2484,89 @@ mod tests {
             poll_until(&mut |event| event.eventType == vr::EVREventType::Quit as u32),
             "Quit never arrived"
         );
+    }
+
+    #[test]
+    fn sorted_tracked_device_indices_of_class() {
+        use fakexr::UserPath::*;
+        use vr::ETrackedDeviceClass::*;
+        crate::init_logging();
+        fakexr::set_headless_supported(true);
+        for hand in [LeftHand, RightHand] {
+            fakexr::set_default_interaction_profile(
+                hand,
+                Some("/interaction_profiles/oculus/touch_controller"),
+            );
+        }
+        let xr = Arc::new(
+            OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Background).unwrap(),
+        );
+        let system = System::new(xr.clone(), &Injector::default());
+        let input = Arc::new(Input::new(xr.clone()));
+        system.input.set(Arc::downgrade(&input));
+        xr.input.set(Arc::downgrade(&input));
+        // fakexr only locates in LOCAL space.
+        xr.set_tracking_space(vr::ETrackingUniverseOrigin::Seated);
+
+        let hmd = vr::k_unTrackedDeviceIndex_Hmd;
+        let absolute = vr::k_unTrackedDeviceIndexInvalid;
+        let sorted = |class, relative_to| {
+            let count = system.GetSortedTrackedDeviceIndicesOfClass(
+                class,
+                std::ptr::null_mut(),
+                0,
+                relative_to,
+            );
+            let mut indices = vec![u32::MAX; count as usize];
+            assert_eq!(
+                system.GetSortedTrackedDeviceIndicesOfClass(
+                    class,
+                    indices.as_mut_ptr(),
+                    count,
+                    relative_to
+                ),
+                count
+            );
+            indices
+        };
+        assert_eq!(sorted(HMD, hmd), [hmd]);
+        assert!(sorted(Controller, hmd).is_empty());
+
+        // Bind the controllers and put them to the left and right of the HMD.
+        input.frame_start_update();
+        xr.poll_events();
+        let session = xr.session_data.get().session.as_raw();
+        let grip = |x, orientation| xr::Posef {
+            position: xr::Vector3f { x, y: 1.0, z: -0.5 },
+            orientation,
+        };
+        fakexr::set_grip(session, LeftHand, grip(-0.5, xr::Quaternionf::IDENTITY));
+        fakexr::set_grip(session, RightHand, grip(0.5, xr::Quaternionf::IDENTITY));
+        input.frame_start_update();
+
+        assert_eq!(sorted(Controller, hmd), [2, 1]);
+        assert_eq!(sorted(Controller, absolute), [2, 1]);
+        assert_eq!(sorted(HMD, absolute), [hmd]);
+        assert!(sorted(GenericTracker, hmd).is_empty());
+
+        // Turned around, the left controller has the right one on its left.
+        let turned = xr::Quaternionf {
+            x: 0.0,
+            y: 1.0,
+            z: 0.0,
+            w: 0.0,
+        };
+        fakexr::set_grip(session, LeftHand, grip(-0.5, turned));
+        input.frame_start_update();
+        assert_eq!(sorted(Controller, 1), [1, 2]);
+
+        // Too small an array gets the first devices and the full count.
+        let mut first = u32::MAX;
+        assert_eq!(
+            system.GetSortedTrackedDeviceIndicesOfClass(Controller, &mut first, 1, hmd),
+            2
+        );
+        assert_eq!(first, 2);
     }
 
     /// While the app runs a frame loop, events are left to WaitGetPoses.
