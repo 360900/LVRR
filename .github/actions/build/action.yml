@@ -26,3 +26,11 @@ runs:
         mkdir -p out/xrizer-edge
         cp -r -L target/release/bin out/xrizer-edge
         cp -L target/i686-unknown-linux-gnu/release/bin/vrclient.so out/xrizer-edge/bin/
+    - name: Check version
+      shell: sh
+      # The version reaches the library through build-time env only, which has
+      # broken silently before.
+      run: |
+        test -n "$XRIZER_VERSION"
+        grep -qF "$XRIZER_VERSION" out/xrizer-edge/bin/linux64/vrclient.so
+        grep -qF "$XRIZER_VERSION" out/xrizer-edge/bin/vrclient.so
