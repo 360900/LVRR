@@ -306,6 +306,7 @@ impl Vector2ActionData {
         direct: &xr::Action<xr::Vector2f>,
         session: &xr::Session<xr::AnyGraphics>,
         hands: [(xr::Path, xr::Path, vr::VRInputValueHandle_t); 2],
+        masked: [bool; 2],
         update_time: impl Fn(bool, xr::Time) -> f32,
     ) {
         if self.input_only {
@@ -325,6 +326,10 @@ impl Vector2ActionData {
 
         let mut next = [vr::InputAnalogActionData_t::default(); 3];
         for (index, (hand, profile, origin)) in hands.into_iter().enumerate() {
+            // By a higher priority action set.
+            if masked[index] {
+                continue;
+            }
             let mut consider = |state: xr::ActionState<xr::Vector2f>| {
                 let candidate = vr::InputAnalogActionData_t {
                     bActive: state.is_active,

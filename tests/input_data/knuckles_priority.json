@@ -1,0 +1,115 @@
+{
+	"bindings": {
+		"/actions/game": {
+			"sources": [
+				{
+					"path": "/user/hand/left/input/trigger",
+					"mode": "trigger",
+					"inputs": {
+						"click": {
+							"output": "/actions/game/in/fire"
+						},
+						"pull": {
+							"output": "/actions/game/in/throttle"
+						}
+					}
+				},
+				{
+					"path": "/user/hand/left/input/a",
+					"mode": "button",
+					"inputs": {
+						"click": {
+							"output": "/actions/game/in/jump"
+						}
+					}
+				},
+				{
+					"path": "/user/hand/left/input/thumbstick",
+					"mode": "joystick",
+					"inputs": {
+						"position": {
+							"output": "/actions/game/in/move"
+						},
+						"click": {
+							"output": "/actions/game/in/jump"
+						}
+					}
+				},
+				{
+					"path": "/user/hand/right/input/trigger",
+					"mode": "trigger",
+					"inputs": {
+						"click": {
+							"output": "/actions/game/in/fire"
+						},
+						"pull": {
+							"output": "/actions/game/in/throttle"
+						}
+					}
+				},
+				{
+					"path": "/user/hand/right/input/a",
+					"mode": "button",
+					"inputs": {
+						"click": {
+							"output": "/actions/game/in/jump"
+						}
+					}
+				},
+				{
+					"path": "/user/hand/right/input/thumbstick",
+					"mode": "joystick",
+					"inputs": {
+						"position": {
+							"output": "/actions/game/in/move"
+						},
+						"click": {
+							"output": "/actions/game/in/jump"
+						}
+					}
+				}
+			]
+		},
+		"/actions/menu": {
+			"sources": [
+				{
+					"path": "/user/hand/left/input/trigger",
+					"mode": "button",
+					"inputs": {
+						"click": {
+							"output": "/actions/menu/in/select"
+						}
+					}
+				},
+				{
+					"path": "/user/hand/left/input/thumbstick",
+					"mode": "joystick",
+					"inputs": {
+						"position": {
+							"output": "/actions/menu/in/scroll"
+						}
+					}
+				},
+				{
+					"path": "/user/hand/right/input/trigger",
+					"mode": "button",
+					"inputs": {
+						"click": {
+							"output": "/actions/menu/in/select"
+						}
+					}
+				},
+				{
+					"path": "/user/hand/right/input/thumbstick",
+					"mode": "joystick",
+					"inputs": {
+						"position": {
+							"output": "/actions/menu/in/scroll"
+						}
+					}
+				}
+			]
+		}
+	},
+	"controller_type": "knuckles"
+}

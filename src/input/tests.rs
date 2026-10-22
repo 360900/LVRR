@@ -290,12 +290,16 @@ impl Fixture {
         src
     }
 
-    pub fn sync(&mut self, mut active: vr::VRActiveActionSet_t) {
+    pub fn sync(&mut self, active: vr::VRActiveActionSet_t) {
+        self.sync_sets(&mut [active]);
+    }
+
+    pub fn sync_sets(&mut self, active: &mut [vr::VRActiveActionSet_t]) {
         assert_eq!(
             self.input.UpdateActionState(
-                &mut active,
+                active.as_mut_ptr(),
                 std::mem::size_of::<vr::VRActiveActionSet_t>() as u32,
-                1
+                active.len() as u32
             ),
             vr::EVRInputError::None
         );
@@ -2341,23 +2345,89 @@ fn secondary_set_needs_restricted_primary() {
 }
 
 #[test]
-fn push_priority_keeps_highest() {
-    let f = Fixture::new();
-    let instance = &f.input.openxr.instance;
-    let a = instance.create_action_set("prio_a", "Prio A", 0).unwrap();
-    let b = instance.create_action_set("prio_b", "Prio B", 0).unwrap();
+fn action_set_priorities() {
+    let mut f = Fixture::new();
+    f.load_actions(c"actions_priority.json");
+    let game = f.get_action_set_handle(c"/actions/game");
+    let menu = f.get_action_set_handle(c"/actions/menu");
+    let fire = f.get_action_handle(c"/actions/game/in/fire");
+    let jump = f.get_action_handle(c"/actions/game/in/jump");
+    let throttle = f.get_action_handle(c"/actions/game/in/throttle");
+    let move_ = f.get_action_handle(c"/actions/game/in/move");
+    let select = f.get_action_handle(c"/actions/menu/in/select");
+    // So the menu's trigger comes from a custom binding's action.
+    assert!(
+        f.get_extra_action(select, ExtraActionType::Analog)
+            .is_some()
+    );
+    let left = f.get_input_source_handle(c"/user/hand/left");
+    let right = f.get_input_source_handle(c"/user/hand/right");
+    f.set_interaction_profile::<Knuckles>(LeftHand);
+    f.set_interaction_profile::<Knuckles>(RightHand);
 
-    let mut priorities = Vec::new();
-    super::push_priority(&mut priorities, &a, 1);
-    super::push_priority(&mut priorities, &b, 5);
-    super::push_priority(&mut priorities, &a, 3);
-    super::push_priority(&mut priorities, &a, 2);
+    for hand in [LeftHand, RightHand] {
+        fakexr::set_action_state(f.get_action::<bool>(fire), true.into(), hand);
+        fakexr::set_action_state(f.get_action::<bool>(jump), true.into(), hand);
+        fakexr::set_action_state(
+            f.get_action::<f32>(throttle),
+            fakexr::ActionState::Float(0.5),
+            hand,
+        );
+        fakexr::set_action_state(
+            f.get_action::<xr::Vector2f>(move_),
+            fakexr::ActionState::Vector2(0.0, 1.0),
+            hand,
+        );
+    }
+    let sync = |f: &mut Fixture, menu_priority, menu_restrict| {
+        f.sync_sets(&mut [
+            vr::VRActiveActionSet_t {
+                ulActionSet: game,
+                ..Default::default()
+            },
+            vr::VRActiveActionSet_t {
+                ulActionSet: menu,
+                ulRestrictedToDevice: menu_restrict,
+                nPriority: menu_priority,
+                ..Default::default()
+            },
+        ])
+    };
+    let digital = |f: &Fixture, restrict| {
+        let s = f.get_bool_state_hand(fire, restrict).unwrap();
+        (s.bActive, s.bState, s.bChanged, s.activeOrigin)
+    };
 
-    let got: Vec<_> = priorities
-        .iter()
-        .map(|p| (p.action_set, p.priority_override))
-        .collect();
-    assert_eq!(got, [(a.as_raw(), 3), (b.as_raw(), 5)]);
+    sync(&mut f, 0, 0);
+    assert_eq!(digital(&f, 0), (true, true, true, left));
+
+    // The menu binds the trigger and thumbstick: actions bound to them are masked, and a held
+    // button is released.
+    sync(&mut f, 1, 0);
+    assert_eq!(digital(&f, 0), (false, false, true, 0));
+    assert_eq!(digital(&f, left), (false, false, true, 0));
+    assert!(!get_analog_state(&f, throttle, 0).bActive);
+    assert!(!get_analog_state(&f, move_, right).bActive);
+    // Jump is also bound to A, which the menu doesn't use.
+    assert!(f.get_bool_state(jump).unwrap().bState);
+
+    sync(&mut f, 1, 0);
+    assert_eq!(digital(&f, 0), (false, false, false, 0));
+
+    // Unmasking a held button doesn't press it.
+    sync(&mut f, 0, 0);
+    assert_eq!(digital(&f, 0), (true, true, false, left));
+    assert!(get_analog_state(&f, throttle, 0).bActive);
+
+    // A set restricted to one hand only masks that hand.
+    sync(&mut f, 1, right);
+    assert_eq!(digital(&f, left), (true, true, false, left));
+    assert_eq!(digital(&f, right), (false, false, true, 0));
+    assert_eq!(digital(&f, 0), (true, true, false, left));
+    let throttle_state = get_analog_state(&f, throttle, 0);
+    assert!(throttle_state.bActive);
+    assert_eq!(throttle_state.activeOrigin, left);
+    assert!(!get_analog_state(&f, move_, right).bActive);
 }
 
 #[test]

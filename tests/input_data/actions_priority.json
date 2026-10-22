@@ -1,0 +1,45 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/game",
+			"usage": "leftright"
+		},
+		{
+			"name": "/actions/menu",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/game/in/fire",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/game/in/jump",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/game/in/throttle",
+			"type": "vector1"
+		},
+		{
+			"name": "/actions/game/in/move",
+			"type": "vector2"
+		},
+		{
+			"name": "/actions/menu/in/select",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/menu/in/scroll",
+			"type": "vector2"
+		}
+	],
+	"default_bindings": [
+		{
+			"binding_url": "knuckles_priority.json",
+			"controller_type": "knuckles"
+		}
+	],
+	"localization": []
+}

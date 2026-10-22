@@ -461,6 +461,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         key: ActionKey,
         action: &xr::Action<f32>,
         state: &Mutex<[vr::InputAnalogActionData_t; 3]>,
+        masked: [bool; 2],
     ) {
         let has_custom_bindings = loaded.actions_with_custom_bindings.contains(&key);
         let mut next = [vr::InputAnalogActionData_t::default(); 3];
@@ -468,7 +469,10 @@ impl<C: openxr_data::Compositor> Input<C> {
             (self.subaction_paths.left, self.left_hand_key),
             (self.subaction_paths.right, self.right_hand_key),
         ];
-        for (slot, (path, hand_key)) in next.iter_mut().zip(hands) {
+        for ((slot, (path, hand_key)), masked) in next.iter_mut().zip(hands).zip(masked) {
+            if masked {
+                continue;
+            }
             let Ok(mut current) = action.state(&session_data.session, path) else {
                 continue;
             };
@@ -516,6 +520,250 @@ impl<C: openxr_data::Compositor> Input<C> {
         *previous = next;
     }
 
+    /// Emulates action set priorities. On each hand, an action is masked if every input source
+    /// it's bound to is also bound in an active set of a higher priority, like SteamVR disables
+    /// the bindings of those sources. SteamVR masks bindings rather than actions, but an OpenXR
+    /// action's state can't be split by binding, so an action with a source that isn't masked
+    /// stays entirely active.
+    fn mask_by_priority(
+        &self,
+        session_data: &SessionData,
+        loaded: &ManifestLoadedActions,
+        set_map: &SlotMap<ActionSetKey, String>,
+        set_priorities: &[(ActionSetKey, [bool; 2], i32)],
+        profiles: [xr::Path; 2],
+    ) -> HashSet<(ActionKey, usize)> {
+        let mut masked = HashSet::new();
+        if set_priorities
+            .iter()
+            .all(|(_, _, priority)| *priority == set_priorities[0].2)
+        {
+            return masked;
+        }
+
+        let sources = session_data
+            .input_data
+            .action_sources
+            .get_or_init(|| self.action_sources(loaded, set_map));
+        for (hand, profile) in profiles.into_iter().enumerate() {
+            let Some(actions) = sources.sources.get(&profile) else {
+                continue;
+            };
+            let priority = |action| {
+                let set = *sources.sets.get(action)?;
+                set_priorities
+                    .iter()
+                    .filter(|(key, hands, _)| *key == set && hands[hand])
+                    .map(|(_, _, priority)| *priority)
+                    .max()
+            };
+
+            // The highest priority each source is bound with.
+            let mut claims = HashMap::<xr::Path, i32>::new();
+            for (action, action_sources) in actions {
+                let Some(priority) = priority(action) else {
+                    continue;
+                };
+                for source in &action_sources[hand] {
+                    let claim = claims.entry(*source).or_insert(priority);
+                    *claim = (*claim).max(priority);
+                }
+            }
+
+            for (action, action_sources) in actions {
+                let Some(priority) = priority(action) else {
+                    continue;
+                };
+                let action_sources = &action_sources[hand];
+                if !action_sources.is_empty()
+                    && action_sources
+                        .iter()
+                        .all(|source| claims[source] > priority)
+                {
+                    masked.insert((action, hand));
+                }
+            }
+        }
+        masked
+    }
+
+    fn action_sources(
+        &self,
+        loaded: &ManifestLoadedActions,
+        set_map: &SlotMap<ActionSetKey, String>,
+    ) -> ActionSources {
+        let action_map = self.action_map.read().unwrap();
+        let mut sources = ActionSources::default();
+
+        let actions_by_handle: HashMap<xr::sys::Action, ActionKey> = loaded
+            .actions
+            .iter()
+            .filter_map(|(key, data)| {
+                let action = match data {
+                    ActionData::Bool(action) => action.as_raw(),
+                    ActionData::Vector1 { action, .. } => action.as_raw(),
+                    ActionData::Vector2 { action, .. } => action.as_raw(),
+                    _ => return None,
+                };
+                Some((action, key))
+            })
+            .collect();
+
+        // Input path -> hand index and source.
+        let mut source_paths = HashMap::<xr::Path, Option<(usize, xr::Path)>>::new();
+        let mut source_of = |path: xr::Path| {
+            *source_paths.entry(path).or_insert_with(|| {
+                let path = self.openxr.instance.path_to_string(path).ok()?;
+                let (device, kind, component, _) = parse_input_path(&path);
+                if kind != "input" {
+                    return None;
+                }
+                let hand = ["/user/hand/left", "/user/hand/right"]
+                    .iter()
+                    .position(|hand| *hand == device)?;
+                let source = format!("{device}/input/{component}");
+                Some((hand, self.openxr.instance.string_to_path(&source).ok()?))
+            })
+        };
+
+        for (key, data) in &loaded.actions {
+            let vector2_bindings = match data {
+                ActionData::Bool(_) | ActionData::Vector1 { .. } => &[][..],
+                ActionData::Vector2 { data, .. } => &data.bindings[..],
+                _ => continue,
+            };
+            // Only application actions, not the extra actions of custom bindings.
+            let Some(set) = action_map
+                .get(key)
+                .and_then(|action| action.path.split_once("/in/"))
+                .and_then(|(set, _)| {
+                    set_map
+                        .iter()
+                        .find_map(|(set_key, name)| (name == set).then_some(set_key))
+                })
+            else {
+                continue;
+            };
+            sources.sets.insert(key, set);
+
+            // The OpenXR actions this action is driven by: its own, and those of its custom and
+            // inverted bindings.
+            let extra = loaded.extra_actions.get(key);
+            let driving: Vec<ActionKey> = std::iter::once(key)
+                .chain(
+                    extra
+                        .into_iter()
+                        .flat_map(|extra| {
+                            [
+                                extra.toggle_action.as_ref().map(|a| a.as_raw()),
+                                extra.analog_action.as_ref().map(|a| a.as_raw()),
+                                extra.double_action.as_ref().map(|a| a.as_raw()),
+                                extra.vector2_action.as_ref().map(|a| a.as_raw()),
+                                extra.grab_actions.as_ref().map(|g| g.force_action.as_raw()),
+                                extra.grab_actions.as_ref().map(|g| g.value_action.as_raw()),
+                            ]
+                        })
+                        .flatten()
+                        .chain(vector2_bindings.iter().map(|b| b.action.as_raw()))
+                        .filter_map(|action| actions_by_handle.get(&action).copied()),
+                )
+                .collect();
+
+            for (profile, input_paths) in &loaded.per_profile_input_paths {
+                let mut hands: [Vec<xr::Path>; 2] = Default::default();
+                for path in driving
+                    .iter()
+                    .filter_map(|key| input_paths.get(*key))
+                    .flatten()
+                {
+                    if let Some((hand, source)) = source_of(*path)
+                        && !hands[hand].contains(&source)
+                    {
+                        hands[hand].push(source);
+                    }
+                }
+                if hands.iter().any(|sources| !sources.is_empty()) {
+                    sources
+                        .sources
+                        .entry(*profile)
+                        .or_default()
+                        .insert(key, hands);
+                }
+            }
+        }
+        sources
+    }
+
+    /// The state of a boolean action that a higher priority action set masks on a hand, now or
+    /// as of the previous sync. Masked hands don't count, and masking a pressed hand releases it.
+    fn masked_bool_state(
+        &self,
+        handle: vr::VRActionHandle_t,
+        action: &xr::Action<bool>,
+        session_data: &SessionData,
+        subaction_path: xr::Path,
+        mask: HandMask,
+    ) -> (xr::ActionState<bool>, vr::VRInputValueHandle_t) {
+        let mut state = xr::ActionState {
+            current_state: false,
+            changed_since_last_sync: false,
+            last_change_time: xr::Time::from_nanos(0),
+            is_active: false,
+        };
+        let mut origin = vr::k_ulInvalidInputValueHandle;
+        let mut best_rank = None;
+        let mut previous = false;
+        let hands = [
+            (self.subaction_paths.left, self.left_hand_key),
+            (self.subaction_paths.right, self.right_hand_key),
+        ];
+        for (hand, (path, hand_key)) in hands.into_iter().enumerate() {
+            if subaction_path != xr::Path::NULL && subaction_path != path {
+                continue;
+            }
+
+            let hand_origin = hand_key.data().as_ffi();
+            let native = action.state(&session_data.session, path).ok();
+            let (hand_state, hand_origin) = match self.state_from_bindings(handle, hand_origin) {
+                Some((binding, source))
+                    if binding.is_active
+                        && native.is_none_or(|native| {
+                            !native.is_active || binding_rank(&binding) > binding_rank(&native)
+                        }) =>
+                {
+                    (binding, source)
+                }
+                _ => match native {
+                    Some(native) => (native, hand_origin),
+                    None => continue,
+                },
+            };
+
+            // A hand that was masked counts as unchanged, so unmasking a held input isn't a press.
+            previous |= match (mask.previous[hand], mask.current[hand]) {
+                (false, _) => hand_state.current_state != hand_state.changed_since_last_sync,
+                (true, false) => hand_state.current_state,
+                (true, true) => false,
+            };
+            if mask.current[hand] || !hand_state.is_active {
+                continue;
+            }
+
+            state.is_active = true;
+            state.current_state |= hand_state.current_state;
+            if hand_state.last_change_time.as_nanos() > state.last_change_time.as_nanos() {
+                state.last_change_time = hand_state.last_change_time;
+            }
+            let rank = binding_rank(&hand_state);
+            if best_rank.is_none_or(|best| rank > best) {
+                best_rank = Some(rank);
+                origin = hand_origin;
+            }
+        }
+        state.changed_since_last_sync = state.current_state != previous;
+        (state, origin)
+    }
+
     /// The hand whose natively bound inputs drive an unrestricted read of a boolean action, if
     /// any is active.
     fn native_bool_origin(
@@ -549,27 +797,36 @@ fn binding_rank(state: &xr::ActionState<bool>) -> (bool, bool, i64) {
     )
 }
 
-/// Adds a set's priority, keeping the highest one if the set is already present (e.g. as both a
-/// primary and a secondary set). The extension doesn't allow duplicates.
-fn push_priority(
-    priorities: &mut Vec<xr::sys::ActiveActionSetPriorityEXT>,
-    set: &xr::ActionSet,
-    priority: u32,
-) {
-    match priorities.iter_mut().find(|p| p.action_set == set.as_raw()) {
-        Some(existing) => existing.priority_override = existing.priority_override.max(priority),
-        None => priorities.push(xr::sys::ActiveActionSetPriorityEXT {
-            action_set: set.as_raw(),
-            priority_override: priority,
-        }),
-    }
-}
-
 pub struct InputSessionData {
     actions: OnceLock<LoadedActions>,
     estimated_skeleton_actions: OnceLock<SkeletalInputActionData>,
     pose_data: PoseData,
     devices: RwLock<TrackedDeviceList>,
+    action_sources: OnceLock<ActionSources>,
+    priority_masks: Mutex<PriorityMasks>,
+}
+
+/// The input sources each application action is bound to, per interaction profile and hand.
+/// Sources are components (`/user/hand/<hand>/input/<component>`), which is what action set
+/// priorities apply to.
+#[derive(Default)]
+struct ActionSources {
+    sets: SecondaryMap<ActionKey, ActionSetKey>,
+    sources: HashMap<xr::Path, SecondaryMap<ActionKey, [Vec<xr::Path>; 2]>>,
+}
+
+/// The actions masked on each hand (by index) by a higher priority action set, as of the latest
+/// and the previous UpdateActionState.
+#[derive(Default)]
+struct PriorityMasks {
+    current: HashSet<(ActionKey, usize)>,
+    previous: HashSet<(ActionKey, usize)>,
+}
+
+#[derive(Clone, Copy)]
+struct HandMask {
+    current: [bool; 2],
+    previous: [bool; 2],
 }
 
 impl InputSessionData {
@@ -587,7 +844,23 @@ impl InputSessionData {
             estimated_skeleton_actions: OnceLock::new(),
             pose_data: PoseData::new(instance, paths.left, paths.right),
             devices: RwLock::new(TrackedDeviceList::new(session, hand_tracking)),
+            action_sources: OnceLock::new(),
+            priority_masks: Mutex::default(),
         }
+    }
+
+    fn hand_mask(&self, key: ActionKey) -> Option<HandMask> {
+        let masks = self.priority_masks.lock().unwrap();
+        let get = |masked: &HashSet<_>| [0, 1].map(|hand| masked.contains(&(key, hand)));
+        let mask = HandMask {
+            current: get(&masks.current),
+            previous: get(&masks.previous),
+        };
+        mask.current
+            .iter()
+            .chain(&mask.previous)
+            .any(|masked| *masked)
+            .then_some(mask)
     }
 
     #[inline]
@@ -1622,31 +1895,36 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             return vr::EVRInputError::WrongType;
         };
 
-        let mut state = action
-            .state(&session_data.session, subaction_path)
-            .unwrap_or_else(inactive_state);
-        let mut active_hand = if subaction_path == xr::Path::NULL {
-            self.native_bool_origin(action, &session_data.session)
+        let key = ActionKey::from(KeyData::from_ffi(handle));
+        let (state, active_hand) = if let Some(mask) = session_data.input_data.hand_mask(key) {
+            self.masked_bool_state(handle, action, &session_data, subaction_path, mask)
         } else {
-            restrict_to_device
-        };
+            let mut state = action
+                .state(&session_data.session, subaction_path)
+                .unwrap_or_else(inactive_state);
+            let mut active_hand = if subaction_path == xr::Path::NULL {
+                self.native_bool_origin(action, &session_data.session)
+            } else {
+                restrict_to_device
+            };
 
-        // An action can be driven both by a natively bound input and by a custom binding.
-        if let Some((binding_state, binding_source)) =
-            self.state_from_bindings(handle, restrict_to_device)
-            && binding_state.is_active
-            && (!state.is_active || binding_rank(&binding_state) > binding_rank(&state))
-        {
-            state = binding_state;
-            active_hand = binding_source;
-        }
+            // An action can be driven both by a natively bound input and by a custom binding.
+            if let Some((binding_state, binding_source)) =
+                self.state_from_bindings(handle, restrict_to_device)
+                && binding_state.is_active
+                && (!state.is_active || binding_rank(&binding_state) > binding_rank(&state))
+            {
+                state = binding_state;
+                active_hand = binding_source;
+            }
+            (state, active_hand)
+        };
 
         if log::log_enabled!(log::Level::Trace) {
             let action_map = self.action_map.read().unwrap();
-            let action_key = ActionKey::from(KeyData::from_ffi(handle));
             trace!(
                 "digital action {:?}: {} (changed: {}, active: {})",
-                action_map.get(action_key).map(|a| &a.path),
+                action_map.get(key).map(|a| &a.path),
                 state.current_state,
                 state.changed_since_last_sync,
                 state.is_active
@@ -1721,29 +1999,24 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
 
         let set_map = self.set_map.read().unwrap();
         let mut sync_sets = Vec::with_capacity(active_sets.len() + 3);
-        let mut priorities = Vec::with_capacity(active_sets.len() + 3);
         // The sets synced below and their hand, for the skeletal actions
         let mut activated_sets = Vec::with_capacity(active_sets.len());
+        // The priority of each set, and the hands it's active for.
+        let mut set_priorities = Vec::with_capacity(active_sets.len());
 
         {
             tracy_span!("UpdateActionState generate active sets");
 
-            // we need to convert int32 to uint32
-            let priority_offset = 1 // override legacy actions
-                - i64::from(
-                    active_sets
-                        .iter()
-                        .map(|set| set.nPriority)
-                        .min()
-                        .unwrap() // safe: count cannot be zero here
-                        .min(0),
-                );
+            let hands_for = |path| {
+                [
+                    path != self.subaction_paths.right,
+                    path != self.subaction_paths.left,
+                ]
+            };
 
             for set in active_sets {
                 let key = ActionSetKey::from(KeyData::from_ffi(set.ulActionSet));
                 let name = set_map.get(key);
-                let priority =
-                    u32::try_from(i64::from(set.nPriority) + priority_offset).unwrap_or(u32::MAX);
 
                 // A restricted set without OpenXR actions doesn't have the hand subaction paths,
                 // which would fail xrSyncActions. It has nothing to restrict, so sync it
@@ -1772,7 +2045,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
                         };
                         let key = ActionSetKey::from(KeyData::from_ffi(set.ulSecondaryActionSet));
                         let name = set_map.get(key);
-                        let Some(set) = actions.sets.get(key) else {
+                        let Some(set_data) = actions.sets.get(key) else {
                             debug!(
                                 "Application passed invalid secondary action set key: {key:?} ({name:?})"
                             );
@@ -1780,30 +2053,30 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
                         };
                         debug!("Activating secondary set {}", name.unwrap());
                         sync_sets.push(xr::ActiveActionSet::with_subaction(
-                            set,
+                            set_data,
                             restrict(path, key),
                         ));
                         activated_sets.push((key, path));
                         // TODO: check if SteamVR actually puts these on the same priority as the primary
-                        push_priority(&mut priorities, set, priority);
+                        set_priorities.push((key, hands_for(path), set.nPriority));
                     }
                 };
 
-                let Some(set) = actions.sets.get(key) else {
+                let Some(set_data) = actions.sets.get(key) else {
                     debug!("Application passed invalid action set key: {key:?} ({name:?})");
                     return vr::EVRInputError::InvalidHandle;
                 };
                 debug!(
                     "Activating set {} with priority {}",
                     name.unwrap(),
-                    priority
+                    set.nPriority
                 );
                 sync_sets.push(xr::ActiveActionSet::with_subaction(
-                    set,
+                    set_data,
                     restrict(path, key),
                 ));
                 activated_sets.push((key, path));
-                push_priority(&mut priorities, set, priority);
+                set_priorities.push((key, hands_for(path), set.nPriority));
             }
 
             let skeletal_input = data.input_data.estimated_skeleton_actions.get().unwrap();
@@ -1815,27 +2088,12 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
 
         {
             tracy_span!("xrSyncActions");
-            let next_priorities = xr::sys::ActiveActionSetPrioritiesEXT {
-                ty: xr::sys::ActiveActionSetPrioritiesEXT::TYPE,
-                next: ptr::null(),
-                action_set_priority_count: priorities.len() as u32,
-                action_set_priorities: priorities.as_ptr(),
-            };
-
-            // TODO: enable only when runtime provides hand tracking data
-            let next_ptr = if self
-                .openxr
-                .enabled_extensions
-                .ext_active_action_set_priority
-            {
-                &next_priorities as *const _ as *const _
-            } else {
-                ptr::null()
-            };
-
+            // XR_EXT_active_action_set_priority isn't used: it would let the application's sets
+            // block xrizer's own sets on the same inputs, or the other way around. See
+            // Input::mask_by_priority.
             let info = xr::sys::ActionsSyncInfo {
                 ty: xr::sys::ActionsSyncInfo::TYPE,
-                next: next_ptr,
+                next: ptr::null(),
                 count_active_action_sets: sync_sets.len() as u32,
                 active_action_sets: sync_sets.as_ptr() as _,
             };
@@ -1869,15 +2127,28 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
                 origin,
             )
         });
-        for (_, action) in &actions.actions {
+        let masked = self.mask_by_priority(
+            &data,
+            actions,
+            &set_map,
+            &set_priorities,
+            hands.map(|(_, profile, _)| profile),
+        );
+        let masked_hands = |key| [0, 1].map(|hand| masked.contains(&(key, hand)));
+
+        for (key, action) in &actions.actions {
             if let ActionData::Vector2 {
                 action,
                 data: vector2,
             } = action
             {
-                vector2.sync(action, &data.session, hands, |changed, time| {
-                    self.update_time(changed, time)
-                });
+                vector2.sync(
+                    action,
+                    &data.session,
+                    hands,
+                    masked_hands(key),
+                    |changed, time| self.update_time(changed, time),
+                );
             }
         }
 
@@ -1924,9 +2195,12 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         // After the custom bindings were unsynced, so they're evaluated for this sync.
         for (key, action) in &actions.actions {
             if let ActionData::Vector1 { action, state } = action {
-                self.sync_vector1(&data, actions, key, action, state);
+                self.sync_vector1(&data, actions, key, action, state, masked_hands(key));
             }
         }
+
+        let mut masks = data.input_data.priority_masks.lock().unwrap();
+        masks.previous = std::mem::replace(&mut masks.current, masked);
 
         vr::EVRInputError::None
     }
