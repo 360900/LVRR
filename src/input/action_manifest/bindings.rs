@@ -423,11 +423,29 @@ where
                 Ok(StringOrTyped(value))
             }
 
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let value = T::deserialize(serde::de::value::U64Deserializer::<E>::new(value))
+                    .map_err(E::custom)?;
+                Ok(StringOrTyped(value))
+            }
+
             fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
             where
                 E: de::Error,
             {
                 let value = T::deserialize(serde::de::value::F64Deserializer::<E>::new(value))
+                    .map_err(E::custom)?;
+                Ok(StringOrTyped(value))
+            }
+
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let value = T::deserialize(serde::de::value::BoolDeserializer::<E>::new(value))
                     .map_err(E::custom)?;
                 Ok(StringOrTyped(value))
             }
@@ -658,6 +676,7 @@ fn long_press_delay_parse() {
             r#"{"long_press_delay": "0.25"}"#,
             Some(Duration::from_millis(250)),
         ),
+        (r#"{"long_press_delay": 1}"#, Some(Duration::from_secs(1))),
         (r#"{"long_press_delay": "-1"}"#, None),
         (r#"{"long_press_delay": "NaN"}"#, None),
         (r#"{"long_press_delay": "1e20"}"#, None),
@@ -666,6 +685,22 @@ fn long_press_delay_parse() {
         let parameters: ButtonParameters = serde_json::from_str(json).unwrap();
         assert_eq!(parameters.long_press_delay(), expected, "{json}");
     }
+}
+
+#[cfg(test)]
+#[test]
+fn numeric_and_boolean_parameters() {
+    // JSON numbers and booleans work as well as their string forms.
+    let parameters: DpadParameters =
+        serde_json::from_str(r#"{"sub_mode": "click", "deadzone_pct": 25, "sticky": true}"#)
+            .unwrap();
+    assert_eq!(*parameters.deadzone_pct, 25.0);
+    assert!(*parameters.sticky);
+
+    let parameters: Vector2Parameters =
+        serde_json::from_str(r#"{"deadzone_pct": 10, "maxzone_pct": "90"}"#).unwrap();
+    assert_eq!(*parameters.deadzone_pct.unwrap(), 10.0);
+    assert_eq!(*parameters.maxzone_pct.unwrap(), 90.0);
 }
 
 pub fn handle_dpad_binding(
