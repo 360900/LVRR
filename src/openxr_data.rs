@@ -369,12 +369,7 @@ impl<C: Compositor> OpenXrData<C> {
         let Some(mut updates) = self.frame_updates.try_lock() else {
             return;
         };
-        let period = Duration::from_nanos(
-            self.display_period_nanos
-                .load(Ordering::Relaxed)
-                .try_into()
-                .unwrap_or(0),
-        );
+        let period = self.display_period();
         let within = |time: Option<Instant>, duration| time.is_some_and(|t| t.elapsed() < duration);
         if within(updates.last_frame, FRAME_LOOP_TIMEOUT) || within(updates.last_pump, period) {
             return;
@@ -801,6 +796,16 @@ impl<C: Compositor> OpenXrData<C> {
         self.display_time.get()
     }
 
+    /// The display period of the last frame the compositor waited for, or 90 Hz before that.
+    pub fn display_period(&self) -> Duration {
+        Duration::from_nanos(
+            self.display_period_nanos
+                .load(Ordering::Relaxed)
+                .try_into()
+                .unwrap_or(0),
+        )
+    }
+
     /// Records the timing of a frame the compositor waited for.
     pub fn set_frame_timing(&self, display_time: xr::Time, display_period_nanos: i64) {
         self.display_time.set(display_time);
@@ -1027,6 +1032,15 @@ struct FrameUpdates {
 }
 
 pub struct FrameUpdateGuard<'a>(parking_lot::MutexGuard<'a, FrameUpdates>);
+
+impl FrameUpdateGuard<'_> {
+    /// Sleeps until `period` has passed since the last WaitGetPoses returned.
+    pub fn pace(&self, period: Duration) {
+        if let Some(last) = self.0.last_frame {
+            std::thread::sleep(period.saturating_sub(last.elapsed()));
+        }
+    }
+}
 
 impl Drop for FrameUpdateGuard<'_> {
     fn drop(&mut self) {

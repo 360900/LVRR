@@ -1046,11 +1046,11 @@ impl vr::IVRCompositor029_Interface for Compositor {
         game_pose_count: u32,
     ) -> vr::EVRCompositorError {
         tracy_span!("WaitGetPoses impl");
-        let _frame_update = self.openxr.frame_update();
+        let frame_update = self.openxr.frame_update();
         // This should be called every frame - we must regularly poll events
         self.openxr.poll_events();
         self.focused.call_once(|| {});
-        let paced = {
+        let (paced, frame_loop) = {
             let session_data = self.openxr.session_data.get();
             let timing_mode = *self.timing_mode.lock().unwrap();
             if matches!(
@@ -1078,13 +1078,16 @@ impl vr::IVRCompositor029_Interface for Compositor {
             if paced && timing_mode == vr::EVRCompositorTimingMode::Implicit {
                 self.maybe_begin_frame(&session_data);
             }
-            paced
+            (paced, session_data.comp_data.0.lock().unwrap().is_some())
         };
-        if !paced {
-            // Keep the app from spinning, e.g. after the session was lost and it ignores Quit.
-            let period = self.openxr.display_period_nanos.load(Ordering::Relaxed);
-            std::thread::sleep(std::time::Duration::from_nanos(
-                period.clamp(1_000_000, 100_000_000) as u64,
+        if !paced || !frame_loop {
+            // Nothing blocked in xrWaitFrame: before the first Submit, in apps that don't render,
+            // or after the session was lost. SteamVR blocks here until the next frame, and apps
+            // rely on that for pacing (or keep spinning while ignoring Quit).
+            let period = self.openxr.display_period();
+            frame_update.pace(period.clamp(
+                std::time::Duration::from_millis(1),
+                std::time::Duration::from_millis(100),
             ));
         }
         if self.openxr.is_lost() {
@@ -2056,6 +2059,24 @@ mod tests {
             assert_eq!(xr.session_data.get().session.as_raw(), session);
             assert!(xr.session_data.get().comp_data.0.lock().unwrap().is_none());
         }
+    }
+
+    /// Before the first Submit and in apps that don't render, nothing used to block in
+    /// WaitGetPoses, so apps that rely on it for pacing spun.
+    #[test]
+    fn wait_get_poses_paces_without_frame_loop() {
+        let f = Fixture::new();
+        let period = std::time::Duration::from_millis(20);
+        f.comp
+            .openxr
+            .display_period_nanos
+            .store(period.as_nanos() as i64, Ordering::Relaxed);
+
+        let start = Instant::now();
+        for _ in 0..3 {
+            assert_eq!(f.wait_get_poses(), None);
+        }
+        assert!(start.elapsed() >= 2 * period);
     }
 
     #[test]
