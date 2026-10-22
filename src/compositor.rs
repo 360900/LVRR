@@ -2915,6 +2915,21 @@ mod tests {
         assert!(rx.try_recv().is_err(), "temporary session was restarted");
     }
 
+    /// A runtime lost while the real session is created must tell the game to quit.
+    #[test]
+    fn session_lost_on_real_session_creation() {
+        let f = Fixture::new();
+        let system = f.system();
+        assert_eq!(f.wait_get_poses(), None);
+
+        fakexr::fail_next_session_creation(xr::sys::Result::ERROR_INSTANCE_LOST);
+        assert_eq!(f.submit(vr::EVREye::Left), InvalidTexture);
+        assert!(f.comp.openxr.is_lost());
+        assert_eq!(quit_events(&system), [true]);
+        assert_eq!(f.wait_get_poses(), DoNotHaveFocus);
+        assert_eq!(f.submit(vr::EVREye::Left), DoNotHaveFocus);
+    }
+
     /// More visible overlays than the runtime's layer limit must not make xrEndFrame fail.
     #[test]
     fn overlays_over_layer_limit() {

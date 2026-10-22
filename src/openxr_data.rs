@@ -448,11 +448,22 @@ impl<C: Compositor> OpenXrData<C> {
             }
             Err(e) => {
                 error!("Failed to create new session ({e:?}), going back to a temporary session");
+                self.handle_error("Creating session", e.result());
                 self.session_creation_failed.store(true, Ordering::Relaxed);
                 // Without a session in the guard there is nothing left to run on.
-                let (session, ..) =
+                let session =
                     SessionData::new(&self.instance, self.system_id, origin, None, self.headless)
-                        .expect("Failed to recreate temporary session");
+                        .unwrap_or_else(|e| {
+                            self.handle_error("Recreating temporary session", e.result());
+                            if self.is_lost() {
+                                error!("OpenXR runtime is gone, exiting");
+                                // Plain exit would run the app's exit handlers, which may call
+                                // back into us while we hold the session lock.
+                                unsafe { libc::_exit(1) }
+                            }
+                            panic!("Failed to recreate temporary session: {e:?}")
+                        })
+                        .0;
                 (session, Err(RestartError::CreationFailed))
             }
         };
@@ -769,12 +780,25 @@ pub enum RestartError {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)] // Results aren't used, but they're printed
+#[allow(dead_code)] // The state isn't used, but it's printed
 #[allow(clippy::enum_variant_names)]
 pub enum SessionCreationError {
     SessionCreationFailed(xr::sys::Result),
     PollEventFailed(xr::sys::Result),
     BeginSessionFailed(xr::sys::Result),
+    /// The runtime lost or ended the session before it became ready.
+    SessionLost(xr::SessionState),
+}
+
+impl SessionCreationError {
+    fn result(&self) -> xr::sys::Result {
+        match *self {
+            Self::SessionCreationFailed(e)
+            | Self::PollEventFailed(e)
+            | Self::BeginSessionFailed(e) => e,
+            Self::SessionLost(_) => xr::sys::Result::ERROR_SESSION_LOST,
+        }
+    }
 }
 
 impl SessionData {
@@ -891,10 +915,15 @@ impl SessionData {
                 .map_err(SessionCreationError::PollEventFailed)?
             {
                 Some(xr::Event::SessionStateChanged(state))
-                    if state.session() == session.as_raw()
-                        && state.state() == xr::SessionState::READY =>
+                    if state.session() == session.as_raw() =>
                 {
-                    break;
+                    match state.state() {
+                        xr::SessionState::READY => break,
+                        s @ (xr::SessionState::LOSS_PENDING | xr::SessionState::EXITING) => {
+                            return Err(SessionCreationError::SessionLost(s));
+                        }
+                        _ => {}
+                    }
                 }
                 Some(_) => {}
                 None => std::thread::sleep(Duration::from_millis(1)),
