@@ -791,32 +791,12 @@ impl vr::IVRSystem026_Interface for System {
         pose: *mut vr::TrackedDevicePose_t,
     ) -> bool {
         if let Some(queued) = self.events.lock().unwrap().pop_front() {
-            unsafe {
-                (&raw mut (*event).eventType).write(queued.eventType);
-                (&raw mut (*event).eventAgeSeconds).write(queued.eventAgeSeconds);
-                match vr::EVREventType(queued.eventType) {
-                    vr::EVREventType::Quit => {
-                        const CONNECTION_LOST_OFFSET: usize =
-                            std::mem::offset_of!(vr::VREvent_t, data)
-                                + std::mem::offset_of!(vr::VREvent_Process_t, bConnectionLost);
-
-                        (&raw mut (*event).data.process.pid).write(queued.data.process.pid);
-                        (&raw mut (*event).data.process.oldPid).write(queued.data.process.oldPid);
-                        (&raw mut (*event).data.process.bForced).write(queued.data.process.bForced);
-                        if size > CONNECTION_LOST_OFFSET as u32 {
-                            (&raw mut (*event).data.process.bConnectionLost)
-                                .write(queued.data.process.bConnectionLost);
-                        }
-
-                        return true;
-                    }
-                    vr::EVREventType::KeyboardDone => {
-                        Self::copy_event(&queued, event, size);
-                        return true;
-                    }
-                    _ => return true,
-                }
+            // Truncated to the app's size, so older event structs only get what they have room for.
+            Self::copy_event(&queued, event, size);
+            if !pose.is_null() {
+                unsafe { pose.write(Default::default()) };
             }
+            return true;
         }
 
         let Some(input) = self.input.get() else {
@@ -2062,6 +2042,31 @@ mod tests {
         assert_eq!(translation(raw), [-0.5, 0.0, 0.0]);
         let seated = system.GetSeatedZeroPoseToStandingAbsoluteTrackingPose();
         assert_eq!(translation(seated), [-0.5, 1.6, 0.0]);
+    }
+
+    #[test]
+    fn queued_event_fills_device_index_and_pose() {
+        let (xr, system) = system_with_events();
+        xr.session_data.get().session.request_exit().unwrap();
+        xr.poll_events();
+
+        let mut event = vr::VREvent_t {
+            trackedDeviceIndex: 1234,
+            ..Default::default()
+        };
+        let mut pose = vr::TrackedDevicePose_t {
+            bPoseIsValid: true,
+            ..Default::default()
+        };
+        assert!(system.PollNextEventWithPose(
+            vr::ETrackingUniverseOrigin::Standing,
+            &mut event,
+            std::mem::size_of_val(&event) as u32,
+            &mut pose
+        ));
+        assert_eq!(event.eventType, vr::EVREventType::Quit as u32);
+        assert_eq!(event.trackedDeviceIndex, vr::k_unTrackedDeviceIndexInvalid);
+        assert!(!pose.bPoseIsValid);
     }
 
     #[test]
