@@ -809,7 +809,10 @@ impl Overlay {
         session_data: &RealSessionData<'_>,
         mut texture: vr::Texture_t,
     ) -> Result<(), vr::EVROverlayError> {
-        if texture.eColorSpace == vr::EColorSpace::Auto {
+        // Values that aren't a colour space count as Auto, like in the backends.
+        if texture.eColorSpace != vr::EColorSpace::Gamma
+            && texture.eColorSpace != vr::EColorSpace::Linear
+        {
             texture.eColorSpace = self.color_space;
         }
         let backend = match &self.compositor {
@@ -3293,6 +3296,11 @@ mod tests {
             crate::compositor::FakeGraphicsData::overlay_color_space()
         };
         assert_eq!(copied_color_space(f.texture()), vr::EColorSpace::Linear);
+        let unknown = vr::Texture_t {
+            eColorSpace: vr::EColorSpace(0xdead),
+            ..f.texture()
+        };
+        assert_eq!(copied_color_space(unknown), vr::EColorSpace::Linear);
         let gamma = vr::Texture_t {
             eColorSpace: vr::EColorSpace::Gamma,
             ..f.texture()
