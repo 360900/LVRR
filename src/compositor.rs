@@ -3716,6 +3716,69 @@ mod tests {
         fakexr::last_projection_layer(session).expect("no projection layer")
     }
 
+    /// Flattened canted views get a FOV covering the canted one, both for the app and the layer.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn canted_views_are_widened() {
+        use vr::IVRSystem023_Interface;
+
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+        let fov = xr::Fovf {
+            angle_left: -std::f32::consts::FRAC_PI_4,
+            angle_right: std::f32::consts::FRAC_PI_4,
+            angle_up: std::f32::consts::FRAC_PI_4,
+            angle_down: -std::f32::consts::FRAC_PI_4,
+        };
+        let canted = |yaw: f32, x| {
+            let (mut pose, fov) = view(x, fov);
+            let q = Quat::from_rotation_y(yaw.to_radians());
+            pose.orientation = xr::Quaternionf {
+                x: q.x,
+                y: q.y,
+                z: q.z,
+                w: q.w,
+            };
+            (pose, fov)
+        };
+        fakexr::set_views(
+            f.comp.openxr.session_data.get().session.as_raw(),
+            [canted(10.0, -0.03), canted(-10.0, 0.03)],
+        );
+        let layer = frame_with_texture(
+            &f,
+            &FakeGraphicsData::texture(&f.vk),
+            Option::None,
+            vr::EVRSubmitFlags::Default,
+        );
+
+        let system = f.comp.system.get().unwrap();
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        for (eye, (pose, fov)) in [vr::EVREye::Left, vr::EVREye::Right]
+            .into_iter()
+            .zip(layer.views)
+        {
+            let [mut left, mut right, mut top, mut bottom] = [0.0; 4];
+            system.GetProjectionRaw(eye, &mut left, &mut right, &mut top, &mut bottom);
+            assert!(close(left, fov.angle_left.tan()));
+            assert!(close(right, fov.angle_right.tan()));
+            assert!(close(top, fov.angle_down.tan()));
+            assert!(close(bottom, fov.angle_up.tan()));
+            assert!(close(pose.orientation.w, 1.0));
+
+            let outer = match eye {
+                vr::EVREye::Left => -fov.angle_left,
+                vr::EVREye::Right => fov.angle_right,
+            };
+            assert!(close(outer.to_degrees(), 55.0), "{eye:?}: {fov:?}");
+            let eye_to_head = system.GetEyeToHeadTransform(eye).m;
+            assert_eq!(
+                [eye_to_head[0][0], eye_to_head[1][1], eye_to_head[2][2]],
+                [1.0; 3]
+            );
+        }
+    }
+
     #[test]
     #[cfg_attr(miri, ignore)]
     fn submit_texture_with_pose() {

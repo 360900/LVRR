@@ -9,7 +9,7 @@ use crate::{
 #[cfg(feature = "monado")]
 use libmonado::BatteryStatus;
 
-use glam::{Mat3, Quat, Vec3};
+use glam::{Mat3, Quat, Vec2, Vec3};
 use log::{debug, info, trace, warn};
 use openvr as vr;
 use openxr as xr;
@@ -32,7 +32,8 @@ fn view_index(eye: vr::EVREye) -> usize {
 #[derive(Copy, Clone)]
 struct ViewDataViewSpace {
     data: ViewData,
-    original_orientations: [Quat; 2],
+    /// The VIEW space orientation of each view, which was removed from the views in every space.
+    canting: [Quat; 2],
 }
 
 impl ViewData {
@@ -130,16 +131,16 @@ impl ViewCache {
 
         // Canted-view handling.
         //
-        // Runtimes for HMDs with canted displays (Pimax etc.) report per-eye
-        // rotations in the VIEW reference space to describe the tilt of each
-        // panel. By default xrizer normalises those away by forcing VIEW-space
-        // views to identity ("parallel views") and multiplying the inverse back
-        // into LOCAL/STAGE views. On canted HMDs that also flattens the FOV,
-        // which is not what the user wants.
+        // Runtimes for HMDs with canted displays (Pimax, Bigscreen Beyond etc.)
+        // report per-eye rotations in the VIEW reference space to describe the
+        // tilt of each panel. By default xrizer normalises those away by forcing
+        // VIEW-space views to identity ("parallel views") and multiplying the
+        // inverse back into LOCAL/STAGE views, since many games assume parallel
+        // views. The FOV is widened to still cover the whole panel.
         //
         // Opt-in via XRIZER_PRESERVE_VIEW_CANTING=1 to preserve the canted
-        // orientations end-to-end (fixes Pimax FOV; may confuse games that
-        // assume parallel views).
+        // orientations end-to-end (avoids rendering the wider FOV; may confuse
+        // games that assume parallel views).
         static PRESERVE_CANTING: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
             std::env::var("XRIZER_PRESERVE_VIEW_CANTING")
                 .ok()
@@ -147,21 +148,22 @@ impl ViewCache {
                 .is_some()
         });
 
-        let original_orientations: [Quat; 2] = if *PRESERVE_CANTING {
+        let canting: [Quat; 2] = if *PRESERVE_CANTING {
             [Quat::IDENTITY, Quat::IDENTITY]
         } else {
             views
                 .iter_mut()
-                .map(
-                    |xr::View {
-                         pose: xr::Posef { orientation: o, .. },
-                         ..
-                     }| {
-                        let ret = Quat::from_xyzw(o.x, o.y, o.z, o.w).inverse();
-                        *o = xr::Quaternionf::IDENTITY;
-                        ret
-                    },
-                )
+                .map(|view| {
+                    let o = &mut view.pose.orientation;
+                    let canting = if flags.contains(xr::ViewStateFlags::ORIENTATION_VALID) {
+                        Quat::from_xyzw(o.x, o.y, o.z, o.w)
+                    } else {
+                        Quat::IDENTITY
+                    };
+                    *o = xr::Quaternionf::IDENTITY;
+                    view.fov = parallel_fov(view.fov, canting);
+                    canting
+                })
                 .collect::<Vec<_>>()
                 .try_into()
                 .unwrap()
@@ -169,7 +171,7 @@ impl ViewCache {
 
         Ok(ViewDataViewSpace {
             data: ViewData { flags, views },
-            original_orientations,
+            canting,
         })
     }
 
@@ -186,18 +188,18 @@ impl ViewCache {
         )?;
         let mut views = stereo_views(views)?;
 
-        for ((view, view_rot), view_space_view) in views
+        for ((view, canting), view_space_view) in views
             .iter_mut()
-            .zip(view_space.original_orientations)
+            .zip(view_space.canting)
             .zip(&view_space.data.views)
         {
-            // The FOV doesn't depend on the space, and was already checked.
+            // The FOV doesn't depend on the space, and was already checked and widened.
             view.fov = view_space_view.fov;
             let rot = &mut view.pose.orientation;
             let quat = Quat::from_xyzw(rot.x, rot.y, rot.z, rot.w);
             // rotate the inverse of the view space view rotation by this space's
             // view orientation to remove the canting from the displays in this space
-            let adjusted_rot = quat * view_rot;
+            let adjusted_rot = quat * canting.inverse();
             *rot = xr::Quaternionf {
                 x: adjusted_rot.x,
                 y: adjusted_rot.y,
@@ -222,6 +224,16 @@ struct Views {
 }
 
 impl Views {
+    /// The rotation removed from each view to make the views parallel, none if the runtime never
+    /// located them.
+    fn canting(&mut self, session: &SessionData, openxr: &RealOpenXrData) -> [Quat; 2] {
+        self.get(session, openxr, xr::ReferenceSpaceType::VIEW);
+        self.frame
+            .view
+            .or(self.last.view)
+            .map_or([Quat::IDENTITY; 2], |view| view.canting)
+    }
+
     fn get(
         &mut self,
         session: &SessionData,
@@ -287,6 +299,38 @@ fn is_valid_fov(fov: &xr::Fovf) -> bool {
         .all(|angle| angle.abs() < std::f32::consts::FRAC_PI_2)
         && fov.angle_left < fov.angle_right
         && fov.angle_down < fov.angle_up
+}
+
+/// Where the direction through `tangents` on the z = -1 plane of a view rotated by `canting`
+/// crosses the z = -1 plane of the unrotated view.
+fn parallel_tangents(canting: Quat, tangents: Vec2) -> Vec2 {
+    let dir = canting * tangents.extend(-1.0);
+    // Directions at or behind the eye's plane only come from extreme FOVs and canting.
+    let depth = (-dir.z).max(0.01);
+    Vec2::new(dir.x, dir.y) / depth
+}
+
+/// The smallest FOV of an unrotated view that covers the FOV of a view rotated by `canting`.
+fn parallel_fov(fov: xr::Fovf, canting: Quat) -> xr::Fovf {
+    if canting == Quat::IDENTITY {
+        return fov;
+    }
+    // A rotated frustum still projects to a quadrilateral spanned by its corners.
+    let corners = [
+        (fov.angle_left, fov.angle_down),
+        (fov.angle_left, fov.angle_up),
+        (fov.angle_right, fov.angle_down),
+        (fov.angle_right, fov.angle_up),
+    ]
+    .map(|(x, y)| parallel_tangents(canting, Vec2::new(x.tan(), y.tan())));
+    let min = corners.into_iter().reduce(Vec2::min).unwrap();
+    let max = corners.into_iter().reduce(Vec2::max).unwrap();
+    xr::Fovf {
+        angle_left: min.x.atan(),
+        angle_right: max.x.atan(),
+        angle_up: max.y.atan(),
+        angle_down: min.y.atan(),
+    }
 }
 
 #[derive(macros::InterfaceImpl)]
@@ -419,6 +463,13 @@ impl System {
     /// failure here.
     pub fn get_views(&self, ty: xr::ReferenceSpaceType) -> ViewData {
         self.located_views(ty).unwrap_or_else(ViewData::fallback)
+    }
+
+    /// The rotation removed from `eye`'s view to make the views parallel.
+    fn view_canting(&self, eye: vr::EVREye) -> Quat {
+        let session = self.openxr.session_data.get();
+        let mut views = self.views.lock().unwrap();
+        views.canting(&session, &self.openxr)[view_index(eye)]
     }
 
     /// Copies an event into an app provided buffer, which may be an older, smaller VREvent_t.
@@ -727,13 +778,16 @@ impl vr::IVRSystem026_Interface for System {
 
         let [mut left, mut right, mut top, mut bottom] = [0.0; 4];
         self.GetProjectionRaw(eye, &mut left, &mut right, &mut top, &mut bottom);
+        let canting = self.view_canting(eye);
 
         // convert from indices + vertices to just vertices
         let vertices: Vec<_> = mask
             .indices
             .into_iter()
             .map(|i| {
+                // The mask is in the canted view, the projection in the parallel one.
                 let v = mask.vertices[i as usize];
+                let v = parallel_tangents(canting, Vec2::new(v.x, v.y));
 
                 // It is unclear to me why this scaling is necessary, but OpenComposite does it and
                 // it seems to get games to use the mask correctly.
@@ -1815,6 +1869,37 @@ mod tests {
         system.reset_views();
         assert_eq!(projection(), [0.0; 4]);
         assert!(system.located_views(xr::ReferenceSpaceType::VIEW).is_some());
+    }
+
+    #[test]
+    fn parallel_fov_covers_canted_view() {
+        let fov = xr::Fovf {
+            angle_left: -std::f32::consts::FRAC_PI_4,
+            angle_right: std::f32::consts::FRAC_PI_4,
+            angle_up: std::f32::consts::FRAC_PI_4,
+            angle_down: -std::f32::consts::FRAC_PI_4,
+        };
+        assert_eq!(parallel_fov(fov, Quat::IDENTITY), fov);
+
+        // Turned 10 degrees to the left.
+        let canting = Quat::from_rotation_y(10f32.to_radians());
+        let wide = parallel_fov(fov, canting);
+        let degrees = [
+            wide.angle_left,
+            wide.angle_right,
+            wide.angle_up,
+            wide.angle_down,
+        ]
+        .map(f32::to_degrees);
+        for (angle, expected) in degrees.into_iter().zip([-55.0, 35.0, 50.9524, -50.9524]) {
+            assert!((angle - expected).abs() < 1e-3, "{degrees:?}");
+        }
+
+        // The canted view's edges end up on the parallel view's edges.
+        let left_edge = parallel_tangents(canting, Vec2::new(-1.0, 0.0));
+        assert!((left_edge.x - wide.angle_left.tan()).abs() < 1e-5);
+        let top_left = parallel_tangents(canting, Vec2::new(-1.0, 1.0));
+        assert!((top_left.y - wide.angle_up.tan()).abs() < 1e-5);
     }
 
     #[test]
