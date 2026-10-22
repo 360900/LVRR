@@ -90,12 +90,13 @@ jobs:
         fetch-depth: 0
     - uses: ./.github/actions/build
     - uses: ./.github/actions/check
-    - name: MSRV check
-      run: |
-        rustup toolchain install 1.88 --profile minimal
-        cargo +1.88 check --workspace --locked
     - name: Upload
       uses: actions/upload-artifact@v6
       with:
         name: xrizer-edge-nightly-release
         path: out
+    # After Upload, as the shipped build doesn't use 1.88.
+    - name: MSRV check
+      run: |
+        rustup toolchain install 1.88 --profile minimal
+        cargo +1.88 check --workspace --all-targets --locked --features static-openxr
