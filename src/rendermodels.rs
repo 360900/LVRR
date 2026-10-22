@@ -714,16 +714,19 @@ impl OwnedRenderModel {
     }
 }
 
+/// Returns the buffer size the string needs, which callers tell apart from 0 for "no such item".
 fn cstr_write_out(cstr: &CStr, out_ptr: *mut std::ffi::c_char, out_len: u32) -> u32 {
     let bytes = unsafe { std::slice::from_raw_parts(cstr.as_ptr(), cstr.count_bytes() + 1) };
-    if out_ptr.is_null() {
+    if out_ptr.is_null() || out_len == 0 {
         return bytes.len() as u32; // querying required buffer length
     }
-    if out_len < bytes.len() as u32 {
-        return 0; // doesn't fit
-    }
     let out = unsafe { std::slice::from_raw_parts_mut(out_ptr, out_len as usize) };
-    out[..bytes.len()].copy_from_slice(bytes);
+    if out.len() < bytes.len() {
+        // doesn't fit, but don't leave the app reading garbage
+        out[0] = 0;
+    } else {
+        out[..bytes.len()].copy_from_slice(bytes);
+    }
 
     bytes.len() as u32
 }
@@ -782,10 +785,11 @@ mod tests {
         let required = cstr_write_out(s, ptr::null_mut(), 0);
         assert_eq!(required, s.to_bytes_with_nul().len() as u32);
 
-        // pointer, but buffer too small → no deref, return 0
-        let mut small = vec![0 as std::ffi::c_char; (required as usize).saturating_sub(1)];
+        // pointer, but buffer too small → empty string, return required size
+        let mut small = vec![1 as std::ffi::c_char; (required as usize).saturating_sub(1)];
         let wrote = cstr_write_out(s, small.as_mut_ptr(), small.len() as u32);
-        assert_eq!(wrote, 0);
+        assert_eq!(wrote, required);
+        assert_eq!(small[0], 0);
 
         // pointer with enhough buf size → deref, return size
         let mut buf = vec![0 as std::ffi::c_char; required as usize];
