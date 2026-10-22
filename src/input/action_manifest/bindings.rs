@@ -7,8 +7,9 @@ use crate::input::profiles::{Component, DynInputPath, paths};
 use crate::input::{ActionData, BoundPoseType};
 use crate::{
     input::custom_bindings::{
-        BoolBindingType, ChordData, DoubleTapData, DpadData, DpadDirection, GrabBindingData,
+        self, BoolBindingType, ChordData, DoubleTapData, DpadData, DpadDirection, GrabBindingData,
         ThresholdBindingData, TimedPress, TimedPressData, ToggleData, Vector2Inversion,
+        Vector2Transform,
     },
     openxr_data::Hand,
 };
@@ -544,10 +545,9 @@ struct ScrollInput {
 
 #[derive(Deserialize)]
 struct ScrollParameters {
-    #[allow(unused)]
+    /// "discrete" (default) or "smooth"
     scroll_mode: Option<String>,
-    #[allow(unused)]
-    smooth_scroll_multiplier: Option<String>, // float
+    smooth_scroll_multiplier: Option<StringOrTyped<f32>>,
 }
 
 #[derive(Deserialize)]
@@ -561,12 +561,25 @@ struct Vector2Input {
 struct Vector2Parameters {
     #[serde(default)]
     invert: Vector2Inversion,
-    #[allow(unused)]
     deadzone_pct: Option<StringOrTyped<f32>>,
-    #[allow(unused)]
     maxzone_pct: Option<StringOrTyped<f32>>,
     #[allow(unused)]
     sticky_click: Option<StringOrTyped<bool>>,
+}
+
+impl Vector2Parameters {
+    fn transform(&self) -> Vector2Transform {
+        let fraction = |pct: Option<StringOrTyped<f32>>, default: f32| {
+            pct.map(|pct| *pct / 100.0)
+                .filter(|f| f.is_finite())
+                .map_or(default, |f| f.clamp(0.0, 1.0))
+        };
+        Vector2Transform::Position {
+            invert: self.invert,
+            deadzone: fraction(self.deadzone_pct, 0.0),
+            maxzone: fraction(self.maxzone_pct, 1.0),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1134,18 +1147,41 @@ pub fn handle_sources(
             }
             ActionBinding::Scroll(data) => {
                 let Some(ValidActionBindingData {
-                    inputs,
+                    inputs: ScrollInput { scroll },
                     path,
-                    parameters: _,
+                    parameters,
                 }) = data.validate_path()
                 else {
                     continue;
                 };
-                let ScrollInput { scroll } = inputs;
-                // TODO: custom scrolling for trackpads
-                let _ = scroll
-                    .try_bind_with_component(path, context, validate_path)
-                    .inspect_err(InvalidActionPath::warn);
+                let Some(path) = validate_path(path) else {
+                    InvalidActionPath(path, &scroll.output.path).warn();
+                    continue;
+                };
+                let input = match path.subpath {
+                    paths::DynSubpath::Trackpad => custom_bindings::ScrollInput::Trackpad,
+                    _ => custom_bindings::ScrollInput::Joystick,
+                };
+                let touch = (input == custom_bindings::ScrollInput::Trackpad)
+                    .then(|| validate_path(path.with_component(DynComponent::Touch)))
+                    .flatten()
+                    .filter(|touch| touch.component == Some(DynComponent::Touch))
+                    .and_then(|touch| context.input_action(action_set_name, action_set, touch));
+                let smooth = parameters
+                    .and_then(|p| p.scroll_mode.as_deref())
+                    .is_some_and(|mode| mode == "smooth");
+                let multiplier = parameters
+                    .and_then(|p| p.smooth_scroll_multiplier.as_deref().copied())
+                    .unwrap_or(1.0);
+                context.add_vector2_binding(
+                    &scroll.output,
+                    path,
+                    Vector2Transform::Scroll(custom_bindings::ScrollData::new(
+                        input, smooth, multiplier, touch,
+                    )),
+                    action_set_name,
+                    action_set,
+                );
             }
             ActionBinding::Trackpad(data) | ActionBinding::Joystick(data) => {
                 let Some(ValidActionBindingData {
@@ -1172,19 +1208,24 @@ pub fn handle_sources(
                 }
 
                 if let Some(position) = position {
-                    let invert = parameters.map(|p| p.invert).unwrap_or_default();
-                    if invert == Vector2Inversion::None {
-                        let _ = position.try_bind_with_component(path, context, validate_path);
-                    } else if let Some(path) = validate_path(path) {
-                        context.add_vector2_binding(
-                            &position.output,
-                            path,
-                            invert,
-                            action_set_name,
-                            action_set,
-                        );
-                    } else {
-                        InvalidActionPath(path, &position.output.path).warn();
+                    let transform = parameters.map(Vector2Parameters::transform);
+                    match transform.filter(|t| !t.is_identity()) {
+                        None => {
+                            let _ = position.try_bind_with_component(path, context, validate_path);
+                        }
+                        Some(transform) => {
+                            if let Some(path) = validate_path(path) {
+                                context.add_vector2_binding(
+                                    &position.output,
+                                    path,
+                                    transform,
+                                    action_set_name,
+                                    action_set,
+                                );
+                            } else {
+                                InvalidActionPath(path, &position.output.path).warn();
+                            }
+                        }
                     }
                 }
             }

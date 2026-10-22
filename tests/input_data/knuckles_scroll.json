@@ -1,0 +1,42 @@
+{
+	"bindings": {
+		"/actions/main": {
+			"sources": [
+				{
+					"mode": "joystick",
+					"path": "/user/hand/left/input/thumbstick",
+					"inputs": {
+						"position": {
+							"output": "/actions/main/in/move"
+						}
+					},
+					"parameters": {
+						"deadzone_pct": "20",
+						"maxzone_pct": "90.0"
+					}
+				},
+				{
+					"mode": "scroll",
+					"path": "/user/hand/left/input/trackpad",
+					"inputs": {
+						"scroll": {
+							"output": "/actions/main/in/scroll_pad"
+						}
+					}
+				},
+				{
+					"mode": "scroll",
+					"path": "/user/hand/right/input/thumbstick",
+					"inputs": {
+						"scroll": {
+							"output": "/actions/main/in/scroll_stick"
+						}
+					},
+					"parameters": {
+						"scroll_mode": "discrete"
+					}
+				}
+			]
+		}
+	}
+}

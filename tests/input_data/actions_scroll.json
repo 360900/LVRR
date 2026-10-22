@@ -1,0 +1,28 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/main",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/main/in/move",
+			"type": "vector2"
+		},
+		{
+			"name": "/actions/main/in/scroll_pad",
+			"type": "vector2"
+		},
+		{
+			"name": "/actions/main/in/scroll_stick",
+			"type": "vector2"
+		}
+	],
+	"default_bindings": [
+		{
+			"controller_type": "knuckles",
+			"binding_url": "knuckles_scroll.json"
+		}
+	]
+}

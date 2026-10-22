@@ -1,7 +1,7 @@
 use super::actions::{LoadedActionDataMap, XrNames};
 use super::bindings::{ActionPath, DpadParameters, DpadSubMode};
 use crate::input::custom_bindings::{
-    BoolBindingData, BoolBindingType, DpadActions, Vector2BindingData, Vector2Inversion,
+    BoolBindingData, BoolBindingType, DpadActions, Vector2BindingData, Vector2Transform,
 };
 use crate::input::profiles::{DynInputPath, paths};
 use crate::input::skeletal::SkeletalInputActionData;
@@ -334,7 +334,7 @@ impl BindingsProfileLoadContext<'_> {
         &mut self,
         output: &ActionPath,
         path: DynInputPath,
-        invert: Vector2Inversion,
+        transform: Vector2Transform,
         action_set_name: &str,
         action_set: &xr::ActionSet,
     ) {
@@ -367,7 +367,7 @@ impl BindingsProfileLoadContext<'_> {
             action,
             profile: self.interaction_profile,
             hand,
-            invert,
+            transform,
         });
     }
 

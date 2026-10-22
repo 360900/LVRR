@@ -403,9 +403,13 @@ mod tests {
             ],
         );
 
+        // Scrolling reads the stick through an action of its own.
+        let scrollact =
+            f.get_action::<xr::Vector2f>(f.get_action_handle(c"/actions/set1/in/scrollact"));
+        assert!(fakexr::check_no_suggested_bindings(scrollact, p));
         f.verify_bindings::<xr::Vector2f>(
             path,
-            c"/actions/set1/in/scrollact",
+            c"/user/hand/left/input/thumbstick-/actions/set1",
             ["/user/hand/left/input/thumbstick".into()],
         );
 

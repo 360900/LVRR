@@ -59,7 +59,227 @@ pub(super) struct Vector2BindingData {
     pub action: xr::Action<xr::Vector2f>,
     pub profile: xr::Path,
     pub hand: xr::Path,
-    pub invert: Vector2Inversion,
+    pub transform: Vector2Transform,
+}
+
+/// How a 2D input becomes an OpenVR vector2 value.
+pub(super) enum Vector2Transform {
+    Position {
+        invert: Vector2Inversion,
+        /// Fractions of the full deflection
+        deadzone: f32,
+        maxzone: f32,
+    },
+    Scroll(ScrollData),
+}
+
+impl Vector2Transform {
+    /// Whether a position binding is used as is.
+    pub fn is_identity(&self) -> bool {
+        matches!(
+            self,
+            Self::Position {
+                invert: Vector2Inversion::None,
+                deadzone: 0.0,
+                maxzone: 1.0,
+            }
+        )
+    }
+
+    fn apply(
+        &self,
+        mut value: xr::Vector2f,
+        session: &xr::Session<xr::AnyGraphics>,
+        hand: xr::Path,
+    ) -> xr::Vector2f {
+        match self {
+            Self::Position {
+                invert,
+                deadzone,
+                maxzone,
+            } => {
+                invert.apply(&mut value);
+                apply_deadzone(&mut value, *deadzone, *maxzone);
+                value
+            }
+            Self::Scroll(scroll) => scroll.apply(value, session, hand),
+        }
+    }
+}
+
+/// Rescales the length of `value` so that `deadzone` maps to 0 and `maxzone` to 1.
+fn apply_deadzone(value: &mut xr::Vector2f, deadzone: f32, maxzone: f32) {
+    let len = value.x.hypot(value.y);
+    if len == 0.0 || (deadzone == 0.0 && maxzone == 1.0) {
+        return;
+    }
+    let scaled = if maxzone <= deadzone {
+        if len >= deadzone { 1.0 } else { 0.0 }
+    } else {
+        ((len - deadzone) / (maxzone - deadzone)).clamp(0.0, 1.0)
+    };
+    value.x *= scaled / len;
+    value.y *= scaled / len;
+}
+
+#[cfg(test)]
+#[test]
+fn deadzone_remap() {
+    let remap = |y, deadzone, maxzone| {
+        let mut value = xr::Vector2f { x: 0.0, y };
+        apply_deadzone(&mut value, deadzone, maxzone);
+        // Round off float noise.
+        (value.y * 1000.0).round() / 1000.0
+    };
+    assert_eq!(remap(0.5, 0.0, 1.0), 0.5);
+    assert_eq!(remap(0.1, 0.2, 1.0), 0.0);
+    assert_eq!(remap(0.6, 0.2, 1.0), 0.5);
+    assert_eq!(remap(-0.6, 0.2, 1.0), -0.5);
+    assert_eq!(remap(0.95, 0.2, 0.9), 1.0);
+    // No division by zero when the zones overlap.
+    assert_eq!(remap(0.4, 0.5, 0.5), 0.0);
+    assert_eq!(remap(0.6, 0.5, 0.5), 1.0);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ScrollInput {
+    Trackpad,
+    Joystick,
+}
+
+#[derive(Default)]
+struct ScrollState {
+    /// Trackpad position at the last sync, while touched.
+    last_position: Option<xr::Vector2f>,
+    /// Trackpad movement not yet turned into a tick.
+    accumulated: xr::Vector2f,
+    last_sync: Option<Instant>,
+    /// Joystick direction per axis, and when it next repeats.
+    joystick: [(i8, Option<Instant>); 2],
+}
+
+/// Scroll mode: reports scroll amounts rather than the position. Discrete scrolling reports
+/// ticks of ±1, smooth scrolling fractional amounts.
+pub(super) struct ScrollData {
+    input: ScrollInput,
+    smooth: bool,
+    multiplier: f32,
+    /// The trackpad's touch, if it has one.
+    touch: Option<xr::Action<f32>>,
+    state: Mutex<ScrollState>,
+}
+
+impl ScrollData {
+    /// Trackpad travel (of 2 across the pad) per discrete tick.
+    const TRACKPAD_TICK: f32 = 0.2;
+    const JOYSTICK_PRESS: f32 = 0.5;
+    const JOYSTICK_RELEASE: f32 = 0.4;
+    const JOYSTICK_REPEAT_DELAY: Duration = Duration::from_millis(500);
+    const JOYSTICK_REPEAT: Duration = Duration::from_millis(125);
+    /// Smooth joystick scrolling at full deflection, in ticks per second.
+    const JOYSTICK_SMOOTH_RATE: f32 = 8.0;
+
+    pub fn new(
+        input: ScrollInput,
+        smooth: bool,
+        multiplier: f32,
+        touch: Option<xr::Action<f32>>,
+    ) -> Self {
+        Self {
+            input,
+            smooth,
+            multiplier,
+            touch,
+            state: Default::default(),
+        }
+    }
+
+    fn apply(
+        &self,
+        position: xr::Vector2f,
+        session: &xr::Session<xr::AnyGraphics>,
+        hand: xr::Path,
+    ) -> xr::Vector2f {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap();
+        let dt = state
+            .last_sync
+            .replace(now)
+            .map_or(0.0, |last| (now - last).as_secs_f32().min(0.1));
+
+        match self.input {
+            ScrollInput::Trackpad => {
+                let touched = match self.touch.as_ref().map(|t| t.state(session, hand)) {
+                    Some(Ok(touch)) if touch.is_active => touch.current_state > 0.5,
+                    _ => position.x != 0.0 || position.y != 0.0,
+                };
+                if !touched {
+                    state.last_position = None;
+                    state.accumulated = Default::default();
+                    return Default::default();
+                }
+                // Touching down is not a movement.
+                let Some(last) = state.last_position.replace(position) else {
+                    return Default::default();
+                };
+                let delta = xr::Vector2f {
+                    x: position.x - last.x,
+                    y: position.y - last.y,
+                };
+                if self.smooth {
+                    return xr::Vector2f {
+                        x: delta.x * self.multiplier,
+                        y: delta.y * self.multiplier,
+                    };
+                }
+                let tick = |accumulated: &mut f32, delta: f32| {
+                    *accumulated += delta;
+                    let ticks = (*accumulated / Self::TRACKPAD_TICK).trunc();
+                    *accumulated -= ticks * Self::TRACKPAD_TICK;
+                    ticks
+                };
+                xr::Vector2f {
+                    x: tick(&mut state.accumulated.x, delta.x),
+                    y: tick(&mut state.accumulated.y, delta.y),
+                }
+            }
+            ScrollInput::Joystick if self.smooth => xr::Vector2f {
+                x: position.x * self.multiplier * Self::JOYSTICK_SMOOTH_RATE * dt,
+                y: position.y * self.multiplier * Self::JOYSTICK_SMOOTH_RATE * dt,
+            },
+            ScrollInput::Joystick => {
+                let mut tick = |axis: usize, value: f32| {
+                    let (direction, next_repeat) = &mut state.joystick[axis];
+                    let threshold = if *direction == 0 {
+                        Self::JOYSTICK_PRESS
+                    } else {
+                        Self::JOYSTICK_RELEASE
+                    };
+                    let new_direction = if value.abs() >= threshold {
+                        value.signum() as i8
+                    } else {
+                        0
+                    };
+                    if new_direction != *direction {
+                        *direction = new_direction;
+                        *next_repeat = Some(now + Self::JOYSTICK_REPEAT_DELAY);
+                        return new_direction as f32;
+                    }
+                    match next_repeat {
+                        Some(at) if *direction != 0 && now >= *at => {
+                            *at += Self::JOYSTICK_REPEAT;
+                            *direction as f32
+                        }
+                        _ => 0.0,
+                    }
+                };
+                xr::Vector2f {
+                    x: tick(0, position.x),
+                    y: tick(1, position.y),
+                }
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -112,7 +332,7 @@ impl Vector2ActionData {
                     .action
                     .state(session, hand)
                     .unwrap_or_else(inactive_state);
-                binding.invert.apply(&mut state.current_state);
+                state.current_state = binding.transform.apply(state.current_state, session, hand);
                 consider(state);
             }
         }
@@ -819,6 +1039,7 @@ mod tests {
     use fakexr::ActionState;
     use fakexr::UserPath::*;
     use openvr as vr;
+    use openvr::IVRInput010_Interface;
     use slotmap::Key;
     use std::ffi::CStr;
     use std::time::Duration;
@@ -2071,6 +2292,98 @@ mod tests {
             let s = f.get_bool_state(handle).unwrap();
             assert!(!s.bActive);
         }
+    }
+
+    #[test]
+    fn scroll_and_deadzone() {
+        let mut f = Fixture::new();
+        let set = vr::VRActiveActionSet_t {
+            ulActionSet: f.get_action_set_handle(c"/actions/main"),
+            ..Default::default()
+        };
+        let [movement, scroll_pad, scroll_stick] = [
+            c"/actions/main/in/move",
+            c"/actions/main/in/scroll_pad",
+            c"/actions/main/in/scroll_stick",
+        ]
+        .map(|name| f.get_action_handle(name));
+        let [left, right] =
+            [c"/user/hand/left", c"/user/hand/right"].map(|hand| f.get_input_source_handle(hand));
+        f.load_actions(c"actions_scroll.json");
+        f.set_interaction_profile::<Knuckles>(LeftHand);
+        f.set_interaction_profile::<Knuckles>(RightHand);
+
+        let vector2 = |path: &CStr| f.get_action::<xr::Vector2f>(f.get_action_handle(path));
+        let left_stick = vector2(c"/user/hand/left/input/thumbstick-/actions/main");
+        let right_stick = vector2(c"/user/hand/right/input/thumbstick-/actions/main");
+        let pad = vector2(c"/user/hand/left/input/trackpad-/actions/main");
+        let pad_touch = f.get_action::<f32>(
+            f.get_action_handle(c"/user/hand/left/input/trackpad/touch-/actions/main"),
+        );
+        let analog = |f: &Fixture, handle, hand| {
+            let mut data = vr::InputAnalogActionData_t::default();
+            assert_eq!(
+                f.input.GetAnalogActionData(
+                    handle,
+                    &mut data,
+                    std::mem::size_of_val(&data) as u32,
+                    hand,
+                ),
+                vr::EVRInputError::None
+            );
+            assert!(data.bActive);
+            (
+                (data.x * 1000.0).round() / 1000.0,
+                (data.y * 1000.0).round() / 1000.0,
+            )
+        };
+        let set_state = |action, hand, x, y| {
+            fakexr::set_action_state(action, ActionState::Vector2(x, y), hand);
+        };
+
+        // Deadzone and maxzone of the stick.
+        set_state(right_stick, RightHand, 0.0, 0.0);
+        fakexr::set_action_state(pad_touch, ActionState::Float(0.0), LeftHand);
+        set_state(pad, LeftHand, 0.0, 0.0);
+        for (y, expected) in [(0.1, 0.0), (0.55, 0.5), (1.0, 1.0)] {
+            set_state(left_stick, LeftHand, 0.0, y);
+            f.sync(set);
+            assert_eq!(analog(&f, movement, left), (0.0, expected), "{y}");
+        }
+
+        // A pushed stick scrolls one tick, then repeats only after a while.
+        set_state(right_stick, RightHand, 0.0, 0.8);
+        f.sync(set);
+        assert_eq!(analog(&f, scroll_stick, right), (0.0, 1.0));
+        f.sync(set);
+        assert_eq!(analog(&f, scroll_stick, right), (0.0, 0.0));
+        set_state(right_stick, RightHand, 0.0, 0.0);
+        f.sync(set);
+        assert_eq!(analog(&f, scroll_stick, right), (0.0, 0.0));
+        set_state(right_stick, RightHand, 0.0, -0.8);
+        f.sync(set);
+        assert_eq!(analog(&f, scroll_stick, right), (0.0, -1.0));
+
+        // A resting thumb doesn't scroll, moving it does.
+        fakexr::set_action_state(pad_touch, ActionState::Float(1.0), LeftHand);
+        set_state(pad, LeftHand, 0.0, 0.5);
+        f.sync(set);
+        assert_eq!(analog(&f, scroll_pad, left), (0.0, 0.0));
+        f.sync(set);
+        assert_eq!(analog(&f, scroll_pad, left), (0.0, 0.0));
+        set_state(pad, LeftHand, 0.0, 0.75);
+        f.sync(set);
+        assert_eq!(analog(&f, scroll_pad, left), (0.0, 1.0));
+        set_state(pad, LeftHand, 0.0, 0.8);
+        f.sync(set);
+        assert_eq!(analog(&f, scroll_pad, left), (0.0, 0.0));
+        // Lifting the thumb and touching elsewhere isn't a movement.
+        fakexr::set_action_state(pad_touch, ActionState::Float(0.0), LeftHand);
+        f.sync(set);
+        fakexr::set_action_state(pad_touch, ActionState::Float(1.0), LeftHand);
+        set_state(pad, LeftHand, 0.0, -0.9);
+        f.sync(set);
+        assert_eq!(analog(&f, scroll_pad, left), (0.0, 0.0));
     }
 
     #[test]
