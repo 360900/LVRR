@@ -1,9 +1,9 @@
 #[path = "skeletal_generated.rs"]
 mod generated;
 
-use super::{ActionKey, Input, ManifestLoadedActions, inactive_state};
+use super::{ActionKey, Input, ManifestLoadedActions, SpaceReadGuard, inactive_state};
 use crate::input::TrackedDeviceType;
-use crate::input::devices::HandSkeleton;
+use crate::input::devices::{HandSkeleton, TrackedDevice};
 use crate::openxr_data::{self, Hand, SessionData};
 use HandSkeletonBone::*;
 use glam::{Affine3A, Quat, Vec3};
@@ -49,13 +49,6 @@ impl<C: openxr_data::Compositor> Input<C> {
         let mut transforms: [vr::VRBoneTransform_t; Count as usize] = Default::default();
 
         let controller = devices.get_controller(hand)?;
-        let TrackedDeviceType::Controller {
-            pose_is_synthesised,
-            ..
-        } = controller.get_type()
-        else {
-            unreachable!()
-        };
 
         let grip: xr::Posef = controller
             .get_pose(
@@ -67,24 +60,14 @@ impl<C: openxr_data::Compositor> Input<C> {
             .unwrap_or_default()
             .mDeviceToAbsoluteTracking
             .into();
-        let is_synthesised = pose_is_synthesised.load(Ordering::Relaxed);
-
-        let pose_data = &session_data.input_data.pose_data;
-
-        let raw = match hand {
-            Hand::Left => &pose_data.left_space,
-            Hand::Right => &pose_data.right_space,
-        }
-        .try_get_or_init_raw(&controller.profile_data, session_data, pose_data);
-
-        let base = if is_synthesised {
-            session_data.tracking_space()
-        } else {
-            let Some(ref raw) = raw else {
+        let (raw, is_synthesised) = joint_space(session_data, controller, hand);
+        let base: &xr::Space = match &raw {
+            Some(raw) => raw,
+            None if is_synthesised => session_data.tracking_space(),
+            None => {
                 drop(bone_cache);
                 return Some(self.get_estimated_bones(session_data, space, hand, range));
-            };
-            raw
+            }
         };
 
         let Some(HandSkeleton { joints, .. }) = controller.get_hand_skeleton(&self.openxr, base)
@@ -266,7 +249,9 @@ impl<C: openxr_data::Compositor> Input<C> {
             return level;
         }
 
-        match controller.get_hand_skeleton(&self.openxr, session_data.tracking_space()) {
+        let (raw, _) = joint_space(session_data, controller, hand);
+        let base = raw.as_deref().unwrap_or(session_data.tracking_space());
+        match controller.get_hand_skeleton(&self.openxr, base) {
             None => vr::EVRSkeletalTrackingLevel::Estimated,
             Some(HandSkeleton {
                 data_source: xr::HandTrackingDataSourceEXT::UNOBSTRUCTED,
@@ -291,10 +276,11 @@ impl<C: openxr_data::Compositor> Input<C> {
             return;
         };
 
-        // The curls only depend on the joints relative to each other, so locate them in the
-        // tracking space, which works whether or not the hand has a controller pose.
-        let Some(HandSkeleton { joints, .. }) =
-            controller.get_hand_skeleton(&self.openxr, session_data.tracking_space())
+        // The curls only depend on the joints relative to each other, so the tracking space
+        // works for a hand without a grip space.
+        let (raw, _) = joint_space(session_data, controller, hand);
+        let base = raw.as_deref().unwrap_or(session_data.tracking_space());
+        let Some(HandSkeleton { joints, .. }) = controller.get_hand_skeleton(&self.openxr, base)
         else {
             self.get_estimated_bone_summary(session_data, summary_type, summary_data, hand);
             return;
@@ -568,6 +554,33 @@ impl<C: openxr_data::Compositor> Input<C> {
         *out_transforms = skeleton;
         Ok(())
     }
+}
+
+/// The space a controller's hand joints are located in: its raw grip space, or the tracking space
+/// (`None`) if it has none or its pose is synthesised from the joints (the returned flag). Bone
+/// data, the summary and the tracking level all use it, so a hand is located once per frame.
+fn joint_space<'a>(
+    session_data: &'a SessionData,
+    controller: &TrackedDevice,
+    hand: Hand,
+) -> (Option<SpaceReadGuard<'a>>, bool) {
+    let TrackedDeviceType::Controller {
+        pose_is_synthesised,
+        ..
+    } = controller.get_type()
+    else {
+        return (None, false);
+    };
+    if pose_is_synthesised.load(Ordering::Relaxed) {
+        return (None, true);
+    }
+    let pose_data = &session_data.input_data.pose_data;
+    let raw = match hand {
+        Hand::Left => &pose_data.left_space,
+        Hand::Right => &pose_data.right_space,
+    }
+    .try_get_or_init_raw(&controller.profile_data, session_data, pose_data);
+    (raw, false)
 }
 
 /// trait alias
