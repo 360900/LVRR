@@ -1997,7 +1997,7 @@ mod tests {
             std::mem::size_of_val(&event) as u32,
             std::ptr::null_mut(),
         ) {
-            if event.eventType == vr::EVREventType::Quit as u32 {
+            if event.eventType == vr::EVREventType::Quit.0 {
                 quits.push(unsafe { event.data.process.bConnectionLost });
             }
         }

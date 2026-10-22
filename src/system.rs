@@ -1728,7 +1728,7 @@ mod tests {
                 std::mem::size_of_val(&event) as u32,
                 std::ptr::null_mut(),
             ));
-            assert_eq!(event.eventType, vr::EVREventType::Quit as u32);
+            assert_eq!(event.eventType, vr::EVREventType::Quit.0);
         }
     }
 
