@@ -386,27 +386,15 @@ impl GraphicsBackend for VulkanData {
         if extent.width == 0 || extent.height == 0 {
             return xr_extent;
         }
-        let multisampled = texture.m_nSampleCount > 1;
-        if multisampled {
-            crate::warn_once!(
-                "Multisampled overlay textures are unsupported, clearing the overlay"
-            );
-        }
-
         let data = self.real_data.as_mut().unwrap();
         let buf = data.bufs[image_index];
         // The image's resources can only be replaced once its previous copy has finished.
         if !wait_for_fences(&self.device, &data.fences[image_index..=image_index]) {
             return xr_extent;
         }
-        let pipeline_data = data.overlay_pipeline.get_or_insert_with(|| {
-            PipelineData::new(
-                &self.device,
-                data.format,
-                texture.m_nSampleCount,
-                &data.images,
-            )
-        });
+        let pipeline_data = data
+            .overlay_pipeline
+            .get_or_insert_with(|| PipelineData::new(&self.device, data.format, &data.images));
 
         let game_image = vk::Image::from_raw(texture.m_nImage);
         let game_range = vk::ImageSubresourceRange {
@@ -459,11 +447,13 @@ impl GraphicsBackend for VulkanData {
             );
         }
 
+        let pipeline = if texture.m_nSampleCount > 1 {
+            pipeline_data.multisampled_pipeline
+        } else {
+            pipeline_data.pipeline
+        };
         let PipelineData {
-            pipeline,
-            layout,
-            renderpass,
-            ..
+            layout, renderpass, ..
         } = *pipeline_data;
         let OverlaySlot {
             set, framebuffer, ..
@@ -496,12 +486,6 @@ impl GraphicsBackend for VulkanData {
 
         self.record_commands(image_index, || unsafe {
             let device = &self.device;
-            if multisampled {
-                // The render pass clears the overlay.
-                device.cmd_begin_render_pass(buf, &render_pass_info, vk::SubpassContents::INLINE);
-                device.cmd_end_render_pass(buf);
-                return;
-            }
             device.cmd_pipeline_barrier(
                 buf,
                 vk::PipelineStageFlags::ALL_COMMANDS,
@@ -736,6 +720,8 @@ const DECODE_SRGB_OFFSET: u32 = std::mem::size_of::<[f32; 4]>() as u32;
 
 struct PipelineData {
     pipeline: vk::Pipeline,
+    /// Averages the samples of multisampled textures, which can't be sampled normally.
+    multisampled_pipeline: vk::Pipeline,
     layout: vk::PipelineLayout,
     renderpass: vk::RenderPass,
     set_layout: vk::DescriptorSetLayout,
@@ -745,26 +731,10 @@ struct PipelineData {
 }
 
 impl PipelineData {
-    fn new(
-        device: &ash::Device,
-        target_format: vk::Format,
-        sample_count: u32,
-        images: &[vk::Image],
-    ) -> Self {
-        let samples = match sample_count {
-            0 | 1 => vk::SampleCountFlags::TYPE_1,
-            2 => vk::SampleCountFlags::TYPE_2,
-            4 => vk::SampleCountFlags::TYPE_4,
-            8 => vk::SampleCountFlags::TYPE_8,
-            16 => vk::SampleCountFlags::TYPE_16,
-            32 => vk::SampleCountFlags::TYPE_32,
-            64 => vk::SampleCountFlags::TYPE_64,
-            other => {
-                warn!("unexpected sample count {other} for pipeline - using 1");
-                vk::SampleCountFlags::TYPE_1
-            }
-        };
-        // The texture is only sampled, so the swapchain image is the only attachment.
+    fn new(device: &ash::Device, target_format: vk::Format, images: &[vk::Image]) -> Self {
+        // The texture is only sampled, so the swapchain image is the only attachment. Overlay
+        // swapchains are always single sampled.
+        let samples = vk::SampleCountFlags::TYPE_1;
         let attachment = vk::AttachmentDescription {
             format: target_format,
             samples,
@@ -823,6 +793,10 @@ impl PipelineData {
         let (_frag_module, frag_stage) = load_module(
             vk::ShaderStageFlags::FRAGMENT,
             &include_bytes!(concat!(env!("OUT_DIR"), "/frag_overlay.spv"))[..],
+        );
+        let (_frag_ms_module, frag_ms_stage) = load_module(
+            vk::ShaderStageFlags::FRAGMENT,
+            &include_bytes!(concat!(env!("OUT_DIR"), "/frag_overlay_ms.spv"))[..],
         );
 
         let binding = vk::DescriptorSetLayoutBinding::default()
@@ -888,6 +862,7 @@ impl PipelineData {
         };
 
         let stages = [vert_stage, frag_stage];
+        let ms_stages = [vert_stage, frag_ms_stage];
         let input_state = Default::default();
         let assembly_state = vk::PipelineInputAssemblyStateCreateInfo {
             topology: vk::PrimitiveTopology::TRIANGLE_STRIP,
@@ -931,14 +906,14 @@ impl PipelineData {
             .base_pipeline_handle(vk::Pipeline::null())
             .base_pipeline_index(-1);
 
-        let pipeline = unsafe {
+        let pipelines = unsafe {
             device
                 .create_graphics_pipelines(
                     vk::PipelineCache::null(),
-                    std::slice::from_ref(&pipeline_info),
+                    &[pipeline_info, pipeline_info.stages(&ms_stages)],
                     None,
                 )
-                .unwrap()[0]
+                .unwrap()
         };
 
         let slots = images
@@ -980,7 +955,8 @@ impl PipelineData {
         };
 
         Self {
-            pipeline,
+            pipeline: pipelines[0],
+            multisampled_pipeline: pipelines[1],
             layout: pipeline_layout,
             renderpass,
             set_layout,
@@ -998,6 +974,7 @@ impl PipelineData {
                 device.destroy_image_view(slot.target, None);
             }
             device.destroy_pipeline(self.pipeline, None);
+            device.destroy_pipeline(self.multisampled_pipeline, None);
             device.destroy_pipeline_layout(self.layout, None);
             device.destroy_render_pass(self.renderpass, None);
             device.destroy_descriptor_pool(self.pool, None);

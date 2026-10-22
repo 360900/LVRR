@@ -863,6 +863,8 @@ impl Overlay {
             // OpenComposite creates overlay swapchains with arraySize=1; some runtimes (e.g. Monado)
             // do not render quad layers correctly when a multi-array swapchain is used.
             info.array_size = 1;
+            // Runtimes may not support multisampled swapchains, and copies resolve the texture.
+            info.sample_count = 1;
             // Degenerate bounds or a texture without storage.
             if !is_valid_swapchain_info(&info) {
                 debug!(
@@ -3231,6 +3233,28 @@ mod tests {
         assert_eq!(xr.session_data.get().session.as_raw(), session);
         drop(man);
         drop(xr);
+    }
+
+    #[test]
+    fn overlay_swapchain_is_single_sampled() {
+        use crate::compositor::FakeGraphicsData;
+
+        let f = RealSessionFixture::new();
+        let handle = create(&f.man, c"key", c"name");
+        FakeGraphicsData::set_sample_count(4);
+        let result = f.man.SetOverlayTexture(handle, &f.texture());
+        FakeGraphicsData::set_sample_count(1);
+        assert_eq!(result, vr::EVROverlayError::None);
+
+        let data = f.xr.session_data.get();
+        let swapchains = data.overlay_data.swapchains.lock().unwrap();
+        let swapchains: &SwapchainMap<<FakeGraphicsData as GraphicsBackend>::Api> = swapchains
+            .as_ref()
+            .unwrap()
+            .try_into()
+            .unwrap_or_else(|e| panic!("{e}"));
+        let key = OverlayKey::from(KeyData::from_ffi(handle));
+        assert_eq!(swapchains[key].info.sample_count, 1);
     }
 
     #[test]

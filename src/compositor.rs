@@ -1949,6 +1949,11 @@ mod tests {
             OVERLAY_COLOR_SPACE.get()
         }
 
+        /// Sets the sample count of the textures on this thread.
+        pub fn set_sample_count(count: u32) {
+            SWAPCHAIN_SAMPLE_COUNT.set(count);
+        }
+
         pub fn texture(data: &Arc<VulkanData>) -> vr::Texture_t {
             vr::Texture_t {
                 eType: vr::ETextureType::Reserved,

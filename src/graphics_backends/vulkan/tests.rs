@@ -30,6 +30,7 @@ struct Gpu {
     scissors: Vec<vk::Rect2D>,
     descriptor_layouts: Vec<vk::ImageLayout>,
     pipeline_samples: Vec<vk::SampleCountFlags>,
+    bound_pipelines: Vec<vk::Pipeline>,
     push_constants: Vec<(vk::ShaderStageFlags, u32, Vec<u8>)>,
     draws: usize,
     /// Pending work never finishes, so waits for it time out.
@@ -383,7 +384,10 @@ unsafe extern "system" fn vkCmdBindPipeline(
     _: vk::PipelineBindPoint,
     pipeline: vk::Pipeline,
 ) {
-    gpu(|gpu| gpu.record(buf, pipeline));
+    gpu(|gpu| {
+        gpu.record(buf, pipeline);
+        gpu.bound_pipelines.push(pipeline);
+    });
 }
 
 unsafe extern "system" fn vkCmdSetViewport(
@@ -734,7 +738,6 @@ fn overlay_copy_draws_bounds_at_origin() {
             gpu.descriptor_layouts,
             [vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL]
         );
-        assert_eq!(gpu.pipeline_samples, [vk::SampleCountFlags::TYPE_1]);
         assert_eq!(gpu.draws, 1);
         let layouts: Vec<_> = gpu
             .barriers
@@ -776,18 +779,23 @@ fn overlay_copies_keep_resources_until_finished() {
 }
 
 #[test]
-fn multisampled_overlay_is_cleared() {
+fn multisampled_overlay_gets_its_own_pipeline() {
     let mut vk = fake_vulkan();
     store_images(&mut vk, 2);
-    let texture = vr::VRVulkanTextureData_t {
+    let multisampled = vr::VRVulkanTextureData_t {
         m_nSampleCount: 4,
         ..texture(16, 16)
     };
-    copy_overlay(&mut vk, &texture, FULL_BOUNDS, 0);
+    copy_overlay(&mut vk, &texture(16, 16), FULL_BOUNDS, 0);
+    copy_overlay(&mut vk, &multisampled, FULL_BOUNDS, 1);
     gpu(|gpu| {
-        assert_eq!(gpu.render_areas.len(), 1);
-        assert_eq!(gpu.draws, 0);
-        assert!(gpu.barriers.is_empty());
+        // Overlay swapchains are single sampled, whatever the texture.
+        assert_eq!(gpu.pipeline_samples, [vk::SampleCountFlags::TYPE_1; 2]);
+        assert_eq!(gpu.draws, 2);
+        let [single, multi] = gpu.bound_pipelines[..] else {
+            panic!("bound {:?}", gpu.bound_pipelines);
+        };
+        assert_ne!(single, multi);
     });
     finish(vk);
 }
