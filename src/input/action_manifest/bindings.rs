@@ -996,30 +996,28 @@ pub fn handle_sources(
                     continue;
                 };
 
-                let force_path = path.with_component(DynComponent::Force);
                 let value_path = path.with_component(DynComponent::Value);
-
-                let Ok((force_path, value_path)) = validate_path(force_path)
-                    .ok_or_else(|| InvalidActionPath(force_path, &grab.output.path))
-                    .and_then(|force| {
-                        Ok((
-                            force,
-                            validate_path(value_path)
-                                .ok_or_else(|| InvalidActionPath(value_path, &grab.output.path))?,
-                        ))
-                    })
-                    .inspect_err(InvalidActionPath::warn)
-                else {
+                let Some(value_path) = validate_path(value_path) else {
+                    InvalidActionPath(value_path, &grab.output.path).warn();
                     continue;
                 };
+                // Controllers without a force sensor grab by value alone.
+                let force_path = validate_path(path.with_component(DynComponent::Force))
+                    .filter(|p| p.component == Some(DynComponent::Force));
 
                 if !context.accepts_custom_binding(&grab.output) {
                     continue;
                 }
-                let Some(force_action) =
-                    context.input_action(action_set_name, action_set, force_path)
-                else {
-                    continue;
+                let force_action = match force_path {
+                    Some(force_path) => {
+                        let Some(action) =
+                            context.input_action(action_set_name, action_set, force_path)
+                        else {
+                            continue;
+                        };
+                        Some(action)
+                    }
+                    None => None,
                 };
                 let Some(value_action) =
                     context.input_action(action_set_name, action_set, value_path)
@@ -1028,7 +1026,8 @@ pub fn handle_sources(
                 };
 
                 trace!(
-                    "suggesting {force_path} and {value_path} for {} (grab binding)",
+                    "suggesting {value_path} (force: {}) for {} (grab binding)",
+                    force_path.is_some(),
                     grab.output.path
                 );
                 context.add_custom_binding(
@@ -1036,7 +1035,7 @@ pub fn handle_sources(
                     path.hand,
                     value_path,
                     BoolBindingType::Grab(GrabBindingData::new(
-                        Some(force_action),
+                        force_action,
                         value_action,
                         parameters,
                     )),

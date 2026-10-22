@@ -1208,6 +1208,38 @@ mod tests {
     }
 
     #[test]
+    fn grab_without_force_sensor() {
+        let mut f = Fixture::new();
+        let set1 = f.get_action_set_handle(c"/actions/set1");
+        let grab = f.get_action_handle(c"/actions/set1/in/grab");
+        f.load_actions(c"actions_grab_mode.json");
+        f.verify_custom_bindings(
+            OculusTouch::profile_path(),
+            c"/actions/set1/in/grab",
+            ["/user/hand/left/input/squeeze/value".into()],
+        );
+
+        f.set_interaction_profile::<OculusTouch>(LeftHand);
+        let squeeze = f.get_action::<f32>(
+            f.get_action_handle(c"/user/hand/left/input/squeeze/value-/actions/set1"),
+        );
+        let mut check = |value, state| {
+            fakexr::set_action_state(squeeze, ActionState::Float(value), LeftHand);
+            f.sync(vr::VRActiveActionSet_t {
+                ulActionSet: set1,
+                ..Default::default()
+            });
+            let s = f.get_bool_state(grab).unwrap();
+            assert!(s.bActive);
+            assert_eq!(s.bState, state, "{value}");
+        };
+        check(0.68, false);
+        check(0.75, true);
+        check(0.68, true);
+        check(0.6, false);
+    }
+
+    #[test]
     fn toggle_button() {
         let mut f = Fixture::new();
         let set1 = f.get_action_set_handle(c"/actions/set1");
