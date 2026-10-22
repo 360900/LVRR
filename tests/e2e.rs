@@ -708,8 +708,9 @@ fn scene_app() {
         Prop::DeviceClass_Int32,
         &mut err
     );
-    // SteamVR answers 1 (HMD) here; xrizer currently reports UnknownProperty.
     println!("hmd DeviceClass_Int32: {class} ({err:?})");
+    assert_eq!(err, vr::ETrackedPropertyError::Success);
+    assert_eq!(class, vr::ETrackedDeviceClass::HMD as i32);
     let prox = vcall!(
         sys,
         IVRSystem_GetBoolTrackedDeviceProperty,
