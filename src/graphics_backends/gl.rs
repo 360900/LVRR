@@ -1,5 +1,6 @@
 use super::GraphicsBackend;
 use derive_more::Deref;
+use gl::types::{GLenum, GLint, GLuint};
 use glutin_glx_sys::{
     Success,
     glx::{self, Glx},
@@ -555,8 +556,70 @@ impl GraphicsBackend for GlData {
         image_index: usize,
         _submit_flags: vr::EVRSubmitFlags,
     ) -> xr::Extent2Di {
-        let swapchain_texture = self.images[image_index];
+        let dst = GlTexture {
+            name: self.images[image_index],
+            target: gl::TEXTURE_2D_ARRAY,
+        };
+        self.copy(texture, bounds, dst, eye.0 as i32)
+    }
 
+    fn copy_overlay_to_swapchain(
+        &mut self,
+        texture: Self::OpenVrTexture,
+        _color_space: vr::EColorSpace,
+        bounds: openvr::VRTextureBounds_t,
+        image_index: usize,
+    ) -> openxr::Extent2Di {
+        // Overlay swapchains have a single layer (see Overlay::set_texture), which runtimes
+        // allocate as 2D textures rather than arrays.
+        let dst = GlTexture {
+            name: self.images[image_index],
+            target: gl::TEXTURE_2D,
+        };
+        self.copy(texture, bounds, dst, 0)
+    }
+}
+
+/// A texture name and the target it's bound to.
+#[derive(Copy, Clone)]
+struct GlTexture {
+    name: GLuint,
+    target: GLenum,
+}
+
+impl GlTexture {
+    unsafe fn attach(self, framebuffer: GLenum, layer: GLint) {
+        unsafe {
+            if self.target == gl::TEXTURE_2D_ARRAY {
+                gl::FramebufferTextureLayer(
+                    framebuffer,
+                    gl::COLOR_ATTACHMENT0,
+                    self.name,
+                    0,
+                    layer,
+                );
+            } else {
+                gl::FramebufferTexture2D(
+                    framebuffer,
+                    gl::COLOR_ATTACHMENT0,
+                    self.target,
+                    self.name,
+                    0,
+                );
+            }
+        }
+    }
+}
+
+impl GlData {
+    /// Copies `texture` into layer `dst_layer` of the swapchain image `dst`.
+    fn copy(
+        &self,
+        texture: GLuint,
+        bounds: vr::VRTextureBounds_t,
+        dst: GlTexture,
+        dst_layer: GLint,
+    ) -> xr::Extent2Di {
         let xr::Rect2Di { extent, offset } = texture_rect_from_bounds(texture, bounds);
 
         let mut fmt = 0;
@@ -575,12 +638,12 @@ impl GraphicsBackend for GlData {
                     offset.x,
                     offset.y,
                     0, // z
-                    swapchain_texture,
-                    gl::TEXTURE_2D_ARRAY,
+                    dst.name,
+                    dst.target,
+                    0, // level
                     0, // x
                     0, // y
-                    0, // z
-                    eye.0 as i32,
+                    dst_layer,
                     extent.width,
                     extent.height,
                     1,
@@ -597,13 +660,7 @@ impl GraphicsBackend for GlData {
                     0,
                 );
                 gl::BindFramebuffer(gl::DRAW_FRAMEBUFFER, self.draw_fbo);
-                gl::FramebufferTextureLayer(
-                    gl::DRAW_FRAMEBUFFER,
-                    gl::COLOR_ATTACHMENT0,
-                    swapchain_texture,
-                    0,
-                    eye.0 as i32,
-                );
+                dst.attach(gl::DRAW_FRAMEBUFFER, dst_layer);
 
                 gl::BlitFramebuffer(
                     offset.x,
@@ -624,23 +681,6 @@ impl GraphicsBackend for GlData {
         }
 
         extent
-    }
-
-    fn copy_overlay_to_swapchain(
-        &mut self,
-        texture: Self::OpenVrTexture,
-        color_space: vr::EColorSpace,
-        bounds: openvr::VRTextureBounds_t,
-        image_index: usize,
-    ) -> openxr::Extent2Di {
-        self.copy_texture_to_swapchain(
-            vr::EVREye::Left,
-            texture,
-            color_space,
-            bounds,
-            image_index,
-            vr::EVRSubmitFlags::Default,
-        )
     }
 }
 
