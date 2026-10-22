@@ -2157,6 +2157,27 @@ fn unrestricted_digital_action_origin() {
     assert_eq!(f.get_bool_state(boolact).unwrap().activeOrigin, left);
 }
 
+#[test]
+fn pose_relative_to_now_in_the_past() {
+    let f = Fixture::new();
+    f.load_actions(c"actions.json");
+    let pose = f.get_action_handle(c"/actions/set1/in/pose");
+    for seconds in [-0.25, f32::NAN, f32::NEG_INFINITY] {
+        let mut data = vr::InputPoseActionData_t::default();
+        assert_eq!(
+            f.input.GetPoseActionDataRelativeToNow(
+                pose,
+                vr::ETrackingUniverseOrigin::Seated,
+                seconds,
+                &mut data,
+                std::mem::size_of_val(&data) as u32,
+                0,
+            ),
+            vr::EVRInputError::None
+        );
+    }
+}
+
 #[track_caller]
 fn get_analog_state(
     f: &Fixture,
