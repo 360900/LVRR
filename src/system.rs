@@ -345,6 +345,15 @@ impl System {
         }
     }
 
+    /// Drops the cached views. Those in LOCAL and STAGE are relative to the tracking origin, so
+    /// the last located ones in them are stale too.
+    pub fn clear_views(&self) {
+        let mut views = self.views.lock().unwrap();
+        views.frame = ViewCache::default();
+        views.last.local = None;
+        views.last.stage = None;
+    }
+
     pub fn reset_views(&self) {
         std::mem::take(&mut self.views.lock().unwrap().frame);
         let session = self.openxr.session_data.get();
@@ -2057,6 +2066,18 @@ mod tests {
         assert_eq!(translation(raw), [-0.5, 0.0, 0.0]);
         let seated = system.GetSeatedZeroPoseToStandingAbsoluteTrackingPose();
         assert_eq!(translation(seated), [-0.5, 1.6, 0.0]);
+    }
+
+    /// The projection layer goes out in the current tracking space, so views cached before the
+    /// app moved its zero pose are stale.
+    #[test]
+    fn zero_pose_reset_drops_cached_views() {
+        let (xr, system) = system_with_events();
+        system.get_views(xr::ReferenceSpaceType::STAGE);
+        assert!(system.views.lock().unwrap().frame.stage.is_some());
+        xr.reset_tracking_space(vr::ETrackingUniverseOrigin::Standing);
+        let views = system.views.lock().unwrap();
+        assert!(views.frame.stage.is_none() && views.last.stage.is_none());
     }
 
     /// A runtime recenter is the user resetting their seated position: the head becomes the

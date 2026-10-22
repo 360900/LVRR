@@ -339,10 +339,11 @@ impl<C: Compositor> OpenXrData<C> {
         }
         if self.stage_moved.swap(false, Ordering::Relaxed) {
             // The runtime moved the stage, which replaces any standing zero pose the app set.
-            self.session_data
-                .0
-                .write()
-                .set_origin_offset(vr::ETrackingUniverseOrigin::Standing, xr::Posef::IDENTITY);
+            self.move_origin(
+                &mut self.session_data.0.write(),
+                vr::ETrackingUniverseOrigin::Standing,
+                xr::Posef::IDENTITY,
+            );
             self.push_event(
                 vr::EVREventType::ChaperoneUniverseHasChanged,
                 Default::default(),
@@ -523,7 +524,7 @@ impl<C: Compositor> OpenXrData<C> {
                 );
                 xr::Posef::IDENTITY
             });
-            session.set_origin_offset(origin, zero);
+            self.move_origin(&mut session, origin, zero);
         }
         drop(session);
 
@@ -727,8 +728,23 @@ impl<C: Compositor> OpenXrData<C> {
         }
         let mut session = self.session_data.0.write();
         match session.head_zero_pose(origin, self.get_display_time()) {
-            Some(zero) => session.set_origin_offset(origin, zero),
+            Some(zero) => self.move_origin(&mut session, origin, zero),
             None => warn!("Couldn't locate the headset, not resetting {origin:?} zero pose"),
+        }
+    }
+
+    /// Moves `origin`'s zero pose to `offset`, a pose in its reference space.
+    fn move_origin(
+        &self,
+        session: &mut SessionData,
+        origin: vr::ETrackingUniverseOrigin,
+        offset: xr::Posef,
+    ) {
+        session.set_origin_offset(origin, offset);
+        // The projection layer goes out in the moved space, so views located in the old one
+        // would put the frame where the app didn't render it.
+        if let Some(system) = self.system.get() {
+            system.clear_views();
         }
     }
 
