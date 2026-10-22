@@ -620,7 +620,8 @@ pub struct OverlaySessionData {
 }
 
 impl OverlaySessionData {
-    /// Destroys an overlay's swapchain. The lock makes this wait for a frame still using it.
+    /// Destroys an overlay's swapchain. The lock makes this wait for a frame still using it, and
+    /// dropping the overlay's backend before makes it wait for the backend's copies into it.
     fn remove(&self, key: OverlayKey) {
         #[macros::any_graphics(AnySwapchainMap)]
         fn remove<G: xr::Graphics>(map: &mut SwapchainMap<G>, key: OverlayKey) {
@@ -1484,12 +1485,10 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         vr::EVROverlayError::None
     }
     fn ClearOverlayTexture(&self, handle: vr::VROverlayHandle_t) -> vr::EVROverlayError {
-        let session = self.openxr.session_data.get();
         get_overlay!(self, handle, mut overlay);
+        // The swapchain stays for the next texture: destroying it here could free images that the
+        // last copy into it is still writing to.
         overlay.rect = None;
-        session
-            .overlay_data
-            .remove(OverlayKey::from(KeyData::from_ffi(handle)));
         vr::EVROverlayError::None
     }
     fn ClearOverlayCursorPositionOverride(&self, _: vr::VROverlayHandle_t) -> vr::EVROverlayError {
@@ -3018,21 +3017,24 @@ mod tests {
         let swapchains = || f.xr.session_data.get().overlay_data.swapchain_count();
         assert_eq!(swapchains(), 3);
 
+        // A cleared overlay keeps its swapchain for its next texture.
         assert_eq!(
             f.man.ClearOverlayTexture(cleared),
             vr::EVROverlayError::None
         );
-        assert_eq!(swapchains(), 2);
+        assert_eq!(swapchains(), 3);
+        assert_eq!(f.layers(true).len(), 2);
         assert_eq!(f.man.DestroyOverlay(destroyed), vr::EVROverlayError::None);
-        assert_eq!(swapchains(), 1);
+        assert_eq!(swapchains(), 2);
         f.man.clear_skybox();
-        assert_eq!(swapchains(), 0);
+        assert_eq!(swapchains(), 1);
         assert_eq!(f.layers(true).len(), 0);
 
         assert_eq!(
             f.man.SetOverlayTexture(cleared, &f.texture()),
             vr::EVROverlayError::None
         );
+        assert_eq!(swapchains(), 1);
         assert_eq!(f.layers(true).len(), 1);
     }
 
