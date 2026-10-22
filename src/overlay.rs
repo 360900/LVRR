@@ -3002,7 +3002,7 @@ mod tests {
         let second = f.textured_overlay(c"second");
         assert_eq!(f.layers(false).len(), 2);
 
-        f.xr.restart_session();
+        f.xr.restart_session().unwrap();
         assert_eq!(f.layers(false).len(), 0);
         for (overlay, count) in [(first, 1), (second, 2)] {
             assert_eq!(
