@@ -229,10 +229,13 @@ pub fn set_stage_bounds(session: xr::Session, bounds: Option<xr::Extent2Df>) {
     session.stage_bounds.store(bounds);
 }
 
-/// Sets the pose of the STAGE origin in LOCAL space (identity by default).
-pub fn set_stage_pose(session: xr::Session, pose: xr::Posef) {
+/// Sets where the origin of a STAGE reference space is, relative to LOCAL.
+pub fn set_reference_space_pose(session: xr::Session, ty: xr::ReferenceSpaceType, pose: xr::Posef) {
     let session = session.to_handle().unwrap();
-    session.stage_pose.store(pose);
+    match ty {
+        xr::ReferenceSpaceType::STAGE => session.stage_pose.store(pose),
+        other => panic!("can't move reference space {other:?}"),
+    }
 }
 
 pub fn session_frame_state(session: xr::Session) -> FrameState {

@@ -1319,8 +1319,9 @@ mod tests {
         use vr::ETrackingUniverseOrigin::{Seated, Standing};
 
         let f = Fixture::new();
-        fakexr::set_stage_pose(
+        fakexr::set_reference_space_pose(
             f.raw_session(),
+            xr::ReferenceSpaceType::STAGE,
             xr::Posef {
                 position: xr::Vector3f {
                     x: 0.0,
