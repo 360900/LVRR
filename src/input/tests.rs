@@ -1178,6 +1178,37 @@ fn load_actions_race() {
     assert!(res.is_ok(), "{res:?}");
 }
 
+/// The bone cache must not be held while waiting for the device list: frame_start_update takes
+/// them in the other order.
+#[test]
+fn bone_cache_not_held_while_waiting_for_devices() {
+    let f = Fixture::new();
+    f.load_actions(c"actions.json");
+    let data = f.input.openxr.session_data.get();
+    let devices = data.input_data.devices.write().unwrap();
+
+    std::thread::scope(|s| {
+        let bones = s.spawn(|| {
+            let data = f.input.openxr.session_data.get();
+            f.input.get_bones_from_hand_tracking(
+                &data,
+                vr::EVRSkeletalTransformSpace::Model,
+                Hand::Left,
+            )
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let cache_free = f.input.skeletal_bone_cache[Hand::Left as usize - 1]
+            .try_lock()
+            .is_ok();
+        drop(devices);
+        bones.join().unwrap();
+        assert!(
+            cache_free,
+            "bone cache held while waiting for the device list"
+        );
+    });
+}
+
 /// Polling events must not wait for threads reading the device list.
 #[test]
 fn poll_event_while_devices_are_read() {

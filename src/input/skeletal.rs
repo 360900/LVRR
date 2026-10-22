@@ -25,6 +25,8 @@ impl<C: openxr_data::Compositor> Input<C> {
     ) -> Option<[vr::VRBoneTransform_t; Count as usize]> {
         use HandSkeletonBone::*;
 
+        // Same order as frame_start_update and get_estimated_bones: devices, then the bone cache.
+        let devices = session_data.input_data.devices.read().unwrap();
         let mut bone_cache = self.skeletal_bone_cache[hand as usize - 1].lock().unwrap();
         if let Some(mut bones) = *bone_cache {
             finalize_transforms(&mut bones, space);
@@ -32,8 +34,6 @@ impl<C: openxr_data::Compositor> Input<C> {
         }
 
         let mut transforms: [vr::VRBoneTransform_t; Count as usize] = Default::default();
-
-        let devices = session_data.input_data.devices.read().unwrap();
 
         let controller = devices.get_controller(hand)?;
         let TrackedDeviceType::Controller {
