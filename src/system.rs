@@ -10,7 +10,7 @@ use crate::{
 use libmonado::BatteryStatus;
 
 use glam::{Mat3, Quat, Vec3};
-use log::{debug, error, info, trace, warn};
+use log::{debug, info, trace, warn};
 use openvr as vr;
 use openxr as xr;
 use std::collections::{HashMap, VecDeque};
@@ -1475,8 +1475,8 @@ impl vr::IVRSystem011On012 for System {
     }
 }
 
-// 0.9.14 events are a distinct type with the same layout up to the event data, which is all the
-// 0.9.12 conversion writes.
+// 0.9.14 events are a distinct type with the same layout as 0.9.12's: 16 bytes of data, then
+// eventAgeSeconds, which the 0.9.12 conversion writes by offset.
 const _: () = assert!(
     std::mem::offset_of!(vr::vr_0_9_12::VREvent_t, data)
         == std::mem::offset_of!(vr::vr_0_9_14::VREvent_t, data)
@@ -2317,7 +2317,7 @@ mod tests {
             age: -1.0,
             canary: 0xdeadbeef,
         };
-        assert!(vr::IVRSystem009On011::PollNextEvent(
+        assert!(vr::IVRSystem009On010::PollNextEvent(
             &system,
             (&raw mut event).cast()
         ));
