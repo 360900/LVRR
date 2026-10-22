@@ -118,7 +118,12 @@ impl<C: openxr_data::Compositor> Input<C> {
         let data = self.openxr.session_data.get();
         if let Some(manifest_actions) = data.input_data.get_loaded_actions() {
             // Game provided action manifest but also calls the legacy action's pulse method.
-            self.legacy_haptic_via_manifest(manifest_actions, hand_path, duration_us);
+            self.legacy_haptic_via_manifest(
+                &data.session,
+                manifest_actions,
+                hand_path,
+                duration_us,
+            );
             return;
         }
 
@@ -154,22 +159,22 @@ impl<C: openxr_data::Compositor> Input<C> {
     /// legacy-input haptic interface functions while providing manifest files.
     fn legacy_haptic_via_manifest(
         &self,
+        session: &xr::Session<xr::AnyGraphics>,
         manifest_actions: &ManifestLoadedActions,
         hand_path: xr::Path,
         duration_us: ::std::ffi::c_ushort,
     ) {
         trace!("triggered legacy haptic while using action manifest");
-        manifest_actions
-            .haptic_action
-            .apply_feedback(
-                &self.openxr.session_data.get().session,
-                hand_path,
-                &xr::HapticVibration::new()
-                    .amplitude(1.0)
-                    .frequency(xr::FREQUENCY_UNSPECIFIED)
-                    .duration(xr::Duration::from_nanos(i64::from(duration_us) * 1000)),
-            )
-            .unwrap();
+        if let Err(e) = manifest_actions.haptic_action.apply_feedback(
+            session,
+            hand_path,
+            &xr::HapticVibration::new()
+                .amplitude(1.0)
+                .frequency(xr::FREQUENCY_UNSPECIFIED)
+                .duration(xr::Duration::from_nanos(i64::from(duration_us) * 1000)),
+        ) {
+            warn!("Failed to trigger haptic: {e:?}");
+        }
     }
 
     pub fn get_legacy_controller_state(
@@ -213,8 +218,6 @@ impl<C: openxr_data::Compositor> Input<C> {
         };
 
         let hand_path = self.get_subaction_path(hand);
-
-        let data = self.openxr.session_data.get();
 
         state.unPacketNum = self.legacy_state.packet_num.load(Ordering::Relaxed);
 
