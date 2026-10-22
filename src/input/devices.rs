@@ -793,51 +793,90 @@ impl SubactionPaths {
 
 pub struct TrackedDeviceList {
     devices: Vec<TrackedDevice>,
+    /// XrSystemHandTrackingPropertiesEXT::supportsHandTracking. Creating hand trackers fails
+    /// without it.
+    hand_tracking: bool,
 }
 
 impl TrackedDeviceList {
-    pub fn new(session: &xr::Session<xr::AnyGraphics>) -> Self {
-        let create_hand_tracker = |hand: Hand| {
-            session
-                .create_hand_tracker(hand.into())
-                .inspect_err(|e| {
-                    if !matches!(
-                        *e,
-                        xr::sys::Result::ERROR_EXTENSION_NOT_PRESENT
-                            | xr::sys::Result::ERROR_FEATURE_UNSUPPORTED
-                    ) {
-                        log::debug!("Failed to create hand tracker for hand {hand:?}: {e}");
-                    }
-                })
-                .ok()
+    pub fn new(session: &xr::Session<xr::AnyGraphics>, hand_tracking: bool) -> Self {
+        let mut list = Self {
+            devices: vec![TrackedDevice::new(TrackedDeviceType::Hmd, None, None)],
+            hand_tracking,
         };
-
-        Self {
-            devices: vec![
-                TrackedDevice::new(TrackedDeviceType::Hmd, None, None),
-                TrackedDevice::new(
-                    TrackedDeviceType::Controller {
-                        hand: Hand::Left,
-                        hand_tracker: create_hand_tracker(Hand::Left),
-                        skeleton_cache: Mutex::new(Default::default()),
-                        pose_is_synthesised: false.into(),
-                    },
-                    None,
-                    None,
-                ),
-                TrackedDevice::new(
-                    TrackedDeviceType::Controller {
-                        hand: Hand::Right,
-                        hand_tracker: create_hand_tracker(Hand::Right),
-                        skeleton_cache: Mutex::new(Default::default()),
-                        pose_is_synthesised: false.into(),
-                    },
-                    None,
-                    None,
-                ),
-            ],
+        for hand in [Hand::Left, Hand::Right] {
+            let hand_tracker = list.create_hand_tracker(session, hand);
+            list.devices.push(TrackedDevice::new(
+                TrackedDeviceType::Controller {
+                    hand,
+                    hand_tracker,
+                    skeleton_cache: Mutex::new(Default::default()),
+                    pose_is_synthesised: false.into(),
+                },
+                None,
+                None,
+            ));
         }
+        list
     }
+
+    pub(super) fn create_hand_tracker<G>(
+        &self,
+        session: &xr::Session<G>,
+        hand: Hand,
+    ) -> Option<xr::HandTracker> {
+        if !self.hand_tracking {
+            return None;
+        }
+        create_hand_tracker(session, hand.into())
+            .inspect_err(|e| log::warn!("Failed to create hand tracker for hand {hand:?}: {e}"))
+            .ok()
+    }
+}
+
+/// Creates a hand tracker that requests its data sources if XR_EXT_hand_tracking_data_source is
+/// enabled: [get_joints_with_data_source] queries the data source state, which runtimes reject
+/// for trackers created without them.
+fn create_hand_tracker<G>(
+    session: &xr::Session<G>,
+    hand: xr::HandEXT,
+) -> xr::Result<xr::HandTracker> {
+    let exts = session.instance().exts();
+    let Some(ext) = exts.ext_hand_tracking.as_ref() else {
+        return Err(xr::sys::Result::ERROR_EXTENSION_NOT_PRESENT);
+    };
+    if exts.ext_hand_tracking_data_source.is_none() {
+        return session.create_hand_tracker(hand);
+    }
+
+    let data_sources = [
+        xr::HandTrackingDataSourceEXT::CONTROLLER,
+        xr::HandTrackingDataSourceEXT::UNOBSTRUCTED,
+    ];
+    let data_source_info = xr::sys::HandTrackingDataSourceInfoEXT {
+        ty: xr::sys::HandTrackingDataSourceInfoEXT::TYPE,
+        next: std::ptr::null(),
+        requested_data_source_count: data_sources.len() as u32,
+        requested_data_sources: data_sources.as_ptr() as *mut xr::HandTrackingDataSourceEXT,
+    };
+    let info = xr::sys::HandTrackerCreateInfoEXT {
+        ty: xr::sys::HandTrackerCreateInfoEXT::TYPE,
+        next: &data_source_info as *const _ as _,
+        hand,
+        // If this ever changes, update the joint_counts set in `Space::locate_hand_joints`
+        hand_joint_set: xr::sys::HandJointSetEXT::DEFAULT,
+    };
+
+    let handle = {
+        let mut handle = xr::sys::HandTrackerEXT::NULL;
+        let r = unsafe { (ext.create_hand_tracker)(session.as_raw(), &info, &mut handle) };
+        if r.into_raw() < 0 {
+            return Err(r);
+        }
+        handle
+    };
+
+    Ok(unsafe { xr::HandTracker::from_raw(session, handle) })
 }
 
 impl TrackedDeviceList {
@@ -1103,8 +1142,11 @@ impl<C: openxr_data::Compositor> Input<C> {
 
 #[cfg(test)]
 mod tests {
+    use super::TrackedDeviceType;
     use crate::input::{profiles::knuckles::Knuckles, tests::Fixture};
+    use crate::openxr_data::Hand;
     use openvr as vr;
+    use openxr as xr;
 
     #[test]
     #[cfg_attr(not(feature = "monado"), ignore)]
@@ -1164,6 +1206,50 @@ mod tests {
             .get_device_string_tracked_property(3, vr::ETrackedDeviceProperty::SerialNumber_String)
             .unwrap();
         assert_eq!(serial.to_str().unwrap(), "FAKEXR-SERIAL");
+    }
+
+    fn hand_skeleton(f: &Fixture, hand: Hand) -> Option<super::HandSkeleton> {
+        let session = f.input.openxr.session_data.get();
+        let devices = session.input_data.devices.read().unwrap();
+        devices
+            .get_controller(hand)
+            .unwrap()
+            .get_hand_skeleton(&f.input.openxr, session.tracking_space())
+    }
+
+    #[test]
+    fn no_hand_trackers_without_system_support() {
+        let f = Fixture::new();
+        assert_eq!(fakexr::hand_trackers_created(), 0);
+        let session = f.input.openxr.session_data.get();
+        let devices = session.input_data.devices.read().unwrap();
+        for hand in [Hand::Left, Hand::Right] {
+            let TrackedDeviceType::Controller { hand_tracker, .. } =
+                devices.get_controller(hand).unwrap().get_type()
+            else {
+                unreachable!()
+            };
+            assert!(hand_tracker.is_none());
+        }
+    }
+
+    #[test]
+    fn hand_trackers_request_data_sources() {
+        fakexr::set_hand_tracking_supported(true);
+        let f = Fixture::new();
+        fakexr::set_hand_tracked(
+            f.raw_session(),
+            fakexr::UserPath::LeftHand,
+            Some(xr::HandTrackingDataSourceEXT::CONTROLLER),
+        );
+
+        // The runtime rejects data source queries for trackers that didn't request them.
+        let skeleton = hand_skeleton(&f, Hand::Left).expect("left hand should be tracked");
+        assert_eq!(
+            skeleton.data_source,
+            xr::HandTrackingDataSourceEXT::CONTROLLER
+        );
+        assert!(hand_skeleton(&f, Hand::Right).is_none());
     }
 
     #[test]

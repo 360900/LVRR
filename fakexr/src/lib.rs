@@ -1,6 +1,8 @@
 pub mod vulkan;
 
+mod hand_tracking;
 mod monado_xdev;
+pub use hand_tracking::{hand_trackers_created, set_hand_tracked, set_hand_tracking_supported};
 pub use monado_xdev::add_trackers;
 
 use crossbeam_utils::atomic::AtomicCell;
@@ -415,6 +417,7 @@ pub unsafe extern "system" fn get_instance_proc_addr(
             );
         }
     } else {
+        use hand_tracking::*;
         use vulkan::xr::*;
 
         unsafe {
@@ -481,6 +484,9 @@ pub unsafe extern "system" fn get_instance_proc_addr(
                     (EnumerateBoundSourcesForAction),
                     (GetInputSourceLocalizedName),
                     GetVisibilityMaskKHR,
+                    CreateHandTrackerEXT,
+                    DestroyHandTrackerEXT,
+                    LocateHandJointsEXT,
                     {mndx::CreateXDevListMNDX},
                     {mndx::GetXDevListGenerationNumberMNDX},
                     {mndx::EnumerateXDevsMNDX},
@@ -508,102 +514,26 @@ extern "system" fn enumerate_instance_extension_properties(
     properties: *mut xr::ExtensionProperties,
 ) -> xr::Result {
     assert!(layer_name.is_null());
+    let fixed: [&[u8]; 10] = [
+        xr::KHR_VULKAN_ENABLE_EXTENSION_NAME,
+        openxr_mndx_xdev_space::XR_MNDX_XDEV_SPACE_EXTENSION_NAME.as_bytes(),
+        xr::HTC_VIVE_FOCUS3_CONTROLLER_INTERACTION_EXTENSION_NAME,
+        xr::META_TOUCH_CONTROLLER_PLUS_EXTENSION_NAME,
+        xr::EXT_HP_MIXED_REALITY_CONTROLLER_EXTENSION_NAME,
+        xr::EXT_SAMSUNG_ODYSSEY_CONTROLLER_EXTENSION_NAME,
+        xr::KHR_VISIBILITY_MASK_EXTENSION_NAME,
+        b"XR_VALVE_frame_controller_interaction\0",
+        xr::EXT_HAND_TRACKING_EXTENSION_NAME,
+        xr::EXT_HAND_TRACKING_DATA_SOURCE_EXTENSION_NAME,
+    ];
     let extra = EXTRA_EXTENSIONS.with_borrow(Clone::clone);
-    let count = 8 + extra.len() as u32;
+    let count = (fixed.len() + extra.len()) as u32;
     unsafe { *property_count_output = count };
     if property_capacity_input >= count {
         let props =
             unsafe { std::slice::from_raw_parts_mut(properties, property_capacity_input as usize) };
 
-        props[0] = xr::ExtensionProperties {
-            ty: xr::ExtensionProperties::TYPE,
-            next: std::ptr::null_mut(),
-            extension_name: [0 as c_char; xr::MAX_EXTENSION_NAME_SIZE],
-            extension_version: 1,
-        };
-        let name = xr::KHR_VULKAN_ENABLE_EXTENSION_NAME;
-        let name =
-            unsafe { std::slice::from_raw_parts(name.as_ptr() as *const c_char, name.len()) };
-        props[0].extension_name[..name.len()].copy_from_slice(name);
-
-        props[1] = xr::ExtensionProperties {
-            ty: xr::ExtensionProperties::TYPE,
-            next: std::ptr::null_mut(),
-            extension_name: [0 as c_char; xr::MAX_EXTENSION_NAME_SIZE],
-            extension_version: 1,
-        };
-        let name = openxr_mndx_xdev_space::XR_MNDX_XDEV_SPACE_EXTENSION_NAME;
-        let name =
-            unsafe { std::slice::from_raw_parts(name.as_ptr() as *const c_char, name.len()) };
-        props[1].extension_name[..name.len()].copy_from_slice(name);
-
-        props[2] = xr::ExtensionProperties {
-            ty: xr::ExtensionProperties::TYPE,
-            next: std::ptr::null_mut(),
-            extension_name: [0 as c_char; xr::MAX_EXTENSION_NAME_SIZE],
-            extension_version: 1,
-        };
-        let name = xr::HTC_VIVE_FOCUS3_CONTROLLER_INTERACTION_EXTENSION_NAME;
-        let name =
-            unsafe { std::slice::from_raw_parts(name.as_ptr() as *const c_char, name.len()) };
-        props[2].extension_name[..name.len()].copy_from_slice(name);
-
-        props[3] = xr::ExtensionProperties {
-            ty: xr::ExtensionProperties::TYPE,
-            next: std::ptr::null_mut(),
-            extension_name: [0 as c_char; xr::MAX_EXTENSION_NAME_SIZE],
-            extension_version: 1,
-        };
-        let name = xr::META_TOUCH_CONTROLLER_PLUS_EXTENSION_NAME;
-        let name =
-            unsafe { std::slice::from_raw_parts(name.as_ptr() as *const c_char, name.len()) };
-        props[3].extension_name[..name.len()].copy_from_slice(name);
-
-        props[4] = xr::ExtensionProperties {
-            ty: xr::ExtensionProperties::TYPE,
-            next: std::ptr::null_mut(),
-            extension_name: [0 as c_char; xr::MAX_EXTENSION_NAME_SIZE],
-            extension_version: 1,
-        };
-        let name = xr::EXT_HP_MIXED_REALITY_CONTROLLER_EXTENSION_NAME;
-        let name =
-            unsafe { std::slice::from_raw_parts(name.as_ptr() as *const c_char, name.len()) };
-        props[4].extension_name[..name.len()].copy_from_slice(name);
-
-        props[5] = xr::ExtensionProperties {
-            ty: xr::ExtensionProperties::TYPE,
-            next: std::ptr::null_mut(),
-            extension_name: [0 as c_char; xr::MAX_EXTENSION_NAME_SIZE],
-            extension_version: 1,
-        };
-        let name = xr::EXT_SAMSUNG_ODYSSEY_CONTROLLER_EXTENSION_NAME;
-        let name =
-            unsafe { std::slice::from_raw_parts(name.as_ptr() as *const c_char, name.len()) };
-        props[5].extension_name[..name.len()].copy_from_slice(name);
-
-        props[6] = xr::ExtensionProperties {
-            ty: xr::ExtensionProperties::TYPE,
-            next: std::ptr::null_mut(),
-            extension_name: [0 as c_char; xr::MAX_EXTENSION_NAME_SIZE],
-            extension_version: 1,
-        };
-        let name = xr::KHR_VISIBILITY_MASK_EXTENSION_NAME;
-        let name =
-            unsafe { std::slice::from_raw_parts(name.as_ptr() as *const c_char, name.len()) };
-        props[6].extension_name[..name.len()].copy_from_slice(name);
-
-        props[7] = xr::ExtensionProperties {
-            ty: xr::ExtensionProperties::TYPE,
-            next: std::ptr::null_mut(),
-            extension_name: [0 as c_char; xr::MAX_EXTENSION_NAME_SIZE],
-            extension_version: 1,
-        };
-        let name = b"XR_VALVE_frame_controller_interaction\0";
-        let name =
-            unsafe { std::slice::from_raw_parts(name.as_ptr() as *const c_char, name.len()) };
-        props[7].extension_name[..name.len()].copy_from_slice(name);
-
-        for (prop, name) in props[8..].iter_mut().zip(extra) {
+        for (prop, name) in props.iter_mut().zip(fixed.into_iter().chain(extra)) {
             *prop = xr::ExtensionProperties {
                 ty: xr::ExtensionProperties::TYPE,
                 next: std::ptr::null_mut(),
@@ -1418,6 +1348,7 @@ extern "system" fn get_system_properties(
         orientation_tracking: true.into(),
         position_tracking: true.into(),
     };
+    hand_tracking::fill_system_properties(properties.next as _);
     xr::Result::SUCCESS
 }
 

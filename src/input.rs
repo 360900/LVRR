@@ -41,7 +41,6 @@ use std::ptr;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock, RwLock, RwLockReadGuard};
-use xr::sys::Handle as _;
 
 new_key_type! {
     struct InputSourceKey;
@@ -469,13 +468,20 @@ pub struct InputSessionData {
 }
 
 impl InputSessionData {
-    pub(crate) fn new(instance: &xr::Instance, session: &xr::Session<xr::AnyGraphics>) -> Self {
+    pub(crate) fn new(
+        instance: &xr::Instance,
+        system_id: xr::SystemId,
+        session: &xr::Session<xr::AnyGraphics>,
+    ) -> Self {
         let paths = SubactionPaths::new(instance);
+        let hand_tracking = instance
+            .supports_hand_tracking(system_id)
+            .is_ok_and(|supported| supported);
         Self {
             actions: OnceLock::new(),
             estimated_skeleton_actions: OnceLock::new(),
             pose_data: PoseData::new(instance, paths.left, paths.right),
-            devices: RwLock::new(TrackedDeviceList::new(session)),
+            devices: RwLock::new(TrackedDeviceList::new(session, hand_tracking)),
         }
     }
 
@@ -2471,52 +2477,8 @@ impl<C: openxr_data::Compositor> vr::IVRInput004On005 for Input<C> {
     }
 }
 
-// OpenXR spec requires we create the hand tracker with requested data sources if
-// we chain XrHandTrackingDataSourceStateEXT in XrHandJointLocationsEXT.
-fn create_hand_tracker_with_data_sources<G>(
-    session: &xr::Session<G>,
-    hand: xr::HandEXT,
-) -> xr::Result<xr::HandTracker> {
-    let Some(ext) = session.instance().exts().ext_hand_tracking.as_ref() else {
-        return Err(xr::sys::Result::ERROR_EXTENSION_NOT_PRESENT);
-    };
-
-    let data_sources = [
-        xr::HandTrackingDataSourceEXT::CONTROLLER,
-        xr::HandTrackingDataSourceEXT::UNOBSTRUCTED,
-    ];
-    let data_source_info = xr::sys::HandTrackingDataSourceInfoEXT {
-        ty: xr::sys::HandTrackingDataSourceInfoEXT::TYPE,
-        next: std::ptr::null(),
-        requested_data_source_count: data_sources.len() as u32,
-        requested_data_sources: data_sources.as_ptr() as *mut xr::HandTrackingDataSourceEXT,
-    };
-    let info = xr::sys::HandTrackerCreateInfoEXT {
-        ty: xr::sys::HandTrackerCreateInfoEXT::TYPE,
-        next: &data_source_info as *const _ as _,
-        hand,
-        // If this ever changes, update the joint_counts set in `Space::locate_hand_joints`
-        hand_joint_set: xr::sys::HandJointSetEXT::DEFAULT,
-    };
-
-    let handle = {
-        let mut handle = xr::sys::HandTrackerEXT::NULL;
-        let r = unsafe { (ext.create_hand_tracker)(session.as_raw(), &info, &mut handle) };
-        if r.into_raw() < 0 {
-            return Err(r);
-        }
-        handle
-    };
-
-    Ok(unsafe { xr::HandTracker::from_raw(session, handle) })
-}
-
 impl<C: openxr_data::Compositor> Input<C> {
-    pub fn interaction_profile_changed(
-        &self,
-        session_data: &SessionData,
-        enabled_extensions: &xr::ExtensionSet,
-    ) {
+    pub fn interaction_profile_changed(&self, session_data: &SessionData) {
         let mut devices = session_data.input_data.devices.write().unwrap();
 
         let mut devices_to_create = vec![];
@@ -2558,21 +2520,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                 if let Some(controller) = controller.as_mut() {
                     controller.profile_data = Some(data);
                 } else {
-                    let hand_tracker = if enabled_extensions.ext_hand_tracking_data_source {
-                        create_hand_tracker_with_data_sources(&session_data.session, hand.into())
-                    } else {
-                        session_data.session.create_hand_tracker(hand.into())
-                    }
-                    .inspect_err(|e| {
-                        if !matches!(
-                            *e,
-                            xr::sys::Result::ERROR_EXTENSION_NOT_PRESENT
-                                | xr::sys::Result::ERROR_FEATURE_UNSUPPORTED
-                        ) {
-                            log::warn!("Failed to create hand tracker for hand {hand:?}: {e}");
-                        }
-                    })
-                    .ok();
+                    let hand_tracker = devices.create_hand_tracker(&session_data.session, hand);
                     devices_to_create.push((
                         TrackedDeviceType::Controller {
                             hand,

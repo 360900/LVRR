@@ -358,7 +358,7 @@ impl<C: Compositor> OpenXrData<C> {
                 xr::Event::InstanceLossPending(_) => self.push_quit(true),
                 xr::Event::InteractionProfileChanged(_) => {
                     if let Some(input) = self.input.get() {
-                        input.interaction_profile_changed(session_data, &self.enabled_extensions);
+                        input.interaction_profile_changed(session_data);
                     }
                 }
                 _ => {
@@ -1014,7 +1014,7 @@ impl SessionData {
             .map_err(SessionCreationError::BeginSessionFailed)?;
         info!("Began OpenXR session.");
 
-        let input_data = InputSessionData::new(instance, &session);
+        let input_data = InputSessionData::new(instance, system_id, &session);
 
         Ok((
             SessionData {
