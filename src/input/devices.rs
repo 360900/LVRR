@@ -1140,19 +1140,19 @@ impl<C: openxr_data::Compositor> Input<C> {
         let session_data = self.openxr.session_data.get();
         let devices = session_data.input_data.devices.read().unwrap();
 
+        // Slots without a device get an invalid, disconnected pose.
         for (i, pose) in poses.iter_mut().enumerate() {
-            let device = devices.get_device(i as u32);
-
-            if let Some(device) = device {
-                *pose = device
-                    .get_pose(
+            *pose = devices
+                .get_device(i as u32)
+                .and_then(|device| {
+                    device.get_pose(
                         xr_time,
                         &session_data,
                         origin.unwrap_or(session_data.current_origin),
                         None,
                     )
-                    .unwrap_or_default();
-            }
+                })
+                .unwrap_or_default();
         }
     }
 

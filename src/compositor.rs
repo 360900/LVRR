@@ -970,24 +970,24 @@ impl vr::IVRCompositor029_Interface for Compositor {
         output_pose: *mut vr::TrackedDevicePose_t,
         output_game_pose: *mut vr::TrackedDevicePose_t,
     ) -> vr::EVRCompositorError {
+        if device_index >= vr::k_unMaxTrackedDeviceCount {
+            return vr::EVRCompositorError::IndexOutOfRange;
+        }
         if output_pose.is_null() && output_game_pose.is_null() {
             return vr::EVRCompositorError::RequestFailed;
         }
 
         let input = self.input.force(|_| Input::new(self.openxr.clone()));
 
-        let Some(pose) =
-            input.get_device_pose(device_index, None, self.openxr.display_time.get(), None)
-        else {
-            return vr::EVRCompositorError::RequestFailed;
-        };
+        // Like GetLastPoses, a slot without a device gets an invalid, disconnected pose.
+        let pose = input
+            .get_device_pose(device_index, None, self.openxr.display_time.get(), None)
+            .unwrap_or_default();
 
-        if !output_pose.is_null() {
-            unsafe { output_pose.write(pose) };
-        }
-
-        if !output_game_pose.is_null() {
-            unsafe { output_game_pose.write(pose) };
+        for output in [output_pose, output_game_pose] {
+            if !output.is_null() {
+                unsafe { output.write(pose) };
+            }
         }
 
         vr::EVRCompositorError::None
@@ -1012,24 +1012,21 @@ impl vr::IVRCompositor029_Interface for Compositor {
             }
             return vr::EVRCompositorError::DoNotHaveFocus;
         }
-        if render_pose_count == 0 {
-            return vr::EVRCompositorError::None;
-        }
-        let render_poses = unsafe {
-            std::slice::from_raw_parts_mut(render_pose_array, render_pose_count as usize)
-        };
-        self.input
-            .force(|_| Input::new(self.openxr.clone()))
-            .get_poses(render_poses, None, self.openxr.display_time.get());
-
-        // Not entirely sure how the game poses are supposed to differ from the render poses,
-        // but a lot of games use the game pose array for controller positions.
-        if game_pose_count > 0 {
-            let game_poses = unsafe {
-                std::slice::from_raw_parts_mut(game_pose_array, game_pose_count as usize)
-            };
-            assert!(game_poses.len() <= render_poses.len());
-            game_poses.copy_from_slice(&render_poses[0..game_poses.len()]);
+        let time = self.openxr.display_time.get();
+        // Both arrays are optional and sized independently. Not entirely sure how the game poses
+        // are supposed to differ from the render poses, but a lot of games use the game pose array
+        // for controller positions.
+        for (array, count) in [
+            (render_pose_array, render_pose_count),
+            (game_pose_array, game_pose_count),
+        ] {
+            if array.is_null() || count == 0 {
+                continue;
+            }
+            let poses = unsafe { std::slice::from_raw_parts_mut(array, count as usize) };
+            self.input
+                .force(|_| Input::new(self.openxr.clone()))
+                .get_poses(poses, None, time);
         }
 
         vr::EVRCompositorError::None
@@ -2149,6 +2146,105 @@ mod tests {
 
         assert_eq!(f.wait_get_poses(), None);
         assert_eq!(f.wait_get_poses(), None);
+    }
+
+    #[test]
+    fn wait_get_poses_fills_every_slot() {
+        const COUNT: usize = vr::k_unMaxTrackedDeviceCount as usize;
+        let garbage = vr::TrackedDevicePose_t {
+            mDeviceToAbsoluteTracking: vr::HmdMatrix34_t { m: [[1.0; 4]; 3] },
+            eTrackingResult: vr::ETrackingResult::Running_OK,
+            bPoseIsValid: true,
+            bDeviceIsConnected: true,
+            ..Default::default()
+        };
+        let assert_hmd = |pose: &vr::TrackedDevicePose_t| {
+            assert!(pose.bPoseIsValid);
+            assert!(pose.bDeviceIsConnected);
+        };
+        // only the HMD and both (unbound) controllers exist
+        let assert_no_device = |poses: &[vr::TrackedDevicePose_t]| {
+            for (i, pose) in poses.iter().enumerate().skip(3) {
+                assert!(!pose.bPoseIsValid, "slot {i}");
+                assert!(!pose.bDeviceIsConnected, "slot {i}");
+                assert_eq!(
+                    pose.eTrackingResult,
+                    vr::ETrackingResult::Uninitialized,
+                    "slot {i}"
+                );
+                assert_eq!(pose.mDeviceToAbsoluteTracking.m, [[0.0; 4]; 3], "slot {i}");
+            }
+        };
+
+        let f = Fixture::new();
+        let mut render = [garbage; COUNT];
+        let mut game = [garbage; COUNT];
+
+        // render array only
+        assert_eq!(
+            f.comp
+                .WaitGetPoses(render.as_mut_ptr(), COUNT as u32, std::ptr::null_mut(), 0),
+            None
+        );
+        assert_hmd(&render[0]);
+        assert_no_device(&render);
+
+        // game array only
+        assert_eq!(
+            f.comp
+                .WaitGetPoses(std::ptr::null_mut(), 0, game.as_mut_ptr(), COUNT as u32),
+            None
+        );
+        assert_hmd(&game[0]);
+        assert_no_device(&game);
+
+        // game array larger than the render array
+        let mut render = [garbage; 1];
+        let mut game = [garbage; COUNT];
+        assert_eq!(
+            f.comp
+                .WaitGetPoses(render.as_mut_ptr(), 1, game.as_mut_ptr(), COUNT as u32),
+            None
+        );
+        assert_hmd(&render[0]);
+        assert_hmd(&game[0]);
+        assert_no_device(&game);
+
+        // null array with a count
+        let mut game = [garbage; COUNT];
+        assert_eq!(
+            f.comp
+                .WaitGetPoses(std::ptr::null_mut(), 16, game.as_mut_ptr(), COUNT as u32),
+            None
+        );
+        assert_hmd(&game[0]);
+        assert_no_device(&game);
+    }
+
+    #[test]
+    fn last_pose_for_device_without_a_device() {
+        let f = Fixture::new();
+        let mut pose = vr::TrackedDevicePose_t {
+            bPoseIsValid: true,
+            bDeviceIsConnected: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            f.comp
+                .GetLastPoseForTrackedDeviceIndex(10, &mut pose, std::ptr::null_mut()),
+            None
+        );
+        assert!(!pose.bPoseIsValid);
+        assert!(!pose.bDeviceIsConnected);
+
+        assert_eq!(
+            f.comp.GetLastPoseForTrackedDeviceIndex(
+                vr::k_unMaxTrackedDeviceCount,
+                &mut pose,
+                std::ptr::null_mut()
+            ),
+            IndexOutOfRange
+        );
     }
 
     #[test]

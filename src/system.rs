@@ -1981,6 +1981,19 @@ mod tests {
     }
 
     #[test]
+    fn device_to_absolute_tracking_pose_null_array() {
+        let xr =
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
+        let system = System::new(xr, &Injector::default());
+        system.GetDeviceToAbsoluteTrackingPose(
+            vr::ETrackingUniverseOrigin::Standing,
+            0.0,
+            std::ptr::null_mut(),
+            vr::k_unMaxTrackedDeviceCount,
+        );
+    }
+
+    #[test]
     fn hmd_identity_available_before_first_frame() {
         fakexr::set_default_interaction_profile(
             fakexr::UserPath::RightHand,
