@@ -1916,3 +1916,40 @@ fn pose_relative_to_now_takes_any_seconds() {
         );
     }
 }
+
+#[test]
+fn input_003_update_action_state() {
+    use vr::IVRInput003On004;
+
+    let f = Fixture::new();
+    f.load_actions(c"actions.json");
+    let set1 = f.get_action_set_handle(c"/actions/set1");
+    let boolact = f.get_action_handle(c"/actions/set1/in/boolact");
+    fakexr::set_action_state(
+        f.get_action::<bool>(boolact),
+        fakexr::ActionState::Bool(true),
+        LeftHand,
+    );
+
+    // The beta's sets have no priority, so they're smaller.
+    let mut set = vr::vr_1_0_15::VRActiveActionSet_t {
+        ulActionSet: set1,
+        ..Default::default()
+    };
+    assert_eq!(std::mem::size_of_val(&set), 24);
+    let mut update = |size| IVRInput003On004::UpdateActionState(&*f.input, &mut set, size, 1);
+    assert_eq!(update(32), vr::EVRInputError::InvalidParam);
+    assert_eq!(update(24), vr::EVRInputError::None);
+
+    let mut state = vr::InputDigitalActionData_t::default();
+    assert_eq!(
+        IVRInput003On004::GetDigitalActionData(
+            &*f.input,
+            boolact,
+            &mut state,
+            std::mem::size_of_val(&state) as u32
+        ),
+        vr::EVRInputError::None
+    );
+    assert!(state.bActive && state.bState);
+}

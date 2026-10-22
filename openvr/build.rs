@@ -864,6 +864,8 @@ fn process_vr_namespace_content(
                     ("vr_1_0_3", &["Compositor_FrameTiming"]),
                     // IVRInput_004's version has a boneCount that later versions dropped.
                     ("vr_1_0_17", &["InputSkeletalActionData_t"]),
+                    // No nPriority yet, so the struct is smaller.
+                    ("vr_1_0_15", &["VRActiveActionSet_t"]),
                 ];
                 let should_reversion = INCOMPAT_STRUCTS
                     .iter()

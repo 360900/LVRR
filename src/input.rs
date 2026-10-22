@@ -2136,6 +2136,39 @@ impl<C: openxr_data::Compositor> vr::IVRInput005On006 for Input<C> {
 
 // IVRInput_003 is the SteamVR Input beta: no device restriction yet, and skeletal data in one call.
 impl<C: openxr_data::Compositor> vr::IVRInput003On004 for Input<C> {
+    fn UpdateActionState(
+        &self,
+        active_sets: *mut vr::vr_1_0_15::VRActiveActionSet_t,
+        active_set_size: u32,
+        active_set_count: u32,
+    ) -> vr::EVRInputError {
+        if active_set_count == 0 || active_set_size == 0 {
+            return vr::EVRInputError::NoActiveActionSet;
+        }
+        if active_sets.is_null()
+            || active_set_size as usize != std::mem::size_of::<vr::vr_1_0_15::VRActiveActionSet_t>()
+        {
+            return vr::EVRInputError::InvalidParam;
+        }
+        // The beta has no set priorities, which is the same as all of them being 0.
+        let mut sets: Vec<_> =
+            unsafe { std::slice::from_raw_parts(active_sets, active_set_count as usize) }
+                .iter()
+                .map(|set| vr::VRActiveActionSet_t {
+                    ulActionSet: set.ulActionSet,
+                    ulRestrictedToDevice: set.ulRestrictedToDevice,
+                    ulSecondaryActionSet: set.ulSecondaryActionSet,
+                    ..Default::default()
+                })
+                .collect();
+        <Self as vr::IVRInput011_Interface>::UpdateActionState(
+            self,
+            sets.as_mut_ptr(),
+            std::mem::size_of::<vr::VRActiveActionSet_t>() as u32,
+            active_set_count,
+        )
+    }
+
     fn GetDigitalActionData(
         &self,
         action: vr::VRActionHandle_t,
@@ -2271,6 +2304,17 @@ impl<C: openxr_data::Compositor> vr::IVRInput003On004 for Input<C> {
             amplitude,
             vr::k_ulInvalidInputValueHandle,
         )
+    }
+
+    fn ShowBindingsForActionSet(
+        &self,
+        _: *mut vr::vr_1_0_15::VRActiveActionSet_t,
+        _: u32,
+        _: u32,
+        _: vr::VRInputValueHandle_t,
+    ) -> vr::EVRInputError {
+        crate::warn_unimplemented!("ShowBindingsForActionSet");
+        vr::EVRInputError::None
     }
 }
 
