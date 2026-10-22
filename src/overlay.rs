@@ -11,7 +11,7 @@ use openvr as vr;
 use openxr as xr;
 use slotmap::{Key, KeyData, SecondaryMap, SlotMap, new_key_type};
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::{
     collections::{HashMap, VecDeque},
     ops::Deref,
@@ -163,14 +163,17 @@ impl OverlayMan {
         &self,
         session: &'a SessionData,
         render_skybox: bool,
-    ) -> Vec<OverlayLayer<'a, G>>
+    ) -> OverlayLayers<'a, G>
     where
         for<'b> &'b AnySwapchainMap: TryInto<&'b SwapchainMap<G>, Error: std::fmt::Display>,
     {
         let mut overlays = self.overlays.write().unwrap();
-        let swapchains = session.overlay_data.swapchains.lock().unwrap();
-        let Some(swapchains) = swapchains.as_ref() else {
-            return Vec::new();
+        let swapchains_guard = session.overlay_data.swapchains.lock().unwrap();
+        let Some(swapchains) = swapchains_guard.as_ref() else {
+            return OverlayLayers {
+                layers: Vec::new(),
+                _swapchains: swapchains_guard,
+            };
         };
         let swapchains: &SwapchainMap<G> = swapchains.try_into().unwrap_or_else(|e| {
             panic!(
@@ -238,8 +241,8 @@ impl OverlayMan {
                         // SAFETY: We need to remove the lifetimes to be able to return this layer.
                         // Internally, CompositionLayerQuad is using the raw OpenXR handles and PhantomData, not actual
                         // references, so returning it as long as we can guarantee the lifetimes of the space and
-                        // swapchain is fine. Both of these are derived from the SessionData,
-                        // so we should have no lifetime problems.
+                        // swapchain is fine. The space lives as long as the SessionData, and the
+                        // returned OverlayLayers keeps the swapchains locked.
                         unsafe { $ty::from_raw(layer.into_raw()) }
                     }
 
@@ -321,7 +324,10 @@ impl OverlayMan {
         let sorted_layers: Vec<OverlayLayer<_>> = layers.into_iter().map(|(_, l)| l).collect();
 
         trace!("returning {} layers", sorted_layers.len());
-        sorted_layers
+        OverlayLayers {
+            layers: sorted_layers,
+            _swapchains: swapchains_guard,
+        }
     }
 
     pub fn get_next_overlay_event(
@@ -382,6 +388,20 @@ impl OverlayMan {
                 .push_event(event);
         }
         vr::EVROverlayError::None
+    }
+}
+
+/// The overlay composition layers for a frame. Keeps the overlay swapchains locked until dropped, so
+/// a texture update on another thread can't destroy a swapchain before the frame using it has ended.
+pub struct OverlayLayers<'a, G: xr::Graphics> {
+    layers: Vec<OverlayLayer<'a, G>>,
+    _swapchains: MutexGuard<'a, Option<AnySwapchainMap>>,
+}
+
+impl<'a, G: xr::Graphics> Deref for OverlayLayers<'a, G> {
+    type Target = [OverlayLayer<'a, G>];
+    fn deref(&self) -> &Self::Target {
+        &self.layers
     }
 }
 
