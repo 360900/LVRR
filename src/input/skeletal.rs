@@ -1,7 +1,7 @@
 #[path = "skeletal_generated.rs"]
 mod generated;
 
-use super::Input;
+use super::{Input, inactive_state};
 use crate::input::TrackedDeviceType;
 use crate::input::devices::HandSkeleton;
 use crate::openxr_data::{self, Hand, SessionData};
@@ -423,22 +423,22 @@ impl<C: openxr_data::Compositor> Input<C> {
         let thumb_touch = actions
             .thumb_touch
             .state(&session_data.session, subaction)
-            .unwrap()
+            .unwrap_or_else(inactive_state)
             .current_state;
         let index_touch = actions
             .index_touch
             .state(&session_data.session, subaction)
-            .unwrap()
+            .unwrap_or_else(inactive_state)
             .current_state;
         let index_curl = actions
             .index_curl
             .state(&session_data.session, subaction)
-            .unwrap()
+            .unwrap_or_else(inactive_state)
             .current_state;
         let rest_curl = actions
             .rest_curl
             .state(&session_data.session, subaction)
-            .unwrap()
+            .unwrap_or_else(inactive_state)
             .current_state;
 
         let index = index_curl.max(

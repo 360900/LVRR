@@ -1,6 +1,6 @@
 use super::action_manifest::{ClickThresholdParams, GrabParameters};
 use crate::AtomicF32;
-use crate::input::{ActionData, ExtraActionData};
+use crate::input::{ActionData, ExtraActionData, inactive_state};
 use crate::openxr_data::SessionData;
 use log::{error, warn};
 use openvr as vr;
@@ -104,12 +104,15 @@ impl Vector2ActionData {
                     next[index] = candidate;
                 }
             };
-            consider(direct.state(session, hand).unwrap());
+            consider(direct.state(session, hand).unwrap_or_else(inactive_state));
             for binding in &self.bindings {
                 if binding.hand != hand || binding.profile != profile {
                     continue;
                 }
-                let mut state = binding.action.state(session, hand).unwrap();
+                let mut state = binding
+                    .action
+                    .state(session, hand)
+                    .unwrap_or_else(inactive_state);
                 binding.invert.apply(&mut state.current_state);
                 consider(state);
             }
@@ -1127,7 +1130,7 @@ mod tests {
         let boolact = f.get_action_handle(c"/actions/set1/in/boolact");
 
         f.load_actions(c"actions_dpad.json");
-        f.input.openxr.restart_session();
+        f.input.openxr.restart_session().unwrap();
 
         get_dpad_action!(f, boolact, dpad_data, ViveWands);
 
@@ -1201,7 +1204,7 @@ mod tests {
         let boolact = f.get_action_handle(c"/actions/set1/in/boolact");
 
         f.load_actions(c"actions_dpad_mixed.json");
-        f.input.openxr.restart_session();
+        f.input.openxr.restart_session().unwrap();
 
         get_dpad_action!(f, boolact, _dpad, ViveWands);
 
@@ -1238,7 +1241,7 @@ mod tests {
         let boolact = f.get_action_handle(c"/actions/set1/in/boolact");
 
         f.load_actions(c"actions_dpad_multi.json");
-        f.input.openxr.restart_session();
+        f.input.openxr.restart_session().unwrap();
 
         get_dpad_action!(f, boolact, dpad_data_vive, ViveWands);
         get_dpad_action!(f, boolact, dpad_data_knuckles, Knuckles);

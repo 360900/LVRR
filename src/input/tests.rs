@@ -488,7 +488,7 @@ fn reload_manifest_on_session_restart() {
     let boolact = f.get_action_handle(c"/actions/set1/in/boolact");
 
     f.load_actions(c"actions.json");
-    f.input.openxr.restart_session();
+    f.input.openxr.restart_session().unwrap();
 
     fakexr::set_action_state(
         f.get_action::<bool>(boolact),
@@ -1071,6 +1071,75 @@ fn analog_action_initialize_on_failure() {
     check_state(state, "wrong type");
 }
 
+/// Input calls must not panic once the runtime lost the session. A sync that hits the loss marks
+/// the session lost, after which the calls fail without touching it.
+#[test]
+fn session_loss() {
+    let f = Fixture::new();
+    let set1 = f.get_action_set_handle(c"/actions/set1");
+    let boolact = f.get_action_handle(c"/actions/set1/in/boolact");
+    let vec1act = f.get_action_handle(c"/actions/set1/in/vec1act");
+    let poseact = f.get_action_handle(c"/actions/set1/in/pose");
+    let vib = f.get_action_handle(c"/actions/set1/in/vib");
+    f.load_actions(c"actions.json");
+
+    let mut active = vr::VRActiveActionSet_t {
+        ulActionSet: set1,
+        ..Default::default()
+    };
+    let mut sync = || {
+        f.input.UpdateActionState(
+            &mut active,
+            std::mem::size_of::<vr::VRActiveActionSet_t>() as u32,
+            1,
+        )
+    };
+    fakexr::set_action_state(
+        f.get_action::<bool>(boolact),
+        fakexr::ActionState::Bool(true),
+        LeftHand,
+    );
+    assert_eq!(sync(), vr::EVRInputError::None);
+    assert!(f.get_bool_state(boolact).unwrap().bState);
+
+    fakexr::lose_session(f.raw_session());
+    // Before the loss is noticed, failed reads count as inactive.
+    let state = f.get_bool_state(boolact).unwrap();
+    assert!(!state.bActive && !state.bState);
+
+    assert_eq!(sync(), vr::EVRInputError::IPCError);
+    assert!(f.input.openxr.is_lost());
+    assert_eq!(sync(), vr::EVRInputError::IPCError);
+    assert_eq!(
+        f.get_bool_state(boolact).unwrap_err(),
+        vr::EVRInputError::IPCError
+    );
+    let mut analog = vr::InputAnalogActionData_t {
+        bActive: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        f.input.GetAnalogActionData(
+            vec1act,
+            &mut analog,
+            std::mem::size_of_val(&analog) as u32,
+            0
+        ),
+        vr::EVRInputError::IPCError
+    );
+    assert!(!analog.bActive);
+    assert_eq!(
+        f.get_pose(poseact, 0).unwrap_err(),
+        vr::EVRInputError::IPCError
+    );
+    assert_eq!(
+        f.input
+            .TriggerHapticVibrationAction(vib, 0.0, 1.0, 1.0, 1.0, 0),
+        vr::EVRInputError::IPCError
+    );
+    f.input.frame_start_update();
+}
+
 #[test]
 fn implicit_action_sets() {
     let mut f = Fixture::new();
@@ -1117,14 +1186,14 @@ fn empty_manifest() {
     f.input
         .SetActionManifestPath(c"empty_manifest.json".as_ptr() as _);
 
-    f.input.openxr.restart_session();
+    f.input.openxr.restart_session().unwrap();
     assert!(f.input.action_map.read().unwrap().is_empty());
 }
 
 #[test]
 fn load_actions_race() {
     let mut f = Fixture::new();
-    f.input.openxr.restart_session(); // get to real session
+    f.input.openxr.restart_session().unwrap(); // get to real session
 
     f.set_interaction_profile::<OculusTouch>(LeftHand);
     f.set_interaction_profile::<OculusTouch>(RightHand);
@@ -1245,7 +1314,7 @@ fn poll_event_while_devices_are_read() {
 #[test]
 fn legacy_setup_racing_manifest_load() {
     let mut f = Fixture::new();
-    f.input.openxr.restart_session(); // get to real session
+    f.input.openxr.restart_session().unwrap(); // get to real session
 
     let (attaching_tx, attaching_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();

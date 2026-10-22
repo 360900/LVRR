@@ -58,6 +58,12 @@ pub struct OpenXrData<C: Compositor> {
     /// Set while we are ending the session ourselves (restart or shutdown), so the resulting
     /// STOPPING state isn't reported to the application as a Quit.
     exit_requested: AtomicBool,
+    /// Set once the application was told to quit because the runtime stopped or lost the session.
+    /// No new session is started afterwards, so this and `lost` are never cleared.
+    exiting: AtomicBool,
+    /// Set once the runtime lost the session or instance. Every call on the session fails from
+    /// then on, so callers skip them.
+    lost: AtomicBool,
 
     /// should only be externally accessed for testing
     pub(crate) input: Injected<crate::input::Input<C>>,
@@ -263,6 +269,8 @@ impl<C: Compositor> OpenXrData<C> {
             probed_profiles,
             headless,
             exit_requested: false.into(),
+            exiting: false.into(),
+            lost: false.into(),
             input: injector.inject(),
             compositor: injector.inject(),
             system: injector.inject(),
@@ -270,6 +278,9 @@ impl<C: Compositor> OpenXrData<C> {
     }
 
     pub fn poll_events(&self) {
+        if self.is_lost() {
+            return;
+        }
         let data = self.session_data.get();
         if let Some(state) = self.poll_events_impl(&data) {
             drop(data);
@@ -280,7 +291,10 @@ impl<C: Compositor> OpenXrData<C> {
     fn poll_events_impl(&self, session_data: &SessionData) -> Option<xr::SessionState> {
         let mut buf = xr::EventDataBuffer::new();
         let mut state = None;
-        while let Some(event) = self.instance.poll_event(&mut buf).unwrap() {
+        while let Some(event) = self
+            .check("xrPollEvent", self.instance.poll_event(&mut buf))
+            .flatten()
+        {
             match event {
                 xr::Event::SessionStateChanged(event) => {
                     // Events for an older session (i.e. the probe session or a session we
@@ -294,30 +308,25 @@ impl<C: Compositor> OpenXrData<C> {
                     }
                     state = Some(event.state());
                     info!("OpenXR session state changed: {:?}", event.state());
-                    if state == Some(xr::SessionState::STOPPING)
-                        && self.exit_requested.load(Ordering::Relaxed)
-                    {
-                        debug!("session stopping at our request, not pushing Quit");
-                    } else if let Some(system) = self.system.get().filter(|_| {
-                        (cfg!(test) || session_data.temp_vulkan.is_none())
-                            && state == Some(xr::SessionState::STOPPING)
-                    }) {
-                        debug!("pushing Quit event");
-                        system.push_event(vr::VREvent_t {
-                            eventType: vr::EVREventType::Quit as u32,
-                            trackedDeviceIndex: vr::k_unTrackedDeviceIndexInvalid,
-                            eventAgeSeconds: 0.0,
-                            data: vr::VREvent_Data_t {
-                                process: vr::VREvent_Process_t {
-                                    pid: u32::MAX,
-                                    oldPid: u32::MAX,
-                                    bForced: false,
-                                    bConnectionLost: false,
-                                },
-                            },
-                        });
+                    let exit_requested = self.exit_requested.load(Ordering::Relaxed);
+                    match event.state() {
+                        xr::SessionState::STOPPING if exit_requested => {
+                            debug!("session stopping at our request, not pushing Quit");
+                        }
+                        xr::SessionState::STOPPING
+                            if cfg!(test) || session_data.temp_vulkan.is_none() =>
+                        {
+                            self.push_quit(false)
+                        }
+                        xr::SessionState::LOSS_PENDING => self.mark_lost("session loss pending"),
+                        // We only end the session ourselves, so the runtime ended it.
+                        xr::SessionState::EXITING if !exit_requested => {
+                            self.mark_lost("session exiting")
+                        }
+                        _ => {}
                     }
                 }
+                xr::Event::InstanceLossPending(_) => self.push_quit(true),
                 xr::Event::InteractionProfileChanged(_) => {
                     if let Some(input) = self.input.get() {
                         input.interaction_profile_changed(session_data, &self.enabled_extensions);
@@ -332,9 +341,76 @@ impl<C: Compositor> OpenXrData<C> {
         state
     }
 
-    pub fn restart_session(&self) {
+    /// Whether the runtime lost the session or instance.
+    pub fn is_lost(&self) -> bool {
+        self.lost.load(Ordering::Relaxed)
+    }
+
+    /// Passes through a successful result. A failure is logged, and if it means the runtime lost
+    /// the session or instance, the session is marked lost and the application told to quit.
+    pub fn check<T>(&self, call: &str, result: xr::Result<T>) -> Option<T> {
+        result.map_err(|e| self.handle_error(call, e)).ok()
+    }
+
+    /// See [Self::check].
+    pub fn handle_error(&self, call: &str, error: xr::sys::Result) {
+        match error {
+            xr::sys::Result::ERROR_SESSION_LOST | xr::sys::Result::ERROR_INSTANCE_LOST => {
+                self.mark_lost(format_args!("{call} failed: {error}"))
+            }
+            _ => warn!("{call} failed: {error}"),
+        }
+    }
+
+    fn mark_lost(&self, reason: impl std::fmt::Display) {
+        if !self.lost.swap(true, Ordering::Relaxed) {
+            error!("OpenXR session lost ({reason}), asking the application to quit");
+        }
+        self.push_quit(true);
+    }
+
+    /// Sends the application VREvent_Quit, at most once.
+    fn push_quit(&self, connection_lost: bool) {
+        if self.exiting.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let Some(system) = self.system.get() else {
+            return;
+        };
+        debug!("pushing Quit event");
+        system.push_event(vr::VREvent_t {
+            eventType: vr::EVREventType::Quit as u32,
+            trackedDeviceIndex: vr::k_unTrackedDeviceIndexInvalid,
+            eventAgeSeconds: 0.0,
+            data: vr::VREvent_Data_t {
+                process: vr::VREvent_Process_t {
+                    pid: u32::MAX,
+                    oldPid: u32::MAX,
+                    bForced: false,
+                    bConnectionLost: connection_lost,
+                },
+            },
+        });
+    }
+
+    /// Why [Self::restart_session] would refuse to start a new session, if it would.
+    pub fn restart_blocked(&self) -> Option<RestartError> {
+        self.exiting
+            .load(Ordering::Relaxed)
+            .then_some(RestartError::Exiting)
+    }
+
+    pub fn restart_session(&self) -> Result<(), RestartError> {
         let mut session_guard = self.session_data.0.write();
+        if let Some(e) = self.restart_blocked() {
+            debug!("not restarting session: {e:?}");
+            return Err(e);
+        }
         self.end_session(&mut session_guard);
+        // A session lost while ending it is kept, since every call on it fails anyway.
+        if self.is_lost() {
+            return Err(RestartError::Exiting);
+        }
 
         let origin = session_guard.current_origin;
         let comp = self
@@ -363,6 +439,7 @@ impl<C: Compositor> OpenXrData<C> {
         }
 
         *session_guard = ManuallyDrop::new(session);
+        Ok(())
     }
 
     pub fn set_tracking_space(&self, space: vr::ETrackingUniverseOrigin) {
@@ -486,6 +563,10 @@ impl<C: Compositor> OpenXrData<C> {
     }
 
     fn end_session(&self, session_data: &mut SessionData) {
+        if self.is_lost() {
+            debug!("not ending lost session");
+            return;
+        }
         self.exit_requested.store(true, Ordering::Relaxed);
         let mut state = session_data.state;
         if state != xr::SessionState::STOPPING {
@@ -517,7 +598,7 @@ impl<C: Compositor> OpenXrData<C> {
         target: xr::SessionState,
     ) -> xr::SessionState {
         let start = Instant::now();
-        while state != target {
+        while state != target && !self.is_lost() {
             if start.elapsed() >= SESSION_STATE_TIMEOUT {
                 warn!("timed out waiting for session state {target:?} (current: {state:?})");
                 break;
@@ -640,6 +721,13 @@ pub struct SessionData {
     temp_vulkan: Option<VulkanData>,
     #[cfg(feature = "monado")]
     pub monado: Option<SafeMonado>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestartError {
+    /// The runtime stopped or lost the session and the application was told to quit, so no new
+    /// session is started.
+    Exiting,
 }
 
 #[derive(Debug)]
@@ -1088,7 +1176,7 @@ mod tests {
             }
 
             scope.spawn(|| {
-                data.restart_session();
+                data.restart_session().unwrap();
             });
         });
 
@@ -1163,6 +1251,23 @@ mod tests {
         drop(writer);
         drop(constructor.join().unwrap());
         done.expect("Input::new waited for the session lock");
+    }
+
+    /// The runtime going away (e.g. wivrn-server stopping) right before shutdown makes xrPollEvent
+    /// fail. Shutdown must neither panic nor wait for state changes that will never come.
+    #[test]
+    fn shutdown_after_instance_loss() {
+        crate::init_logging();
+        let data = OpenXrData::<FakeCompositor>::new(
+            &Injector::default(),
+            openvr::EVRApplicationType::Other,
+        )
+        .unwrap();
+
+        fakexr::lose_instance(data.instance.as_raw());
+        let start = std::time::Instant::now();
+        drop(data);
+        assert!(start.elapsed() < super::SESSION_STATE_TIMEOUT);
     }
 
     #[test]

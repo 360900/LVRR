@@ -104,11 +104,19 @@ impl Compositor {
 
     fn maybe_wait_frame(&self, session_data: &SessionData) {
         tracy_span!();
+        if self.openxr.is_lost() {
+            return;
+        }
         let mut frame_lock = { session_data.comp_data.0.lock().unwrap() };
-        self.frame_state
+        // Waiting again before the waited frame was begun would block forever.
+        if !self
+            .frame_state
             .lock()
             .unwrap()
-            .advance_to(FrameState::Waited);
+            .advance_to(FrameState::Waited)
+        {
+            return;
+        }
         let Some(ctrl) = frame_lock.as_mut() else {
             debug!("no frame controller - not starting frame");
             return;
@@ -117,11 +125,18 @@ impl Compositor {
         #[macros::any_graphics(DynFrameController)]
         fn wait_frame<G: GraphicsBackend + 'static>(
             ctrl: &mut FrameController<G>,
-        ) -> (xr::Time, i64) {
+        ) -> xr::Result<(xr::Time, i64)> {
             ctrl.wait_frame()
         }
 
-        let (display_time, display_period) = ctrl.with_any_graphics_mut::<wait_frame>(());
+        let Some((display_time, display_period)) = self.openxr.check(
+            "Waiting for frame",
+            ctrl.with_any_graphics_mut::<wait_frame>(()),
+        ) else {
+            // No frame was waited, so the next WaitGetPoses waits again.
+            *self.frame_state.lock().unwrap() = FrameState::Submitted;
+            return;
+        };
         self.openxr.display_time.set(display_time);
         self.openxr
             .display_period_nanos
@@ -130,6 +145,9 @@ impl Compositor {
 
     fn maybe_begin_frame(&self, session_data: &SessionData) {
         tracy_span!();
+        if self.openxr.is_lost() {
+            return;
+        }
         let mut frame_lock = { session_data.comp_data.0.lock().unwrap() };
         if !self
             .frame_state
@@ -146,11 +164,23 @@ impl Compositor {
         };
 
         #[macros::any_graphics(DynFrameController)]
-        fn begin_frame<G: GraphicsBackend + 'static>(ctrl: &mut FrameController<G>) {
+        fn begin_frame<G: GraphicsBackend + 'static>(
+            ctrl: &mut FrameController<G>,
+        ) -> xr::Result<()> {
             ctrl.begin_frame()
         }
 
-        ctrl.with_any_graphics_mut::<begin_frame>(());
+        if self
+            .openxr
+            .check(
+                "Beginning frame",
+                ctrl.with_any_graphics_mut::<begin_frame>(()),
+            )
+            .is_none()
+        {
+            // The frame is still waited, so the next WaitGetPoses tries to begin it again.
+            *self.frame_state.lock().unwrap() = FrameState::Waited;
+        }
     }
 
     pub fn initialize_real_session(
@@ -158,6 +188,10 @@ impl Compositor {
         texture: &vr::Texture_t,
         bounds: vr::VRTextureBounds_t,
     ) -> Result<(), vr::EVRCompositorError> {
+        // The app was told to quit, so no new session is started.
+        if self.openxr.restart_blocked().is_some() {
+            return Err(vr::EVRCompositorError::DoNotHaveFocus);
+        }
         let backend =
             SupportedBackend::new(texture, bounds).ok_or(vr::EVRCompositorError::InvalidTexture)?;
 
@@ -203,8 +237,9 @@ impl Compositor {
         *self.tmp_backend.lock().unwrap() = Some(tmp_backend);
 
         info!("Creating real backend for texture type {:?}", texture.eType);
-        self.openxr.restart_session();
-        Ok(())
+        self.openxr
+            .restart_session()
+            .map_err(|_| vr::EVRCompositorError::DoNotHaveFocus)
     }
 }
 
@@ -725,13 +760,17 @@ impl vr::IVRCompositor029_Interface for Compositor {
             system: &System,
             display_time: xr::Time,
             overlays: Option<&OverlayMan>,
-        ) where
+        ) -> xr::Result<()>
+        where
             for<'b> &'b crate::overlay::AnySwapchainMap:
                 TryInto<&'b crate::overlay::SwapchainMap<G::Api>, Error: std::fmt::Display>,
         {
             ctrl.end_frame(session_data, system, display_time, overlays)
         }
 
+        if self.openxr.is_lost() {
+            return;
+        }
         let session_data = self.openxr.session_data.get();
         let mut frame_lock = session_data.comp_data.0.lock().unwrap();
         let Some(ctrl) = frame_lock.as_mut() else {
@@ -748,12 +787,14 @@ impl vr::IVRCompositor029_Interface for Compositor {
         let display_time = self.openxr.get_display_time();
         let overlays = self.overlays.get();
 
-        ctrl.with_any_graphics_mut::<end_frame>((
+        let result = ctrl.with_any_graphics_mut::<end_frame>((
             &session_data,
             &system,
             display_time,
             overlays.as_deref(),
         ));
+        // A frame that failed to end is discarded by the next xrBeginFrame.
+        self.openxr.check("Ending frame", result);
 
         self.frame_state
             .lock()
@@ -822,7 +863,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
             return vr::EVRCompositorError::InvalidTexture;
         };
 
-        if !self.focused.is_completed() {
+        if !self.focused.is_completed() || self.openxr.is_lost() {
             return vr::EVRCompositorError::DoNotHaveFocus;
         }
 
@@ -920,6 +961,18 @@ impl vr::IVRCompositor029_Interface for Compositor {
         game_pose_count: u32,
     ) -> vr::EVRCompositorError {
         tracy_span!("GetLastPoses impl");
+        if self.openxr.is_lost() {
+            for (poses, count) in [
+                (render_pose_array, render_pose_count),
+                (game_pose_array, game_pose_count),
+            ] {
+                if !poses.is_null() {
+                    unsafe { std::slice::from_raw_parts_mut(poses, count as usize) }
+                        .fill(Default::default());
+                }
+            }
+            return vr::EVRCompositorError::DoNotHaveFocus;
+        }
         if render_pose_count == 0 {
             return vr::EVRCompositorError::None;
         }
@@ -982,6 +1035,19 @@ impl vr::IVRCompositor029_Interface for Compositor {
             if timing_mode == vr::EVRCompositorTimingMode::Implicit {
                 self.maybe_begin_frame(&session_data);
             }
+        }
+        if self.openxr.is_lost() {
+            // xrWaitFrame no longer paces the app, so keep it from spinning until it quits.
+            let period = self.openxr.display_period_nanos.load(Ordering::Relaxed);
+            std::thread::sleep(std::time::Duration::from_nanos(
+                period.clamp(1_000_000, 100_000_000) as u64,
+            ));
+            return self.GetLastPoses(
+                render_pose_array,
+                render_pose_count,
+                game_pose_array,
+                game_pose_count,
+            );
         }
         if let Some(system) = self.system.get() {
             system.reset_views();
@@ -1346,7 +1412,8 @@ impl<G: GraphicsBackend> FrameController<G> {
         &mut self,
         session_data: &SessionData,
         mut create_info: xr::SwapchainCreateInfo<G::Api>,
-    ) where
+    ) -> xr::Result<()>
+    where
         for<'a> &'a openxr_data::GraphicalSession:
             TryInto<&'a openxr_data::Session<G::Api>, Error: std::fmt::Display>,
         G::Format: PartialEq + std::fmt::Debug,
@@ -1359,66 +1426,66 @@ impl<G: GraphicsBackend> FrameController<G> {
             info: create_info,
             initial_format: format,
         });
-        self.acquire_swapchain_image();
+        // The old image went away with the old swapchain.
+        self.image_acquired = false;
         self.eyes_submitted = Default::default();
+        self.acquire_swapchain_image()
     }
 
-    fn acquire_swapchain_image(&mut self) {
+    fn acquire_swapchain_image(&mut self) -> xr::Result<()> {
         let swapchain = &mut self
             .swapchain_data
             .as_mut()
             .expect("Can't acquire swapchain image with no swapchain!")
             .swapchain;
 
-        self.image_index = swapchain
-            .acquire_image()
-            .expect("Failed to acquire swapchain image") as usize;
+        self.image_index = swapchain.acquire_image()? as usize;
 
         trace!("waiting image");
         {
             tracy_span!("wait swapchain image");
-            swapchain
-                .wait_image(xr::Duration::INFINITE)
-                .expect("Failed to wait for swapchain image");
+            swapchain.wait_image(xr::Duration::INFINITE)?;
         }
 
         self.image_acquired = true;
+        Ok(())
     }
 
-    fn wait_frame(&mut self) -> (xr::Time, i64) {
+    fn wait_frame(&mut self) -> xr::Result<(xr::Time, i64)> {
         let frame_state = {
             tracy_span!("wait frame");
-            self.waiter.wait().unwrap()
+            self.waiter.wait()?
         };
         self.should_render = frame_state.should_render && !self.app_suspend_render;
-        (
+        Ok((
             frame_state.predicted_display_time,
             frame_state.predicted_display_period.as_nanos(),
-        )
+        ))
     }
 
-    fn begin_frame(&mut self) {
+    fn begin_frame(&mut self) -> xr::Result<()> {
         if self.image_acquired {
             tracy_span!("release old swapchain image");
+            self.image_acquired = false;
             self.swapchain_data
                 .as_mut()
                 .expect("Image is acquired, yet we have no swapchain?")
                 .swapchain
-                .release_image()
-                .unwrap();
+                .release_image()?;
         }
 
         if self.swapchain_data.is_some() {
-            self.acquire_swapchain_image();
+            self.acquire_swapchain_image()?;
         }
 
         {
             tracy_span!("begin frame");
-            self.stream.begin().expect("Couldn't begin frame");
+            self.stream.begin()?;
         }
         self.eyes_submitted = [None; 2];
         self.submitting_null = false;
         trace!("frame begin");
+        Ok(())
     }
 
     fn submit_impl(
@@ -1446,42 +1513,44 @@ impl<G: GraphicsBackend> FrameController<G> {
                 .backend
                 .swapchain_info_for_texture(texture, bounds, color_space);
 
-            is_valid_swapchain_info(&new_info)
-                .then(|| {
-                    assert!(
-                        !self.submitting_null,
-                        "App submitted a null texture and a normal texture in the same frame"
-                    );
+            if is_valid_swapchain_info(&new_info) {
+                assert!(
+                    !self.submitting_null,
+                    "App submitted a null texture and a normal texture in the same frame"
+                );
 
-                    if !self.swapchain_data.as_ref().is_some_and(|data| {
-                        is_usable_swapchain(
-                            &data.info,
-                            G::from_openxr_format(data.initial_format),
-                            &new_info,
-                            G::from_openxr_format(new_info.format),
-                        )
-                    }) {
-                        info!("recreating swapchain (for {eye:?})");
-                        self.recreate_swapchain(session_data, new_info);
+                if !self.swapchain_data.as_ref().is_some_and(|data| {
+                    is_usable_swapchain(
+                        &data.info,
+                        G::from_openxr_format(data.initial_format),
+                        &new_info,
+                        G::from_openxr_format(new_info.format),
+                    )
+                }) {
+                    info!("recreating swapchain (for {eye:?})");
+                    // A lost session is noticed by the next frame call.
+                    if let Err(e) = self.recreate_swapchain(session_data, new_info) {
+                        warn!("Failed to recreate swapchain: {e}");
+                        return Err(vr::EVRCompositorError::RequestFailed);
                     }
+                }
 
-                    SubmittedEye {
-                        extent: self.backend.copy_texture_to_swapchain(
-                            eye,
-                            texture,
-                            color_space,
-                            bounds,
-                            self.image_index,
-                            submit_flags,
-                        ),
-                        flip_vertically: bounds.vertically_flipped(),
-                    }
+                Some(SubmittedEye {
+                    extent: self.backend.copy_texture_to_swapchain(
+                        eye,
+                        texture,
+                        color_space,
+                        bounds,
+                        self.image_index,
+                        submit_flags,
+                    ),
+                    flip_vertically: bounds.vertically_flipped(),
                 })
-                .or_else(|| {
-                    trace!("submitting null this frame");
-                    self.submitting_null = true;
-                    Some(Default::default())
-                })
+            } else {
+                trace!("submitting null this frame");
+                self.submitting_null = true;
+                Some(Default::default())
+            }
         } else {
             Some(Default::default())
         };
@@ -1493,7 +1562,9 @@ impl<G: GraphicsBackend> FrameController<G> {
                 && let Some(data) = self.swapchain_data.as_mut()
             {
                 trace!("releasing image");
-                data.swapchain.release_image().unwrap();
+                if let Err(e) = data.swapchain.release_image() {
+                    warn!("Failed to release swapchain image: {e}");
+                }
             }
             self.image_acquired = false;
         }
@@ -1507,7 +1578,8 @@ impl<G: GraphicsBackend> FrameController<G> {
         system: &System,
         display_time: xr::Time,
         overlays: Option<&OverlayMan>,
-    ) where
+    ) -> xr::Result<()>
+    where
         for<'b> &'b crate::overlay::AnySwapchainMap:
             TryInto<&'b crate::overlay::SwapchainMap<G::Api>, Error: std::fmt::Display>,
     {
@@ -1588,10 +1660,10 @@ impl<G: GraphicsBackend> FrameController<G> {
         }
 
         self.stream
-            .end(display_time, xr::EnvironmentBlendMode::OPAQUE, &layers)
-            .unwrap();
+            .end(display_time, xr::EnvironmentBlendMode::OPAQUE, &layers)?;
 
         trace!("frame submitted");
+        Ok(())
     }
 }
 
@@ -1844,6 +1916,35 @@ mod tests {
             let session = self.comp.openxr.session_data.get().session.as_raw();
             assert_eq!(fakexr::session_frame_state(session), state);
         }
+
+        /// Sets up the System that receives the session's Quit events.
+        fn system(&self) -> Arc<System> {
+            let system = Arc::new(System::new(self.comp.openxr.clone(), &Injector::default()));
+            self.comp.openxr.system.set(Arc::downgrade(&system));
+            system
+        }
+
+        fn raw_session(&self) -> xr::sys::Session {
+            self.comp.openxr.session_data.get().session.as_raw()
+        }
+    }
+
+    /// Drains the queued events and returns bConnectionLost of each Quit.
+    fn quit_events(system: &System) -> Vec<bool> {
+        use vr::IVRSystem023_Interface;
+        let mut event = vr::VREvent_t::default();
+        let mut quits = Vec::new();
+        while system.PollNextEventWithPose(
+            vr::ETrackingUniverseOrigin::Standing,
+            &mut event,
+            std::mem::size_of_val(&event) as u32,
+            std::ptr::null_mut(),
+        ) {
+            if event.eventType == vr::EVREventType::Quit as u32 {
+                quits.push(unsafe { event.data.process.bConnectionLost });
+            }
+        }
+        quits
     }
 
     #[test]
@@ -2300,7 +2401,7 @@ mod tests {
         );
 
         f.ensure_real_session(true);
-        f.comp.openxr.restart_session();
+        f.comp.openxr.restart_session().unwrap();
         assert_eq!(f.wait_get_poses(), None);
 
         f.check_frame_state(fakexr::FrameState::Waited);
@@ -2433,7 +2534,7 @@ mod tests {
         set_texture(second);
         f.comp.PostPresentHandoff();
 
-        f.comp.openxr.restart_session();
+        f.comp.openxr.restart_session().unwrap();
         assert_eq!(f.wait_get_poses(), None);
         set_texture(first);
         f.check_frame_state(fakexr::FrameState::Begun);
@@ -2612,6 +2713,73 @@ mod tests {
             <Compositor as vr::IVRCompositor015On016>::GetCurrentScreenshotType(&f.comp),
             vr::EVRScreenshotType::None
         );
+    }
+
+    /// The session being lost mid frame (e.g. the WiVRn connection dropping) must not abort the
+    /// game: it is told to quit once, and the frame calls fail until it does.
+    #[test]
+    fn session_lost_mid_frame() {
+        let f = Fixture::new();
+        let system = f.system();
+        f.ensure_real_session(false);
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+
+        // xrEndFrame fails before the loss event is polled.
+        fakexr::lose_session(f.raw_session());
+        f.comp.PostPresentHandoff();
+        assert!(f.comp.openxr.is_lost());
+
+        let valid = vr::TrackedDevicePose_t {
+            bPoseIsValid: true,
+            ..Default::default()
+        };
+        let mut poses = [valid; 2];
+        let mut game_poses = [valid; 1];
+        assert_eq!(
+            f.comp
+                .WaitGetPoses(poses.as_mut_ptr(), 2, game_poses.as_mut_ptr(), 1),
+            DoNotHaveFocus
+        );
+        assert!(poses.iter().chain(&game_poses).all(|p| !p.bPoseIsValid));
+        assert_eq!(f.submit(vr::EVREye::Left), DoNotHaveFocus);
+        f.comp.PostPresentHandoff();
+        assert_eq!(f.wait_get_poses(), DoNotHaveFocus);
+        assert_eq!(quit_events(&system), [true]);
+    }
+
+    /// WiVRn stops the app and loses its session if it doesn't quit in time. The app is only told
+    /// to quit once.
+    #[test]
+    fn session_stopped_then_lost() {
+        let f = Fixture::new();
+        let system = f.system();
+        f.ensure_real_session(false);
+
+        f.comp
+            .openxr
+            .session_data
+            .get()
+            .session
+            .request_exit()
+            .unwrap();
+        assert_eq!(f.wait_get_poses(), None);
+        fakexr::lose_session(f.raw_session());
+        assert_eq!(f.wait_get_poses(), DoNotHaveFocus);
+        assert!(f.comp.openxr.is_lost());
+        assert_eq!(quit_events(&system), [false]);
+    }
+
+    #[test]
+    fn instance_lost() {
+        let f = Fixture::new();
+        let system = f.system();
+        f.ensure_real_session(false);
+
+        fakexr::lose_instance(f.comp.openxr.instance.as_raw());
+        assert_eq!(f.wait_get_poses(), DoNotHaveFocus);
+        assert_eq!(quit_events(&system), [true]);
     }
 
     #[test]

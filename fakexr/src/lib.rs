@@ -210,6 +210,41 @@ pub fn on_next_end_frame(session: xr::Session, hook: impl FnOnce() + Send + 'sta
     *session.end_frame_hook.lock().unwrap() = Some(Box::new(hook));
 }
 
+/// Loses `session` like Monado does when the connection drops: LOSS_PENDING is queued and the
+/// session's calls fail with ERROR_SESSION_LOST from now on.
+pub fn lose_session(session: xr::Session) {
+    let s = session.to_handle().unwrap();
+    s.lost.store(true, Ordering::Relaxed);
+    send_event(
+        &s.event_sender,
+        xr::EventDataSessionStateChanged {
+            ty: xr::EventDataSessionStateChanged::TYPE,
+            next: std::ptr::null(),
+            session,
+            state: xr::SessionState::LOSS_PENDING,
+            time: xr::Time::from_nanos(0),
+        },
+        None,
+    );
+}
+
+/// Makes xrPollEvent fail with ERROR_INSTANCE_LOST from now on.
+pub fn lose_instance(instance: xr::Instance) {
+    let instance = instance.to_handle().unwrap();
+    instance.lost.store(true, Ordering::Relaxed);
+}
+
+/// Like get_handle!, but for a session call that fails once the session was lost.
+macro_rules! get_session {
+    ($session:expr) => {{
+        let session = get_handle!($session);
+        if session.lost.load(Ordering::Relaxed) {
+            return xr::Result::ERROR_SESSION_LOST;
+        }
+        session
+    }};
+}
+
 macro_rules! fn_unimplemented_impl {
     ($($param:ident),+) => {
         fn_unimplemented_impl!($($param),+  -> []);
@@ -559,6 +594,7 @@ struct Instance {
     action_sets: Mutex<HashSet<xr::ActionSet>>,
     left_hand_key: DefaultKey,
     right_hand_key: DefaultKey,
+    lost: AtomicBool,
 }
 
 impl Instance {
@@ -640,6 +676,7 @@ struct Session {
     attach_hook: Hook,
     end_hook: Hook,
     end_frame_hook: Hook,
+    lost: AtomicBool,
 }
 
 impl Session {
@@ -964,6 +1001,7 @@ extern "system" fn create_instance(
         action_sets: Default::default(),
         left_hand_key,
         right_hand_key,
+        lost: false.into(),
     });
     unsafe {
         *instance = inst.to_xr();
@@ -1005,6 +1043,7 @@ extern "system" fn create_session(
         attach_hook: Mutex::default(),
         end_hook: Mutex::default(),
         end_frame_hook: Mutex::default(),
+        lost: false.into(),
     });
 
     DEFAULT_PROFILES.with_borrow(|profiles| {
@@ -1336,6 +1375,9 @@ extern "system" fn poll_event(
     buffer: *mut xr::EventDataBuffer,
 ) -> xr::Result {
     let instance = get_handle!(instance);
+    if instance.lost.load(Ordering::Relaxed) {
+        return xr::Result::ERROR_INSTANCE_LOST;
+    }
     let recv = instance.event_receiver.lock().unwrap();
     match recv.try_recv() {
         Ok(event) => {
@@ -1390,7 +1432,7 @@ extern "system" fn path_to_string(
 }
 
 extern "system" fn request_exit_session(session: xr::Session) -> xr::Result {
-    let sess = get_handle!(session);
+    let sess = get_session!(session);
     send_event(
         &sess.event_sender,
         xr::EventDataSessionStateChanged {
@@ -1406,7 +1448,7 @@ extern "system" fn request_exit_session(session: xr::Session) -> xr::Result {
 }
 
 extern "system" fn end_session(session: xr::Session) -> xr::Result {
-    let sess = get_handle!(session);
+    let sess = get_session!(session);
     run_hook(&sess.end_hook);
     send_event(
         &sess.event_sender,
@@ -1455,7 +1497,7 @@ extern "system" fn attach_session_action_sets(
     session: xr::Session,
     info: *const xr::SessionActionSetsAttachInfo,
 ) -> xr::Result {
-    let sesh = get_handle!(session);
+    let sesh = get_session!(session);
     run_hook(&sesh.attach_hook);
     let sets =
         unsafe { std::slice::from_raw_parts((*info).action_sets, (*info).count_action_sets as _) };
@@ -1475,7 +1517,7 @@ extern "system" fn sync_actions(
     session_xr: xr::Session,
     info: *const xr::ActionsSyncInfo,
 ) -> xr::Result {
-    let session = get_handle!(session_xr);
+    let session = get_session!(session_xr);
     for hand in [&session.left_hand, &session.right_hand] {
         if let Some(profile) = hand.pending_profile.load() {
             hand.profile.store(profile);
@@ -1593,7 +1635,7 @@ extern "system" fn get_action_state_boolean(
             is_active: false.into(),
         });
     }
-    let session = get_handle!(session);
+    let session = get_session!(session);
     let Some((set, action)) = session.get_action_if_attached(info) else {
         return xr::Result::ERROR_ACTIONSET_NOT_ATTACHED;
     };
@@ -1631,7 +1673,7 @@ extern "system" fn get_action_state_float(
             is_active: false.into(),
         });
     }
-    let session = get_handle!(session);
+    let session = get_session!(session);
     let Some((set, action)) = session.get_action_if_attached(info) else {
         return xr::Result::ERROR_ACTIONSET_NOT_ATTACHED;
     };
@@ -1665,7 +1707,7 @@ extern "system" fn get_action_state_vector2f(
             is_active: false.into(),
         });
     }
-    let session = get_handle!(session);
+    let session = get_session!(session);
     let Some((set, action)) = session.get_action_if_attached(info) else {
         return xr::Result::ERROR_ACTIONSET_NOT_ATTACHED;
     };
@@ -1691,7 +1733,7 @@ extern "system" fn get_current_interaction_profile(
     user_path: xr::Path,
     state: *mut xr::InteractionProfileState,
 ) -> xr::Result {
-    let session = get_handle!(session);
+    let session = get_session!(session);
     let Some(instance) = session.instance.upgrade() else {
         return xr::Result::ERROR_INSTANCE_LOST;
     };
@@ -1888,7 +1930,7 @@ extern "system" fn wait_frame(
     _info: *const xr::FrameWaitInfo,
     state: *mut xr::FrameState,
 ) -> xr::Result {
-    let session = get_handle!(session);
+    let session = get_session!(session);
     if let Err(e) = transition_frame_state(&session.frame_state, FrameState::Waited) {
         return e;
     }
@@ -1908,7 +1950,7 @@ extern "system" fn begin_frame(
     session: xr::Session,
     _info: *const xr::FrameBeginInfo,
 ) -> xr::Result {
-    let session = get_handle!(session);
+    let session = get_session!(session);
     if let Err(e) = transition_frame_state(&session.frame_state, FrameState::Begun) {
         return e;
     }
@@ -1916,7 +1958,7 @@ extern "system" fn begin_frame(
 }
 
 extern "system" fn end_frame(session: xr::Session, _info: *const xr::FrameEndInfo) -> xr::Result {
-    let session = get_handle!(session);
+    let session = get_session!(session);
     run_hook(&session.end_frame_hook);
     if let Err(e) = transition_frame_state(&session.frame_state, FrameState::Ended) {
         return e;
@@ -2015,7 +2057,7 @@ extern "system" fn apply_haptic_feedback(
     action_info: *const xr::HapticActionInfo,
     haptic_feedback: *const xr::HapticBaseHeader,
 ) -> xr::Result {
-    let session = get_handle!(session);
+    let session = get_session!(session);
 
     const {
         assert!(
