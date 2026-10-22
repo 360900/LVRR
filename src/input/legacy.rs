@@ -1121,7 +1121,15 @@ mod tests {
         assert!(matches!(get_state(), (true, pressed) if pressed != 0));
 
         fakexr::lose_session(f.raw_session());
-        // Before the loss is noticed, failed reads count as released.
+        // Before the loss is noticed, the state of the last sync is kept.
+        assert!(matches!(get_state(), (true, pressed) if pressed != 0));
+        // Reads that fail after a sync count as released.
+        {
+            let data = f.input.openxr.session_data.get();
+            let devices = data.input_data.devices.read().unwrap();
+            let legacy = data.input_data.get_legacy_actions().unwrap();
+            f.input.update_legacy_state(&data.session, &devices, legacy);
+        }
         assert_eq!(get_state(), (true, 0));
         // The next sync notices it.
         f.input.frame_start_update();
@@ -1199,7 +1207,7 @@ mod tests {
         use fakexr::UserPath::*;
         use vr::EVREventType as Ev;
         let mut f = Fixture::new();
-        f.input.openxr.restart_session();
+        f.input.openxr.restart_session().unwrap();
         f.input.frame_start_update();
         let trigger = legacy_action(&f, |actions| actions.trigger_click.as_raw());
         let expect_device_event = |f: &Fixture, ty: vr::EVREventType, index| {
