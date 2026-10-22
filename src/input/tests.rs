@@ -2112,6 +2112,45 @@ fn restricted_set_without_openxr_actions() {
 }
 
 #[test]
+fn skeletal_tracking_level_follows_hand_tracking() {
+    use vr::EVRSkeletalTrackingLevel::*;
+    use xr::HandTrackingDataSourceEXT as Source;
+
+    fakexr::set_hand_tracking_supported(true);
+    let mut f = Fixture::new();
+    f.load_actions(c"actions.json");
+    let set1 = f.get_action_set_handle(c"/actions/set1");
+    let skeleton = f.get_action_handle(c"/actions/set1/in/skellyl");
+    let level = |f: &mut Fixture| {
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: set1,
+            ..Default::default()
+        });
+        // drop cached hand skeletons
+        f.input.frame_start_update();
+        let mut level = Estimated;
+        assert_eq!(
+            f.input.GetSkeletalTrackingLevel(skeleton, &mut level),
+            vr::EVRInputError::None
+        );
+        level
+    };
+
+    // Reported before any bone data was requested.
+    f.set_interaction_profile::<SimpleController>(LeftHand);
+    fakexr::set_hand_tracked(f.raw_session(), LeftHand, Some(Source::UNOBSTRUCTED));
+    assert_eq!(level(&mut f), Full);
+    fakexr::set_hand_tracked(f.raw_session(), LeftHand, None);
+    assert_eq!(level(&mut f), Full);
+
+    // A different device doesn't inherit it.
+    f.set_interaction_profile::<OculusTouch>(LeftHand);
+    assert_eq!(level(&mut f), Estimated);
+    fakexr::set_hand_tracked(f.raw_session(), LeftHand, Some(Source::CONTROLLER));
+    assert_eq!(level(&mut f), Partial);
+}
+
+#[test]
 fn secondary_set_needs_restricted_primary() {
     let mut f = Fixture::new();
     f.load_actions(c"actions_pose_only_set.json");

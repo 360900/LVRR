@@ -229,7 +229,9 @@ impl<C: openxr_data::Compositor> Input<C> {
             })
     }
 
-    pub(super) fn skeletal_tracking_level(
+    /// The tracking level of the hand's current skeleton, or the last one seen while the hand
+    /// isn't tracked, so it doesn't drop whenever tracking is lost.
+    pub(super) fn current_skeletal_tracking_level(
         &self,
         session_data: &SessionData,
         hand: Hand,
@@ -251,15 +253,17 @@ impl<C: openxr_data::Compositor> Input<C> {
 
         let (raw, _) = joint_space(session_data, controller, hand);
         let base = raw.as_deref().unwrap_or(session_data.tracking_space());
-        match controller.get_hand_skeleton(&self.openxr, base) {
-            None => vr::EVRSkeletalTrackingLevel::Estimated,
-            Some(HandSkeleton {
-                data_source: xr::HandTrackingDataSourceEXT::UNOBSTRUCTED,
-                ..
-            }) => vr::EVRSkeletalTrackingLevel::Full,
-            // Joints derived from a controller, or an unknown source
-            Some(_) => vr::EVRSkeletalTrackingLevel::Partial,
+        let skeleton = controller.get_hand_skeleton(&self.openxr, base);
+        let mut levels = self.skeletal_tracking_level.write().unwrap();
+        let level = &mut levels[hand as usize - 1];
+        if let Some(skeleton) = skeleton {
+            *level = match skeleton.data_source {
+                xr::HandTrackingDataSourceEXT::UNOBSTRUCTED => vr::EVRSkeletalTrackingLevel::Full,
+                // Joints derived from a controller, or an unknown source
+                _ => vr::EVRSkeletalTrackingLevel::Partial,
+            };
         }
+        *level
     }
 
     pub(super) fn get_bone_summary_from_hand_tracking(

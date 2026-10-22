@@ -116,6 +116,7 @@ pub struct Input<C: openxr_data::Compositor> {
     set_map: RwLock<SlotMap<ActionSetKey, String>>,
     loaded_actions_path: OnceLock<PathBuf>,
     legacy_state: legacy::LegacyState,
+    skeletal_tracking_level: RwLock<[vr::EVRSkeletalTrackingLevel; 2]>,
     /// The sets activated by the last UpdateActionState, with the hand they're restricted to
     /// (or NULL).
     active_sets: RwLock<Vec<(ActionSetKey, xr::Path)>>,
@@ -205,6 +206,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             left_hand_key,
             right_hand_key,
             legacy_state: Default::default(),
+            skeletal_tracking_level: RwLock::new([vr::EVRSkeletalTrackingLevel::Estimated; 2]),
             active_sets: Default::default(),
             skeletal_bone_cache: Default::default(),
             estimated_finger_state: [
@@ -1255,7 +1257,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             return vr::EVRInputError::InvalidParam;
         };
 
-        *level = self.skeletal_tracking_level(&data, *hand);
+        *level = self.current_skeletal_tracking_level(&data, *hand);
         vr::EVRInputError::None
     }
     fn GetSkeletalReferenceTransforms(
@@ -2500,6 +2502,9 @@ impl<C: openxr_data::Compositor> Input<C> {
             if let Some(controller) = controller.as_mut() {
                 if controller.profile_path != profile_path {
                     controller.reset_tracked_hand();
+                    // The new device's skeleton may come from elsewhere, or not at all.
+                    self.skeletal_tracking_level.write().unwrap()[hand as usize - 1] =
+                        vr::EVRSkeletalTrackingLevel::Estimated;
                 }
                 controller.profile_path = profile_path;
             }
