@@ -14,21 +14,33 @@ use paste::paste;
 use slotmap::KeyData;
 use std::cell::RefCell;
 use std::f32::consts::{FRAC_PI_2, PI};
+use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+pub(super) type BoneCache = Mutex<Option<[vr::VRBoneTransform_t; Count as usize]>>;
+
 impl<C: openxr_data::Compositor> Input<C> {
+    /// The bones computed this frame, in parent space.
+    pub(super) fn bone_cache(&self, hand: Hand, range: vr::EVRSkeletalMotionRange) -> &BoneCache {
+        let with_controller = range == vr::EVRSkeletalMotionRange::WithController;
+        &self.skeletal_bone_cache[hand as usize - 1][usize::from(with_controller)]
+    }
+
+    /// Tracked bones are the same for both motion ranges: like OpenComposite, they aren't
+    /// limited to what the controller allows.
     pub(super) fn get_bones_from_hand_tracking(
         &self,
         session_data: &SessionData,
         space: vr::EVRSkeletalTransformSpace,
         hand: Hand,
+        range: vr::EVRSkeletalMotionRange,
     ) -> Option<[vr::VRBoneTransform_t; Count as usize]> {
         use HandSkeletonBone::*;
 
         // Same order as frame_start_update and get_estimated_bones: devices, then the bone cache.
         let devices = session_data.input_data.devices.read().unwrap();
-        let mut bone_cache = self.skeletal_bone_cache[hand as usize - 1].lock().unwrap();
+        let mut bone_cache = self.bone_cache(hand, range).lock().unwrap();
         if let Some(mut bones) = *bone_cache {
             finalize_transforms(&mut bones, space);
             return Some(bones);
@@ -70,7 +82,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         } else {
             let Some(ref raw) = raw else {
                 drop(bone_cache);
-                return Some(self.get_estimated_bones(session_data, space, hand));
+                return Some(self.get_estimated_bones(session_data, space, hand, range));
             };
             raw
         };
@@ -78,7 +90,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         let Some(HandSkeleton { joints, .. }) = controller.get_hand_skeleton(&self.openxr, base)
         else {
             drop(bone_cache);
-            return Some(self.get_estimated_bones(session_data, space, hand));
+            return Some(self.get_estimated_bones(session_data, space, hand, range));
         };
 
         let mut joints: Box<[_]> = joints
@@ -420,8 +432,9 @@ impl<C: openxr_data::Compositor> Input<C> {
         session_data: &SessionData,
         space: vr::EVRSkeletalTransformSpace,
         hand: Hand,
+        range: vr::EVRSkeletalMotionRange,
     ) -> [vr::VRBoneTransform_t; Count as usize] {
-        let mut bone_cache = self.skeletal_bone_cache[hand as usize - 1].lock().unwrap();
+        let mut bone_cache = self.bone_cache(hand, range).lock().unwrap();
         if let Some(mut bones) = *bone_cache {
             finalize_transforms(&mut bones, space);
             return bones;
@@ -430,11 +443,21 @@ impl<C: openxr_data::Compositor> Input<C> {
         let mut transforms: [vr::VRBoneTransform_t; Count as usize] = Default::default();
 
         let finger_state = self.get_finger_state(session_data, hand);
-        let (open, fist) = match hand {
-            Hand::Left => (&generated::left_hand::OPENHAND, &generated::left_hand::FIST),
-            Hand::Right => (
+        // With the controller, a closed hand wraps around it rather than making a fist.
+        let with_controller = range == vr::EVRSkeletalMotionRange::WithController;
+        let (open, closed) = match (hand, with_controller) {
+            (Hand::Left, false) => (&generated::left_hand::OPENHAND, &generated::left_hand::FIST),
+            (Hand::Left, true) => (
+                &generated::left_hand::OPENHAND,
+                &generated::left_hand::GRIPLIMIT,
+            ),
+            (Hand::Right, false) => (
                 &generated::right_hand::OPENHAND,
                 &generated::right_hand::FIST,
+            ),
+            (Hand::Right, true) => (
+                &generated::right_hand::OPENHAND,
+                &generated::right_hand::GRIPLIMIT,
             ),
         };
 
@@ -444,7 +467,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                 .get_bone_state(unsafe { std::mem::transmute::<usize, HandSkeletonBone>(idx) });
 
             let (start_pos, start_rot) = bone_transform_to_glam(open[idx]);
-            let (closed_pos, closed_rot) = bone_transform_to_glam(fist[idx]);
+            let (closed_pos, closed_rot) = bone_transform_to_glam(closed[idx]);
 
             transforms[idx] = vr::VRBoneTransform_t {
                 position: start_pos.lerp(closed_pos, curl_state).into(),
@@ -1223,5 +1246,60 @@ mod tests {
         sync(&mut f, left);
         f.input.openxr.poll_events();
         assert_eq!(data(&f), (false, vr::k_ulInvalidInputValueHandle));
+    }
+
+    #[test]
+    fn estimated_bones_respect_motion_range() {
+        use super::HandSkeletonBone::IndexFinger1;
+        let mut f = Fixture::new();
+        f.load_actions(c"actions.json");
+        let skeleton = f.get_action_handle(c"/actions/set1/in/skellyl");
+        let set = f.get_action_set_handle(c"/actions/set1");
+
+        let data = f.input.openxr.session_data.get();
+        let actions = &data
+            .input_data
+            .estimated_skeleton_actions
+            .get()
+            .unwrap()
+            .actions;
+        for action in [&actions.index_curl, &actions.rest_curl] {
+            fakexr::set_action_state(
+                action.as_raw(),
+                fakexr::ActionState::Float(1.0),
+                fakexr::UserPath::LeftHand,
+            );
+        }
+        drop(data);
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: set,
+            ..Default::default()
+        });
+        // Let the finger smoothing reach the target.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let bones = |range| {
+            let mut bones = [vr::VRBoneTransform_t::default(); Count as usize];
+            assert_eq!(
+                f.input.GetSkeletalBoneData(
+                    skeleton,
+                    vr::EVRSkeletalTransformSpace::Parent,
+                    range,
+                    bones.as_mut_ptr(),
+                    bones.len() as u32,
+                ),
+                vr::EVRInputError::None
+            );
+            bone_transform_to_glam(bones[IndexFinger1 as usize]).1
+        };
+        let reference = |pose: &[vr::VRBoneTransform_t; Count as usize]| {
+            bone_transform_to_glam(pose[IndexFinger1 as usize]).1
+        };
+
+        // Both ranges in the same frame
+        let without = bones(vr::EVRSkeletalMotionRange::WithoutController);
+        let with = bones(vr::EVRSkeletalMotionRange::WithController);
+        assert!(without.abs_diff_eq(reference(&generated::left_hand::FIST), 1e-4));
+        assert!(with.abs_diff_eq(reference(&generated::left_hand::GRIPLIMIT), 1e-4));
     }
 }

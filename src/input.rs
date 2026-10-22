@@ -120,8 +120,8 @@ pub struct Input<C: openxr_data::Compositor> {
     /// The sets activated by the last UpdateActionState, with the hand they're restricted to
     /// (or NULL).
     active_sets: RwLock<Vec<(ActionSetKey, xr::Path)>>,
-    skeletal_bone_cache:
-        [Mutex<Option<[vr::VRBoneTransform_t; HandSkeletonBone::Count as usize]>>; 2],
+    /// Per hand and motion range (see [`Input::bone_cache`]).
+    skeletal_bone_cache: [[skeletal::BoneCache; 2]; 2],
     estimated_finger_state: [Mutex<FingerState>; 2],
     subaction_paths: SubactionPaths,
     events: Mutex<VecDeque<InputEvent>>,
@@ -1223,7 +1223,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         &self,
         handle: vr::VRActionHandle_t,
         transform_space: vr::EVRSkeletalTransformSpace,
-        _motion_range: vr::EVRSkeletalMotionRange,
+        motion_range: vr::EVRSkeletalMotionRange,
         transform_array: *mut vr::VRBoneTransform_t,
         transform_array_count: u32,
     ) -> vr::EVRInputError {
@@ -1238,7 +1238,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         };
 
         let Some(transforms) =
-            self.get_bones_from_hand_tracking(&session_data, transform_space, *hand)
+            self.get_bones_from_hand_tracking(&session_data, transform_space, *hand, motion_range)
         else {
             return vr::EVRInputError::NoData;
         };
@@ -2624,7 +2624,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         let data = self.openxr.session_data.get();
         let devices = data.input_data.devices.read().unwrap();
 
-        for cache in self.skeletal_bone_cache.as_ref() {
+        for cache in self.skeletal_bone_cache.iter().flatten() {
             std::mem::take(&mut *cache.lock().unwrap());
         }
 

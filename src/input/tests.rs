@@ -1270,10 +1270,13 @@ fn bone_cache_not_held_while_waiting_for_devices() {
                 &data,
                 vr::EVRSkeletalTransformSpace::Model,
                 Hand::Left,
+                vr::EVRSkeletalMotionRange::WithoutController,
             )
         });
         std::thread::sleep(std::time::Duration::from_millis(100));
-        let cache_free = f.input.skeletal_bone_cache[Hand::Left as usize - 1]
+        let cache_free = f
+            .input
+            .bone_cache(Hand::Left, vr::EVRSkeletalMotionRange::WithoutController)
             .try_lock()
             .is_ok();
         drop(devices);
