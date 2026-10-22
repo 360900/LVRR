@@ -387,10 +387,16 @@ impl<C: Compositor> OpenXrData<C> {
             return;
         }
         let data = self.session_data.get();
+        let session = data.session.as_raw();
         let state = self.poll_events_impl(&data);
         drop(data);
         if let Some(state) = state {
-            self.session_data.0.write().state = state;
+            let mut data = self.session_data.0.write();
+            // Apps poll from several threads, so another one may have restarted the session in
+            // between. The state is the old session's then.
+            if data.session.as_raw() == session {
+                data.state = state;
+            }
         }
         if self.is_lost() {
             return;
