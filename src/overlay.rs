@@ -164,10 +164,12 @@ impl OverlayMan {
     }
 
     pub fn clear_skybox(&self) {
+        let session = self.openxr.session_data.get();
         let mut overlays = self.overlays.write().unwrap();
         let mut skybox = self.skybox.write().unwrap();
         for key in skybox.drain(..) {
             overlays.remove(key);
+            session.overlay_data.remove(key);
         }
     }
 
@@ -585,10 +587,36 @@ pub struct OverlaySessionData {
     swapchains: Mutex<Option<AnySwapchainMap>>,
 }
 
+impl OverlaySessionData {
+    /// Destroys an overlay's swapchain. The lock makes this wait for a frame still using it.
+    fn remove(&self, key: OverlayKey) {
+        #[macros::any_graphics(AnySwapchainMap)]
+        fn remove<G: xr::Graphics>(map: &mut SwapchainMap<G>, key: OverlayKey) {
+            map.remove(key);
+        }
+
+        if let Some(map) = self.swapchains.lock().unwrap().as_mut() {
+            map.with_any_graphics_mut::<remove>(key);
+        }
+    }
+}
+
 #[cfg(test)]
 impl OverlaySessionData {
     pub fn swapchains_locked(&self) -> bool {
         self.swapchains.try_lock().is_err()
+    }
+
+    fn swapchain_count(&self) -> usize {
+        #[macros::any_graphics(AnySwapchainMap)]
+        fn len<G: xr::Graphics>(map: &SwapchainMap<G>) -> usize {
+            map.len()
+        }
+
+        let swapchains = self.swapchains.lock().unwrap();
+        swapchains
+            .as_ref()
+            .map_or(0, |map| map.with_any_graphics::<len>(()))
     }
 }
 
@@ -1418,8 +1446,12 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         vr::EVROverlayError::None
     }
     fn ClearOverlayTexture(&self, handle: vr::VROverlayHandle_t) -> vr::EVROverlayError {
+        let session = self.openxr.session_data.get();
         get_overlay!(self, handle, mut overlay);
         overlay.rect = None;
+        session
+            .overlay_data
+            .remove(OverlayKey::from(KeyData::from_ffi(handle)));
         vr::EVROverlayError::None
     }
     fn ClearOverlayCursorPositionOverride(&self, _: vr::VROverlayHandle_t) -> vr::EVROverlayError {
@@ -2017,10 +2049,14 @@ impl vr::IVROverlay028_Interface for OverlayMan {
     fn DestroyOverlay(&self, handle: vr::VROverlayHandle_t) -> vr::EVROverlayError {
         let key = OverlayKey::from(KeyData::from_ffi(handle));
 
+        let session = self.openxr.session_data.get();
         let mut overlays = self.overlays.write().unwrap();
         if let Some(overlay) = overlays.remove(key) {
             let mut map = self.key_to_overlay.write().unwrap();
             map.remove(&overlay.key);
+            // Dropping the backend waits for its copies into the swapchain.
+            drop(overlay);
+            session.overlay_data.remove(key);
         }
         vr::EVROverlayError::None
     }
@@ -2913,6 +2949,33 @@ mod tests {
         FakeGraphicsData::set_texture_size(10, 10);
         // The previous texture stays up.
         assert_eq!(f.layers(false).len(), 1);
+    }
+
+    #[test]
+    fn removed_overlays_release_swapchains() {
+        let f = RealSessionFixture::new();
+        let cleared = f.textured_overlay(c"cleared");
+        let destroyed = f.textured_overlay(c"destroyed");
+        assert_eq!(f.man.set_skybox(&[f.texture()]), Ok(()));
+        let swapchains = || f.xr.session_data.get().overlay_data.swapchain_count();
+        assert_eq!(swapchains(), 3);
+
+        assert_eq!(
+            f.man.ClearOverlayTexture(cleared),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(swapchains(), 2);
+        assert_eq!(f.man.DestroyOverlay(destroyed), vr::EVROverlayError::None);
+        assert_eq!(swapchains(), 1);
+        f.man.clear_skybox();
+        assert_eq!(swapchains(), 0);
+        assert_eq!(f.layers(true).len(), 0);
+
+        assert_eq!(
+            f.man.SetOverlayTexture(cleared, &f.texture()),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(f.layers(true).len(), 1);
     }
 
     #[test]
