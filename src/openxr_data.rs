@@ -83,6 +83,8 @@ pub struct OpenXrData<C: Compositor> {
     input_focus_captured: AtomicBool,
     /// Change time of a runtime recenter of LOCAL that hasn't taken effect yet.
     pending_recenter: parking_lot::Mutex<Option<xr::Time>>,
+    /// Set when the runtime moved STAGE and the app's standing zero pose is still in place.
+    stage_moved: AtomicBool,
 
     /// should only be externally accessed for testing
     pub(crate) input: Injected<crate::input::Input<C>>,
@@ -318,6 +320,7 @@ impl<C: Compositor> OpenXrData<C> {
             user_present: true.into(),
             input_focus_captured: false.into(),
             pending_recenter: parking_lot::Mutex::new(None),
+            stage_moved: false.into(),
             input: injector.inject(),
             compositor: injector.inject(),
             system: injector.inject(),
@@ -329,12 +332,12 @@ impl<C: Compositor> OpenXrData<C> {
             return;
         }
         let data = self.session_data.get();
-        let polled = self.poll_events_impl(&data);
+        let state = self.poll_events_impl(&data);
         drop(data);
-        if let Some(state) = polled.state {
+        if let Some(state) = state {
             self.session_data.0.write().state = state;
         }
-        if polled.stage_changed {
+        if self.stage_moved.swap(false, Ordering::Relaxed) {
             // The runtime moved the stage, which replaces any standing zero pose the app set.
             self.session_data
                 .0
@@ -345,15 +348,12 @@ impl<C: Compositor> OpenXrData<C> {
                 Default::default(),
             );
         }
-        if let Some(time) = polled.local_change_time {
-            *self.pending_recenter.lock() = Some(time);
-        }
         self.apply_pending_recenter();
     }
 
-    fn poll_events_impl(&self, session_data: &SessionData) -> PolledEvents {
+    fn poll_events_impl(&self, session_data: &SessionData) -> Option<xr::SessionState> {
         let mut buf = xr::EventDataBuffer::new();
-        let mut polled = PolledEvents::default();
+        let mut state = None;
         // Events for an older session (i.e. the probe session or a session we already replaced)
         // are stale.
         let is_stale = |session: xr::sys::Session, what: &dyn std::fmt::Debug| {
@@ -372,8 +372,8 @@ impl<C: Compositor> OpenXrData<C> {
                     if is_stale(event.session(), &event.state()) {
                         continue;
                     }
-                    let previous = polled.state.unwrap_or(session_data.state);
-                    polled.state = Some(event.state());
+                    let previous = state.unwrap_or(session_data.state);
+                    state = Some(event.state());
                     info!("OpenXR session state changed: {:?}", event.state());
                     self.update_input_focus(previous, event.state());
                     let exit_requested = self.exit_requested.load(Ordering::Relaxed);
@@ -402,11 +402,15 @@ impl<C: Compositor> OpenXrData<C> {
                         continue;
                     }
                     info!("Runtime is moving reference space {ty:?}");
+                    // Kept until poll_events acts on it: ending the session for a restart polls
+                    // too, and the move carries over to the new session.
                     match ty {
                         xr::ReferenceSpaceType::LOCAL => {
-                            polled.local_change_time = Some(event.change_time())
+                            *self.pending_recenter.lock() = Some(event.change_time())
                         }
-                        xr::ReferenceSpaceType::STAGE => polled.stage_changed = true,
+                        xr::ReferenceSpaceType::STAGE => {
+                            self.stage_moved.store(true, Ordering::Relaxed)
+                        }
                         _ => {}
                     }
                 }
@@ -433,7 +437,7 @@ impl<C: Compositor> OpenXrData<C> {
             }
         }
 
-        polled
+        state
     }
 
     /// Mirrors SteamVR's dashboard taking input focus when the runtime does (e.g. its system menu
@@ -634,6 +638,8 @@ impl<C: Compositor> OpenXrData<C> {
             self.headless,
         ) {
             Ok((mut session, waiter, stream)) => {
+                // A runtime recenter seen while ending the session replaces these on the next
+                // poll.
                 for (origin, offset) in offsets {
                     session.set_origin_offset(origin, offset);
                 }
@@ -800,7 +806,7 @@ impl<C: Compositor> OpenXrData<C> {
                 warn!("timed out waiting for session state {target:?} (current: {state:?})");
                 break;
             }
-            match self.poll_events_impl(session_data).state {
+            match self.poll_events_impl(session_data) {
                 Some(s) => state = s,
                 None => std::thread::sleep(Duration::from_millis(1)),
             }
@@ -847,15 +853,6 @@ impl<C: Compositor> OpenXrData<C> {
             seconds,
         )
     }
-}
-
-/// Results of polling events that need the session write lock to act on.
-#[derive(Default)]
-struct PolledEvents {
-    state: Option<xr::SessionState>,
-    /// The runtime recentered LOCAL, taking effect at this time.
-    local_change_time: Option<xr::Time>,
-    stage_changed: bool,
 }
 
 /// Opt-in: a runtime recenter (e.g. a long press of the Quest system button) also recenters the
@@ -1809,6 +1806,47 @@ mod tests {
         assert_pose_eq(head_pose(&data, Seated), pitch_only(pitch, [0.0, 0.0, 0.0]));
 
         drop(data); // Session must be dropped before Vulkan data.
+        drop(comp);
+    }
+
+    /// A runtime recenter seen while ending the session replaces the app's zero poses on the new
+    /// session, instead of the app's getting carried over.
+    #[test]
+    fn runtime_recenter_during_session_restart() {
+        use openvr::ETrackingUniverseOrigin::*;
+        crate::init_logging();
+        let data = OpenXrData::<FakeCompositor>::new(
+            &Injector::default(),
+            openvr::EVRApplicationType::Other,
+        )
+        .unwrap();
+        let comp = Arc::new(FakeCompositor::new(&data));
+        data.compositor.set(Arc::downgrade(&comp));
+
+        let (head, pitch) = standing_head();
+        let session = data.session_data.get().session.as_raw();
+        fakexr::set_reference_space_pose(session, xr::ReferenceSpaceType::VIEW, head);
+        data.reset_tracking_space(Standing);
+        data.reset_tracking_space(Seated);
+        fakexr::reference_space_change_pending(session, xr::ReferenceSpaceType::LOCAL);
+        fakexr::reference_space_change_pending(session, xr::ReferenceSpaceType::STAGE);
+
+        data.restart_session();
+        let moved = xr::Posef {
+            position: xr::Vector3f {
+                x: -1.0,
+                y: 1.2,
+                z: 0.5,
+            },
+            ..head
+        };
+        let session = data.session_data.get().session.as_raw();
+        fakexr::set_reference_space_pose(session, xr::ReferenceSpaceType::VIEW, moved);
+        data.poll_events();
+        assert_pose_eq(head_pose(&data, Seated), pitch_only(pitch, [0.0, 0.0, 0.0]));
+        assert_pose_eq(head_pose(&data, Standing), moved);
+
+        drop(data);
         drop(comp);
     }
 
