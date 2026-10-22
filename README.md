@@ -96,7 +96,7 @@ cargo xbuild            # debug, output in target/debug
 cargo xbuild --release  # release, output in target/release
 ```
 
-The output directory is the runtime directory. To install elsewhere, copy its `bin` with `cp -rL` (it links into `target`), and build with `XRIZER_INSTALL_PREFIX` set to the destination so the generated `openvrpaths.vrpath` points there.
+The output directory is the runtime directory.
 
 32-bit games need a 32-bit build in `bin/vrclient.so` (needs a multilib C toolchain):
 
@@ -106,7 +106,9 @@ cargo xbuild --release --target i686-unknown-linux-gnu
 cp -L target/i686-unknown-linux-gnu/release/bin/vrclient.so target/release/bin/
 ```
 
-These builds load the system OpenXR loader, so 32-bit games also need a 32-bit one (e.g. `lib32-openxr`). Releases bundle the loader with `--features static-openxr` instead, which also needs cmake, a C++ compiler and, for 32-bit, C++ multilib and 32-bit X11 headers.
+These builds load the system OpenXR loader, so 32-bit games also need a 32-bit one (e.g. `lib32-openxr`). Releases bundle the loader with `--features static-openxr` instead, which also needs cmake, a C++ compiler and, for 32-bit, C++ multilib and 32-bit X11 headers. That loader also reads OpenXR config from its build directory and fails if that exists but isn't readable, so build packages in a path that won't exist on users' machines.
+
+To install elsewhere, copy `target/release/bin` with `cp -rL` (its libraries are symlinks), and build with `XRIZER_INSTALL_PREFIX` set to the destination so the generated `openvrpaths.vrpath` points there.
 
 The reported version comes from `git describe` via the default `git-version` feature. For builds without a git checkout (distro packages, tarballs), use `--no-default-features` (re-adding what you need, e.g. `--features monado`) and set `XRIZER_VERSION` at build time. `XRIZER_VERSION` always takes precedence when set.
 
