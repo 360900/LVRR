@@ -24,6 +24,9 @@ use std::time::{Duration, Instant};
 /// How long to wait for the runtime to move the session to a requested state.
 const SESSION_STATE_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Unknown to the openxr crate, so it lives in `ExtensionSet::other`, whose names keep their nul.
+pub const XR_VALVE_FRAME_CONTROLLER_INTERACTION: &[u8] = b"XR_VALVE_frame_controller_interaction\0";
+
 #[cfg(feature = "monado")]
 use openxr_mndx_xdev_space::XR_MNDX_XDEV_SPACE_EXTENSION_NAME;
 
@@ -224,10 +227,10 @@ impl<C: Compositor> OpenXrData<C> {
 
         if supported_exts
             .other
-            .contains(&b"XR_VALVE_frame_controller_interaction".to_vec())
+            .contains(&XR_VALVE_FRAME_CONTROLLER_INTERACTION.to_vec())
         {
             exts.other
-                .push(b"XR_VALVE_frame_controller_interaction".to_vec());
+                .push(XR_VALVE_FRAME_CONTROLLER_INTERACTION.to_vec());
         }
 
         // Extension that enables simple full body tracking support via generic tracked devices.

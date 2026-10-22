@@ -62,7 +62,7 @@ impl InteractionProfile for FrameController {
     fn has_required_extensions(enabled_extensions: &openxr::ExtensionSet) -> bool {
         enabled_extensions
             .other
-            .contains(&b"XR_VALVE_frame_controller_interaction".to_vec())
+            .contains(&crate::openxr_data::XR_VALVE_FRAME_CONTROLLER_INTERACTION.to_vec())
     }
     fn properties() -> &'static ProfileProperties {
         static DEVICE_PROPERTIES: ProfileProperties = ProfileProperties {
