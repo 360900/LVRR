@@ -226,9 +226,18 @@ impl vr::IVRRenderModels006_Interface for RenderModels {
         _: *const vr::RenderModel_ControllerMode_State_t,
         state: *mut vr::RenderModel_ComponentState_t,
     ) -> bool {
-        if render_model_name.is_null() || component_name.is_null() || state.is_null() {
+        let Some(state) = (unsafe { state.as_mut() }) else {
+            return false;
+        };
+        // "If the pchRenderModelName or pchComponentName is invalid, this will return false (and
+        // transforms will be set to identity)."
+        state.mTrackingToComponentRenderModel = xr::Posef::IDENTITY.into();
+        state.mTrackingToComponentLocal = xr::Posef::IDENTITY.into();
+        state.uProperties = 0;
+
+        if render_model_name.is_null() || component_name.is_null() {
             debug!(
-                "GetComponentState called with null ptr(s): rm={render_model_name:?} comp={component_name:?} state={state:?}"
+                "GetComponentState called with null ptr(s): rm={render_model_name:?} comp={component_name:?}"
             );
             return false;
         }
@@ -244,12 +253,8 @@ impl vr::IVRRenderModels006_Interface for RenderModels {
         }
 
         // all of our models are static and have offsets baked in
-        unsafe {
-            (*state).mTrackingToComponentRenderModel = xr::Posef::IDENTITY.into();
-            (*state).mTrackingToComponentLocal = xr::Posef::IDENTITY.into();
-            (*state).uProperties =
-                (vr::EVRComponentProperty::IsVisible | vr::EVRComponentProperty::IsStatic).0;
-        }
+        state.uProperties =
+            (vr::EVRComponentProperty::IsVisible | vr::EVRComponentProperty::IsStatic).0;
 
         true
     }
@@ -1088,6 +1093,33 @@ mod tests {
             ptr::null(),
             &mut state,
         ));
+    }
+
+    #[test]
+    fn get_component_state_failure_writes_identity() {
+        let rm = RenderModels::default();
+        let some_model = CString::new(*RENDER_MODELS.keys().next().unwrap()).unwrap();
+        let ident = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ];
+
+        for (model, component) in [
+            (c"unknown_model".as_ptr(), c"tip".as_ptr()),
+            (some_model.as_ptr(), c"not_a_real_component".as_ptr()),
+            (ptr::null(), c"tip".as_ptr()),
+        ] {
+            let mut state = vr::RenderModel_ComponentState_t {
+                mTrackingToComponentRenderModel: vr::HmdMatrix34_t { m: [[7.0; 4]; 3] },
+                mTrackingToComponentLocal: vr::HmdMatrix34_t { m: [[7.0; 4]; 3] },
+                uProperties: u32::MAX,
+            };
+            assert!(!rm.GetComponentState(model, component, ptr::null(), ptr::null(), &mut state));
+            assert_eq!(state.mTrackingToComponentRenderModel.m, ident);
+            assert_eq!(state.mTrackingToComponentLocal.m, ident);
+            assert_eq!(state.uProperties, 0);
+        }
     }
 
     #[test]
