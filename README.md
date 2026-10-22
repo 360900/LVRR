@@ -43,7 +43,15 @@ Games running in the Steam Linux Runtime (all Proton 6+ games) are in a containe
 - `/usr` is available at `/run/host/usr`.
 - Some paths are unavailable.
 
-Use `PRESSURE_VESSEL_FILESYSTEMS_RW` to expose more. Example launch options for a systemwide Monado install:
+Let pressure-vessel import the host's active OpenXR runtime and its socket:
+
+```
+PRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES=1 VR_OVERRIDE=/path/to/xrizer-edge %command%
+```
+
+The active runtime is `active_runtime.json` in `~/.config/openxr/1` or `/etc/xdg/openxr/1`. 32-bit games (e.g. Half-Life 2: VR Mod) need a 32-bit build of the runtime (e.g. `lib32-wivrn-server`) as `active_runtime.i686.json`. WiVRn sets these up while its server runs.
+
+Otherwise, set `XR_RUNTIME_JSON` and use `PRESSURE_VESSEL_FILESYSTEMS_RW` to expose the socket. `XR_RUNTIME_JSON` applies to 32-bit games too, so this only works for 64-bit ones. Example for a systemwide Monado install:
 
 ```
 XR_RUNTIME_JSON=/run/host/usr/share/openxr/1/openxr_monado.json VR_OVERRIDE=/path/to/xrizer-edge PRESSURE_VESSEL_FILESYSTEMS_RW=$XDG_RUNTIME_DIR/monado_comp_ipc %command%
