@@ -207,12 +207,9 @@ impl vr::IVRChaperoneSetup005On006 for ChaperoneSetup {
         false
     }
 
-    fn GetLivePhysicalBoundsInfo(&self, _: *mut HmdQuad_t, quads_count: *mut u32) -> bool {
-        crate::warn_unimplemented!("GetLivePhysicalBoundsInfo");
-        if let Some(quads_count) = unsafe { quads_count.as_mut() } {
-            *quads_count = 0;
-        }
-        false
+    // OpenXR only knows one boundary, the play area.
+    fn GetLivePhysicalBoundsInfo(&self, buffer: *mut HmdQuad_t, quads_count: *mut u32) -> bool {
+        self.collision_bounds(buffer, quads_count)
     }
 }
 
@@ -258,6 +255,16 @@ mod tests {
             assert_eq!(wall[3], rect[(i + 1) % 4]);
             assert_eq!(wall[1][1], WALL_HEIGHT);
         }
+        let mut physical = [HmdQuad_t::default(); 4];
+        assert!(vr::IVRChaperoneSetup005On006::GetLivePhysicalBoundsInfo(
+            &setup,
+            physical.as_mut_ptr(),
+            &mut count
+        ));
+        assert_eq!(
+            physical.map(|q| q.vCorners.map(|c| c.v)),
+            walls.map(|q| q.vCorners.map(|c| c.v))
+        );
 
         // LOCAL 1.6 m above the floor.
         fakexr::set_reference_space_pose(
