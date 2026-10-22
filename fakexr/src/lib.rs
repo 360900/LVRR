@@ -504,7 +504,7 @@ extern "system" fn enumerate_instance_extension_properties(
 ) -> xr::Result {
     assert!(layer_name.is_null());
     let extra = EXTRA_EXTENSIONS.with_borrow(Clone::clone);
-    let count = 7 + extra.len() as u32;
+    let count = 8 + extra.len() as u32;
     unsafe { *property_count_output = count };
     if property_capacity_input >= count {
         let props =
@@ -587,7 +587,18 @@ extern "system" fn enumerate_instance_extension_properties(
             unsafe { std::slice::from_raw_parts(name.as_ptr() as *const c_char, name.len()) };
         props[6].extension_name[..name.len()].copy_from_slice(name);
 
-        for (prop, name) in props[7..].iter_mut().zip(extra) {
+        props[7] = xr::ExtensionProperties {
+            ty: xr::ExtensionProperties::TYPE,
+            next: std::ptr::null_mut(),
+            extension_name: [0 as c_char; xr::MAX_EXTENSION_NAME_SIZE],
+            extension_version: 1,
+        };
+        let name = b"XR_VALVE_frame_controller_interaction\0";
+        let name =
+            unsafe { std::slice::from_raw_parts(name.as_ptr() as *const c_char, name.len()) };
+        props[7].extension_name[..name.len()].copy_from_slice(name);
+
+        for (prop, name) in props[8..].iter_mut().zip(extra) {
             *prop = xr::ExtensionProperties {
                 ty: xr::ExtensionProperties::TYPE,
                 next: std::ptr::null_mut(),

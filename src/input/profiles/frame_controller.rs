@@ -225,9 +225,8 @@ impl InteractionProfile for FrameController {
 
 #[cfg(test)]
 mod tests {
-    use super::InteractionProfile;
-    use crate::input::profiles::knuckles::Knuckles;
-    use crate::input::{ActionData, tests::Fixture};
+    use super::{FrameController, InteractionProfile};
+    use crate::input::tests::Fixture;
     use openxr as xr;
 
     #[test]
@@ -235,66 +234,30 @@ mod tests {
         let f = Fixture::new();
         f.load_actions(c"actions.json");
 
-        let path = Knuckles::profile_path();
+        let path = FrameController::profile_path();
         f.verify_bindings::<bool>(
             path,
             c"/actions/set1/in/boolact",
             [
-                "/user/hand/left/input/a/click".into(),
                 "/user/hand/right/input/a/click".into(),
-                "/user/hand/left/input/b/click".into(),
                 "/user/hand/right/input/b/click".into(),
-                "/user/hand/left/input/squeeze/value".into(),
-                "/user/hand/left/input/trigger/touch".into(),
-                "/user/hand/right/input/trigger/touch".into(),
+                "/user/hand/right/input/x/click".into(),
+                "/user/hand/right/input/y/click".into(),
+                "/user/hand/right/input/menu/click".into(),
+                "/user/hand/left/input/dpad_up/click".into(),
+                "/user/hand/left/input/dpad_down/click".into(),
+                "/user/hand/left/input/view/click".into(),
+                "/user/hand/left/input/bumper/click".into(),
+                "/user/hand/right/input/bumper/touch".into(),
                 "/user/hand/left/input/thumbstick/click".into(),
-                "/user/hand/right/input/thumbstick/click".into(),
-                "/user/hand/left/input/thumbstick/touch".into(),
-                "/user/hand/right/input/thumbstick/touch".into(),
-                "/user/hand/right/input/trackpad/touch".into(),
-                "/user/hand/left/input/trackpad/force".into(),
-                "/user/hand/right/input/trackpad/force".into(),
             ],
         );
-
-        f.verify_bindings::<f32>(
-            path,
-            c"/actions/set1/boolact_asfloat",
-            [
-                "/user/hand/left/input/trigger/value".into(),
-                "/user/hand/right/input/trigger/value".into(),
-                "/user/hand/left/input/squeeze/value".into(),
-            ],
-        );
-
-        f.verify_bindings::<f32>(
-            path,
-            c"/user/hand/left/input/trackpad/click-/actions/set1",
-            ["/user/hand/left/input/trackpad/force".into()],
-        );
-
-        let handle = f.get_action_handle(c"/actions/set1/in/boolact");
-        let data = f.input.openxr.session_data.get();
-        let actions = data.input_data.get_loaded_actions().unwrap();
-        let action = actions.try_get_action(handle).unwrap();
-        let extra = actions.try_get_extra(handle).unwrap();
-
-        let ActionData::Bool(_) = action else {
-            panic!("no");
-        };
-
-        let grab_data = extra.grab_actions.as_ref().unwrap();
-        let p = f.input.openxr.instance.string_to_path(path).unwrap();
-        let suggested = fakexr::get_suggested_bindings(grab_data.force_action.as_raw(), p);
-        assert!(suggested.contains(&"/user/hand/right/input/squeeze/force".to_string()));
 
         f.verify_bindings::<f32>(
             path,
             c"/actions/set1/in/vec1act",
             [
                 "/user/hand/left/input/trigger/value".into(),
-                "/user/hand/right/input/trigger/value".into(),
-                "/user/hand/left/input/squeeze/force".into(),
                 "/user/hand/right/input/squeeze/value".into(),
             ],
         );
@@ -303,17 +266,9 @@ mod tests {
             path,
             c"/actions/set1/in/vec2act",
             [
-                "/user/hand/left/input/trackpad".into(),
-                "/user/hand/right/input/trackpad".into(),
                 "/user/hand/left/input/thumbstick".into(),
                 "/user/hand/right/input/thumbstick".into(),
             ],
-        );
-
-        f.verify_bindings::<xr::Vector2f>(
-            path,
-            c"/actions/set1/in/scrollact",
-            ["/user/hand/left/input/thumbstick".into()],
         );
 
         f.verify_bindings::<xr::Haptic>(

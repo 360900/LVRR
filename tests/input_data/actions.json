@@ -103,6 +103,10 @@
 			"controller_type": "vive_focus3_controller"
 		},
 		{
+			"binding_url": "frame_controller.json",
+			"controller_type": "frame_controller"
+		},
+		{
 			"binding_url": "hpmotioncontroller.json",
 			"controller_type": "hpmotioncontroller"
 		},

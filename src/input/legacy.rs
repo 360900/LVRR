@@ -578,8 +578,8 @@ impl LegacyActionData {
 mod tests {
     use crate::input::InteractionProfile;
     use crate::input::profiles::{
-        knuckles::Knuckles, oculus_touch::OculusTouch, simple_controller::SimpleController,
-        vive_focus3::ViveFocus3,
+        frame_controller::FrameController, knuckles::Knuckles, oculus_touch::OculusTouch,
+        simple_controller::SimpleController, vive_focus3::ViveFocus3,
     };
     use crate::input::tests::{Fixture, compare_pose};
     use crate::openxr_data::Hand;
@@ -901,6 +901,41 @@ mod tests {
             &[
                 "/user/hand/left/input/squeeze/touch",
                 "/user/hand/right/input/squeeze/touch",
+            ],
+        );
+    }
+
+    #[test]
+    fn frame_bindings() {
+        let (f, _) = legacy_fixture(|actions| actions.a.as_raw());
+        assert_legacy_bindings::<FrameController>(
+            &f,
+            |actions| actions.app_menu.as_raw(),
+            &[
+                "/user/hand/left/input/dpad_left/click",
+                "/user/hand/left/input/dpad_right/click",
+                "/user/hand/left/input/dpad_up/click",
+                "/user/hand/right/input/b/click",
+                "/user/hand/right/input/x/click",
+                "/user/hand/right/input/y/click",
+            ],
+        );
+        assert_legacy_bindings::<FrameController>(
+            &f,
+            |actions| actions.a.as_raw(),
+            &[
+                "/user/hand/left/input/dpad_down/click",
+                "/user/hand/right/input/a/click",
+            ],
+        );
+        assert_legacy_bindings::<FrameController>(
+            &f,
+            |actions| actions.trigger_click.as_raw(),
+            &[
+                "/user/hand/left/input/trigger/click",
+                "/user/hand/right/input/trigger/click",
+                "/user/hand/left/input/bumper/click",
+                "/user/hand/right/input/bumper/click",
             ],
         );
     }
