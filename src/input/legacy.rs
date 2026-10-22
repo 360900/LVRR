@@ -15,7 +15,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 #[derive(Default)]
 pub(super) struct LegacyState {
     packet_num: AtomicU32,
-    /// Controller state per hand as of the last legacy action sync.
+    /// Controller state per hand as of the last legacy action sync, including its packet number
+    /// so both are published together.
     hands: [Mutex<HandState>; 2],
 }
 
@@ -242,7 +243,6 @@ impl<C: openxr_data::Compositor> Input<C> {
             .lock()
             .unwrap()
             .state;
-        state.unPacketNum = self.legacy_state.packet_num.load(Ordering::Relaxed);
 
         true
     }
@@ -255,17 +255,19 @@ impl<C: openxr_data::Compositor> Input<C> {
         devices: &TrackedDeviceList,
         legacy: &LegacyActionData,
     ) {
+        let packet_num = self.legacy_state.packet_num.load(Ordering::Relaxed);
         for hand in [Hand::Left, Hand::Right] {
             let Some(device_index) = devices.get_controller_index(hand) else {
                 continue;
             };
             let mut hand_state = self.legacy_state.hands[hand as usize - 1].lock().unwrap();
-            let new = read_hand_state(
+            let mut new = read_hand_state(
                 &legacy.actions,
                 session,
                 self.get_subaction_path(hand),
                 &hand_state,
             );
+            new.state.unPacketNum = packet_num;
             let (old, new_state) = (&hand_state.state, &new.state);
 
             let mut events = self.events.lock().unwrap();
@@ -1119,6 +1121,15 @@ mod tests {
             expect_button_event(&f, ty, 2, vr::EVRButtonId::SteamVR_Trigger);
         }
         expect_no_event(&f);
+    }
+
+    #[test]
+    fn packet_num_changes_with_each_sync() {
+        let (f, _) = legacy_fixture(|actions| actions.a.as_raw());
+        let first = get_state(&f, 1).unPacketNum;
+        assert_eq!({ get_state(&f, 1).unPacketNum }, first);
+        f.input.frame_start_update();
+        assert_ne!({ get_state(&f, 1).unPacketNum }, first);
     }
 
     #[test]
