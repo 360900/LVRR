@@ -76,6 +76,8 @@ pub struct OpenXrData<C: Compositor> {
     pub max_layer_count: usize,
     /// Runtime errors already logged as warnings, so one that repeats every frame is logged once.
     logged_errors: Mutex<HashSet<(&'static str, i32)>>,
+    /// Change time of a runtime recenter of LOCAL that hasn't taken effect yet.
+    pending_recenter: parking_lot::Mutex<Option<xr::Time>>,
 
     /// should only be externally accessed for testing
     pub(crate) input: Injected<crate::input::Input<C>>,
@@ -304,6 +306,7 @@ impl<C: Compositor> OpenXrData<C> {
             session_creation_failed: false.into(),
             max_layer_count,
             logged_errors: Mutex::default(),
+            pending_recenter: parking_lot::Mutex::new(None),
             input: injector.inject(),
             compositor: injector.inject(),
             system: injector.inject(),
@@ -315,31 +318,50 @@ impl<C: Compositor> OpenXrData<C> {
             return;
         }
         let data = self.session_data.get();
-        if let Some(state) = self.poll_events_impl(&data) {
-            drop(data);
+        let polled = self.poll_events_impl(&data);
+        drop(data);
+        if let Some(state) = polled.state {
             self.session_data.0.write().state = state;
         }
+        if polled.stage_changed {
+            // The runtime moved the stage, which replaces any standing zero pose the app set.
+            self.session_data
+                .0
+                .write()
+                .set_origin_offset(vr::ETrackingUniverseOrigin::Standing, xr::Posef::IDENTITY);
+            self.push_event(
+                vr::EVREventType::ChaperoneUniverseHasChanged,
+                Default::default(),
+            );
+        }
+        if let Some(time) = polled.local_change_time {
+            *self.pending_recenter.lock() = Some(time);
+        }
+        self.apply_pending_recenter();
     }
 
-    fn poll_events_impl(&self, session_data: &SessionData) -> Option<xr::SessionState> {
+    fn poll_events_impl(&self, session_data: &SessionData) -> PolledEvents {
         let mut buf = xr::EventDataBuffer::new();
-        let mut state = None;
+        let mut polled = PolledEvents::default();
+        // Events for an older session (i.e. the probe session or a session we already replaced)
+        // are stale.
+        let is_stale = |session: xr::sys::Session, what: &dyn std::fmt::Debug| {
+            let stale = session != session_data.session.as_raw();
+            if stale {
+                debug!("ignoring {what:?} for stale session");
+            }
+            stale
+        };
         while let Some(event) = self
             .check("xrPollEvent", self.instance.poll_event(&mut buf))
             .flatten()
         {
             match event {
                 xr::Event::SessionStateChanged(event) => {
-                    // Events for an older session (i.e. the probe session or a session we
-                    // already replaced) are stale.
-                    if event.session() != session_data.session.as_raw() {
-                        debug!(
-                            "ignoring state change {:?} for stale session",
-                            event.state()
-                        );
+                    if is_stale(event.session(), &event.state()) {
                         continue;
                     }
-                    state = Some(event.state());
+                    polled.state = Some(event.state());
                     info!("OpenXR session state changed: {:?}", event.state());
                     let exit_requested = self.exit_requested.load(Ordering::Relaxed);
                     match event.state() {
@@ -361,13 +383,80 @@ impl<C: Compositor> OpenXrData<C> {
                         input.interaction_profile_changed(session_data);
                     }
                 }
+                xr::Event::ReferenceSpaceChangePending(event) => {
+                    let ty = event.reference_space_type();
+                    if is_stale(event.session(), &ty) {
+                        continue;
+                    }
+                    info!("Runtime is moving reference space {ty:?}");
+                    match ty {
+                        xr::ReferenceSpaceType::LOCAL => {
+                            polled.local_change_time = Some(event.change_time())
+                        }
+                        xr::ReferenceSpaceType::STAGE => polled.stage_changed = true,
+                        _ => {}
+                    }
+                }
                 _ => {
                     info!("unknown event");
                 }
             }
         }
 
-        state
+        polled
+    }
+
+    /// Pushes a system event that isn't about a particular device.
+    fn push_event(&self, ty: vr::EVREventType, data: vr::VREvent_Data_t) {
+        if let Some(system) = self.system.get() {
+            system.push_event(vr::VREvent_t {
+                eventType: ty as u32,
+                trackedDeviceIndex: vr::k_unTrackedDeviceIndex_Hmd,
+                eventAgeSeconds: 0.0,
+                data,
+            });
+        }
+    }
+
+    /// A runtime recenter of LOCAL is the equivalent of the user resetting their seated position
+    /// in the SteamVR dashboard: the seated zero becomes the current head pose, replacing what
+    /// the app set. The head pose is only measured once the new LOCAL is in effect.
+    fn apply_pending_recenter(&self) {
+        let time = {
+            let mut pending = self.pending_recenter.lock();
+            let Some(change_time) = *pending else {
+                return;
+            };
+            let time = self.get_display_time();
+            if change_time.as_nanos() > time.as_nanos() {
+                return;
+            }
+            *pending = None;
+            time
+        };
+
+        let mut origins = vec![vr::ETrackingUniverseOrigin::Seated];
+        if *RECENTER_STANDING {
+            origins.push(vr::ETrackingUniverseOrigin::Standing);
+        }
+        let mut session = self.session_data.0.write();
+        for origin in origins {
+            let zero = session.head_zero_pose(origin, time).unwrap_or_else(|| {
+                warn!(
+                    "Couldn't locate the headset, resetting {origin:?} zero pose to the runtime's"
+                );
+                xr::Posef::IDENTITY
+            });
+            session.set_origin_offset(origin, zero);
+        }
+        drop(session);
+
+        let mut data = vr::VREvent_Data_t::default();
+        data.seatedZeroPoseReset.bResetBySystemMenu = true;
+        self.push_event(vr::EVREventType::SeatedZeroPoseReset, data);
+        if *RECENTER_STANDING {
+            self.push_event(vr::EVREventType::StandingZeroPoseReset, Default::default());
+        }
     }
 
     /// Whether the runtime lost the session or instance.
@@ -639,7 +728,7 @@ impl<C: Compositor> OpenXrData<C> {
                 warn!("timed out waiting for session state {target:?} (current: {state:?})");
                 break;
             }
-            match self.poll_events_impl(session_data) {
+            match self.poll_events_impl(session_data).state {
                 Some(s) => state = s,
                 None => std::thread::sleep(Duration::from_millis(1)),
             }
@@ -687,6 +776,22 @@ impl<C: Compositor> OpenXrData<C> {
         )
     }
 }
+
+/// Results of polling events that need the session write lock to act on.
+#[derive(Default)]
+struct PolledEvents {
+    state: Option<xr::SessionState>,
+    /// The runtime recentered LOCAL, taking effect at this time.
+    local_change_time: Option<xr::Time>,
+    stage_changed: bool,
+}
+
+/// Opt-in: a runtime recenter (e.g. a long press of the Quest system button) also recenters the
+/// standing universe, like SteamVR does for Quest headsets through Virtual Desktop. Off by
+/// default, because on a calibrated room setup the stage is the play area and shouldn't move.
+static RECENTER_STANDING: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    crate::quirks::env_override("XRIZER_RECENTER_STANDING").unwrap_or(false)
+});
 
 pub struct AtomicXrTime(AtomicI64);
 

@@ -1989,6 +1989,13 @@ mod tests {
         (xr, system)
     }
 
+    fn next_event(system: &System) -> Option<vr::VREvent_t> {
+        let mut event = vr::VREvent_t::default();
+        system
+            .PollNextEvent(&mut event, std::mem::size_of_val(&event) as u32)
+            .then_some(event)
+    }
+
     fn session(xr: &RealOpenXrData) -> xr::sys::Session {
         xr.session_data.get().session.as_raw()
     }
@@ -2036,6 +2043,78 @@ mod tests {
         assert_eq!(translation(raw), [-0.5, 0.0, 0.0]);
         let seated = system.GetSeatedZeroPoseToStandingAbsoluteTrackingPose();
         assert_eq!(translation(seated), [-0.5, 1.6, 0.0]);
+    }
+
+    /// A runtime recenter is the user resetting their seated position: the head becomes the
+    /// seated zero, replacing what the app set.
+    #[test]
+    fn runtime_recenter_resets_seated_zero_pose() {
+        let (xr, system) = system_with_events();
+        let head = |x, y| xr::Posef {
+            position: xr::Vector3f { x, y, z: 0.0 },
+            ..xr::Posef::IDENTITY
+        };
+        let head_in_seated = || {
+            let data = xr.session_data.get();
+            data.view_space
+                .locate(
+                    data.get_space_for_origin(vr::ETrackingUniverseOrigin::Seated),
+                    xr.get_display_time(),
+                )
+                .unwrap()
+                .pose
+                .position
+        };
+
+        fakexr::set_reference_space_pose(
+            session(&xr),
+            xr::ReferenceSpaceType::VIEW,
+            head(1.0, 0.0),
+        );
+        xr.reset_tracking_space(vr::ETrackingUniverseOrigin::Seated);
+        assert_eq!(head_in_seated().x, 0.0);
+
+        // The runtime moved LOCAL; the head is now 0.4 m below it.
+        fakexr::set_reference_space_pose(
+            session(&xr),
+            xr::ReferenceSpaceType::VIEW,
+            head(0.0, -0.4),
+        );
+        fakexr::reference_space_change_pending(session(&xr), xr::ReferenceSpaceType::LOCAL);
+        xr.poll_events();
+        let position = head_in_seated();
+        assert_eq!([position.x, position.y, position.z], [0.0, 0.0, 0.0]);
+
+        let event = next_event(&system).expect("no event");
+        assert_eq!(
+            event.eventType,
+            vr::EVREventType::SeatedZeroPoseReset as u32
+        );
+        assert!(unsafe { event.data.seatedZeroPoseReset.bResetBySystemMenu });
+        assert!(next_event(&system).is_none());
+
+        // A moved stage drops the app's standing zero pose.
+        fakexr::set_reference_space_pose(
+            session(&xr),
+            xr::ReferenceSpaceType::VIEW,
+            head(1.0, 0.0),
+        );
+        xr.reset_tracking_space(vr::ETrackingUniverseOrigin::Standing);
+        assert_ne!(
+            translation(system.GetRawZeroPoseToStandingAbsoluteTrackingPose()),
+            [0.0, 0.0, 0.0]
+        );
+        fakexr::reference_space_change_pending(session(&xr), xr::ReferenceSpaceType::STAGE);
+        xr.poll_events();
+        assert_eq!(
+            translation(system.GetRawZeroPoseToStandingAbsoluteTrackingPose()),
+            [0.0, 0.0, 0.0]
+        );
+        let event = next_event(&system).expect("no event");
+        assert_eq!(
+            event.eventType,
+            vr::EVREventType::ChaperoneUniverseHasChanged as u32
+        );
     }
 
     #[test]
