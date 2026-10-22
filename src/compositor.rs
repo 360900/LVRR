@@ -2916,6 +2916,29 @@ mod tests {
         assert_eq!(waits(), [true]);
     }
 
+    /// A failed overlay update starts over with a new swapchain, so the copies into the old one
+    /// have to finish first.
+    #[test]
+    fn failed_overlay_update_waits_before_dropping_its_swapchain() {
+        use vr::IVROverlay027_Interface;
+
+        let f = Fixture::new();
+        let overlays = f.overlay_man();
+        let mut overlay = 0;
+        assert_eq!(
+            overlays.CreateOverlay(c"key".as_ptr(), c"key".as_ptr(), &mut overlay),
+            vr::EVROverlayError::None
+        );
+        let set_texture = || overlays.SetOverlayTexture(overlay, &FakeGraphicsData::texture(&f.vk));
+        assert_eq!(set_texture(), vr::EVROverlayError::None);
+        SWAPCHAIN_EXISTED_ON_WAIT.take();
+
+        // Acquiring the next image fails.
+        fakexr::lose_session(f.raw_session());
+        assert_eq!(set_texture(), vr::EVROverlayError::RequestFailed);
+        assert_eq!(SWAPCHAIN_EXISTED_ON_WAIT.take(), [true]);
+    }
+
     /// Overlays keep their rect across a session restart, but the new session has no swapchain
     /// for them until they get a new texture.
     #[test]

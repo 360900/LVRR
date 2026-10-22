@@ -924,7 +924,9 @@ impl Overlay {
                 Ok(extent)
             };
             copy().map_err(|e| {
-                // The swapchain might still hold an acquired image, so start over with a new one.
+                // The swapchain might still hold an acquired image, so start over with a new one,
+                // once the copy into it has finished.
+                backend.wait_for_copies();
                 map.remove(key);
                 failed("Updating overlay swapchain")(e)
             })
