@@ -10,6 +10,7 @@ use log::{debug, trace};
 use openvr as vr;
 use openxr as xr;
 use slotmap::{Key, KeyData, SecondaryMap, SlotMap, new_key_type, secondary::Entry};
+use std::f32::consts::TAU;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::{
@@ -125,27 +126,26 @@ impl OverlayMan {
         let key = overlays.insert(Overlay::new(name.clone(), name));
         let overlay = overlays.get_mut(key).unwrap();
 
-        overlay.kind = OverlayKind::Curved { curvature: 1.0 };
+        // A curved surface a couple of meters in front of the user, centered on them and wide
+        // enough to fill most of the forward view. The height follows the texture's aspect.
+        const DISTANCE: f32 = 2.0;
+        overlay.width = 4.0;
+        overlay.kind = OverlayKind::Curved {
+            curvature: overlay.width / (TAU * DISTANCE),
+        };
         overlay.z_order = SKYBOX_Z_ORDER;
         // SteamVR draws the skybox opaque, whatever the texture's alpha says.
         overlay.flags = vr::VROverlayFlags::IgnoreTextureAlpha as u32;
         overlay.scale = (1.0, 1.0);
         overlay.bounds = bounds;
-        // Wide enough to fill most of the forward view; height derived from
-        // texture aspect. Distance is set via the transform below and used as
-        // the cylinder radius (see get_layers).
-        overlay.width = 4.0;
         overlay.visible = true;
-        // Curved surface a couple of meters in front of the user. The distance
-        // becomes the cylinder radius, so the "forward" texture wraps around
-        // the user's head rather than sitting on a flat plane.
         overlay.transform = Some((
             vr::ETrackingUniverseOrigin::Seated,
             vr::HmdMatrix34_t {
                 m: [
                     [1.0, 0.0, 0.0, 0.0],
                     [0.0, 1.0, 0.0, 0.0],
-                    [0.0, 0.0, 1.0, -2.0],
+                    [0.0, 0.0, 1.0, -DISTANCE],
                 ],
             },
         ));
@@ -277,60 +277,56 @@ impl OverlayMan {
                 }}
             }
 
-            match overlay.kind {
+            // OC-style size: width = widthMeters * scaleX, height = widthMeters * scaleY / aspect
+            let aspect = if rect.extent.height > 0 {
+                rect.extent.width as f32 / rect.extent.height as f32
+            } else {
+                1.0
+            };
+            let width = overlay.width * overlay.scale.0;
+            let height = overlay.width * overlay.scale.1 / aspect;
+            // The runtime rejects the whole frame if any layer is invalid.
+            if !(is_valid_pose(&pose) && is_positive(width) && is_positive(height)) {
+                crate::warn_once!("Skipping overlay {:?} with invalid placement", overlay.name);
+                continue;
+            }
+
+            let layer = match overlay.kind {
                 OverlayKind::Quad => {
                     use xr::CompositionLayerQuad;
-                    // OC-style size: width = widthMeters * scaleX,
-                    //                height = widthMeters * scaleY / aspect
-                    let aspect = if rect.extent.height > 0 {
-                        rect.extent.width as f32 / rect.extent.height as f32
-                    } else {
-                        1.0
-                    };
-                    let quad_w = overlay.width * overlay.scale.0;
-                    let quad_h = overlay.width * overlay.scale.1 / aspect;
                     let layer = layer_init!(CompositionLayerQuad)
                         .pose(pose)
-                        .size(xr::Extent2Df {
-                            width: quad_w,
-                            height: quad_h,
-                        });
-
-                    let layer = lifetime_extend!(CompositionLayerQuad, layer);
-                    let mut layer = OverlayLayer::from(OverlayLayerInner::Quad(layer));
-                    overlay
-                        .alpha
-                        .iter()
-                        .for_each(|a| layer.set_alpha(*a, premultiplied));
-                    layers.push((overlay.z_order, layer));
+                        .size(xr::Extent2Df { width, height });
+                    OverlayLayerInner::Quad(lifetime_extend!(CompositionLayerQuad, layer))
                 }
                 // SetOverlayCurvature checks for khr_composition_layer_cylinder
-                OverlayKind::Curved { curvature: _ } => {
-                    // OpenVR curvature semantics don't map cleanly to OpenXR's
-                    // cylinder radius. Instead, curve the overlay around the
-                    // user's origin in the overlay's reference space: use the
-                    // distance from origin to the requested pose position as
-                    // the cylinder radius. This produces a natural "curved
-                    // screen" effect wrapping around the user's head.
-                    let width = overlay.width * overlay.scale.0;
+                OverlayKind::Curved { curvature } => {
+                    // OpenVR: curvature = width / (2π * radius), so a curvature of 1 closes the
+                    // cylinder. OpenXR wants an angle below 2π, which f32 2π isn't.
+                    let angle = (TAU * curvature).min(TAU - 1e-4);
+                    let radius = width / angle;
+                    // The pose is the middle of the arc, which faces the cylinder's axis.
                     let pos = vec3(pose.position.x, pose.position.y, pose.position.z);
-                    let distance = pos.length().max(0.01);
-                    let radius = distance;
                     let rot = Quat::from_xyzw(
                         pose.orientation.x,
                         pose.orientation.y,
                         pose.orientation.z,
                         pose.orientation.w,
                     );
-
                     let center = pos + rot.mul_vec3(Vec3::Z * radius);
-                    let angle = 2.0 * (width / (2.0 * radius));
+                    if !(is_positive(angle) && is_positive(radius) && center.is_finite()) {
+                        crate::warn_once!(
+                            "Skipping overlay {:?} with invalid curvature",
+                            overlay.name
+                        );
+                        continue;
+                    }
 
                     use xr::CompositionLayerCylinderKHR;
                     let layer = layer_init!(CompositionLayerCylinderKHR)
                         .radius(radius)
                         .central_angle(angle)
-                        .aspect_ratio(rect.extent.width as f32 / rect.extent.height as f32)
+                        .aspect_ratio(width / height)
                         .pose(xr::Posef {
                             orientation: pose.orientation,
                             position: xr::Vector3f {
@@ -339,16 +335,17 @@ impl OverlayMan {
                                 z: center.z,
                             },
                         });
-
-                    let layer = lifetime_extend!(CompositionLayerCylinderKHR, layer);
-                    let mut layer = OverlayLayer::from(OverlayLayerInner::Cylinder(layer));
-                    overlay
-                        .alpha
-                        .iter()
-                        .for_each(|a| layer.set_alpha(*a, premultiplied));
-                    layers.push((overlay.z_order, layer));
+                    OverlayLayerInner::Cylinder(lifetime_extend!(
+                        CompositionLayerCylinderKHR,
+                        layer
+                    ))
                 }
+            };
+            let mut layer = OverlayLayer::from(layer);
+            if let Some(alpha) = overlay.alpha {
+                layer.set_alpha(alpha, premultiplied);
             }
+            layers.push((overlay.z_order, layer));
         }
 
         // Sort by z_order asc
@@ -565,6 +562,18 @@ impl OverlaySessionData {
     pub fn swapchains_locked(&self) -> bool {
         self.swapchains.try_lock().is_err()
     }
+}
+
+fn is_positive(value: f32) -> bool {
+    value.is_finite() && value > 0.0
+}
+
+fn is_valid_pose(pose: &xr::Posef) -> bool {
+    let xr::Posef {
+        position: p,
+        orientation: o,
+    } = pose;
+    vec3(p.x, p.y, p.z).is_finite() && Quat::from_xyzw(o.x, o.y, o.z, o.w).is_normalized()
 }
 
 /// Splits an overlay transform into its pose and the X and Y scale of its basis, which a pose can't
@@ -1659,13 +1668,13 @@ impl vr::IVROverlay028_Interface for OverlayMan {
             get_overlay!(self, handle, mut overlay);
             // Zero (or near-zero) curvature means "flat" in OpenVR semantics.
             // Treat as a plain quad rather than a degenerate cylinder (radius=inf).
-            if value <= f32::EPSILON {
-                overlay.kind = OverlayKind::Quad;
+            overlay.kind = if value > f32::EPSILON {
+                OverlayKind::Curved {
+                    curvature: value.min(1.0),
+                }
             } else {
-                overlay.kind = OverlayKind::Curved {
-                    curvature: value.clamp(0.0, 1.0),
-                };
-            }
+                OverlayKind::Quad
+            };
         }
         vr::EVROverlayError::None
     }
@@ -2445,6 +2454,75 @@ mod tests {
         set_flag(IsPremultiplied, false);
         set_flag(IgnoreTextureAlpha, true);
         assert_eq!(layer().flags(), Flags::UNPREMULTIPLIED_ALPHA);
+    }
+
+    #[test]
+    fn curvature_follows_openvr() {
+        let f = RealSessionFixture::with_extensions(|e| e.khr_composition_layer_cylinder = true);
+        let handle = f.textured_overlay(c"key");
+        assert_eq!(
+            f.man.SetOverlayWidthInMeters(handle, 4.0),
+            vr::EVROverlayError::None
+        );
+        let cylinder = |curvature| {
+            assert_eq!(
+                f.man.SetOverlayCurvature(handle, curvature),
+                vr::EVROverlayError::None
+            );
+            match f.layers(false).as_slice() {
+                [TestLayer::Cylinder(c, _)] => *c,
+                other => panic!("expected one cylinder, got {other:?}"),
+            }
+        };
+
+        // curvature = width / (2π * radius), whatever the distance to the overlay.
+        let c = cylinder(0.1);
+        assert!((c.radius - 4.0 / (TAU * 0.1)).abs() < 1e-3, "{}", c.radius);
+        assert!((c.central_angle - TAU * 0.1).abs() < 1e-5);
+        assert_eq!(c.aspect_ratio, 4.0 / 4.0);
+        // The middle of the arc stays where the overlay is.
+        assert!((c.pose.position.z - (c.radius - 0.5)).abs() < 1e-4);
+
+        // Monado rejects angles above 2π as a double, which f32 2π is.
+        let c = cylinder(1.0);
+        assert!(f64::from(c.central_angle) < std::f64::consts::TAU);
+        assert!((c.radius * c.central_angle - 4.0).abs() < 1e-4);
+
+        // Flat again
+        assert_eq!(
+            f.man.SetOverlayCurvature(handle, 0.0),
+            vr::EVROverlayError::None
+        );
+        assert!(matches!(f.layers(false).as_slice(), [TestLayer::Quad(..)]));
+    }
+
+    #[test]
+    fn invalid_overlay_placement_is_skipped() {
+        let f = RealSessionFixture::new();
+        let handle = f.textured_overlay(c"key");
+        assert_eq!(f.layers(false).len(), 1);
+
+        assert_eq!(
+            f.man.SetOverlayWidthInMeters(handle, 0.0),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(f.layers(false).len(), 0);
+
+        assert_eq!(
+            f.man.SetOverlayWidthInMeters(handle, 1.0),
+            vr::EVROverlayError::None
+        );
+        let mut transform: vr::HmdMatrix34_t = xr::Posef::IDENTITY.into();
+        transform.m[0][3] = f32::NAN;
+        assert_eq!(
+            f.man.SetOverlayTransformAbsolute(
+                handle,
+                vr::ETrackingUniverseOrigin::Standing,
+                &transform
+            ),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(f.layers(false).len(), 0);
     }
 
     /// The frame thread takes the overlay lock while holding the session lock, so the first
