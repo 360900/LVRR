@@ -840,7 +840,7 @@ impl TrackedDeviceList {
         self.get_device_mut(self.get_controller_index(hand)?)
     }
 
-    fn get_controller_index(&self, hand: Hand) -> Option<vr::TrackedDeviceIndex_t> {
+    pub(super) fn get_controller_index(&self, hand: Hand) -> Option<vr::TrackedDeviceIndex_t> {
         self.iter()
             .enumerate()
             .find(|(_, device)| device.get_controller_hand() == Some(hand))

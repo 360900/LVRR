@@ -2617,6 +2617,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                 ]);
                 if self.openxr.check("xrSyncActions", result).is_some() {
                     self.legacy_state.on_action_sync();
+                    self.update_legacy_state(&data.session, &devices, actions);
                 }
             }
             None => {

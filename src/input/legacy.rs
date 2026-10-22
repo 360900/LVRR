@@ -1,30 +1,33 @@
-use super::{Input, PoseData, WriteOnDrop, inactive_state};
+use super::{Input, PoseData, TrackedDeviceList, WriteOnDrop};
 use crate::{
     input::{
         LoadedActions, ManifestLoadedActions,
         profiles::{self, RunWithProfile},
     },
-    openxr_data::{self},
+    openxr_data::{self, Hand},
 };
 use log::{debug, trace, warn};
 use openvr as vr;
 use openxr as xr;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 #[derive(Default)]
 pub(super) struct LegacyState {
     packet_num: AtomicU32,
-    got_state_this_frame: [AtomicBool; 2],
+    /// Controller state per hand as of the last legacy action sync.
+    hands: [Mutex<vr::VRControllerState_t>; 2],
 }
 
 impl LegacyState {
     pub fn on_action_sync(&self) {
         self.packet_num.fetch_add(1, Ordering::Relaxed);
-        for state in &self.got_state_this_frame {
-            state.store(false, Ordering::Relaxed);
-        }
     }
 }
+
+/// Button events are generated whether or not the app polls them, so an app that never calls
+/// PollNextEvent must not grow the queue forever.
+const MAX_QUEUED_EVENTS: usize = 256;
 
 // Adapted from openvr.h
 pub const fn button_mask_from_id(id: vr::EVRButtonId) -> u64 {
@@ -214,11 +217,10 @@ impl<C: openxr_data::Compositor> Input<C> {
             return false;
         }
 
-        let Some(legacy) = data.input_data.get_legacy_actions() else {
+        if data.input_data.get_legacy_actions().is_none() {
             debug!("tried getting controller state, but legacy actions aren't ready");
             return false;
-        };
-        let actions = &legacy.actions;
+        }
 
         let Some(hand) = self.device_index_to_hand(device_index) else {
             debug!(
@@ -227,101 +229,136 @@ impl<C: openxr_data::Compositor> Input<C> {
             return false;
         };
 
-        let hand_path = self.get_subaction_path(hand);
-
+        **state = *self.legacy_state.hands[hand as usize - 1].lock().unwrap();
         state.unPacketNum = self.legacy_state.packet_num.load(Ordering::Relaxed);
-
-        // Only send the input event if we haven't already.
-        let mut events = self.legacy_state.got_state_this_frame[hand as usize - 1]
-            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-            .then(|| self.events.lock().unwrap());
-
-        let mut read_button =
-            |id, click_action: &xr::Action<bool>, touch_action: Option<&xr::Action<bool>>| {
-                let touch_state = touch_action.map(|a| {
-                    a.state(&data.session, hand_path)
-                        .unwrap_or_else(inactive_state)
-                });
-                let touched = touch_state.is_some_and(|s| s.current_state);
-                state.ulButtonTouched |= button_mask_from_id(id) & (touched as u64 * u64::MAX);
-
-                let click_state = click_action
-                    .state(&data.session, hand_path)
-                    .unwrap_or_else(inactive_state);
-                let pressed = click_state.current_state;
-                state.ulButtonPressed |= button_mask_from_id(id) & (pressed as u64 * u64::MAX);
-
-                if let Some(events) = &mut events {
-                    if touch_state.is_some_and(|s| s.changed_since_last_sync) {
-                        events.push_back(super::InputEvent {
-                            ty: if touched {
-                                vr::EVREventType::ButtonTouch
-                            } else {
-                                vr::EVREventType::ButtonUntouch
-                            },
-                            index: device_index,
-                            data: vr::VREvent_Controller_t { button: id.0 },
-                        });
-                    }
-                    if click_state.changed_since_last_sync {
-                        events.push_back(super::InputEvent {
-                            ty: if pressed {
-                                vr::EVREventType::ButtonPress
-                            } else {
-                                vr::EVREventType::ButtonUnpress
-                            },
-                            index: device_index,
-                            data: vr::VREvent_Controller_t { button: id.0 },
-                        });
-                    }
-                }
-            };
-
-        read_button(
-            vr::EVRButtonId::Axis0,
-            &actions.main_xy_click,
-            Some(&actions.main_xy_touch),
-        );
-        read_button(
-            vr::EVRButtonId::SteamVR_Trigger,
-            &actions.trigger_click,
-            None,
-        );
-        read_button(vr::EVRButtonId::ApplicationMenu, &actions.app_menu, None);
-        read_button(vr::EVRButtonId::A, &actions.a, None);
-        read_button(vr::EVRButtonId::Grip, &actions.squeeze_click, None);
-        read_button(vr::EVRButtonId::Axis2, &actions.squeeze_click, None);
-
-        let j = actions
-            .main_xy
-            .state(&data.session, hand_path)
-            .unwrap_or_else(inactive_state);
-        state.rAxis[0] = vr::VRControllerAxis_t {
-            x: j.current_state.x,
-            y: j.current_state.y,
-        };
-
-        let t = actions
-            .trigger
-            .state(&data.session, hand_path)
-            .unwrap_or_else(inactive_state);
-        state.rAxis[1] = vr::VRControllerAxis_t {
-            x: t.current_state,
-            y: 0.0,
-        };
-
-        let s = actions
-            .squeeze
-            .state(&data.session, hand_path)
-            .unwrap_or_else(inactive_state);
-        state.rAxis[2] = vr::VRControllerAxis_t {
-            x: s.current_state,
-            y: 0.0,
-        };
 
         true
     }
+
+    /// Reads the legacy actions after they were synced and queues button events for every
+    /// change, so apps get them whether or not they poll GetControllerState.
+    pub(super) fn update_legacy_state(
+        &self,
+        session: &xr::Session<xr::AnyGraphics>,
+        devices: &TrackedDeviceList,
+        legacy: &LegacyActionData,
+    ) {
+        for hand in [Hand::Left, Hand::Right] {
+            let Some(device_index) = devices.get_controller_index(hand) else {
+                continue;
+            };
+            let new =
+                read_controller_state(&legacy.actions, session, self.get_subaction_path(hand));
+            let mut old = self.legacy_state.hands[hand as usize - 1].lock().unwrap();
+
+            let mut events = self.events.lock().unwrap();
+            let mut push = |ty, id: vr::EVRButtonId| {
+                events.push_back(super::InputEvent {
+                    ty,
+                    index: device_index,
+                    data: vr::VREvent_Controller_t { button: id as u32 },
+                });
+            };
+            for id in LEGACY_BUTTONS {
+                let mask = button_mask_from_id(id);
+                let touched = new.ulButtonTouched & mask != 0;
+                let pressed = new.ulButtonPressed & mask != 0;
+                let touch_changed = touched != (old.ulButtonTouched & mask != 0);
+                // Touch comes before the press, and the untouch after the release.
+                if touch_changed && touched {
+                    push(vr::EVREventType::ButtonTouch, id);
+                }
+                if pressed != (old.ulButtonPressed & mask != 0) {
+                    push(
+                        if pressed {
+                            vr::EVREventType::ButtonPress
+                        } else {
+                            vr::EVREventType::ButtonUnpress
+                        },
+                        id,
+                    );
+                }
+                if touch_changed && !touched {
+                    push(vr::EVREventType::ButtonUntouch, id);
+                }
+            }
+            let excess = events.len().saturating_sub(MAX_QUEUED_EVENTS);
+            events.drain(..excess);
+
+            *old = new;
+        }
+    }
+}
+
+/// The buttons the legacy actions can report, in the order their events are sent.
+const LEGACY_BUTTONS: [vr::EVRButtonId; 6] = [
+    vr::EVRButtonId::Axis0,
+    vr::EVRButtonId::SteamVR_Trigger,
+    vr::EVRButtonId::ApplicationMenu,
+    vr::EVRButtonId::A,
+    vr::EVRButtonId::Grip,
+    vr::EVRButtonId::Axis2,
+];
+
+fn read_controller_state(
+    actions: &LegacyActions,
+    session: &xr::Session<xr::AnyGraphics>,
+    hand_path: xr::Path,
+) -> vr::VRControllerState_t {
+    let bool_state = |action: &xr::Action<bool>| {
+        action
+            .state(session, hand_path)
+            .is_ok_and(|s| s.current_state)
+    };
+    let float_state = |action: &xr::Action<f32>| {
+        action
+            .state(session, hand_path)
+            .map_or(0.0, |s| s.current_state)
+    };
+
+    let mut state = vr::VRControllerState_t::default();
+    let mut set_button = |id, pressed: bool, touched: bool| {
+        let mask = button_mask_from_id(id);
+        if pressed {
+            state.ulButtonPressed |= mask;
+        }
+        if touched {
+            state.ulButtonTouched |= mask;
+        }
+    };
+
+    set_button(
+        vr::EVRButtonId::Axis0,
+        bool_state(&actions.main_xy_click),
+        bool_state(&actions.main_xy_touch),
+    );
+    set_button(
+        vr::EVRButtonId::SteamVR_Trigger,
+        bool_state(&actions.trigger_click),
+        false,
+    );
+    set_button(
+        vr::EVRButtonId::ApplicationMenu,
+        bool_state(&actions.app_menu),
+        false,
+    );
+    set_button(vr::EVRButtonId::A, bool_state(&actions.a), false);
+    let squeeze_click = bool_state(&actions.squeeze_click);
+    set_button(vr::EVRButtonId::Grip, squeeze_click, false);
+    set_button(vr::EVRButtonId::Axis2, squeeze_click, false);
+
+    let main_xy = actions
+        .main_xy
+        .state(session, hand_path)
+        .map_or(Default::default(), |s| s.current_state);
+    state.rAxis[0] = vr::VRControllerAxis_t {
+        x: main_xy.x,
+        y: main_xy.y,
+    };
+    state.rAxis[1].x = float_state(&actions.trigger);
+    state.rAxis[2].x = float_state(&actions.squeeze);
+
+    state
 }
 
 mod marker {
@@ -515,11 +552,20 @@ mod tests {
         assert!(!got_input);
     }
 
-    fn legacy_input(
+    fn next_event(f: &Fixture) -> Option<MyEvent> {
+        let mut event = MyEvent::default();
+        f.input
+            .get_next_event(
+                std::mem::size_of_val(&event) as u32,
+                &mut event as *mut _ as *mut vr::VREvent_t,
+            )
+            .then_some(event)
+    }
+
+    /// Sets up legacy input with Index controllers, returning the requested legacy action.
+    fn legacy_fixture(
         get_action: impl FnOnce(&super::LegacyActions) -> openxr::sys::Action,
-        ids: &[vr::EVRButtonId],
-        touch: bool,
-    ) {
+    ) -> (Fixture, openxr::sys::Action) {
         use fakexr::UserPath::*;
         let mut f = Fixture::new();
         f.input.openxr.restart_session().unwrap();
@@ -538,6 +584,19 @@ mod tests {
                 .unwrap()
                 .actions,
         );
+        while let Some(event) = next_event(&f) {
+            assert_eq!(event.ty, vr::EVREventType::TrackedDeviceActivated as u32);
+        }
+        (f, action)
+    }
+
+    fn legacy_input(
+        get_action: impl FnOnce(&super::LegacyActions) -> openxr::sys::Action,
+        ids: &[vr::EVRButtonId],
+        touch: bool,
+    ) {
+        use fakexr::UserPath::*;
+        let (f, action) = legacy_fixture(get_action);
 
         let get_state = |hand: fakexr::UserPath| {
             let mut state = vr::VRControllerState_t::default();
@@ -552,15 +611,7 @@ mod tests {
             state
         };
 
-        let get_event = || {
-            let mut event = MyEvent::default();
-            f.input
-                .get_next_event(
-                    std::mem::size_of_val(&event) as u32,
-                    &mut event as *mut _ as *mut vr::VREvent_t,
-                )
-                .then_some(event)
-        };
+        let get_event = || next_event(&f);
 
         let expect_event =
             |msg| get_event().unwrap_or_else(|| panic!("Expected to get an event ({msg})"));
@@ -619,10 +670,6 @@ mod tests {
         };
 
         let hands = [LeftHand, RightHand];
-
-        while let Some(event) = get_event() {
-            assert_eq!(event.ty, vr::EVREventType::TrackedDeviceActivated.0);
-        }
 
         for hand in hands {
             let state = get_state(hand);
@@ -762,6 +809,51 @@ mod tests {
         f.input.frame_start_update();
         assert!(f.input.openxr.is_lost());
         assert_eq!(get_state(), (false, 0));
+    }
+
+    #[test]
+    fn button_events_without_polling_state() {
+        use fakexr::UserPath::*;
+        let (f, trigger) = legacy_fixture(|actions| actions.trigger_click.as_raw());
+
+        fakexr::set_action_state(trigger, true.into(), RightHand);
+        f.input.frame_start_update();
+        fakexr::set_action_state(trigger, false.into(), RightHand);
+        f.input.frame_start_update();
+
+        for ty in [
+            vr::EVREventType::ButtonPress,
+            vr::EVREventType::ButtonUnpress,
+        ] {
+            let event = next_event(&f).expect("missing button event");
+            assert_eq!(event.ty, ty as u32);
+            assert_eq!(event.index, 2);
+            assert_eq!(
+                unsafe { event.data.controller }.button,
+                vr::EVRButtonId::SteamVR_Trigger as u32
+            );
+        }
+        assert!(next_event(&f).is_none());
+    }
+
+    #[test]
+    fn unpolled_button_events_are_bounded() {
+        use fakexr::UserPath::*;
+        let (f, trigger) = legacy_fixture(|actions| actions.trigger_click.as_raw());
+
+        for i in 0..super::MAX_QUEUED_EVENTS + 1 {
+            fakexr::set_action_state(trigger, (i % 2 == 0).into(), RightHand);
+            f.input.frame_start_update();
+        }
+
+        let events: Vec<_> = std::iter::from_fn(|| next_event(&f)).collect();
+        assert_eq!(events.len(), super::MAX_QUEUED_EVENTS);
+        // The oldest event is dropped, the newest one kept.
+        assert_eq!(events[0].ty, vr::EVREventType::ButtonUnpress as u32);
+        assert_eq!(
+            events.last().unwrap().ty,
+            vr::EVREventType::ButtonPress as u32
+        );
     }
 
     #[test]
