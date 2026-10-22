@@ -27,8 +27,10 @@ pub struct VulkanData {
 
 impl Drop for VulkanData {
     fn drop(&mut self) {
-        unsafe {
-            self.device.device_wait_idle().unwrap();
+        // The app's device may already be lost when it shuts down. Destroying objects is still
+        // allowed then.
+        if let Err(e) = unsafe { self.device.device_wait_idle() } {
+            warn!("vkDeviceWaitIdle failed: {e}");
         }
         match &self.real_data {
             // Temporary session - we created these handles, so let's destroy them
@@ -471,29 +473,30 @@ impl GraphicsBackend for VulkanData {
     }
 }
 impl VulkanData {
+    /// Failures (e.g. a lost device) are only logged: the frame is lost either way, and the app
+    /// finds out about a lost device from its own calls.
     pub fn record_commands(&self, buf: vk::CommandBuffer, cmds: impl FnOnce()) {
-        unsafe {
+        let result = unsafe {
             self.device
                 .begin_command_buffer(
                     buf,
                     &vk::CommandBufferBeginInfo::default()
                         .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
                 )
-                .unwrap();
-        }
-
-        cmds();
-
-        unsafe {
-            self.device.end_command_buffer(buf).unwrap();
-
-            self.device
-                .queue_submit(
-                    self.queue,
-                    &[vk::SubmitInfo::default().command_buffers(&[buf])],
-                    vk::Fence::null(),
-                )
-                .unwrap();
+                .and_then(|()| {
+                    cmds();
+                    self.device.end_command_buffer(buf)
+                })
+                .and_then(|()| {
+                    self.device.queue_submit(
+                        self.queue,
+                        &[vk::SubmitInfo::default().command_buffers(&[buf])],
+                        vk::Fence::null(),
+                    )
+                })
+        };
+        if let Err(e) = result {
+            crate::warn_once!("Failed to submit copy commands: {}", e);
         }
     }
 
@@ -920,5 +923,20 @@ fn new_entry() -> ash::Entry {
         ash::Entry::from_static_fn(ash::StaticFn {
             get_instance_proc_addr: fakexr::vulkan::get_instance_proc_addr,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::clientcore::Injector;
+    use crate::openxr_data::RealOpenXrData;
+    use openvr as vr;
+
+    #[test]
+    fn teardown_after_device_lost() {
+        let xr = RealOpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap();
+        fakexr::vulkan::set_device_lost(true);
+        // Drops the temporary session's VulkanData, which waits for its device.
+        drop(xr);
     }
 }

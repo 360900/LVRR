@@ -1,7 +1,17 @@
 use ash::vk::{self, Handle};
 use openxr_sys as xr_sys;
 use paste::paste;
+use std::cell::Cell;
 use std::ffi::{CStr, c_char};
+
+thread_local! {
+    static DEVICE_LOST: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Makes devices report VK_ERROR_DEVICE_LOST on this thread.
+pub fn set_device_lost(lost: bool) {
+    DEVICE_LOST.set(lost);
+}
 
 macro_rules! get_fn {
     ($name:expr => $($fn:ident),+) => {
@@ -132,7 +142,11 @@ extern "system" fn get_device_queue(
 }
 
 extern "system" fn device_wait_idle(_: vk::Device) -> vk::Result {
-    vk::Result::SUCCESS
+    if DEVICE_LOST.get() {
+        vk::Result::ERROR_DEVICE_LOST
+    } else {
+        vk::Result::SUCCESS
+    }
 }
 
 extern "system" fn get_physical_device_queue_family_properties(
