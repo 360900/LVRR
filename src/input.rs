@@ -1401,6 +1401,9 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         action_data_size: u32,
         restrict_to_device: vr::VRInputValueHandle_t,
     ) -> vr::EVRInputError {
+        if action_data.is_null() {
+            return vr::EVRInputError::InvalidParam;
+        }
         if action_data_size as usize != std::mem::size_of::<vr::InputAnalogActionData_t>() {
             crate::warn_once!(
                 "GetAnalogActionData: unexpected size {}, expected {}",
@@ -1507,6 +1510,9 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         action_data_size: u32,
         restrict_to_device: vr::VRInputValueHandle_t,
     ) -> vr::EVRInputError {
+        if action_data.is_null() {
+            return vr::EVRInputError::InvalidParam;
+        }
         if action_data_size as usize != std::mem::size_of::<vr::InputDigitalActionData_t>() {
             crate::warn_once!(
                 "GetDigitalActionData: unexpected size {}, expected {}",
@@ -1596,6 +1602,9 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         }
         if self.openxr.is_lost() {
             return vr::EVRInputError::IPCError;
+        }
+        if active_sets.is_null() {
+            return vr::EVRInputError::InvalidParam;
         }
         if active_set_size as usize != std::mem::size_of::<vr::VRActiveActionSet_t>() {
             crate::warn_once!(
@@ -1929,6 +1938,9 @@ impl<C: openxr_data::Compositor> Input<C> {
         restrict_to_device: vr::VRInputValueHandle_t,
         xr_time: xr::Time,
     ) -> vr::EVRInputError {
+        if action_data.is_null() {
+            return vr::EVRInputError::InvalidParam;
+        }
         if action_data_size as usize != std::mem::size_of::<vr::InputPoseActionData_t>() {
             crate::warn_once!(
                 "GetPoseActionData: unexpected size {}, expected {}",

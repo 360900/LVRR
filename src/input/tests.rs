@@ -1434,26 +1434,31 @@ fn wrong_struct_sizes() {
         f.input.UpdateActionState(&mut active, size + 8, 1),
         InvalidParam
     );
+    assert_eq!(
+        f.input.UpdateActionState(std::ptr::null_mut(), size, 1),
+        InvalidParam
+    );
     f.sync(active);
 
     // The size is rejected before anything is written, so the marker stays.
     fn check<T: Default, M: Copy + PartialEq + std::fmt::Debug>(
         marker: fn(&mut T) -> &mut M,
         value: M,
-        get: impl Fn(&mut T, u32) -> vr::EVRInputError,
+        get: impl Fn(*mut T, u32) -> vr::EVRInputError,
     ) {
         let size = std::mem::size_of::<T>() as u32;
+        assert_eq!(get(std::ptr::null_mut(), size), InvalidParam);
         let mut data = T::default();
         *marker(&mut data) = value;
         for wrong_size in [0, size - 4, size + 4] {
             assert_eq!(
-                get(&mut data, wrong_size),
+                get(&raw mut data, wrong_size),
                 InvalidParam,
                 "size {wrong_size}"
             );
             assert_eq!(*marker(&mut data), value);
         }
-        assert_eq!(get(&mut data, size), None);
+        assert_eq!(get(&raw mut data, size), None);
         assert_ne!(*marker(&mut data), value);
     }
 
