@@ -753,6 +753,8 @@ struct Overlay {
     kind: OverlayKind,
     z_order: i64,
     bounds: vr::VRTextureBounds_t,
+    /// From SetOverlayTextureColorSpace, used for textures that leave it on Auto.
+    color_space: vr::EColorSpace,
     transform: Option<OverlayTransform>,
     compositor: Option<SupportedBackend>,
     rect: Option<xr::Rect2Di>,
@@ -777,6 +779,7 @@ impl Overlay {
                 uMax: 1.0,
                 vMax: 1.0,
             },
+            color_space: vr::EColorSpace::Auto,
             transform: None,
             compositor: None,
             rect: None,
@@ -790,8 +793,11 @@ impl Overlay {
         openxr: &OpenXrData<Compositor>,
         key: OverlayKey,
         session_data: &RealSessionData<'_>,
-        texture: vr::Texture_t,
+        mut texture: vr::Texture_t,
     ) -> Result<(), vr::EVROverlayError> {
+        if texture.eColorSpace == vr::EColorSpace::Auto {
+            texture.eColorSpace = self.color_space;
+        }
         let backend = match &self.compositor {
             Some(b) => b,
             None => self.compositor.insert(
@@ -1839,19 +1845,25 @@ impl vr::IVROverlay028_Interface for OverlayMan {
     }
     fn GetOverlayTextureColorSpace(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: *mut vr::EColorSpace,
+        handle: vr::VROverlayHandle_t,
+        color_space: *mut vr::EColorSpace,
     ) -> vr::EVROverlayError {
-        crate::warn_unimplemented!("GetOverlayTextureColorSpace");
-        vr::EVROverlayError::RequestFailed
+        get_overlay!(self, handle, overlay);
+        if color_space.is_null() {
+            vr::EVROverlayError::InvalidParameter
+        } else {
+            unsafe { color_space.write(overlay.color_space) };
+            vr::EVROverlayError::None
+        }
     }
     fn SetOverlayTextureColorSpace(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: vr::EColorSpace,
+        handle: vr::VROverlayHandle_t,
+        color_space: vr::EColorSpace,
     ) -> vr::EVROverlayError {
-        crate::warn_unimplemented!("SetOverlayTextureColorSpace");
-        vr::EVROverlayError::RequestFailed
+        get_overlay!(self, handle, mut overlay);
+        overlay.color_space = color_space;
+        vr::EVROverlayError::None
     }
     fn GetOverlayPreCurvePitch(
         &self,
@@ -3205,6 +3217,49 @@ mod tests {
         assert_eq!(xr.session_data.get().session.as_raw(), session);
         drop(man);
         drop(xr);
+    }
+
+    #[test]
+    fn overlay_texture_color_space() {
+        let f = RealSessionFixture::new();
+        let handle = create(&f.man, c"key", c"name");
+        let mut color_space = vr::EColorSpace::Linear;
+        assert_eq!(
+            f.man.GetOverlayTextureColorSpace(handle, &mut color_space),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(color_space, vr::EColorSpace::Auto);
+
+        assert_eq!(
+            f.man
+                .SetOverlayTextureColorSpace(handle, vr::EColorSpace::Linear),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(
+            f.man.GetOverlayTextureColorSpace(handle, &mut color_space),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(color_space, vr::EColorSpace::Linear);
+        assert_eq!(
+            f.man
+                .SetOverlayTextureColorSpace(handle + 1, vr::EColorSpace::Gamma),
+            vr::EVROverlayError::UnknownOverlay
+        );
+
+        // It applies to textures that leave the colour space on Auto.
+        let copied_color_space = |texture| {
+            assert_eq!(
+                f.man.SetOverlayTexture(handle, &texture),
+                vr::EVROverlayError::None
+            );
+            crate::compositor::FakeGraphicsData::overlay_color_space()
+        };
+        assert_eq!(copied_color_space(f.texture()), vr::EColorSpace::Linear);
+        let gamma = vr::Texture_t {
+            eColorSpace: vr::EColorSpace::Gamma,
+            ..f.texture()
+        };
+        assert_eq!(copied_color_space(gamma), vr::EColorSpace::Gamma);
     }
 
     #[test]

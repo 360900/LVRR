@@ -1786,6 +1786,7 @@ mod tests {
         static SWAPCHAIN_HEIGHT: Cell<u32> = const { Cell::new(10) };
         static SWAPCHAIN_FORMAT: Cell<u32> = const { Cell::new(0) };
         static SWAPCHAIN_SAMPLE_COUNT: Cell<u32> = const { Cell::new(1) };
+        static OVERLAY_COLOR_SPACE: Cell<vr::EColorSpace> = const { Cell::new(vr::EColorSpace::Auto) };
     }
 
     pub enum FakeApi {}
@@ -1893,10 +1894,11 @@ mod tests {
         fn copy_overlay_to_swapchain(
             &mut self,
             _texture: Self::OpenVrTexture,
-            _color_space: vr::EColorSpace,
+            color_space: vr::EColorSpace,
             _bounds: openvr::VRTextureBounds_t,
             _image_index: usize,
         ) -> openxr::Extent2Di {
+            OVERLAY_COLOR_SPACE.set(color_space);
             xr::Extent2Di {
                 width: SWAPCHAIN_WIDTH.get() as i32,
                 height: SWAPCHAIN_HEIGHT.get() as i32,
@@ -1909,6 +1911,11 @@ mod tests {
         pub fn set_texture_size(width: u32, height: u32) {
             SWAPCHAIN_WIDTH.set(width);
             SWAPCHAIN_HEIGHT.set(height);
+        }
+
+        /// The colour space of the last overlay texture copied on this thread.
+        pub fn overlay_color_space() -> vr::EColorSpace {
+            OVERLAY_COLOR_SPACE.get()
         }
 
         pub fn texture(data: &Arc<VulkanData>) -> vr::Texture_t {
