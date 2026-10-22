@@ -370,6 +370,7 @@ pub unsafe extern "system" fn get_instance_proc_addr(
                     SyncActions,
                     (EnumerateBoundSourcesForAction),
                     (GetInputSourceLocalizedName),
+                    GetVisibilityMaskKHR,
                     {mndx::CreateXDevListMNDX},
                     {mndx::GetXDevListGenerationNumberMNDX},
                     {mndx::EnumerateXDevsMNDX},
@@ -397,8 +398,8 @@ extern "system" fn enumerate_instance_extension_properties(
     properties: *mut xr::ExtensionProperties,
 ) -> xr::Result {
     assert!(layer_name.is_null());
-    unsafe { *property_count_output = 6 };
-    if property_capacity_input >= 6 {
+    unsafe { *property_count_output = 7 };
+    if property_capacity_input >= 7 {
         let props =
             unsafe { std::slice::from_raw_parts_mut(properties, property_capacity_input as usize) };
 
@@ -467,6 +468,17 @@ extern "system" fn enumerate_instance_extension_properties(
         let name =
             unsafe { std::slice::from_raw_parts(name.as_ptr() as *const c_char, name.len()) };
         props[5].extension_name[..name.len()].copy_from_slice(name);
+
+        props[6] = xr::ExtensionProperties {
+            ty: xr::ExtensionProperties::TYPE,
+            next: std::ptr::null_mut(),
+            extension_name: [0 as c_char; xr::MAX_EXTENSION_NAME_SIZE],
+            extension_version: 1,
+        };
+        let name = xr::KHR_VISIBILITY_MASK_EXTENSION_NAME;
+        let name =
+            unsafe { std::slice::from_raw_parts(name.as_ptr() as *const c_char, name.len()) };
+        props[6].extension_name[..name.len()].copy_from_slice(name);
     }
     xr::Result::SUCCESS
 }
@@ -1904,6 +1916,18 @@ extern "system" fn end_frame(session: xr::Session, _info: *const xr::FrameEndInf
         session.synchronized();
     }
     xr::Result::SUCCESS
+}
+
+/// Always fails, like a runtime that can't provide a mask for the session.
+extern "system" fn get_visibility_mask_k_h_r(
+    session: xr::Session,
+    _: xr::ViewConfigurationType,
+    _: u32,
+    _: xr::VisibilityMaskTypeKHR,
+    _: *mut xr::VisibilityMaskKHR,
+) -> xr::Result {
+    let _session = get_handle!(session);
+    xr::Result::ERROR_RUNTIME_FAILURE
 }
 
 extern "system" fn locate_views(

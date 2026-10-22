@@ -558,15 +558,20 @@ impl vr::IVRSystem026_Interface for System {
             }
         };
 
-        let session_data = self.openxr.session_data.get();
-        let mask = session_data
+        let Ok(mask) = self
+            .openxr
+            .session_data
+            .get()
             .session
             .get_visibility_mask_khr(
                 xr::ViewConfigurationType::PRIMARY_STEREO,
                 eye as u32,
                 mask_ty,
             )
-            .unwrap();
+            .inspect_err(|e| warn!("Failed to get {ty:?} hidden area mesh for {eye:?}: {e}"))
+        else {
+            return Default::default();
+        };
 
         trace!("openxr mask: {:#?} {:#?}", mask.indices, mask.vertices);
 
@@ -1413,6 +1418,23 @@ mod tests {
             output.as_mut_ptr(),
         ));
         assert_eq!(output.map(|c| (c.u, c.v)), [(0.1, 0.2), (0.9, 0.8)]);
+    }
+
+    #[test]
+    fn hidden_area_mesh_runtime_error() {
+        let xr =
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
+        assert!(xr.enabled_extensions.khr_visibility_mask);
+        let system = System::new(xr, &Injector::default());
+
+        // fakexr fails every visibility mask request.
+        let mesh = vr::IVRSystem026_Interface::GetHiddenAreaMesh(
+            &system,
+            vr::EVREye::Left,
+            vr::EHiddenAreaMeshType::Standard,
+        );
+        assert!(mesh.pVertexData.is_null());
+        assert_eq!(mesh.unTriangleCount, 0);
     }
 
     #[test]
