@@ -366,7 +366,11 @@ impl<C: Compositor> OpenXrData<C> {
     }
 
     pub fn set_tracking_space(&self, space: vr::ETrackingUniverseOrigin) {
-        self.session_data.0.write().current_origin = space;
+        // The SteamVR Unity plugin sets the same space every frame. Don't make it wait for the
+        // write lock, which takes up to a frame while WaitGetPoses holds a read across xrWaitFrame.
+        if self.session_data.get().current_origin != space {
+            self.session_data.0.write().current_origin = space;
+        }
     }
 
     pub fn get_tracking_space(&self) -> vr::ETrackingUniverseOrigin {
@@ -1129,5 +1133,45 @@ mod tests {
             .recv_timeout(Duration::from_secs(10))
             .expect("nested session read deadlocked against a queued writer");
         reader.join().unwrap();
+    }
+
+    #[test]
+    fn setting_unchanged_tracking_space_does_not_wait_for_readers() {
+        crate::init_logging();
+        let data = Arc::new(
+            OpenXrData::<FakeCompositor>::new(
+                &Injector::default(),
+                openvr::EVRApplicationType::Other,
+            )
+            .unwrap(),
+        );
+        let origin = data.get_tracking_space();
+
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let reader = {
+            let data = data.clone();
+            std::thread::spawn(move || {
+                let _guard = data.session_data.get();
+                held_tx.send(()).unwrap();
+                let _ = release_rx.recv();
+            })
+        };
+        held_rx.recv().unwrap();
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let setter = {
+            let data = data.clone();
+            std::thread::spawn(move || {
+                data.set_tracking_space(origin);
+                done_tx.send(()).unwrap();
+            })
+        };
+        let done = done_rx.recv_timeout(Duration::from_secs(10));
+        release_tx.send(()).unwrap();
+        reader.join().unwrap();
+        setter.join().unwrap();
+        done.expect("SetTrackingSpace waited for a reader");
+        assert_eq!(data.get_tracking_space(), origin);
     }
 }
