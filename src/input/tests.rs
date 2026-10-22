@@ -2099,6 +2099,14 @@ fn synthesized_velocity_from_history() {
         .update_history_and_velocity(60_000_000, Vec3::new(0.06, 0.0, 0.0), origin)
         .unwrap();
     assert!((v3 - Vec3::X).length() < 1e-3, "{v3:?}");
+
+    // a sample from seconds ago says nothing about the current velocity
+    let after_pause = space.update_history_and_velocity(
+        3_060_000_000,
+        Vec3::ONE,
+        vr::ETrackingUniverseOrigin::Seated,
+    );
+    assert!(after_pause.is_none());
 }
 
 #[test]

@@ -3178,9 +3178,17 @@ impl HandSpace {
     ) -> Option<glam::Vec3> {
         const WINDOW_NS: i64 = 60_000_000; // 60ms
         const MIN_SPAN_NS: i64 = 8_000_000; // don't divide over tiny spans
+        // Older samples are from before a pause, e.g. an origin the app only queries now and then.
+        const MAX_GAP_NS: i64 = 4 * WINDOW_NS;
 
         let mut histories = self.pose_history.lock().unwrap();
         let history = histories.entry(origin).or_default();
+        if history
+            .back()
+            .is_some_and(|&(t, _)| time_ns - t > MAX_GAP_NS)
+        {
+            history.clear();
+        }
         // several queries per frame share the same predicted time
         if history.back().is_none_or(|&(t, _)| t != time_ns) {
             history.push_back((time_ns, position));
