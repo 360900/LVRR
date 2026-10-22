@@ -1672,3 +1672,21 @@ fn extreme_set_priorities() {
         });
     }
 }
+
+#[test]
+fn rejected_profile_doesnt_stop_manifest_load() {
+    fakexr::reject_profile(Knuckles::profile_path());
+    let f = Fixture::new();
+    f.load_actions(c"actions.json");
+
+    let action = f.get_action::<bool>(f.get_action_handle(c"/actions/set1/in/boolact"));
+    let path = |p| f.input.openxr.instance.string_to_path(p).unwrap();
+    assert!(fakexr::check_no_suggested_bindings(
+        action,
+        path(Knuckles::profile_path())
+    ));
+    assert!(!fakexr::check_no_suggested_bindings(
+        action,
+        path(OculusTouch::profile_path())
+    ));
+}

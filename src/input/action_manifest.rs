@@ -471,19 +471,20 @@ impl<C: openxr_data::Compositor> Input<C> {
             .chain(skeletal_bindings.binding_iter(&context.skeletal_input.actions))
             .collect();
 
-        self.openxr
+        match self
+            .openxr
             .instance
             .suggest_interaction_profile_bindings(profile_path, &bindings)
-            .unwrap_or_else(|e| {
-                panic!(
-                    "Couldn't suggest profile bindings for {}: {e}",
-                    std::any::type_name::<P>()
-                )
-            });
-        debug!(
-            "suggested {} bindings for {}",
-            bindings.len(),
-            P::profile_path()
-        );
+        {
+            Ok(()) => debug!(
+                "suggested {} bindings for {}",
+                bindings.len(),
+                P::profile_path()
+            ),
+            Err(e) => warn!(
+                "Couldn't suggest bindings for {}, skipping it: {e}",
+                P::profile_path()
+            ),
+        }
     }
 }
