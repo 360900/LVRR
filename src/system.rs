@@ -2115,7 +2115,11 @@ mod tests {
             xr::ReferenceSpaceType::VIEW,
             head(0.0, -0.4),
         );
-        fakexr::reference_space_change_pending(session(&xr), xr::ReferenceSpaceType::LOCAL);
+        fakexr::reference_space_change_pending(
+            session(&xr),
+            xr::ReferenceSpaceType::LOCAL,
+            xr::Time::from_nanos(0),
+        );
         xr.poll_events();
         let position = head_in_seated();
         assert_eq!([position.x, position.y, position.z], [0.0, 0.0, 0.0]);
@@ -2139,7 +2143,11 @@ mod tests {
             translation(system.GetRawZeroPoseToStandingAbsoluteTrackingPose()),
             [0.0, 0.0, 0.0]
         );
-        fakexr::reference_space_change_pending(session(&xr), xr::ReferenceSpaceType::STAGE);
+        fakexr::reference_space_change_pending(
+            session(&xr),
+            xr::ReferenceSpaceType::STAGE,
+            xr::Time::from_nanos(0),
+        );
         xr.poll_events();
         assert_eq!(
             translation(system.GetRawZeroPoseToStandingAbsoluteTrackingPose()),
@@ -2149,6 +2157,44 @@ mod tests {
         assert_eq!(
             event.eventType,
             vr::EVREventType::ChaperoneUniverseHasChanged as u32
+        );
+    }
+
+    /// The runtime says when the recentered LOCAL takes effect, the head is measured after that.
+    #[test]
+    fn runtime_recenter_waits_for_change_time() {
+        let (xr, system) = system_with_events();
+        fakexr::set_reference_space_pose(
+            session(&xr),
+            xr::ReferenceSpaceType::VIEW,
+            xr::Posef {
+                position: xr::Vector3f {
+                    x: 1.0,
+                    y: 0.0,
+                    z: 0.0,
+                },
+                ..xr::Posef::IDENTITY
+            },
+        );
+        let change_time = xr::Time::from_nanos(xr.display_time.get().as_nanos() + 1_000_000);
+        fakexr::reference_space_change_pending(
+            session(&xr),
+            xr::ReferenceSpaceType::LOCAL,
+            change_time,
+        );
+        let seated = || translation(system.GetSeatedZeroPoseToStandingAbsoluteTrackingPose());
+
+        xr.poll_events();
+        assert_eq!(seated(), [0.0, 0.0, 0.0]);
+        assert!(next_event(&system).is_none());
+
+        xr.display_time.set(change_time);
+        xr.poll_events();
+        assert_eq!(seated(), [1.0, 0.0, 0.0]);
+        let event = next_event(&system).expect("no event");
+        assert_eq!(
+            event.eventType,
+            vr::EVREventType::SeatedZeroPoseReset as u32
         );
     }
 

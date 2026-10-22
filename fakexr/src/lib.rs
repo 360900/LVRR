@@ -240,8 +240,12 @@ pub fn set_reference_space_pose(session: xr::Session, ty: xr::ReferenceSpaceType
     }
 }
 
-/// Queues XrEventDataReferenceSpaceChangePending for `ty`, taking effect immediately.
-pub fn reference_space_change_pending(session: xr::Session, ty: xr::ReferenceSpaceType) {
+/// Queues XrEventDataReferenceSpaceChangePending for `ty`, taking effect at `change_time`.
+pub fn reference_space_change_pending(
+    session: xr::Session,
+    ty: xr::ReferenceSpaceType,
+    change_time: xr::Time,
+) {
     let s = session.to_handle().unwrap();
     send_event(
         &s.event_sender,
@@ -250,7 +254,7 @@ pub fn reference_space_change_pending(session: xr::Session, ty: xr::ReferenceSpa
             next: std::ptr::null(),
             session,
             reference_space_type: ty,
-            change_time: xr::Time::from_nanos(0),
+            change_time,
             pose_valid: false.into(),
             pose_in_previous_space: xr::Posef::IDENTITY,
         },

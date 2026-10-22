@@ -349,7 +349,7 @@ impl<C: Compositor> OpenXrData<C> {
                 Default::default(),
             );
         }
-        self.apply_pending_recenter();
+        self.apply_pending_recenter(*RECENTER_STANDING);
     }
 
     fn poll_events_impl(&self, session_data: &SessionData) -> Option<xr::SessionState> {
@@ -498,7 +498,7 @@ impl<C: Compositor> OpenXrData<C> {
     /// A runtime recenter of LOCAL is the equivalent of the user resetting their seated position
     /// in the SteamVR dashboard: the seated zero becomes the current head pose, replacing what
     /// the app set. The head pose is only measured once the new LOCAL is in effect.
-    fn apply_pending_recenter(&self) {
+    fn apply_pending_recenter(&self, recenter_standing: bool) {
         let time = {
             let mut pending = self.pending_recenter.lock();
             let Some(change_time) = *pending else {
@@ -513,7 +513,7 @@ impl<C: Compositor> OpenXrData<C> {
         };
 
         let mut origins = vec![vr::ETrackingUniverseOrigin::Seated];
-        if *RECENTER_STANDING {
+        if recenter_standing {
             origins.push(vr::ETrackingUniverseOrigin::Standing);
         }
         let mut session = self.session_data.0.write();
@@ -531,7 +531,7 @@ impl<C: Compositor> OpenXrData<C> {
         let mut data = vr::VREvent_Data_t::default();
         data.seatedZeroPoseReset.bResetBySystemMenu = true;
         self.push_event(vr::EVREventType::SeatedZeroPoseReset, data);
-        if *RECENTER_STANDING {
+        if recenter_standing {
             self.push_event(vr::EVREventType::StandingZeroPoseReset, Default::default());
         }
     }
@@ -1844,8 +1844,16 @@ mod tests {
         fakexr::set_reference_space_pose(session, xr::ReferenceSpaceType::VIEW, head);
         data.reset_tracking_space(Standing);
         data.reset_tracking_space(Seated);
-        fakexr::reference_space_change_pending(session, xr::ReferenceSpaceType::LOCAL);
-        fakexr::reference_space_change_pending(session, xr::ReferenceSpaceType::STAGE);
+        fakexr::reference_space_change_pending(
+            session,
+            xr::ReferenceSpaceType::LOCAL,
+            xr::Time::from_nanos(0),
+        );
+        fakexr::reference_space_change_pending(
+            session,
+            xr::ReferenceSpaceType::STAGE,
+            xr::Time::from_nanos(0),
+        );
 
         data.restart_session();
         let moved = xr::Posef {
@@ -1861,6 +1869,81 @@ mod tests {
         data.poll_events();
         assert_pose_eq(head_pose(&data, Seated), pitch_only(pitch, [0.0, 0.0, 0.0]));
         assert_pose_eq(head_pose(&data, Standing), moved);
+
+        drop(data);
+        drop(comp);
+    }
+
+    /// XRIZER_RECENTER_STANDING: a runtime recenter also moves the standing zero under the head,
+    /// keeping it on the floor.
+    #[test]
+    fn runtime_recenter_can_move_standing_zero() {
+        use openvr::ETrackingUniverseOrigin::*;
+        crate::init_logging();
+        let data = OpenXrData::<FakeCompositor>::new(
+            &Injector::default(),
+            openvr::EVRApplicationType::Other,
+        )
+        .unwrap();
+        let (head, pitch) = standing_head();
+        let session = data.session_data.get().session.as_raw();
+        fakexr::set_reference_space_pose(session, xr::ReferenceSpaceType::VIEW, head);
+        fakexr::reference_space_change_pending(
+            session,
+            xr::ReferenceSpaceType::LOCAL,
+            xr::Time::from_nanos(0),
+        );
+
+        data.poll_events_impl(&data.session_data.get());
+        data.apply_pending_recenter(true);
+        assert_pose_eq(
+            head_pose(&data, Standing),
+            pitch_only(pitch, [0.0, 1.7, 0.0]),
+        );
+        assert_pose_eq(head_pose(&data, Seated), pitch_only(pitch, [0.0, 0.0, 0.0]));
+    }
+
+    /// Ending the session ourselves isn't the runtime taking input focus, and focus the runtime
+    /// took is only handed back once the new session has it. Every change of the flag is an
+    /// InputFocusCaptured or InputFocusReleased event.
+    #[test]
+    fn input_focus_across_session_restart() {
+        use xr::SessionState as S;
+        crate::init_logging();
+        let data = OpenXrData::<FakeCompositor>::new(
+            &Injector::default(),
+            openvr::EVRApplicationType::Other,
+        )
+        .unwrap();
+        let comp = Arc::new(FakeCompositor::new(&data));
+        data.compositor.set(Arc::downgrade(&comp));
+        let session = || data.session_data.get().session.as_raw();
+        let set_state = |state| {
+            fakexr::set_session_state(session(), state);
+            data.poll_events();
+        };
+        let focus = || {
+            for state in [S::SYNCHRONIZED, S::VISIBLE, S::FOCUSED] {
+                set_state(state);
+            }
+        };
+
+        focus();
+        // Runtimes take focus away when we end the session.
+        fakexr::set_session_state(session(), S::VISIBLE);
+        data.restart_session();
+        assert!(!data.input_focus_captured());
+        focus();
+        assert!(!data.input_focus_captured());
+
+        set_state(S::VISIBLE);
+        assert!(data.input_focus_captured());
+        data.restart_session();
+        set_state(S::SYNCHRONIZED);
+        set_state(S::VISIBLE);
+        assert!(data.input_focus_captured());
+        set_state(S::FOCUSED);
+        assert!(!data.input_focus_captured());
 
         drop(data);
         drop(comp);
