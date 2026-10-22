@@ -84,7 +84,8 @@ impl<C: openxr_data::Compositor> Input<C> {
         // TODO: support non english localization?
         let english = manifest
             .localization
-            .and_then(|l| l.into_iter().find(|l| l.language_tag == "en_US"))
+            .into_iter()
+            .find(|l| l.language_tag == "en_US")
             .map(actions::Localization::into_names)
             .unwrap_or_default();
 
@@ -312,6 +313,22 @@ impl<C: openxr_data::Compositor> Input<C> {
     }
 }
 
+fn read_bindings(
+    path: &Path,
+    controller_type: &actions::ControllerType,
+) -> Option<bindings::Bindings> {
+    debug!(
+        "Reading bindings for {controller_type} (at {})",
+        path.display()
+    );
+    let data = std::fs::read(path)
+        .inspect_err(|e| error!("Couldn't load bindings for {controller_type}: {e}"))
+        .ok()?;
+    serde_json::from_slice(&data)
+        .inspect_err(|e| error!("Failed to parse bindings for {controller_type}: {e}"))
+        .ok()
+}
+
 /// Whether two paths name the same file, even if spelled differently.
 fn same_file(a: &Path, b: &Path) -> bool {
     a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
@@ -324,20 +341,15 @@ impl<C: openxr_data::Compositor> Input<C> {
         bindings: Vec<actions::DefaultBindings>,
         context: &mut context::BindingsLoadContext,
     ) {
-        let custom_bindings_dir =
-            if let Ok(custom_bindings_dir) = std::env::var("XRIZER_CUSTOM_BINDINGS_DIR") {
-                PathBuf::from(custom_bindings_dir)
-            } else {
-                current_dir().unwrap().join("xrizer")
-            };
+        let custom_bindings_dir = std::env::var_os("XRIZER_CUSTOM_BINDINGS_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| current_dir().unwrap_or_default().join("xrizer"));
 
-        let mut bindings = bindings.clone();
+        let mut bindings = bindings;
         if let Ok(additional_bindings) = std::env::var("XRIZER_ADDITIONAL_BINDINGS") {
+            // additional_bindings is a semicolon-separated list of controller_type names.
             bindings.extend(additional_bindings.split(';').map(|s| {
-                // additional_bindings is a semicolon-separated list of controller_type names.
-                let controller_type = s.parse().unwrap_or_else(|_| {
-                    panic!("Invalid controller type in XRIZER_ADDITIONAL_BINDINGS: {s}")
-                });
+                let controller_type: actions::ControllerType = s.parse().unwrap();
                 actions::DefaultBindings {
                     binding_url: PathBuf::from(format!("bindings_{controller_type}.json")),
                     controller_type,
@@ -345,70 +357,54 @@ impl<C: openxr_data::Compositor> Input<C> {
             }));
         }
 
-        let mut it = bindings.into_iter().peekable();
-        while let Some(actions::DefaultBindings {
+        let mut loaded_types = HashSet::new();
+        for actions::DefaultBindings {
             binding_url,
             controller_type,
-        }) = it.next()
+        } in bindings
         {
+            if let actions::ControllerType::Unknown(other) = &controller_type {
+                info!("Ignoring bindings for unknown profile {other}");
+                continue;
+            }
+            // The first file that loads wins, like in SteamVR (e.g. Half-Life: Alyx lists
+            // bindings_knuckles.json, then _left and _single variants).
+            if loaded_types.contains(&controller_type) {
+                info!("skipping bindings in {binding_url:?}");
+                continue;
+            }
+
             let custom_path = custom_bindings_dir.join(format!("{controller_type}.json"));
             let bindings_path = match custom_path.exists() {
                 true => custom_path,
                 false => parent_path.join(binding_url),
             };
-            debug!(
-                "Reading bindings for {controller_type} (at {})",
-                bindings_path.display()
+            let Some(bindings) = read_bindings(&bindings_path, &controller_type) else {
+                continue;
+            };
+            loaded_types.insert(controller_type.clone());
+
+            let mut runner = Runner(self, context, bindings);
+            controller_type.run_for_profile(&mut runner);
+
+            // lifetime moment
+            struct Runner<'a, 'b, 'c, C: openxr_data::Compositor>(
+                &'a Input<C>,
+                &'b mut BindingsLoadContext<'c>,
+                bindings::Bindings,
             );
-
-            let data = match std::fs::read(bindings_path) {
-                Ok(data) => data,
-                Err(e) => {
-                    error!("Couldn't load bindings for {controller_type}: {e}");
-                    continue;
-                }
-            };
-
-            let bindings = match serde_json::from_slice(&data) {
-                Ok(bindings) => bindings,
-                Err(e) => {
-                    error!("Failed to parse bindings for {controller_type}: {e}");
-                    continue;
-                }
-            };
-
-            match controller_type {
-                actions::ControllerType::Unknown(ref other) => {
-                    info!("Ignoring bindings for unknown profile {other}")
-                }
-                ref other => {
-                    let mut runner = Runner(self, context, bindings);
-                    other.run_for_profile(&mut runner);
-
-                    // lifetime moment
-                    struct Runner<'a, 'b, 'c, C: openxr_data::Compositor>(
-                        &'a Input<C>,
-                        &'b mut BindingsLoadContext<'c>,
-                        bindings::Bindings,
-                    );
-                    impl<C: openxr_data::Compositor> RunWithProfile for Runner<'_, '_, '_, C> {
-                        fn run<P: super::InteractionProfile>(&mut self) {
-                            if let Some(mut context) = self.1.for_profile::<C, P>(self.0) {
-                                self.0
-                                    .load_bindings_for_profile::<P>(&self.2.bindings, &mut context);
-                            } else {
-                                warn!(
-                                    "Couldn't create context for profile {}?",
-                                    std::any::type_name::<P>()
-                                );
-                            }
-                        }
+            impl<C: openxr_data::Compositor> RunWithProfile for Runner<'_, '_, '_, C> {
+                fn run<P: super::InteractionProfile>(&mut self) {
+                    if let Some(mut context) = self.1.for_profile::<C, P>(self.0) {
+                        self.0
+                            .load_bindings_for_profile::<P>(&self.2.bindings, &mut context);
+                    } else {
+                        warn!(
+                            "Couldn't create context for profile {}?",
+                            std::any::type_name::<P>()
+                        );
                     }
                 }
-            }
-
-            while let Some(b) = it.next_if(|b| b.controller_type == controller_type) {
-                info!("skipping bindings in {:?}", b.binding_url);
             }
         }
     }
@@ -442,17 +438,9 @@ impl<C: openxr_data::Compositor> Input<C> {
 
             let set = set.clone();
 
-            if let Some(bindings) = &bindings.haptics {
-                bindings::handle_haptic_bindings(&self.openxr.instance, context, bindings);
-            }
-
-            if let Some(bindings) = &bindings.poses {
-                bindings::handle_pose_bindings(context, bindings);
-            }
-
-            if let Some(bindings) = &bindings.skeleton {
-                bindings::handle_skeleton_bindings(context, bindings);
-            }
+            bindings::handle_haptic_bindings(&self.openxr.instance, context, &bindings.haptics);
+            bindings::handle_pose_bindings(context, &bindings.poses);
+            bindings::handle_skeleton_bindings(context, &bindings.skeleton);
 
             bindings::handle_sources(
                 &path_validator,

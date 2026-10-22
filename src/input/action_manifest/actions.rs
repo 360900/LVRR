@@ -1,6 +1,6 @@
 #![allow(private_interfaces)]
 
-use super::bindings::ActionPath;
+use super::bindings::{ActionPath, lenient_vec};
 use crate::openxr_data::Hand;
 use log::{error, trace, warn};
 use openxr as xr;
@@ -19,11 +19,14 @@ use std::path::PathBuf;
 
 #[derive(Deserialize)]
 pub struct ActionManifest {
+    #[serde(default, deserialize_with = "lenient_vec")]
     pub default_bindings: Vec<DefaultBindings>,
-    #[serde(default)] // optional apparently
+    #[serde(default, deserialize_with = "lenient_vec")]
     pub action_sets: Vec<ActionSetJson>,
+    #[serde(default, deserialize_with = "lenient_vec")]
     pub actions: Vec<ActionType>,
-    pub localization: Option<Vec<Localization>>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub localization: Vec<Localization>,
     // localization_files
 }
 

@@ -32,15 +32,75 @@ use std::str::FromStr;
 
 #[derive(Deserialize)]
 pub struct Bindings {
+    #[serde(deserialize_with = "lenient_sets")]
     pub bindings: HashMap<String, ActionSetBinding>,
 }
 
+// SteamVR skips what it doesn't understand, so one odd entry (an unknown mode, a missing
+// field, a tracker pose path...) only drops that entry rather than the whole file.
 #[derive(Deserialize)]
 pub struct ActionSetBinding {
+    #[serde(default, deserialize_with = "lenient_vec")]
     pub sources: Vec<ActionBinding>,
-    pub poses: Option<Vec<PoseBinding>>,
-    pub haptics: Option<Vec<SimpleActionBinding>>,
-    pub skeleton: Option<Vec<SimpleActionBinding>>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub poses: Vec<PoseBinding>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub haptics: Vec<SimpleActionBinding>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub skeleton: Vec<SimpleActionBinding>,
+}
+
+/// Deserializes a list, skipping (and logging) the entries that don't parse.
+pub fn lenient_vec<'de, D, T>(d: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let entries = match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Array(entries) => entries,
+        serde_json::Value::Null => Vec::new(),
+        other => {
+            warn!("Ignoring {other}, expected a list");
+            Vec::new()
+        }
+    };
+    Ok(entries
+        .into_iter()
+        .filter_map(|entry| {
+            T::deserialize(&entry)
+                .inspect_err(|e| warn!("Ignoring invalid entry {entry}: {e}"))
+                .ok()
+        })
+        .collect())
+}
+
+/// Deserializes a value, logging and replacing it with `None` if it doesn't parse.
+fn lenient<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(Option::<T>::deserialize(&value)
+        .inspect_err(|e| warn!("Ignoring invalid value {value}: {e}"))
+        .ok()
+        .flatten())
+}
+
+fn lenient_sets<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<HashMap<String, ActionSetBinding>, D::Error> {
+    let sets = HashMap::<String, serde_json::Value>::deserialize(d)?;
+    Ok(sets
+        .into_iter()
+        .filter_map(|(name, set)| {
+            let set = ActionSetBinding::deserialize(&set)
+                .inspect_err(|e| warn!("Ignoring bindings for action set {name}: {e}"))
+                .ok()?;
+            // Action set paths are case insensitive, like action paths.
+            Some((name.to_lowercase(), set))
+        })
+        .collect())
 }
 
 #[derive(Debug)]
@@ -160,6 +220,10 @@ pub enum ActionBinding {
     Button(ActionBindingData<ButtonInput, ButtonParameters>),
     ToggleButton(ActionBindingData<ButtonInput>),
     Dpad(ActionBindingData<DpadInput, DpadParameters>),
+    /// Older name for a dpad with the click sub mode.
+    DpadClick(ActionBindingData<DpadInput, DpadParameters>),
+    /// Older name for a dpad with the touch sub mode.
+    DpadTouch(ActionBindingData<DpadInput, DpadParameters>),
     Trigger(ActionBindingData<TriggerInput, ClickThresholdParams>),
     ScalarConstant(ActionBindingData<ScalarConstantInput, ScalarConstantParameters>),
     ForceSensor(ActionBindingData<ForceSensorInput, ForceSensorParameters>),
@@ -170,9 +234,12 @@ pub enum ActionBinding {
 }
 
 #[derive(Deserialize)]
+#[serde(bound(deserialize = "Inputs: Deserialize<'de>, Parameters: serde::de::DeserializeOwned"))]
 struct ActionBindingData<Inputs, Parameters = ()> {
     path: MaybeInputPath,
     inputs: Inputs,
+    /// Invalid parameters fall back to the defaults rather than dropping the binding.
+    #[serde(default, deserialize_with = "lenient")]
     parameters: Option<Parameters>,
 }
 
@@ -399,8 +466,8 @@ struct DpadInput {
 #[serde(default)]
 pub struct DpadParameters {
     pub sub_mode: DpadSubMode,
-    pub deadzone_pct: StringOrTyped<u8>,
-    pub overlap_pct: StringOrTyped<u8>,
+    pub deadzone_pct: StringOrTyped<f32>,
+    pub overlap_pct: StringOrTyped<f32>,
     pub sticky: StringOrTyped<bool>,
 }
 
@@ -408,14 +475,14 @@ impl Default for DpadParameters {
     fn default() -> Self {
         Self {
             sub_mode: DpadSubMode::Touch,
-            deadzone_pct: StringOrTyped(50),
-            overlap_pct: StringOrTyped(50),
+            deadzone_pct: StringOrTyped(50.0),
+            overlap_pct: StringOrTyped(50.0),
             sticky: StringOrTyped(false),
         }
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum DpadSubMode {
     Click,
@@ -481,9 +548,9 @@ struct Vector2Parameters {
     #[serde(default)]
     invert: Vector2Inversion,
     #[allow(unused)]
-    deadzone_pct: Option<StringOrTyped<u8>>,
+    deadzone_pct: Option<StringOrTyped<f32>>,
     #[allow(unused)]
-    maxzone_pct: Option<StringOrTyped<u8>>,
+    maxzone_pct: Option<StringOrTyped<f32>>,
     #[allow(unused)]
     sticky_click: Option<StringOrTyped<bool>>,
 }
@@ -781,7 +848,9 @@ pub fn handle_sources(
                     );
                 }
             }
-            ActionBinding::Dpad(data) => {
+            ActionBinding::Dpad(data)
+            | ActionBinding::DpadClick(data)
+            | ActionBinding::DpadTouch(data) => {
                 let Some(ValidActionBindingData {
                     path,
                     inputs,
@@ -790,6 +859,21 @@ pub fn handle_sources(
                 else {
                     continue;
                 };
+                let sub_mode = match mode {
+                    ActionBinding::DpadClick(_) => Some(DpadSubMode::Click),
+                    ActionBinding::DpadTouch(_) => Some(DpadSubMode::Touch),
+                    _ => None,
+                };
+                let legacy_parameters = sub_mode.map(|sub_mode| DpadParameters {
+                    sub_mode,
+                    ..parameters.map_or_else(Default::default, |p| DpadParameters {
+                        sub_mode,
+                        deadzone_pct: p.deadzone_pct,
+                        overlap_pct: p.overlap_pct,
+                        sticky: p.sticky,
+                    })
+                });
+                let parameters = legacy_parameters.as_ref().or(parameters);
 
                 if validate_path(path).is_none() {
                     InvalidActionPath(path, &format!("{inputs:#?}")).warn();

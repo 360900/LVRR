@@ -1,0 +1,70 @@
+{
+	"bindings": {
+		"/actions/main": {
+			"sources": [
+				{
+					"mode": "button",
+					"path": "/user/hand/left/input/a",
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/A"
+						}
+					}
+				},
+				{
+					"mode": "some_future_mode",
+					"path": "/user/hand/left/input/b",
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/B"
+						}
+					}
+				},
+				{
+					"mode": "button",
+					"path": "/user/hand/right/input/trigger",
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/B"
+						}
+					},
+					"parameters": {
+						"force_input": "squish",
+						"click_activate_threshold": "0.5"
+					}
+				},
+				{
+					"mode": "button",
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/B"
+						}
+					}
+				},
+				{
+					"mode": "dpad_click",
+					"path": "/user/hand/right/input/trackpad",
+					"inputs": {
+						"north": {
+							"output": "/actions/main/in/Dpad"
+						}
+					}
+				}
+			],
+			"haptics": "not a list"
+		},
+		"/actions/Poses": {
+			"poses": [
+				{
+					"output": "/actions/poses/in/Pose",
+					"path": "/user/foot/left/pose/raw"
+				},
+				{
+					"output": "/actions/poses/in/Pose",
+					"path": "/user/hand/right/pose/raw"
+				}
+			]
+		},
+		"/actions/broken": 5
+	}
+}

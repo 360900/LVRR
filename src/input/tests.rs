@@ -6,7 +6,10 @@ use super::{
     },
 };
 use crate::{
-    input::ActionKey,
+    input::{
+        ActionKey,
+        custom_bindings::{BoolBindingData, BoolBindingType},
+    },
     openxr_data::{FakeCompositor, Hand, OpenXrData},
     vr::{self, IVRInput010_Interface},
 };
@@ -584,6 +587,42 @@ fn awkward_action_names() {
     for name in [c"/actions/grab", c"/noprefix/in/action"] {
         assert!(loaded.try_get_action(f.get_action_handle(name)).is_err());
     }
+}
+
+#[test]
+fn lenient_bindings() {
+    let f = Fixture::new();
+    // Invalid entries are skipped without dropping the rest of the file, and a controller type
+    // listed again (also non-consecutively) only loads the first file.
+    f.load_actions(c"actions_lenient.json");
+
+    let path = Knuckles::profile_path();
+    f.verify_bindings::<bool>(
+        path,
+        c"/actions/main/in/a",
+        ["/user/hand/left/input/a/click".into()],
+    );
+    let profile = f.input.openxr.instance.string_to_path(path).unwrap();
+    let data = f.input.openxr.session_data.get();
+    let loaded = data.input_data.get_loaded_actions().unwrap();
+
+    // Invalid parameters fall back to the defaults.
+    let b = f.get_action_handle(c"/actions/main/in/b");
+    assert_eq!(loaded.try_get_bindings(b, profile).unwrap().len(), 1);
+    // The older dpad_click mode is a dpad.
+    let dpad = f.get_action_handle(c"/actions/main/in/dpad");
+    assert!(matches!(
+        loaded.try_get_bindings(dpad, profile).unwrap()[..],
+        [BoolBindingData {
+            ty: BoolBindingType::Dpad(_),
+            ..
+        }]
+    ));
+    // A set with only poses, one of them for a tracker.
+    let pose = f.get_action_handle(c"/actions/poses/in/pose");
+    let bound = loaded.try_get_pose(pose, profile).unwrap();
+    assert!(bound.left.is_none());
+    assert!(bound.right.is_some());
 }
 
 #[track_caller]
