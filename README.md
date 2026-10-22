@@ -85,6 +85,8 @@ If a launcher strips `RUST_LOG`, put the same filter string in a file named `log
 
 `XRIZER_HMD_PRESENT` - `1` or `0` answers games asking whether a headset is connected before starting VR, instead of briefly connecting to the runtime to find out.
 
+`XRIZER_RECENTER_STANDING` - `1` makes the runtime's recenter (e.g. holding the Quest system button) recenter standing games too, not just seated ones. Off by default, since on a room-scale setup the standing origin is the calibrated play area.
+
 # Reporting bugs
 
 Attach a log. Logs are in `$XDG_STATE_HOME/xrizer` (or `~/.local/state/xrizer`), one file per process named `xrizer-<timestamp>-<pid>.txt`. The newest is usually the one you want; launchers often start a short-lived process first to check for a headset. Logs older than two days are deleted on startup.
