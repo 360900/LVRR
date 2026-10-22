@@ -1130,37 +1130,44 @@ impl vr::IVRCompositor029_Interface for Compositor {
         let (paced, frame_loop) = {
             let session_data = self.openxr.session_data.get();
             let timing_mode = *self.timing_mode.lock().unwrap();
-            if matches!(
-                timing_mode,
-                vr::EVRCompositorTimingMode::Implicit
-                    | vr::EVRCompositorTimingMode::Explicit_RuntimePerformsPostPresentHandoff
-            ) && *self.frame_state.lock().unwrap() == FrameState::Begun
-            {
+            let app_handoff = timing_mode
+                == vr::EVRCompositorTimingMode::Explicit_ApplicationPerformsPostPresentHandoff;
+            if !app_handoff && *self.frame_state.lock().unwrap() == FrameState::Begun {
                 self.PostPresentHandoff();
             }
 
-            if *self.frame_state.lock().unwrap() == FrameState::Waited {
-                // Auto-flush pending overlay-only frame: begin it and immediately
-                // submit so overlay layers reach the compositor for games that
-                // never call Submit / PostPresentHandoff (e.g. menu-only frames).
-                // Normal games that submit each frame don't end up in Waited
-                // state here, so this is transparent to them.
-                self.maybe_begin_frame(&session_data);
-                if *self.frame_state.lock().unwrap() == FrameState::Begun {
-                    self.PostPresentHandoff();
+            let waited = *self.frame_state.lock().unwrap() == FrameState::Waited;
+            let paced = if waited && app_handoff {
+                // OpenVR promises not to use the app's queue here in this mode, which beginning or
+                // ending a frame may do, and another xrWaitFrame would block until the waited
+                // frame is begun. Return poses for the waited frame again, paced like a wait below.
+                false
+            } else {
+                if waited {
+                    // Auto-flush pending overlay-only frame: begin it and immediately
+                    // submit so overlay layers reach the compositor for games that
+                    // never call Submit / PostPresentHandoff (e.g. menu-only frames).
+                    // Normal games that submit each frame don't end up in Waited
+                    // state here, so this is transparent to them.
+                    self.maybe_begin_frame(&session_data);
+                    if *self.frame_state.lock().unwrap() == FrameState::Begun {
+                        self.PostPresentHandoff();
+                    }
                 }
-            }
-            let paced = self.maybe_wait_frame(&session_data);
+                let paced = self.maybe_wait_frame(&session_data);
 
-            if paced && timing_mode == vr::EVRCompositorTimingMode::Implicit {
-                self.maybe_begin_frame(&session_data);
-            }
+                if paced && timing_mode == vr::EVRCompositorTimingMode::Implicit {
+                    self.maybe_begin_frame(&session_data);
+                }
+                paced
+            };
             (paced, session_data.comp_data.0.lock().unwrap().is_some())
         };
         if !paced || !frame_loop {
             // Nothing blocked in xrWaitFrame: before the first Submit, in apps that don't render,
-            // or after the session was lost. SteamVR blocks here until the next frame, and apps
-            // rely on that for pacing (or keep spinning while ignoring Quit).
+            // while the app hands off a waited frame itself, or after the session was lost. SteamVR
+            // blocks here until the next frame, and apps rely on that for pacing (or keep spinning
+            // while ignoring Quit).
             let period = self.openxr.display_period();
             frame_update.pace(period.clamp(
                 std::time::Duration::from_millis(1),
@@ -3029,6 +3036,8 @@ mod tests {
         f.check_frame_state(fakexr::FrameState::Ended);
     }
 
+    /// With the app performing the post present handoff, WaitGetPoses must not begin or end a frame,
+    /// since that may use the app's queue.
     #[test]
     fn explicit_timing_multiple_waitgetposes() {
         let f = Fixture::new();
@@ -3039,8 +3048,42 @@ mod tests {
 
         assert_eq!(f.wait_get_poses(), None);
         f.check_frame_state(fakexr::FrameState::Waited);
+        let (tx, rx) = std::sync::mpsc::channel();
+        fakexr::on_next_end_frame(
+            f.comp.openxr.session_data.get().session.as_raw(),
+            move || tx.send(()).unwrap(),
+        );
         assert_eq!(f.wait_get_poses(), None);
         f.check_frame_state(fakexr::FrameState::Waited);
+        assert!(rx.try_recv().is_err(), "frame was ended in WaitGetPoses");
+
+        // The waited frame is still used once the app gets to it.
+        assert_eq!(f.comp.SubmitExplicitTimingData(), None);
+        f.check_frame_state(fakexr::FrameState::Begun);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        f.comp.PostPresentHandoff();
+        f.check_frame_state(fakexr::FrameState::Ended);
+    }
+
+    /// The runtime ending the frame keeps flushing frames the app never submitted.
+    #[test]
+    fn runtime_handoff_multiple_waitgetposes() {
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+        f.comp.SetExplicitTimingMode(
+            vr::EVRCompositorTimingMode::Explicit_RuntimePerformsPostPresentHandoff,
+        );
+
+        assert_eq!(f.wait_get_poses(), None);
+        let (tx, rx) = std::sync::mpsc::channel();
+        fakexr::on_next_end_frame(
+            f.comp.openxr.session_data.get().session.as_raw(),
+            move || tx.send(()).unwrap(),
+        );
+        assert_eq!(f.wait_get_poses(), None);
+        f.check_frame_state(fakexr::FrameState::Waited);
+        assert!(rx.try_recv().is_ok(), "pending frame was not flushed");
     }
 
     #[test]
