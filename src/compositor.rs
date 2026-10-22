@@ -3172,7 +3172,9 @@ mod tests {
         assert_eq!(f.submit(vr::EVREye::Left), DoNotHaveFocus);
         assert!(!f.comp.openxr.session_data.get().is_real_session());
 
-        // No frame is ever waited, so WaitGetPoses has to keep a game ignoring Quit from spinning.
+        // No frame is ever waited, so WaitGetPoses has to keep a game ignoring Quit from spinning:
+        // a call right after another one waits for the next frame.
+        assert_eq!(f.wait_get_poses(), None);
         let start = Instant::now();
         assert_eq!(f.wait_get_poses(), None);
         assert!(start.elapsed() >= std::time::Duration::from_millis(1));
@@ -3193,6 +3195,7 @@ mod tests {
         fakexr::on_next_end(f.raw_session(), move || {
             let _ = tx.send(());
         });
+        assert_eq!(f.wait_get_poses(), None);
         let start = Instant::now();
         assert_eq!(f.wait_get_poses(), None);
         assert!(start.elapsed() >= std::time::Duration::from_millis(1));
