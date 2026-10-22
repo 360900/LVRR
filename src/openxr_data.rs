@@ -454,6 +454,7 @@ impl<C: Compositor> OpenXrData<C> {
         }
 
         let origin = session_guard.current_origin;
+        let offsets = session_guard.origin_offsets();
         let comp = self
             .compositor
             .get()
@@ -471,7 +472,10 @@ impl<C: Compositor> OpenXrData<C> {
             Some(&info),
             self.headless,
         ) {
-            Ok((session, waiter, stream)) => {
+            Ok((mut session, waiter, stream)) => {
+                for (origin, offset) in offsets {
+                    session.set_origin_offset(origin, offset);
+                }
                 comp.post_session_restart(&session, waiter, stream);
                 (session, Ok(()))
             }
@@ -480,7 +484,7 @@ impl<C: Compositor> OpenXrData<C> {
                 self.handle_error("Creating session", e.result());
                 self.session_creation_failed.store(true, Ordering::Relaxed);
                 // Without a session in the guard there is nothing left to run on.
-                let session =
+                let mut session =
                     SessionData::new(&self.instance, self.system_id, origin, None, self.headless)
                         .unwrap_or_else(|e| {
                             self.handle_error("Recreating temporary session", e.result());
@@ -493,6 +497,9 @@ impl<C: Compositor> OpenXrData<C> {
                             panic!("Failed to recreate temporary session: {e:?}")
                         })
                         .0;
+                for (origin, offset) in offsets {
+                    session.set_origin_offset(origin, offset);
+                }
                 (session, Err(RestartError::CreationFailed))
             }
         };
@@ -540,78 +547,22 @@ impl<C: Compositor> OpenXrData<C> {
         if self.is_lost() {
             return;
         }
-        let mut guard = self.session_data.0.write();
-        let SessionData {
-            session,
-            view_space,
-            local_space_reference,
-            local_space_adjusted,
-            stage_space_reference,
-            stage_space_adjusted,
-            input_data,
-            ..
-        } = &mut **guard;
-
-        let reset_space = |ref_space, adjusted_space: &mut xr::Space, ty| {
-            let Some(xr::SpaceLocation {
-                pose:
-                    xr::Posef {
-                        position,
-                        orientation,
-                    },
-                ..
-            }) = self.check(
-                "xrLocateSpace",
-                view_space.locate(ref_space, self.get_display_time()),
-            )
-            else {
-                return;
-            };
-
-            // Only set the rotation around the y axis
-            let (twist, _) = swing_twist_decomposition(
-                Quat::from_xyzw(orientation.x, orientation.y, orientation.z, orientation.w),
-                Vec3::Y,
-            )
-            .unwrap_or_else(|| {
-                warn!("Couldn't decompose rotation - using identity");
-                (Quat::IDENTITY, Quat::IDENTITY)
-            });
-
-            let space = session.create_reference_space(
-                ty,
-                xr::Posef {
-                    position,
-                    orientation: xr::Quaternionf {
-                        x: twist.x,
-                        y: twist.y,
-                        z: twist.z,
-                        w: twist.w,
-                    },
-                },
-            );
-            if let Some(space) = self.check("xrCreateReferenceSpace", space) {
-                *adjusted_space = space;
-                input_data.forget_poses();
-            }
-        };
-
         match origin {
+            vr::ETrackingUniverseOrigin::Seated | vr::ETrackingUniverseOrigin::Standing => {}
             vr::ETrackingUniverseOrigin::RawAndUncalibrated => {
                 // RawAndUncalibrated has no calibration to reset
+                return;
             }
-            vr::ETrackingUniverseOrigin::Standing => reset_space(
-                stage_space_reference,
-                stage_space_adjusted,
-                xr::ReferenceSpaceType::STAGE,
-            ),
-            vr::ETrackingUniverseOrigin::Seated => reset_space(
-                local_space_reference,
-                local_space_adjusted,
-                xr::ReferenceSpaceType::LOCAL,
-            ),
-            _ => crate::warn_once!("Not resetting unknown tracking universe {:?}", origin),
-        };
+            _ => {
+                crate::warn_once!("Not resetting unknown tracking universe {:?}", origin);
+                return;
+            }
+        }
+        let mut session = self.session_data.0.write();
+        match session.head_zero_pose(origin, self.get_display_time()) {
+            Some(zero) => session.set_origin_offset(origin, zero),
+            None => warn!("Couldn't locate the headset, not resetting {origin:?} zero pose"),
+        }
     }
 
     pub fn get_refresh_rate(&self) -> f32 {
@@ -831,6 +782,9 @@ pub struct SessionData {
     local_space_adjusted: xr::Space,
     stage_space_reference: xr::Space,
     stage_space_adjusted: xr::Space,
+    /// The pose the adjusted spaces were created with, in their reference space.
+    local_offset: xr::Posef,
+    stage_offset: xr::Posef,
     pub current_origin: vr::ETrackingUniverseOrigin,
 
     pub input_data: InputSessionData,
@@ -1029,6 +983,8 @@ impl SessionData {
                 local_space_adjusted,
                 stage_space_reference,
                 stage_space_adjusted,
+                local_offset: xr::Posef::IDENTITY,
+                stage_offset: xr::Posef::IDENTITY,
                 input_data,
                 comp_data: Default::default(),
                 overlay_data: Default::default(),
@@ -1109,6 +1065,89 @@ impl SessionData {
                 &self.stage_space_reference
             }
         }
+    }
+
+    /// The zero pose resetting `origin` sets: the head's position and yaw in `origin`'s reference
+    /// space. The standing zero stays on the floor.
+    fn head_zero_pose(
+        &self,
+        origin: vr::ETrackingUniverseOrigin,
+        time: xr::Time,
+    ) -> Option<xr::Posef> {
+        let reference = match origin {
+            vr::ETrackingUniverseOrigin::Seated => &self.local_space_reference,
+            vr::ETrackingUniverseOrigin::Standing => &self.stage_space_reference,
+            vr::ETrackingUniverseOrigin::RawAndUncalibrated => return None,
+        };
+        let location = self
+            .view_space
+            .locate(reference, time)
+            .inspect_err(|e| warn!("Couldn't locate the headset: {e}"))
+            .ok()?;
+        if !location.location_flags.contains(
+            xr::SpaceLocationFlags::POSITION_VALID | xr::SpaceLocationFlags::ORIENTATION_VALID,
+        ) {
+            return None;
+        }
+        let xr::Posef {
+            mut position,
+            orientation,
+        } = location.pose;
+
+        // Only set the rotation around the y axis
+        let (twist, _) = swing_twist_decomposition(
+            Quat::from_xyzw(orientation.x, orientation.y, orientation.z, orientation.w),
+            Vec3::Y,
+        )
+        .unwrap_or_else(|| {
+            warn!("Couldn't decompose rotation - using identity");
+            (Quat::IDENTITY, Quat::IDENTITY)
+        });
+        if origin == vr::ETrackingUniverseOrigin::Standing {
+            position.y = 0.0;
+        }
+
+        Some(xr::Posef {
+            position,
+            orientation: xr::Quaternionf {
+                x: twist.x,
+                y: twist.y,
+                z: twist.z,
+                w: twist.w,
+            },
+        })
+    }
+
+    /// Moves `origin`'s zero to `offset`, a pose in its reference space.
+    fn set_origin_offset(&mut self, origin: vr::ETrackingUniverseOrigin, offset: xr::Posef) {
+        let (ty, space, stored) = match origin {
+            vr::ETrackingUniverseOrigin::Seated => (
+                xr::ReferenceSpaceType::LOCAL,
+                &mut self.local_space_adjusted,
+                &mut self.local_offset,
+            ),
+            vr::ETrackingUniverseOrigin::Standing => (
+                xr::ReferenceSpaceType::STAGE,
+                &mut self.stage_space_adjusted,
+                &mut self.stage_offset,
+            ),
+            vr::ETrackingUniverseOrigin::RawAndUncalibrated => return,
+        };
+        match self.session.create_reference_space(ty, offset) {
+            Ok(adjusted) => {
+                *space = adjusted;
+                *stored = offset;
+                self.input_data.forget_poses();
+            }
+            Err(e) => warn!("Couldn't move {origin:?} zero pose: {e}"),
+        }
+    }
+
+    fn origin_offsets(&self) -> [(vr::ETrackingUniverseOrigin, xr::Posef); 2] {
+        [
+            (vr::ETrackingUniverseOrigin::Seated, self.local_offset),
+            (vr::ETrackingUniverseOrigin::Standing, self.stage_offset),
+        ]
     }
 
     #[inline]
@@ -1430,6 +1469,122 @@ mod tests {
         let start = std::time::Instant::now();
         drop(data);
         assert!(start.elapsed() < super::SESSION_STATE_TIMEOUT);
+    }
+
+    fn head_pose(
+        data: &OpenXrData<FakeCompositor>,
+        origin: openvr::ETrackingUniverseOrigin,
+    ) -> xr::Posef {
+        let session = data.session_data.get();
+        session
+            .view_space
+            .locate(
+                session.get_space_for_origin(origin),
+                data.get_display_time(),
+            )
+            .unwrap()
+            .pose
+    }
+
+    fn assert_pose_eq(a: xr::Posef, b: xr::Posef) {
+        let quat = |q: xr::Quaternionf| glam::Quat::from_xyzw(q.x, q.y, q.z, q.w);
+        let vec = |v: xr::Vector3f| glam::Vec3::new(v.x, v.y, v.z);
+        assert!(
+            vec(a.position).abs_diff_eq(vec(b.position), 1e-5)
+                && quat(a.orientation).angle_between(quat(b.orientation)) < 1e-3,
+            "{a:?} != {b:?}"
+        );
+    }
+
+    /// The head pose with a yaw and a pitch, 1.7 m up.
+    fn standing_head() -> (xr::Posef, glam::Quat) {
+        let pitch = glam::Quat::from_rotation_x(0.3);
+        let rot = glam::Quat::from_rotation_y(1.0) * pitch;
+        let pose = xr::Posef {
+            position: xr::Vector3f {
+                x: 0.5,
+                y: 1.7,
+                z: -2.0,
+            },
+            orientation: xr::Quaternionf {
+                x: rot.x,
+                y: rot.y,
+                z: rot.z,
+                w: rot.w,
+            },
+        };
+        (pose, pitch)
+    }
+
+    fn pitch_only(pitch: glam::Quat, position: [f32; 3]) -> xr::Posef {
+        xr::Posef {
+            position: xr::Vector3f {
+                x: position[0],
+                y: position[1],
+                z: position[2],
+            },
+            orientation: xr::Quaternionf {
+                x: pitch.x,
+                y: pitch.y,
+                z: pitch.z,
+                w: pitch.w,
+            },
+        }
+    }
+
+    #[test]
+    fn reset_zero_pose_keeps_standing_floor() {
+        use openvr::ETrackingUniverseOrigin::*;
+        crate::init_logging();
+        let data = OpenXrData::<FakeCompositor>::new(
+            &Injector::default(),
+            openvr::EVRApplicationType::Other,
+        )
+        .unwrap();
+        let (head, pitch) = standing_head();
+        let session = data.session_data.get().session.as_raw();
+        fakexr::set_reference_space_pose(session, xr::ReferenceSpaceType::VIEW, head);
+
+        data.reset_tracking_space(Standing);
+        assert_pose_eq(
+            head_pose(&data, Standing),
+            pitch_only(pitch, [0.0, 1.7, 0.0]),
+        );
+
+        data.reset_tracking_space(Seated);
+        assert_pose_eq(head_pose(&data, Seated), pitch_only(pitch, [0.0, 0.0, 0.0]));
+    }
+
+    /// Zero poses the app set on the temporary session have to carry over to the real one.
+    #[test]
+    fn zero_poses_survive_session_restart() {
+        use openvr::ETrackingUniverseOrigin::*;
+        crate::init_logging();
+        let data = OpenXrData::<FakeCompositor>::new(
+            &Injector::default(),
+            openvr::EVRApplicationType::Other,
+        )
+        .unwrap();
+        let comp = Arc::new(FakeCompositor::new(&data));
+        data.compositor.set(Arc::downgrade(&comp));
+
+        let (head, pitch) = standing_head();
+        let session = data.session_data.get().session.as_raw();
+        fakexr::set_reference_space_pose(session, xr::ReferenceSpaceType::VIEW, head);
+        data.reset_tracking_space(Standing);
+        data.reset_tracking_space(Seated);
+
+        data.restart_session();
+        let session = data.session_data.get().session.as_raw();
+        fakexr::set_reference_space_pose(session, xr::ReferenceSpaceType::VIEW, head);
+        assert_pose_eq(
+            head_pose(&data, Standing),
+            pitch_only(pitch, [0.0, 1.7, 0.0]),
+        );
+        assert_pose_eq(head_pose(&data, Seated), pitch_only(pitch, [0.0, 0.0, 0.0]));
+
+        drop(data); // Session must be dropped before Vulkan data.
+        drop(comp);
     }
 
     #[test]
