@@ -19,13 +19,13 @@ OpenVR games need to be pointed at xrizer-edge instead of SteamVR. Either:
 
 1. Add its path to `$XDG_CONFIG_HOME/openvr/openvrpaths.vrpath`, or
 2. Set `VR_OVERRIDE` when launching: `VR_OVERRIDE=/path/to/xrizer-edge %command%` in Steam launch options.
-   - This still requires a valid `openvrpaths.vrpath` to exist, though xrizer doesn't need to be in it.
+   - This still requires a valid `openvrpaths.vrpath` to exist, though xrizer-edge doesn't need to be in it.
 
 With WiVRn, you can instead set the xrizer-edge path as the OpenVR compatibility library in the WiVRn settings.
 
 ## openvrpaths.vrpath
 
-A JSON file OpenVR games read to find the runtime. If you've run SteamVR before, add the xrizer path to the `runtime` list. Otherwise, create `$XDG_CONFIG_HOME/openvr/openvrpaths.vrpath`:
+A JSON file OpenVR games read to find the runtime. If you've run SteamVR before, add the xrizer-edge path to the `runtime` list. Otherwise, create `$XDG_CONFIG_HOME/openvr/openvrpaths.vrpath`:
 
 ```json
 {
@@ -67,7 +67,7 @@ If a launcher strips `RUST_LOG`, put the same filter string in a file named `log
 
 `XRIZER_PRESERVE_VIEW_CANTING` - `1` keeps per-eye view rotations from canted-display headsets (e.g. Pimax) instead of flattening them to parallel views. Fixes FOV on those headsets, may confuse games that assume parallel views.
 
-`XRIZER_MAX_TRACKERS` - Max number of generic trackers to expose. Trackers appear as Vive Trackers, which can confuse some games' controller detection. `0` hides them. Set automatically for games known to need it.
+`XRIZER_MAX_TRACKERS` - Max number of generic trackers to expose. Requires a runtime with `XR_MNDX_xdev_space` (Monado, WiVRn). Trackers appear as Vive Trackers, which can confuse some games' controller detection. `0` hides them. Set automatically for games known to need it.
 
 `XRIZER_TRACKER_SERIALS` - `;` separated list of device serials to expose as generic trackers, e.g. to use controllers as FBT trackers.
 

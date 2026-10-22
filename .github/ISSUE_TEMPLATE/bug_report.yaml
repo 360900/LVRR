@@ -23,7 +23,7 @@ body:
       label: Describe the issue.
       value: |
         **Please attach a log if applicable.**
-        Logs are located at `~/.local/state/xrizer/xrizer.txt`.
+        Logs are in `~/.local/state/xrizer`, one `xrizer-<timestamp>-<pid>.txt` per process.
     validations:
       required: true
   - type: textarea
