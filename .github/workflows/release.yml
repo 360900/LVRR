@@ -34,6 +34,9 @@ jobs:
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
   build:
     runs-on: ubuntu-latest
+    env:
+      # git describe can pick another tag on the same commit.
+      XRIZER_VERSION: ${{ github.ref_name }}
     container:
       image: 'ghcr.io/360900/xrizer-edge-ubuntu:latest'
       credentials:

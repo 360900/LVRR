@@ -10,8 +10,10 @@ runs:
       # user and the version comes out empty.
       run: |
         git config --global --add safe.directory "$GITHUB_WORKSPACE"
-        v=$(git describe --tags --always)
-        echo "XRIZER_VERSION=$v" >> "$GITHUB_ENV"
+        if [ -z "$XRIZER_VERSION" ]; then
+          v=$(git describe --tags --always)
+          echo "XRIZER_VERSION=$v" >> "$GITHUB_ENV"
+        fi
     - name: Build
       shell: sh
       run: cargo xbuild --release --features static-openxr --verbose
