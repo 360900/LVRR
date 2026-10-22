@@ -1055,10 +1055,11 @@ impl vr::IVRCompositor029_Interface for Compositor {
                 vMax: 1.0,
             });
 
-        // Superhot passes crazy bounds on startup.
-        if !bounds.valid() {
+        // Superhot passes crazy bounds on startup, and GMod VRMod passes bounds slightly outside
+        // the texture.
+        let Some(clamped_bounds) = bounds.clamped() else {
             return vr::EVRCompositorError::InvalidBounds;
-        }
+        };
 
         let texture_with_pose = texture.cast::<vr::VRTextureWithPose_t>();
         let Some(texture) = (unsafe { texture.as_ref() }) else {
@@ -1086,7 +1087,9 @@ impl vr::IVRCompositor029_Interface for Compositor {
                 drop(frame_lock);
                 drop(session_lock);
 
-                if let Err(e) = self.initialize_real_session(texture, bounds, submit_flags) {
+                if let Err(e) =
+                    self.initialize_real_session(texture, clamped_bounds, submit_flags)
+                {
                     return e;
                 }
                 info!("Received game texture, restarted session with new data");
@@ -1553,6 +1556,34 @@ struct SubmittedEye {
     flip_vertically: bool,
     /// The HMD pose the app rendered the eye with, if it passed one.
     render_pose: Option<xr::Posef>,
+    /// The part of the FOV the texture covers, as fractions of the bounds the app submitted:
+    /// [left, right, top, bottom].
+    fov_fractions: [f32; 4],
+}
+
+const FULL_FOV_FRACTIONS: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
+
+/// See [SubmittedEye::fov_fractions].
+fn fov_fractions(requested: vr::VRTextureBounds_t, clamped: vr::VRTextureBounds_t) -> [f32; 4] {
+    let fraction = |bound, min, max| (bound - min) / (max - min);
+    let r = requested;
+    [
+        fraction(clamped.uMin, r.uMin, r.uMax),
+        fraction(clamped.uMax, r.uMin, r.uMax),
+        fraction(clamped.vMin, r.vMin, r.vMax),
+        fraction(clamped.vMax, r.vMin, r.vMax),
+    ]
+}
+
+/// Narrows `fov` to the given fractions of it: [left, right, top, bottom].
+fn narrow_fov(fov: xr::Fovf, [left, right, top, bottom]: [f32; 4]) -> xr::Fovf {
+    let lerp = |a: f32, b: f32, t: f32| (a.tan() + (b.tan() - a.tan()) * t).atan();
+    xr::Fovf {
+        angle_left: lerp(fov.angle_left, fov.angle_right, left),
+        angle_right: lerp(fov.angle_left, fov.angle_right, right),
+        angle_up: lerp(fov.angle_up, fov.angle_down, top),
+        angle_down: lerp(fov.angle_up, fov.angle_down, bottom),
+    }
 }
 
 struct SwapchainData<G: xr::Graphics> {
@@ -1755,6 +1786,7 @@ impl<G: GraphicsBackend> FrameController<G> {
         Ok(())
     }
 
+    /// `requested_bounds` are the bounds the app submitted, which may be outside the texture.
     #[allow(clippy::too_many_arguments)]
     fn submit_impl(
         &mut self,
@@ -1762,7 +1794,7 @@ impl<G: GraphicsBackend> FrameController<G> {
         session_data: &SessionData,
         eye: vr::EVREye,
         texture: &vr::Texture_t,
-        bounds: vr::VRTextureBounds_t,
+        requested_bounds: vr::VRTextureBounds_t,
         submit_flags: vr::EVRSubmitFlags,
         render_pose: Option<xr::Posef>,
     ) -> Result<(), vr::EVRCompositorError>
@@ -1777,6 +1809,9 @@ impl<G: GraphicsBackend> FrameController<G> {
         let color_space = texture.eColorSpace;
         let texture = G::get_texture(texture, submit_flags)
             .ok_or(vr::EVRCompositorError::InvalidTexture)?;
+        let bounds = requested_bounds
+            .clamped()
+            .ok_or(vr::EVRCompositorError::InvalidBounds)?;
 
         // No Man's Sky does this.
         if self.eyes_submitted[eye.0 as usize].is_some() {
@@ -1817,6 +1852,7 @@ impl<G: GraphicsBackend> FrameController<G> {
                     ),
                     flip_vertically: bounds.vertically_flipped(),
                     render_pose,
+                    fov_fractions: fov_fractions(requested_bounds, bounds),
                 })
             } else {
                 trace!("submitting null this frame");
@@ -1884,6 +1920,7 @@ impl<G: GraphicsBackend> FrameController<G> {
                         extent,
                         flip_vertically,
                         render_pose,
+                        fov_fractions,
                     } = self.eyes_submitted[eye_index]
                         .unwrap_or_else(|| panic!("Eye {eye_index} has not been submitted!"));
 
@@ -1903,6 +1940,10 @@ impl<G: GraphicsBackend> FrameController<G> {
                         },
                     };
                     let mut fov = view.fov;
+                    // Bounds outside of the texture were clamped, which leaves out part of the FOV.
+                    if fov_fractions != FULL_FOV_FRACTIONS {
+                        fov = narrow_fov(fov, fov_fractions);
+                    }
                     if flip_vertically {
                         std::mem::swap(&mut fov.angle_up, &mut fov.angle_down);
                     }
@@ -2460,34 +2501,37 @@ mod tests {
     fn bad_bounds() {
         let f = Fixture::new();
 
+        let bounds = vr::VRTextureBounds_t {
+            uMin: 0.0,
+            vMin: 0.0,
+            uMax: 1.0,
+            vMax: 1.0,
+        };
         let bad_bounds = [
-            // bound greater than 1 (Superhot does this)
-            vr::VRTextureBounds_t {
-                vMin: 0.0,
-                vMax: 1.1,
-                uMin: 0.0,
-                uMax: 1.0,
-            },
-            // bound greater than 1
-            vr::VRTextureBounds_t {
-                vMin: 0.0,
-                vMax: 1.0,
-                uMin: 0.0,
-                uMax: 1.1,
-            },
-            // negative bound
-            vr::VRTextureBounds_t {
-                vMin: -0.1,
-                vMax: 1.0,
-                uMin: 0.0,
-                uMax: 1.0,
-            },
             // min/max equal
             vr::VRTextureBounds_t {
                 vMin: 1.0,
                 vMax: 1.0,
-                uMin: 0.0,
-                uMax: 1.0,
+                ..bounds
+            },
+            // nothing left after clamping
+            vr::VRTextureBounds_t {
+                uMin: 1.1,
+                uMax: 1.2,
+                ..bounds
+            },
+            // SteamVR rejects bounds this far out
+            vr::VRTextureBounds_t {
+                uMin: -101.0,
+                ..bounds
+            },
+            vr::VRTextureBounds_t {
+                vMax: f32::NAN,
+                ..bounds
+            },
+            vr::VRTextureBounds_t {
+                uMax: f32::INFINITY,
+                ..bounds
             },
         ];
 
@@ -3777,6 +3821,53 @@ mod tests {
                 [1.0; 3]
             );
         }
+    }
+
+    /// Bounds outside the texture are clamped, and the FOV narrowed to the part that is left.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn out_of_range_bounds() {
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+        let fov = xr::Fovf {
+            angle_left: -std::f32::consts::FRAC_PI_4,
+            angle_right: std::f32::consts::FRAC_PI_4,
+            angle_up: std::f32::consts::FRAC_PI_4,
+            angle_down: -std::f32::consts::FRAC_PI_4,
+        };
+        fakexr::set_views(
+            f.comp.openxr.session_data.get().session.as_raw(),
+            [view(-0.03, fov), view(0.03, fov)],
+        );
+        let texture = FakeGraphicsData::texture(&f.vk);
+        let tangents = |bounds| {
+            let layer = frame_with_texture(&f, &texture, Some(bounds), vr::EVRSubmitFlags::Default);
+            let fov = layer.views[0].1;
+            [
+                fov.angle_left,
+                fov.angle_right,
+                fov.angle_up,
+                fov.angle_down,
+            ]
+            .map(|a| (a.tan() * 1e4).round() / 1e4)
+        };
+
+        let bounds = vr::VRTextureBounds_t {
+            uMin: -0.25,
+            vMin: 0.0,
+            uMax: 1.0,
+            vMax: 1.0,
+        };
+        assert_eq!(tangents(bounds), [-0.6, 1.0, 1.0, -1.0]);
+
+        // Flipped bounds have their FOV flipped too.
+        let flipped = vr::VRTextureBounds_t {
+            uMin: 0.0,
+            vMin: 1.25,
+            uMax: 1.0,
+            vMax: 0.0,
+        };
+        assert_eq!(tangents(flipped), [-1.0, 1.0, -1.0, 0.6]);
     }
 
     #[test]

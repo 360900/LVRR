@@ -82,18 +82,21 @@ impl Default for ETrackingResult {
 }
 
 impl VRTextureBounds_t {
+    /// The bounds clamped to the texture, or None if nothing of the texture is left. Like SteamVR,
+    /// this accepts bounds up to 100 outside of the texture.
     #[inline]
-    pub fn valid(&self) -> bool {
-        matches!(
-            self,
-            VRTextureBounds_t {
-                uMin: 0.0..=1.0,
-                uMax: 0.0..=1.0,
-                vMin: 0.0..=1.0,
-                vMax: 0.0..=1.0
-            }
-        ) && self.vMin != self.vMax
-            && self.uMin != self.uMax
+    pub fn clamped(&self) -> Option<Self> {
+        let bounds = [self.uMin, self.uMax, self.vMin, self.vMax];
+        if !bounds.iter().all(|b| b.abs() <= 100.0) {
+            return None;
+        }
+        let clamped = Self {
+            uMin: self.uMin.clamp(0.0, 1.0),
+            uMax: self.uMax.clamp(0.0, 1.0),
+            vMin: self.vMin.clamp(0.0, 1.0),
+            vMax: self.vMax.clamp(0.0, 1.0),
+        };
+        (clamped.uMin != clamped.uMax && clamped.vMin != clamped.vMax).then_some(clamped)
     }
 
     #[inline]
