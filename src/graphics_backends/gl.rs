@@ -1023,7 +1023,7 @@ mod tests {
         let comp = Arc::new(EglCompositor);
         xr.compositor.set(Arc::downgrade(&comp));
 
-        xr.restart_session();
+        xr.restart_session().unwrap();
         let session = xr.session_data.get();
         assert!(session.is_real_session());
         let swapchain = session
