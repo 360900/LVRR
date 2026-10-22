@@ -34,6 +34,9 @@ use wmr::{
 #[allow(private_interfaces)]
 pub trait InteractionProfile: SupportedProfile + Sized + 'static {
     const USE_FORCE_DPAD: bool = false;
+    /// The skeletal tracking level SteamVR always reports for this controller, if it doesn't
+    /// depend on what the runtime tracks.
+    const SKELETAL_TRACKING_LEVEL: Option<openvr::EVRSkeletalTrackingLevel> = None;
     type LegalPaths: LegalPathsT;
     fn profile_path() -> &'static str;
     fn has_required_extensions(enabled_extensions: &xr::ExtensionSet) -> bool;

@@ -117,7 +117,6 @@ pub struct Input<C: openxr_data::Compositor> {
     set_map: RwLock<SlotMap<ActionSetKey, String>>,
     loaded_actions_path: OnceLock<PathBuf>,
     legacy_state: legacy::LegacyState,
-    skeletal_tracking_level: RwLock<[vr::EVRSkeletalTrackingLevel; 2]>,
     skeletal_bone_cache:
         [Mutex<Option<[vr::VRBoneTransform_t; HandSkeletonBone::Count as usize]>>; 2],
     estimated_finger_state: [Mutex<FingerState>; 2],
@@ -203,7 +202,6 @@ impl<C: openxr_data::Compositor> Input<C> {
             left_hand_key,
             right_hand_key,
             legacy_state: Default::default(),
-            skeletal_tracking_level: RwLock::new([vr::EVRSkeletalTrackingLevel::Estimated; 2]),
             skeletal_bone_cache: Default::default(),
             estimated_finger_state: [
                 Mutex::new(FingerState::new()),
@@ -1256,7 +1254,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             return vr::EVRInputError::InvalidParam;
         };
 
-        *level = self.skeletal_tracking_level.read().unwrap()[*hand as usize - 1];
+        *level = self.skeletal_tracking_level(&data, *hand);
         vr::EVRInputError::None
     }
     fn GetSkeletalReferenceTransforms(

@@ -74,10 +74,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             raw
         };
 
-        let Some(HandSkeleton {
-            joints,
-            data_source,
-        }) = controller.get_hand_skeleton(&self.openxr, base)
+        let Some(HandSkeleton { joints, .. }) = controller.get_hand_skeleton(&self.openxr, base)
         else {
             drop(bone_cache);
             return Some(self.get_estimated_bones(session_data, space, hand));
@@ -200,16 +197,38 @@ impl<C: openxr_data::Compositor> Input<C> {
         *bone_cache = Some(transforms);
 
         finalize_transforms(&mut transforms, space);
-        self.skeletal_tracking_level.write().unwrap()[hand as usize - 1] =
-            vr::EVRSkeletalTrackingLevel::Full;
-
-        self.skeletal_tracking_level.write().unwrap()[hand as usize - 1] = match data_source {
-            xr::HandTrackingDataSourceEXT::CONTROLLER => vr::EVRSkeletalTrackingLevel::Partial,
-            xr::HandTrackingDataSourceEXT::UNOBSTRUCTED => vr::EVRSkeletalTrackingLevel::Full,
-            _ => unreachable!(),
-        };
-
         Some(transforms)
+    }
+
+    pub(super) fn skeletal_tracking_level(
+        &self,
+        session_data: &SessionData,
+        hand: Hand,
+    ) -> vr::EVRSkeletalTrackingLevel {
+        let devices = session_data.input_data.devices.read().unwrap();
+        let Some(controller) = devices.get_controller(hand) else {
+            return vr::EVRSkeletalTrackingLevel::Estimated;
+        };
+        // SteamVR reports a fixed level for some controllers, e.g. Partial for the Index even
+        // when the runtime doesn't track its fingers.
+        if let Some(level) = controller
+            .profile_data
+            .as_ref()
+            .filter(|_| controller.connected)
+            .and_then(|p| p.skeletal_tracking_level)
+        {
+            return level;
+        }
+
+        match controller.get_hand_skeleton(&self.openxr, session_data.tracking_space()) {
+            None => vr::EVRSkeletalTrackingLevel::Estimated,
+            Some(HandSkeleton {
+                data_source: xr::HandTrackingDataSourceEXT::UNOBSTRUCTED,
+                ..
+            }) => vr::EVRSkeletalTrackingLevel::Full,
+            // Joints derived from a controller, or an unknown source
+            Some(_) => vr::EVRSkeletalTrackingLevel::Partial,
+        }
     }
 
     pub(super) fn get_bone_summary_from_hand_tracking(
@@ -374,9 +393,6 @@ impl<C: openxr_data::Compositor> Input<C> {
         *bone_cache = Some(transforms);
 
         finalize_transforms(&mut transforms, space);
-        self.skeletal_tracking_level.write().unwrap()[hand as usize - 1] =
-            vr::EVRSkeletalTrackingLevel::Estimated;
-
         transforms
     }
 
@@ -1007,5 +1023,46 @@ mod tests {
             name(right, -1, 32),
             Err(vr::EVRInputError::InvalidBoneIndex)
         );
+    }
+
+    #[test]
+    fn index_tracking_level_is_partial() {
+        use crate::input::profiles::{knuckles::Knuckles, oculus_touch::OculusTouch};
+        let mut f = Fixture::new();
+        f.load_actions(c"actions.json");
+        let skeleton = f.get_action_handle(c"/actions/set1/in/skellyl");
+        let set = f.get_action_set_handle(c"/actions/set1");
+        let sync = |f: &mut Fixture| {
+            f.sync(vr::VRActiveActionSet_t {
+                ulActionSet: set,
+                ..Default::default()
+            })
+        };
+        // Queried before any bone data, which is when games pick their hand mode.
+        let level = |f: &Fixture| {
+            let mut level = vr::EVRSkeletalTrackingLevel::Full;
+            assert_eq!(
+                f.input.GetSkeletalTrackingLevel(skeleton, &mut level),
+                vr::EVRInputError::None
+            );
+            level
+        };
+
+        assert_eq!(level(&f), vr::EVRSkeletalTrackingLevel::Estimated);
+        f.set_interaction_profile::<Knuckles>(fakexr::UserPath::LeftHand);
+        sync(&mut f);
+        assert_eq!(level(&f), vr::EVRSkeletalTrackingLevel::Partial);
+        // Turned off
+        fakexr::set_interaction_profile(
+            f.raw_session(),
+            fakexr::UserPath::LeftHand,
+            openxr::Path::NULL,
+        );
+        sync(&mut f);
+        f.input.openxr.poll_events();
+        assert_eq!(level(&f), vr::EVRSkeletalTrackingLevel::Estimated);
+        f.set_interaction_profile::<OculusTouch>(fakexr::UserPath::LeftHand);
+        sync(&mut f);
+        assert_eq!(level(&f), vr::EVRSkeletalTrackingLevel::Estimated);
     }
 }

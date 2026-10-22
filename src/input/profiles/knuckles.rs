@@ -14,6 +14,9 @@ use std::iter::Iterator;
 pub struct Knuckles;
 
 impl InteractionProfile for Knuckles {
+    // The finger curl sensors measure the fingers only partially.
+    const SKELETAL_TRACKING_LEVEL: Option<openvr::EVRSkeletalTrackingLevel> =
+        Some(openvr::EVRSkeletalTrackingLevel::Partial);
     type LegalPaths = legal_paths![
         Both::<
             (System, Click),

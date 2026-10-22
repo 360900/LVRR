@@ -75,6 +75,7 @@ pub struct ProfileData {
     /// or thumbstick is being touched, so just use the skeletal input actions to
     /// determine the curl value for the thumb.
     pub force_estimated_thumb: bool,
+    pub skeletal_tracking_level: Option<vr::EVRSkeletalTrackingLevel>,
 }
 
 impl ProfileData {
@@ -84,6 +85,7 @@ impl ProfileData {
             get_hand_offset: P::offset_grip_pose,
             get_pose_transformation: P::pose_transformation,
             force_estimated_thumb: TypeId::of::<P>() == TypeId::of::<Knuckles>(),
+            skeletal_tracking_level: P::SKELETAL_TRACKING_LEVEL,
         }
     }
 
