@@ -772,12 +772,13 @@ impl vr::IVRCompositor029_Interface for Compositor {
             system: &System,
             display_time: xr::Time,
             overlays: Option<&OverlayMan>,
+            max_layers: usize,
         ) -> xr::Result<()>
         where
             for<'b> &'b crate::overlay::AnySwapchainMap:
                 TryInto<&'b crate::overlay::SwapchainMap<G::Api>, Error: std::fmt::Display>,
         {
-            ctrl.end_frame(session_data, system, display_time, overlays)
+            ctrl.end_frame(session_data, system, display_time, overlays, max_layers)
         }
 
         if self.openxr.is_lost() {
@@ -804,6 +805,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
             &system,
             display_time,
             overlays.as_deref(),
+            self.openxr.max_layer_count,
         ));
         // A frame that failed to end is discarded by the next xrBeginFrame.
         self.openxr.check("Ending frame", result);
@@ -1590,6 +1592,7 @@ impl<G: GraphicsBackend> FrameController<G> {
         system: &System,
         display_time: xr::Time,
         overlays: Option<&OverlayMan>,
+        max_layers: usize,
     ) -> xr::Result<()>
     where
         for<'b> &'b crate::overlay::AnySwapchainMap:
@@ -1668,7 +1671,17 @@ impl<G: GraphicsBackend> FrameController<G> {
         let overlay_layers;
         if let Some(overlay_man) = overlays {
             overlay_layers = overlay_man.get_layers(session_data, self.app_fade_grid);
-            layers.extend(overlay_layers.iter().map(Deref::deref));
+            // The layers are sorted by z order, so this drops the bottom ones.
+            let excess = (layers.len() + overlay_layers.len())
+                .saturating_sub(max_layers)
+                .min(overlay_layers.len());
+            if excess > 0 {
+                crate::warn_once!(
+                    "Dropping {} overlays over the runtime's layer limit",
+                    excess
+                );
+            }
+            layers.extend(overlay_layers[excess..].iter().map(Deref::deref));
         }
 
         self.stream
@@ -2832,6 +2845,32 @@ mod tests {
         assert_eq!(f.wait_get_poses(), None);
         assert_eq!(f.submit(vr::EVREye::Left), InvalidTexture);
         assert!(rx.try_recv().is_err(), "temporary session was restarted");
+    }
+
+    /// More visible overlays than the runtime's layer limit must not make xrEndFrame fail.
+    #[test]
+    fn overlays_over_layer_limit() {
+        use vr::IVROverlay027_Interface;
+
+        let f = Fixture::new();
+        let overlays = f.overlay_man();
+        assert_eq!(f.wait_get_poses(), None);
+        for i in 0..=f.comp.openxr.max_layer_count {
+            let key = std::ffi::CString::new(format!("overlay{i}")).unwrap();
+            let mut overlay = 0;
+            assert_eq!(
+                overlays.CreateOverlay(key.as_ptr(), key.as_ptr(), &mut overlay),
+                vr::EVROverlayError::None
+            );
+            assert_eq!(overlays.ShowOverlay(overlay), vr::EVROverlayError::None);
+            assert_eq!(
+                overlays.SetOverlayTexture(overlay, &FakeGraphicsData::texture(&f.vk)),
+                vr::EVROverlayError::None
+            );
+        }
+        f.check_frame_state(fakexr::FrameState::Begun);
+        f.comp.PostPresentHandoff();
+        f.check_frame_state(fakexr::FrameState::Ended);
     }
 
     #[test]

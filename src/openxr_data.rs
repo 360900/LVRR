@@ -67,6 +67,8 @@ pub struct OpenXrData<C: Compositor> {
     /// Set when creating the real session failed, so Submit doesn't tear down the temporary
     /// session for another attempt every frame.
     session_creation_failed: AtomicBool,
+    /// The most composition layers the runtime accepts in one frame.
+    pub max_layer_count: usize,
 
     /// should only be externally accessed for testing
     pub(crate) input: Injected<crate::input::Input<C>>,
@@ -255,6 +257,11 @@ impl<C: Compositor> OpenXrData<C> {
             .0,
         )));
 
+        // The spec guarantees at least 16.
+        let max_layer_count = instance
+            .system_properties(system_id)
+            .map_or(16, |p| p.graphics_properties.max_layer_count as usize);
+
         let display_time = if exts.khr_convert_timespec_time {
             instance.now().map(|t| t.as_nanos()).unwrap_or(1i64)
         } else {
@@ -275,6 +282,7 @@ impl<C: Compositor> OpenXrData<C> {
             exiting: false.into(),
             lost: false.into(),
             session_creation_failed: false.into(),
+            max_layer_count,
             input: injector.inject(),
             compositor: injector.inject(),
             system: injector.inject(),

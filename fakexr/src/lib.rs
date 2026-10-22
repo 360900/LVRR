@@ -1287,6 +1287,8 @@ extern "system" fn get_system(
     xr::Result::SUCCESS
 }
 
+const MAX_LAYER_COUNT: u32 = 16;
+
 extern "system" fn get_system_properties(
     _: xr::Instance,
     system_id: xr::SystemId,
@@ -1306,7 +1308,7 @@ extern "system" fn get_system_properties(
     properties.graphics_properties = xr::SystemGraphicsProperties {
         max_swapchain_image_height: 2048,
         max_swapchain_image_width: 2048,
-        max_layer_count: 16,
+        max_layer_count: MAX_LAYER_COUNT,
     };
     properties.tracking_properties = xr::SystemTrackingProperties {
         orientation_tracking: true.into(),
@@ -1969,9 +1971,12 @@ extern "system" fn begin_frame(
     xr::Result::SUCCESS
 }
 
-extern "system" fn end_frame(session: xr::Session, _info: *const xr::FrameEndInfo) -> xr::Result {
+extern "system" fn end_frame(session: xr::Session, info: *const xr::FrameEndInfo) -> xr::Result {
     let session = get_session!(session);
     run_hook(&session.end_frame_hook);
+    if unsafe { (*info).layer_count } > MAX_LAYER_COUNT {
+        return xr::Result::ERROR_LAYER_LIMIT_EXCEEDED;
+    }
     if let Err(e) = transition_frame_state(&session.frame_state, FrameState::Ended) {
         return e;
     }
