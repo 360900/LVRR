@@ -115,6 +115,18 @@ impl vr::IVRChaperoneSetup006_Interface for ChaperoneSetup {
     }
 }
 
+// The 0.9.14 SDK added these to IVRChaperoneSetup_004 without bumping the version; 005 renamed
+// them.
+impl vr::IVRChaperoneSetup004On005 for ChaperoneSetup {
+    fn SetWorkingWallTagInfo(&self, tags: *mut u8, tag_count: u32) {
+        vr::IVRChaperoneSetup005On006::SetWorkingCollisionBoundsTagsInfo(self, tags, tag_count)
+    }
+
+    fn GetLiveWallTagInfo(&self, tags: *mut u8, tag_count: *mut u32) -> bool {
+        vr::IVRChaperoneSetup005On006::GetLiveCollisionBoundsTagsInfo(self, tags, tag_count)
+    }
+}
+
 impl vr::IVRChaperoneSetup005On006 for ChaperoneSetup {
     fn SetWorkingCollisionBoundsTagsInfo(&self, _: *mut u8, _: u32) {
         crate::warn_unimplemented!("SetWorkingCollisionBoundsTagsInfo");

@@ -258,7 +258,7 @@ impl Views {
 
 #[derive(macros::InterfaceImpl)]
 #[interface = "IVRSystem"]
-#[versions(026, 023, 022, 021, 020, 019, 017, 016, 015, 014, 012, 011, 009)]
+#[versions(026, 023, 022, 021, 020, 019, 017, 016, 015, 014, 012, 011, 010, 009)]
 pub struct System {
     openxr: Arc<RealOpenXrData>, // We don't need to test session restarting.
     events: Mutex<VecDeque<vr::VREvent_t>>,
@@ -1458,7 +1458,29 @@ impl vr::IVRSystem011On012 for System {
     }
 }
 
-impl vr::IVRSystem009On011 for System {
+// 0.9.14 events are a distinct type with the same layout up to the event data, which is all the
+// 0.9.12 conversion writes.
+const _: () = assert!(
+    std::mem::offset_of!(vr::vr_0_9_12::VREvent_t, data)
+        == std::mem::offset_of!(vr::vr_0_9_14::VREvent_t, data)
+);
+
+impl vr::IVRSystem010On011 for System {
+    fn PollNextEvent(&self, event: *mut vr::vr_0_9_14::VREvent_t) -> bool {
+        vr::IVRSystem009On010::PollNextEvent(self, event.cast())
+    }
+
+    fn PollNextEventWithPose(
+        &self,
+        origin: vr::ETrackingUniverseOrigin,
+        event: *mut vr::vr_0_9_14::VREvent_t,
+        pose: *mut vr::TrackedDevicePose_t,
+    ) -> bool {
+        vr::IVRSystem009On010::PollNextEventWithPose(self, origin, event.cast(), pose)
+    }
+}
+
+impl vr::IVRSystem009On010 for System {
     fn PollNextEvent(&self, event: *mut vr::vr_0_9_12::VREvent_t) -> bool {
         self.PollNextEventWithPose(
             vr::ETrackingUniverseOrigin::Seated,
@@ -1924,6 +1946,20 @@ mod tests {
             std::ptr::null_mut()
         ));
         assert_eq!(event.eventType, vr::EVREventType::Quit.0);
+    }
+
+    #[test]
+    fn session_stop_0_9_14() {
+        let xr =
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
+        let system = Arc::new(System::new(xr.clone(), &Injector::default()));
+        xr.system.set(Arc::downgrade(&system));
+
+        xr.session_data.get().session.request_exit().unwrap();
+        xr.poll_events();
+        let mut event: vr::vr_0_9_14::VREvent_t = unsafe { std::mem::zeroed() };
+        assert!(vr::IVRSystem010On011::PollNextEvent(&*system, &mut event));
+        assert_eq!(event.eventType, vr::EVREventType::Quit);
     }
 
     #[test]

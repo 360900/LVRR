@@ -123,6 +123,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
         version!(1, 4, 18),
         version!(1, 3, 22),
         version!(1, 0, 17),
+        version!(1, 0, 15),
         version!(1, 0, 11),
         version!(1, 0, 10),
         version!(1, 0, 9),
@@ -135,6 +136,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
         version!(0, 9, 19),
         version!(0, 9, 17),
         version!(0, 9, 15),
+        version!(0, 9, 14),
         version!(0, 9, 12),
     ];
     let mut pruned_headers = headers.map(|(header, version)| {
@@ -248,6 +250,8 @@ fn prune_header(header: &str, version: &str) -> String {
         "#define _INCLUDE",
         "#define INVALID",
         "#define VR_COMPOSITOR",
+        // 0.9.12 and 0.9.14 both guard their tracked camera types with this
+        "#define _VRTRACKEDCAMERATYPES_H",
     ];
 
     let version = format!("vr_{version}");
@@ -268,9 +272,9 @@ fn prune_header(header: &str, version: &str) -> String {
             continue;
         }
 
-        // 0.9.12 header has duplicate macros/definitions with 0.9.15 that will
+        // 0.9.12 and 0.9.14 headers have duplicate macros/definitions with 0.9.15 that will
         // cause clang to throw errors
-        if version == "vr_0_9_12"
+        if matches!(version.as_str(), "vr_0_9_12" | "vr_0_9_14")
             && (line.starts_with("# define VR_CLANG_ATTR")
                 || line.ends_with("*VR_CALLTYPE VRApplications();")
                 || line.ends_with("*VR_CALLTYPE VRSettings();"))
@@ -812,6 +816,7 @@ fn process_vr_namespace_content(
                 unversion_fields(&mut item.fields.named);
                 check_rust_enum_fields(&item.ident, &item.fields.named);
                 if (vr_mod.ident == "vr_0_9_12"
+                    || vr_mod.ident == "vr_0_9_14"
                     || vr_mod.ident == "vr_0_9_15"
                     || vr_mod.ident == "vr_0_9_17"
                     || vr_mod.ident == "vr_0_9_20")
@@ -833,6 +838,10 @@ fn process_vr_namespace_content(
                 static INCOMPAT_STRUCTS: &[(&str, &[&str])] = &[
                     (
                         "vr_0_9_12",
+                        &["VREvent_t", "VREvent_Reserved_t", "Compositor_FrameTiming"],
+                    ),
+                    (
+                        "vr_0_9_14",
                         &["VREvent_t", "VREvent_Reserved_t", "Compositor_FrameTiming"],
                     ),
                     (

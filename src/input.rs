@@ -87,7 +87,7 @@ fn copy_cstr(dst: &mut [c_char], s: &str) {
 
 #[derive(macros::InterfaceImpl)]
 #[interface = "IVRInput"]
-#[versions(011, 010, 007, 006, 005, 004)]
+#[versions(011, 010, 007, 006, 005, 004, 003)]
 pub struct Input<C: openxr_data::Compositor> {
     openxr: Arc<OpenXrData<C>>,
     vtables: Vtables<C>,
@@ -2130,6 +2130,146 @@ impl<C: openxr_data::Compositor> vr::IVRInput005On006 for Input<C> {
             action_data,
             action_data_size,
             restrict_to_device,
+        )
+    }
+}
+
+// IVRInput_003 is the SteamVR Input beta: no device restriction yet, and skeletal data in one call.
+impl<C: openxr_data::Compositor> vr::IVRInput003On004 for Input<C> {
+    fn GetDigitalActionData(
+        &self,
+        action: vr::VRActionHandle_t,
+        action_data: *mut vr::InputDigitalActionData_t,
+        action_data_size: u32,
+    ) -> vr::EVRInputError {
+        <Self as vr::IVRInput010_Interface>::GetDigitalActionData(
+            self,
+            action,
+            action_data,
+            action_data_size,
+            vr::k_ulInvalidInputValueHandle,
+        )
+    }
+
+    fn GetAnalogActionData(
+        &self,
+        action: vr::VRActionHandle_t,
+        action_data: *mut vr::InputAnalogActionData_t,
+        action_data_size: u32,
+    ) -> vr::EVRInputError {
+        <Self as vr::IVRInput010_Interface>::GetAnalogActionData(
+            self,
+            action,
+            action_data,
+            action_data_size,
+            vr::k_ulInvalidInputValueHandle,
+        )
+    }
+
+    fn GetPoseActionData(
+        &self,
+        action: vr::VRActionHandle_t,
+        origin: vr::ETrackingUniverseOrigin,
+        seconds_from_now: f32,
+        action_data: *mut vr::InputPoseActionData_t,
+        action_data_size: u32,
+    ) -> vr::EVRInputError {
+        vr::IVRInput005On006::GetPoseActionData(
+            self,
+            action,
+            origin,
+            seconds_from_now,
+            action_data,
+            action_data_size,
+            vr::k_ulInvalidInputValueHandle,
+        )
+    }
+
+    fn GetSkeletalActionData(
+        &self,
+        action: vr::VRActionHandle_t,
+        bone_parent: vr::EVRSkeletalTransformSpace,
+        _seconds_from_now: f32,
+        action_data: *mut vr::InputSkeletonActionData_t,
+        action_data_size: u32,
+        transform_array: *mut vr::VRBoneTransform_t,
+        transform_array_count: u32,
+    ) -> vr::EVRInputError {
+        if action_data.is_null()
+            || action_data_size as usize != std::mem::size_of::<vr::InputSkeletonActionData_t>()
+        {
+            return vr::EVRInputError::InvalidParam;
+        }
+        let mut data = vr::InputSkeletalActionData_t::default();
+        let err = <Self as vr::IVRInput010_Interface>::GetSkeletalActionData(
+            self,
+            action,
+            &mut data,
+            std::mem::size_of_val(&data) as u32,
+        );
+        if err != vr::EVRInputError::None {
+            return err;
+        }
+        unsafe {
+            action_data.write(vr::InputSkeletonActionData_t {
+                bActive: data.bActive,
+                activeOrigin: data.activeOrigin,
+            })
+        };
+        if !data.bActive {
+            return vr::EVRInputError::None;
+        }
+        <Self as vr::IVRInput010_Interface>::GetSkeletalBoneData(
+            self,
+            action,
+            bone_parent,
+            vr::EVRSkeletalMotionRange::WithController,
+            transform_array,
+            transform_array_count,
+        )
+    }
+
+    fn GetSkeletalActionDataCompressed(
+        &self,
+        _: vr::VRActionHandle_t,
+        _: vr::EVRSkeletalTransformSpace,
+        _: f32,
+        _: *mut c_void,
+        _: u32,
+        _: *mut u32,
+    ) -> vr::EVRInputError {
+        crate::warn_unimplemented!("GetSkeletalActionDataCompressed");
+        vr::EVRInputError::None
+    }
+
+    fn UncompressSkeletalActionData(
+        &self,
+        _: *mut c_void,
+        _: u32,
+        _: *mut vr::EVRSkeletalTransformSpace,
+        _: *mut vr::VRBoneTransform_t,
+        _: u32,
+    ) -> vr::EVRInputError {
+        crate::warn_unimplemented!("UncompressSkeletalActionData");
+        vr::EVRInputError::None
+    }
+
+    fn TriggerHapticVibrationAction(
+        &self,
+        action: vr::VRActionHandle_t,
+        start_seconds_from_now: f32,
+        duration_seconds: f32,
+        frequency: f32,
+        amplitude: f32,
+    ) -> vr::EVRInputError {
+        <Self as vr::IVRInput010_Interface>::TriggerHapticVibrationAction(
+            self,
+            action,
+            start_seconds_from_now,
+            duration_seconds,
+            frequency,
+            amplitude,
+            vr::k_ulInvalidInputValueHandle,
         )
     }
 }

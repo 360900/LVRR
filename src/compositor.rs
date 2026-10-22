@@ -26,7 +26,7 @@ pub struct CompositorSessionData(Mutex<Option<DynFrameController>>);
 #[derive(macros::InterfaceImpl)]
 #[interface = "IVRCompositor"]
 #[versions(
-    029, 028, 027, 026, 024, 022, 021, 020, 019, 018, 017, 016, 015, 014, 013, 012, 011, 009
+    029, 028, 027, 026, 024, 022, 021, 020, 019, 018, 017, 016, 015, 014, 013, 012, 011, 010, 009
 )]
 pub struct Compositor {
     vtables: Vtables,
@@ -1308,7 +1308,32 @@ impl vr::IVRCompositor011On012 for Compositor {
     }
 }
 
-impl vr::IVRCompositor009On011 for Compositor {
+impl vr::IVRCompositor010On011 for Compositor {
+    fn GetFrameTiming(
+        &self,
+        timing: *mut vr::vr_0_9_14::Compositor_FrameTiming,
+        frames_ago: u32,
+    ) -> bool {
+        self.legacy_frame_timing(timing, frames_ago, |c| {
+            vr::vr_0_9_14::Compositor_FrameTiming {
+                size: 0,
+                frameStart: c.m_flSystemTimeInSeconds,
+                droppedFrames: c.m_nNumDroppedFrames,
+                frameIndex: c.m_nFrameIndex,
+                pose: c.m_HmdPose,
+                m_flFrameIntervalMs: c.m_flClientFrameIntervalMs,
+                m_flSceneRenderGpuMs: c.m_flPreSubmitGpuMs,
+                m_flCompositorRenderCpuMs: c.m_flCompositorRenderCpuMs,
+                m_flCompositorRenderGpuMs: c.m_flCompositorRenderGpuMs,
+                m_flPresentCallCpuMs: c.m_flPresentCallCpuMs,
+                m_nPresents: c.m_nNumFramePresents,
+                ..Default::default()
+            }
+        })
+    }
+}
+
+impl vr::IVRCompositor009On010 for Compositor {
     fn GetFrameTiming(
         &self,
         timing: *mut vr::vr_0_9_12::Compositor_FrameTiming,
@@ -2255,7 +2280,19 @@ mod tests {
             size: std::mem::size_of::<vr::vr_0_9_12::Compositor_FrameTiming>() as u32,
             ..Default::default()
         };
-        assert!(vr::IVRCompositor009On011::GetFrameTiming(
+        assert!(vr::IVRCompositor009On010::GetFrameTiming(
+            &*f.comp,
+            &mut timing,
+            0
+        ));
+        let frame_interval = timing.m_flFrameIntervalMs;
+        assert_eq!(frame_interval, interval);
+
+        let mut timing = vr::vr_0_9_14::Compositor_FrameTiming {
+            size: std::mem::size_of::<vr::vr_0_9_14::Compositor_FrameTiming>() as u32,
+            ..Default::default()
+        };
+        assert!(vr::IVRCompositor010On011::GetFrameTiming(
             &*f.comp,
             &mut timing,
             0

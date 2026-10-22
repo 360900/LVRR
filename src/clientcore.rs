@@ -683,6 +683,35 @@ mod tests {
     }
 
     #[test]
+    fn serves_0_9_14_and_1_0_15_interfaces() {
+        let core = ClientCore::new(c"IVRClientCore_003").unwrap();
+        assert_eq!(
+            core.clone()
+                .Init(vr::EVRApplicationType::Scene, std::ptr::null()),
+            vr::EVRInitError::None
+        );
+        for version in [
+            c"IVRSystem_010",
+            c"IVRCompositor_010",
+            c"IVROverlay_008",
+            c"IVRInput_003",
+        ] {
+            assert_eq!(
+                core.IsInterfaceVersionValid(version.as_ptr()),
+                vr::EVRInitError::None,
+                "{version:?}"
+            );
+            let mut error = vr::EVRInitError::Unknown;
+            assert!(
+                !core
+                    .GetGenericInterface(version.as_ptr(), &mut error)
+                    .is_null()
+            );
+            assert_eq!(error, vr::EVRInitError::None, "{version:?}");
+        }
+    }
+
+    #[test]
     fn cleanup_without_init() {
         let core = ClientCore::new(c"IVRClientCore_003").unwrap();
         core.clone().Cleanup();
