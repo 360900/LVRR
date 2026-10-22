@@ -1621,14 +1621,15 @@ impl<G: GraphicsBackend> FrameController<G> {
         if self.should_render
             && !self.submitting_null
             && self.eyes_submitted.iter().all(|eye| eye.is_some())
+            // Without located views there's no FOV to show the image with.
+            && let Some(crate::system::ViewData { flags, views }) =
+                system.located_views(session_data.current_origin_as_reference_space())
         {
             let swapchain_data = self
                 .swapchain_data
                 .as_ref()
                 .expect("Swapchain data unexpectedly invalid on submit");
 
-            let crate::system::ViewData { flags, views } =
-                system.get_views(session_data.current_origin_as_reference_space());
             proj_layer_views = views
                 .into_iter()
                 .enumerate()
