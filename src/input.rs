@@ -21,7 +21,6 @@ use skeletal::SkeletalInputActionData;
 pub use crate::input::devices::ProfileData;
 use crate::input::profiles::ProfileProperties;
 use crate::{
-    AtomicF32,
     openxr_data::{self, Hand, OpenXrData, RestartError, SessionData},
     tracy_span,
 };
@@ -439,6 +438,69 @@ impl<C: openxr_data::Compositor> Input<C> {
 }
 
 impl<C: openxr_data::Compositor> Input<C> {
+    /// Updates a Vector1 action's state for each subaction (left, right, unrestricted). Like for
+    /// Vector2 actions, this happens once per UpdateActionState, since OpenVR deltas are relative
+    /// to the previous one, and must neither be consumed by reads nor shared between subactions.
+    fn sync_vector1(
+        &self,
+        session_data: &SessionData,
+        loaded: &ManifestLoadedActions,
+        key: ActionKey,
+        action: &xr::Action<f32>,
+        state: &Mutex<[vr::InputAnalogActionData_t; 3]>,
+    ) {
+        let has_custom_bindings = loaded.actions_with_custom_bindings.contains(&key);
+        let mut next = [vr::InputAnalogActionData_t::default(); 3];
+        let hands = [
+            (self.subaction_paths.left, self.left_hand_key),
+            (self.subaction_paths.right, self.right_hand_key),
+        ];
+        for (slot, (path, hand_key)) in next.iter_mut().zip(hands) {
+            let Ok(mut current) = action.state(&session_data.session, path) else {
+                continue;
+            };
+            let mut origin = hand_key.data().as_ffi();
+
+            // It's generally not clear how SteamVR handles float actions with multiple bindings,
+            // so emulate OpenXR, which takes the maximum among active bindings.
+            if has_custom_bindings
+                && let Some((binding, source)) =
+                    self.state_from_bindings(key.data().as_ffi(), origin)
+                && binding.is_active
+                && (binding.current_state && current.current_state != 1.0 || !current.is_active)
+            {
+                current = xr::ActionState {
+                    current_state: if binding.current_state { 1.0 } else { 0.0 },
+                    is_active: true,
+                    changed_since_last_sync: binding.changed_since_last_sync,
+                    last_change_time: binding.last_change_time,
+                };
+                origin = source;
+            }
+
+            if current.is_active {
+                *slot = vr::InputAnalogActionData_t {
+                    bActive: true,
+                    activeOrigin: origin,
+                    x: current.current_state,
+                    ..Default::default()
+                };
+            }
+        }
+        // Like OpenXR, report the largest value when unrestricted. Left wins ties.
+        next[2] = if next[1].bActive && (!next[0].bActive || next[1].x.abs() > next[0].x.abs()) {
+            next[1]
+        } else {
+            next[0]
+        };
+
+        let mut previous = state.lock().unwrap();
+        for (next, previous) in next.iter_mut().zip(previous.iter()) {
+            next.deltaX = next.x - previous.x;
+        }
+        *previous = next;
+    }
+
     /// The hand whose natively bound inputs drive an unrestricted read of a boolean action, if
     /// any is active.
     fn native_bool_origin(
@@ -538,7 +600,8 @@ enum ActionData {
     Bool(xr::Action<bool>),
     Vector1 {
         action: xr::Action<f32>,
-        last_value: AtomicF32,
+        /// Left, right, unrestricted. See [Input::sync_vector1].
+        state: Mutex<[vr::InputAnalogActionData_t; 3]>,
     },
     Vector2 {
         action: xr::Action<xr::Vector2f>,
@@ -1482,91 +1545,37 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         }
 
         let mut out = WriteOnDrop::new(action_data);
-        get_action_from_handle!(self, handle, session_data, action, loaded);
+        get_action_from_handle!(self, handle, session_data, action);
         let subaction_path = get_subaction_path!(self, restrict_to_device, action_data);
 
-        let mut active_hand = restrict_to_device;
-        let (state, delta) = match action {
-            ActionData::Vector1 { action, last_value } => {
-                let mut state = action
-                    .state(&session_data.session, subaction_path)
-                    .unwrap_or_else(inactive_state);
-
-                // It's generally not clear how SteamVR handles float actions with multiple bindings;
-                //   so emulate OpenXR, which takes maximum among active actions
-                if let Some((binding_state, binding_source)) =
-                    self.state_from_bindings(handle, restrict_to_device)
-                    && binding_state.is_active
-                    && (binding_state.current_state && state.current_state != 1.0
-                        || !state.is_active)
-                {
-                    state = xr::ActionState {
-                        current_state: if binding_state.current_state {
-                            1.0
-                        } else {
-                            0.0
-                        },
-                        is_active: binding_state.is_active,
-                        changed_since_last_sync: binding_state.changed_since_last_sync,
-                        last_change_time: binding_state.last_change_time,
-                    };
-                    active_hand = binding_source;
-                }
-
-                let delta = xr::Vector2f {
-                    x: state.current_state - last_value.swap(state.current_state),
-                    y: 0.0,
-                };
-                (
-                    xr::ActionState::<xr::Vector2f> {
-                        current_state: xr::Vector2f {
-                            x: state.current_state,
-                            y: 0.0,
-                        },
-                        changed_since_last_sync: state.changed_since_last_sync,
-                        last_change_time: state.last_change_time,
-                        is_active: state.is_active,
-                    },
-                    delta,
-                )
-            }
-            ActionData::Vector2 { data, .. } => {
-                let index = if subaction_path == self.subaction_paths.left {
-                    0
-                } else if subaction_path == self.subaction_paths.right {
-                    1
-                } else {
-                    2
-                };
-                *out.value = data.state.lock().unwrap()[index];
-                return vr::EVRInputError::None;
-            }
+        let state = match action {
+            ActionData::Vector1 { state, .. } => state,
+            ActionData::Vector2 { data, .. } => &data.state,
             _ => return vr::EVRInputError::WrongType,
         };
+        let index = if subaction_path == self.subaction_paths.left {
+            0
+        } else if subaction_path == self.subaction_paths.right {
+            1
+        } else {
+            2
+        };
+        *out.value = state.lock().unwrap()[index];
 
         if log::log_enabled!(log::Level::Trace) {
             let action_map = self.action_map.read().unwrap();
             let action_key = ActionKey::from(KeyData::from_ffi(handle));
+            let state = &*out.value;
             trace!(
                 "analog action {:?}: x {} y {} (dx {} dy {}, active: {})",
                 action_map.get(action_key).map(|a| &a.path),
-                state.current_state.x,
-                state.current_state.y,
-                delta.x,
-                delta.y,
-                state.is_active
+                state.x,
+                state.y,
+                state.deltaX,
+                state.deltaY,
+                state.bActive
             );
         }
-
-        *out.value = vr::InputAnalogActionData_t {
-            bActive: state.is_active,
-            activeOrigin: active_hand,
-            x: state.current_state.x,
-            deltaX: delta.x,
-            y: state.current_state.y,
-            deltaY: delta.y,
-            ..Default::default()
-        };
 
         vr::EVRInputError::None
     }
@@ -1892,6 +1901,13 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
                     }
                 }
                 (None, None) => {}
+            }
+        }
+
+        // After the custom bindings were unsynced, so they're evaluated for this sync.
+        for (key, action) in &actions.actions {
+            if let ActionData::Vector1 { action, state } = action {
+                self.sync_vector1(&data, actions, key, action, state);
             }
         }
 

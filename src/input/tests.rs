@@ -2157,6 +2157,66 @@ fn unrestricted_digital_action_origin() {
     assert_eq!(f.get_bool_state(boolact).unwrap().activeOrigin, left);
 }
 
+#[track_caller]
+fn get_analog_state(
+    f: &Fixture,
+    action: vr::VRActionHandle_t,
+    restrict: vr::VRInputValueHandle_t,
+) -> vr::InputAnalogActionData_t {
+    let mut state = Default::default();
+    assert_eq!(
+        f.input.GetAnalogActionData(
+            action,
+            &mut state,
+            std::mem::size_of::<vr::InputAnalogActionData_t>() as u32,
+            restrict,
+        ),
+        vr::EVRInputError::None
+    );
+    state
+}
+
+#[test]
+fn vector1_deltas_per_sync_and_hand() {
+    let mut f = Fixture::new();
+    let set1 = f.get_action_set_handle(c"/actions/set1");
+    let vec1 = f.get_action_handle(c"/actions/set1/in/vec1act");
+    f.load_actions(c"actions.json");
+    let left = f.get_input_source_handle(c"/user/hand/left");
+    let right = f.get_input_source_handle(c"/user/hand/right");
+    let action = f.get_action::<f32>(vec1);
+    let sync = |f: &mut Fixture| {
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: set1,
+            ..Default::default()
+        })
+    };
+    let read = |f: &Fixture, restrict| {
+        let state = get_analog_state(f, vec1, restrict);
+        (state.x, state.deltaX, state.activeOrigin)
+    };
+
+    fakexr::set_action_state(action, fakexr::ActionState::Float(0.5), LeftHand);
+    fakexr::set_action_state(action, fakexr::ActionState::Float(1.0), RightHand);
+    sync(&mut f);
+    // Reads neither consume the deltas nor share them between hands.
+    for _ in 0..2 {
+        assert_eq!(read(&f, left), (0.5, 0.5, left));
+        assert_eq!(read(&f, right), (1.0, 1.0, right));
+        assert_eq!(read(&f, 0), (1.0, 1.0, right));
+    }
+
+    sync(&mut f);
+    assert_eq!(read(&f, left), (0.5, 0.0, left));
+    assert_eq!(read(&f, right), (1.0, 0.0, right));
+    assert_eq!(read(&f, 0), (1.0, 0.0, right));
+
+    fakexr::set_action_state(action, fakexr::ActionState::Float(0.25), RightHand);
+    sync(&mut f);
+    assert_eq!(read(&f, right), (0.25, -0.75, right));
+    assert_eq!(read(&f, 0), (0.5, -0.5, left));
+}
+
 #[test]
 fn skeletal_tracking_level_follows_hand_tracking() {
     use vr::EVRSkeletalTrackingLevel::*;
