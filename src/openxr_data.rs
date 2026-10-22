@@ -351,6 +351,18 @@ impl<C: Compositor> OpenXrData<C> {
         })
     }
 
+    /// Like in SteamVR, Background, Overlay and Utility apps can't render. They get headless
+    /// sessions where available, and a graphics session for them would take the display from the
+    /// app that renders.
+    pub fn can_render(&self) -> bool {
+        !matches!(
+            self.application_type,
+            vr::EVRApplicationType::Background
+                | vr::EVRApplicationType::Overlay
+                | vr::EVRApplicationType::Utility
+        )
+    }
+
     /// Marks WaitGetPoses' per-frame update (event polling, action sync), which keeps
     /// [Self::pump] out of the way while the app runs a frame loop.
     pub fn frame_update(&self) -> FrameUpdateGuard<'_> {

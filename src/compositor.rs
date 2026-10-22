@@ -874,13 +874,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
         bounds: *const vr::VRTextureBounds_t,
         submit_flags: vr::EVRSubmitFlags,
     ) -> vr::EVRCompositorError {
-        // Like SteamVR. These apps get headless sessions where available, which can't render.
-        if matches!(
-            self.openxr.application_type,
-            vr::EVRApplicationType::Background
-                | vr::EVRApplicationType::Overlay
-                | vr::EVRApplicationType::Utility
-        ) {
+        if !self.openxr.can_render() {
             crate::warn_once!(
                 "{:?} application tried to submit a frame",
                 self.openxr.application_type

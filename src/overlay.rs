@@ -69,10 +69,13 @@ impl OverlayMan {
             return Err(vr::EVROverlayError::RequestFailed);
         }
 
-        // Overlays are only drawn by the scene app's frame loop. Headless sessions have no
-        // swapchains at all, and without a compositor there is nothing to restart the session.
-        if self.openxr.headless {
-            crate::warn_once!("Can't show overlay textures in a headless session");
+        // Overlays are only drawn by the scene app's frame loop. Without a compositor there is
+        // nothing to restart the session.
+        if !self.openxr.can_render() {
+            crate::warn_once!(
+                "{:?} applications can't show overlay textures",
+                self.openxr.application_type
+            );
             return Err(vr::EVROverlayError::RequestFailed);
         }
 
@@ -2235,9 +2238,11 @@ mod tests {
 
     impl RealSessionFixture {
         fn new() -> Self {
-            let xr = Arc::new(
-                OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap(),
-            );
+            Self::with_app_type(vr::EVRApplicationType::Other)
+        }
+
+        fn with_app_type(app_type: vr::EVRApplicationType) -> Self {
+            let xr = Arc::new(OpenXrData::new(&Injector::default(), app_type).unwrap());
             let vk = Arc::new(crate::graphics_backends::VulkanData::new_temporary(
                 &xr.instance,
                 xr.system_id,
@@ -2298,33 +2303,49 @@ mod tests {
         assert_eq!(f.man.skybox.read().unwrap().len(), 1);
     }
 
-    /// Background apps (VRCX) set overlay textures without ever requesting IVRCompositor, and
-    /// headless sessions can't create swapchains. Both used to panic.
+    /// Headless sessions can't create swapchains, which used to panic, and moving a Background
+    /// app to a graphics session would take the display from the game.
     #[test]
-    fn overlay_texture_without_graphics_session_fails() {
+    fn overlay_texture_from_non_scene_app_fails() {
         for headless in [true, false] {
             fakexr::set_headless_supported(headless);
-            let xr = Arc::new(
-                OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Background).unwrap(),
-            );
+            let f = RealSessionFixture::with_app_type(vr::EVRApplicationType::Background);
             fakexr::set_headless_supported(false);
-            assert_eq!(xr.headless, headless);
-            let vk = Arc::new(crate::graphics_backends::VulkanData::new_temporary(
-                &xr.instance,
-                xr.system_id,
-            ));
-            let man = OverlayMan::new(xr.clone(), &Injector::default());
-            let handle = create(&man, c"key", c"name");
+            assert_eq!(f.xr.headless, headless);
+            let handle = create(&f.man, c"key", c"name");
 
-            let session = xr.session_data.get().session.as_raw();
+            let session = f.xr.session_data.get().session.as_raw();
             assert_eq!(
-                man.SetOverlayTexture(handle, &crate::compositor::FakeGraphicsData::texture(&vk)),
+                f.man.SetOverlayTexture(handle, &f.texture()),
                 vr::EVROverlayError::RequestFailed
             );
-            assert_eq!(xr.session_data.get().session.as_raw(), session);
-            drop(man);
-            drop(xr);
+            assert_eq!(f.man.set_skybox(&[f.texture()]), Ok(()));
+            assert!(f.man.skybox.read().unwrap().is_empty());
+            assert_eq!(f.xr.session_data.get().session.as_raw(), session);
         }
+    }
+
+    /// Companion apps (VRCX) set overlay textures without ever requesting IVRCompositor, which
+    /// used to panic.
+    #[test]
+    fn overlay_texture_without_compositor_fails() {
+        let xr =
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
+        let vk = Arc::new(crate::graphics_backends::VulkanData::new_temporary(
+            &xr.instance,
+            xr.system_id,
+        ));
+        let man = OverlayMan::new(xr.clone(), &Injector::default());
+        let handle = create(&man, c"key", c"name");
+
+        let session = xr.session_data.get().session.as_raw();
+        assert_eq!(
+            man.SetOverlayTexture(handle, &crate::compositor::FakeGraphicsData::texture(&vk)),
+            vr::EVROverlayError::RequestFailed
+        );
+        assert_eq!(xr.session_data.get().session.as_raw(), session);
+        drop(man);
+        drop(xr);
     }
 
     #[test]
