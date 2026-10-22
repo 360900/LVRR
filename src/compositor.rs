@@ -1321,8 +1321,10 @@ impl vr::IVRCompositor029_Interface for Compositor {
 
 impl vr::IVRCompositor021On022 for Compositor {
     fn SetExplicitTimingMode(&self, explicit: bool) {
+        // Calling PostPresentHandoff is optional in this version: WaitGetPoses still hands off a
+        // frame the app didn't. A frame the app did hand off isn't touched by WaitGetPoses either.
         let mode = if explicit {
-            vr::EVRCompositorTimingMode::Explicit_ApplicationPerformsPostPresentHandoff
+            vr::EVRCompositorTimingMode::Explicit_RuntimePerformsPostPresentHandoff
         } else {
             vr::EVRCompositorTimingMode::Implicit
         };
@@ -3442,6 +3444,41 @@ mod tests {
         assert_eq!(f.wait_get_poses(), None);
         f.check_frame_state(fakexr::FrameState::Waited);
         assert!(rx.try_recv().is_ok(), "pending frame was not flushed");
+    }
+
+    /// IVRCompositor_021 apps may turn on explicit timing just for SubmitExplicitTimingData, and
+    /// keep relying on WaitGetPoses to hand their frames off.
+    #[test]
+    fn legacy_explicit_timing_without_handoff() {
+        use vr::IVRCompositor021On022;
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+        IVRCompositor021On022::SetExplicitTimingMode(&*f.comp, true);
+
+        for _ in 0..2 {
+            assert_eq!(f.wait_get_poses(), None);
+            assert_eq!(f.comp.SubmitExplicitTimingData(), None);
+            f.check_frame_state(fakexr::FrameState::Begun);
+            assert_eq!(f.submit(vr::EVREye::Left), None);
+            assert_eq!(f.submit(vr::EVREye::Right), None);
+            let (tx, rx) = std::sync::mpsc::channel();
+            fakexr::on_next_end_frame(f.raw_session(), move || tx.send(()).unwrap());
+            assert_eq!(f.wait_get_poses(), None);
+            assert!(rx.try_recv().is_ok(), "frame was not handed off");
+            f.check_frame_state(fakexr::FrameState::Waited);
+        }
+
+        // An app that hands off itself doesn't get its frames ended twice.
+        assert_eq!(f.comp.SubmitExplicitTimingData(), None);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        f.comp.PostPresentHandoff();
+        f.check_frame_state(fakexr::FrameState::Ended);
+        let (tx, rx) = std::sync::mpsc::channel();
+        fakexr::on_next_end_frame(f.raw_session(), move || tx.send(()).unwrap());
+        assert_eq!(f.wait_get_poses(), None);
+        assert!(rx.try_recv().is_err(), "frame was ended again");
+        f.check_frame_state(fakexr::FrameState::Waited);
     }
 
     #[test]
