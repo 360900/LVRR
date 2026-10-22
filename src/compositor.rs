@@ -2497,6 +2497,14 @@ mod tests {
         assert!(start.elapsed() >= 2 * period);
     }
 
+    /// The game may see a Vulkan driver without all the device extensions the runtime asks for.
+    #[test]
+    fn temporary_session_without_device_extensions() {
+        fakexr::vulkan::set_device_extensions(&[c"VK_foo"]);
+        let xr = OpenXrData::<Compositor>::new(&Injector::default(), vr::EVRApplicationType::Scene);
+        assert!(xr.is_ok());
+    }
+
     #[test]
     fn bad_bounds() {
         let f = Fixture::new();

@@ -1198,6 +1198,7 @@ pub enum RestartError {
 #[allow(dead_code)] // The state isn't used, but it's printed
 #[allow(clippy::enum_variant_names)]
 pub enum SessionCreationError {
+    TemporaryVulkanFailed(String),
     SessionCreationFailed(xr::sys::Result),
     PollEventFailed(xr::sys::Result),
     BeginSessionFailed(xr::sys::Result),
@@ -1262,7 +1263,8 @@ impl SessionData {
             }
             (None, info)
         } else {
-            let vk = VulkanData::new_temporary(instance, system_id);
+            let vk = VulkanData::try_new_temporary(instance, system_id)
+                .map_err(SessionCreationError::TemporaryVulkanFailed)?;
             info = SessionCreateInfo::from_info::<xr::Vulkan>(vk.session_create_info());
             (Some(vk), &info)
         };

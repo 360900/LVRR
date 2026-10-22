@@ -661,12 +661,21 @@ impl VulkanData {
         }
     }
 
+    #[cfg(test)]
     pub fn new_temporary(xr_instance: &xr::Instance, system_id: xr::SystemId) -> Self {
+        Self::try_new_temporary(xr_instance, system_id).unwrap()
+    }
+
+    /// Creates a device for a session that doesn't render yet.
+    pub fn try_new_temporary(
+        xr_instance: &xr::Instance,
+        system_id: xr::SystemId,
+    ) -> Result<Self, String> {
         let entry = new_entry();
 
         let inst_exts = xr_instance
             .vulkan_legacy_instance_extensions(system_id)
-            .unwrap();
+            .map_err(|e| format!("Couldn't get the required Vulkan instance extensions: {e}"))?;
         let inst_exts: Vec<CString> = inst_exts
             .split_ascii_whitespace()
             .map(|ext| CString::new(ext).unwrap())
@@ -685,32 +694,67 @@ impl VulkanData {
                         .enabled_extension_names(&inst_exts),
                     None,
                 )
-                .expect("Failed to create temporary Vulkan instance")
+                .map_err(|e| format!("Failed to create temporary Vulkan instance: {e}"))?
         };
 
+        let (physical_device, queue_family_index, device) =
+            Self::create_temporary_device(xr_instance, system_id, &instance).inspect_err(|_| {
+                unsafe { instance.destroy_instance(None) };
+            })?;
+        let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
+
+        Ok(Self {
+            _entry: entry,
+            instance,
+            physical_device,
+            device,
+            queue,
+            queue_family_index,
+            real_data: Default::default(),
+            owns_device: true,
+        })
+    }
+
+    fn create_temporary_device(
+        xr_instance: &xr::Instance,
+        system_id: xr::SystemId,
+        instance: &ash::Instance,
+    ) -> Result<(vk::PhysicalDevice, u32, ash::Device), String> {
         let physical_device = vk::PhysicalDevice::from_raw(unsafe {
             xr_instance
                 .vulkan_graphics_device(system_id, instance.handle().as_raw() as _)
-                .expect("Failed to get temporary Vulkan physical device") as _
+                .map_err(|e| format!("Failed to get temporary Vulkan physical device: {e}"))?
+                as _
         });
+
+        // The temporary session doesn't render, so it can do without device extensions that the
+        // Vulkan driver the game sees lacks.
+        let available = unsafe { instance.enumerate_device_extension_properties(physical_device) }
+            .map_err(|e| format!("Failed to get Vulkan device extensions: {e}"))?;
         let dev_exts = xr_instance
             .vulkan_legacy_device_extensions(system_id)
-            .unwrap();
-        let dev_exts: Vec<CString> = dev_exts
+            .map_err(|e| format!("Couldn't get the required Vulkan device extensions: {e}"))?;
+        let (dev_exts, missing): (Vec<CString>, Vec<CString>) = dev_exts
             .split_ascii_whitespace()
             .map(|ext| CString::new(ext).unwrap())
-            .collect();
+            .partition(|ext| {
+                available
+                    .iter()
+                    .any(|p| p.extension_name_as_c_str() == Ok(ext.as_c_str()))
+            });
+        if !missing.is_empty() {
+            warn!(
+                "The Vulkan device lacks extensions the runtime requires, the session might not work: {missing:?}"
+            );
+        }
         let dev_exts: Vec<*const c_char> = dev_exts.iter().map(|ext| ext.as_ptr()).collect();
 
         // find whatever graphics queue family
         let queue_family_index =
             unsafe { instance.get_physical_device_queue_family_properties(physical_device) }
                 .into_iter()
-                .enumerate()
-                .find_map(|(idx, family)| {
-                    (family.queue_flags.contains(vk::QueueFlags::GRAPHICS)).then_some(idx)
-                })
-                .unwrap() as u32;
+                .position(|family| family.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+                .ok_or("The Vulkan device has no graphics queue")? as u32;
 
         let device = unsafe {
             instance
@@ -725,21 +769,10 @@ impl VulkanData {
                         .enabled_extension_names(&dev_exts),
                     None,
                 )
-                .expect("Could not create temporary vulkan device")
+                .map_err(|e| format!("Could not create temporary vulkan device: {e}"))?
         };
 
-        let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
-
-        Self {
-            _entry: entry,
-            instance,
-            physical_device,
-            device,
-            queue,
-            queue_family_index,
-            real_data: Default::default(),
-            owns_device: true,
-        }
+        Ok((physical_device, queue_family_index, device))
     }
 }
 
