@@ -313,11 +313,7 @@ impl<C: Compositor> OpenXrData<C> {
                         xr::SessionState::STOPPING if exit_requested => {
                             debug!("session stopping at our request, not pushing Quit");
                         }
-                        xr::SessionState::STOPPING
-                            if cfg!(test) || session_data.temp_vulkan.is_none() =>
-                        {
-                            self.push_quit(false)
-                        }
+                        xr::SessionState::STOPPING => self.push_quit(false),
                         xr::SessionState::LOSS_PENDING => self.mark_lost("session loss pending"),
                         // We only end the session ourselves, so the runtime ended it.
                         xr::SessionState::EXITING if !exit_requested => {

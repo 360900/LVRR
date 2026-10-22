@@ -2782,6 +2782,26 @@ mod tests {
         assert_eq!(quit_events(&system), [true]);
     }
 
+    /// The runtime asking the app to quit before its first frame, while it's still on the
+    /// temporary session, must reach the app. Submit then must not start a new session.
+    #[test]
+    fn stopped_on_temporary_session() {
+        let f = Fixture::new();
+        let system = f.system();
+
+        f.comp
+            .openxr
+            .session_data
+            .get()
+            .session
+            .request_exit()
+            .unwrap();
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(quit_events(&system), [false]);
+        assert_eq!(f.submit(vr::EVREye::Left), DoNotHaveFocus);
+        assert!(!f.comp.openxr.session_data.get().is_real_session());
+    }
+
     #[test]
     fn late_action_manifest_does_not_quit() {
         use crate::input::Input;
