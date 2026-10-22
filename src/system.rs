@@ -1838,7 +1838,7 @@ mod tests {
     fn views_survive_locate_failure() {
         let xr =
             Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
-        let system = System::new(xr, &Injector::default());
+        let system = System::new(xr.clone(), &Injector::default());
         let projection = || {
             let [mut left, mut right, mut top, mut bottom] = [f32::NAN; 4];
             system.GetProjectionRaw(
@@ -1860,14 +1860,23 @@ mod tests {
         let eye_x = system.GetEyeToHeadTransform(vr::EVREye::Left).m[0][3];
         assert!(eye_x < 0.0, "{eye_x}");
 
-        // fakexr's views have a zero FOV.
+        // Located views, with a FOV unlike the made up one.
+        let fov = xr::Fovf {
+            angle_left: -0.5,
+            angle_right: 0.4,
+            angle_up: 0.3,
+            angle_down: -0.6,
+        };
+        let located = [-0.5f32.tan(), 0.4f32.tan(), -0.6f32.tan(), 0.3f32.tan()];
+        let session = xr.session_data.get().session.as_raw();
+        fakexr::set_views(session, [(xr::Posef::IDENTITY, fov); 2]);
         fakexr::set_locate_views_error(None);
-        assert_eq!(projection(), [0.0; 4]);
+        assert_eq!(projection(), located);
 
         // Failing again on the next frame: the last located views.
         fakexr::set_locate_views_error(Some(xr::sys::Result::ERROR_RUNTIME_FAILURE));
         system.reset_views();
-        assert_eq!(projection(), [0.0; 4]);
+        assert_eq!(projection(), located);
         assert!(system.located_views(xr::ReferenceSpaceType::VIEW).is_some());
     }
 
