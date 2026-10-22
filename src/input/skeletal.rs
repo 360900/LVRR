@@ -238,7 +238,6 @@ impl<C: openxr_data::Compositor> Input<C> {
         summary_data: &mut vr::VRSkeletalSummaryData_t,
         hand: Hand,
     ) {
-        let pose_data = &session_data.input_data.pose_data;
         let devices = session_data.input_data.devices.read().unwrap();
 
         let Some(controller) = devices.get_controller(hand) else {
@@ -246,16 +245,10 @@ impl<C: openxr_data::Compositor> Input<C> {
             return;
         };
 
-        let Some(raw) = match hand {
-            Hand::Left => &pose_data.left_space,
-            Hand::Right => &pose_data.right_space,
-        }
-        .try_get_or_init_raw(&controller.profile_data, session_data, pose_data) else {
-            self.get_estimated_bone_summary(session_data, summary_type, summary_data, hand);
-            return;
-        };
-
-        let Some(HandSkeleton { joints, .. }) = controller.get_hand_skeleton(&self.openxr, &raw)
+        // The curls only depend on the joints relative to each other, so locate them in the
+        // tracking space, which works whether or not the hand has a controller pose.
+        let Some(HandSkeleton { joints, .. }) =
+            controller.get_hand_skeleton(&self.openxr, session_data.tracking_space())
         else {
             self.get_estimated_bone_summary(session_data, summary_type, summary_data, hand);
             return;
