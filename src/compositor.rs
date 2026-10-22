@@ -1772,7 +1772,7 @@ where
         && current.sample_count == new.sample_count
 }
 
-fn is_valid_swapchain_info<G: xr::Graphics>(info: &xr::SwapchainCreateInfo<G>) -> bool {
+pub fn is_valid_swapchain_info<G: xr::Graphics>(info: &xr::SwapchainCreateInfo<G>) -> bool {
     info.width > 0 && info.height > 0
 }
 
@@ -1917,6 +1917,12 @@ mod tests {
     }
 
     impl FakeGraphicsData {
+        /// Sets the size of the textures created on this thread.
+        pub fn set_texture_size(width: u32, height: u32) {
+            SWAPCHAIN_WIDTH.set(width);
+            SWAPCHAIN_HEIGHT.set(height);
+        }
+
         pub fn texture(data: &Arc<VulkanData>) -> vr::Texture_t {
             vr::Texture_t {
                 eType: vr::ETextureType::Reserved,

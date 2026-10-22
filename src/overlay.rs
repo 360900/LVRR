@@ -1,6 +1,6 @@
 use crate::{
     clientcore::{Injected, Injector},
-    compositor::{Compositor, is_usable_swapchain},
+    compositor::{Compositor, is_usable_swapchain, is_valid_swapchain_info},
     graphics_backends::{GraphicsBackend, SupportedBackend, supported_apis_enum},
     openxr_data::{GraphicalSession, OpenXrData, Session, SessionData, SessionGuard},
     system::System,
@@ -9,7 +9,7 @@ use glam::{Mat3, Quat, Vec3, vec3};
 use log::{debug, trace};
 use openvr as vr;
 use openxr as xr;
-use slotmap::{Key, KeyData, SecondaryMap, SlotMap, new_key_type, secondary::Entry};
+use slotmap::{Key, KeyData, SecondaryMap, SlotMap, new_key_type};
 use std::f32::consts::TAU;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
@@ -711,64 +711,83 @@ impl Overlay {
                 debug!("received invalid overlay texture handle");
                 return Err(vr::EVROverlayError::InvalidTexture);
             };
-            let mut tex_swapchain_info =
+            let mut info =
                 backend.swapchain_info_for_texture(b_texture, texture_bounds, texture.eColorSpace);
             // OpenComposite creates overlay swapchains with arraySize=1; some runtimes (e.g. Monado)
             // do not render quad layers correctly when a multi-array swapchain is used.
-            tex_swapchain_info.array_size = 1;
-            let mut create_swapchain = || {
-                let mut info = backend.swapchain_info_for_texture(
-                    b_texture,
-                    texture_bounds,
-                    texture.eColorSpace,
+            info.array_size = 1;
+            // Degenerate bounds or a texture without storage.
+            if !is_valid_swapchain_info(&info) {
+                debug!(
+                    "overlay texture region is empty ({}x{})",
+                    info.width, info.height
                 );
-                info.array_size = 1;
-                let initial_format = info.format;
-                session_data.check_format::<G>(&mut info);
-                let swapchain = session_data.create_swapchain(&info)?;
-                let images = swapchain.enumerate_images()?;
-                backend.store_swapchain_images(images, G::from_openxr_format(info.format));
-                Ok(SwapchainData {
-                    swapchain,
-                    info,
-                    initial_format,
-                })
+                return Err(vr::EVROverlayError::InvalidTexture);
+            }
+            let failed = |call: &'static str| {
+                move |e| {
+                    openxr.handle_error(call, e);
+                    vr::EVROverlayError::RequestFailed
+                }
             };
-            let failed = |e| {
-                openxr.handle_error("Updating overlay swapchain", e);
-                vr::EVROverlayError::RequestFailed
-            };
-            let swapchain = {
-                let data = match map.entry(key).unwrap() {
-                    Entry::Occupied(entry) => entry.into_mut(),
-                    Entry::Vacant(entry) => entry.insert(create_swapchain().map_err(failed)?),
-                };
-                if !is_usable_swapchain(
+
+            if !map.get(key).is_some_and(|data| {
+                is_usable_swapchain(
                     &data.info,
                     G::from_openxr_format(data.initial_format),
-                    &tex_swapchain_info,
-                    G::from_openxr_format(tex_swapchain_info.format),
-                ) {
-                    *data = create_swapchain().map_err(failed)?;
-                }
-                &mut data.swapchain
+                    &info,
+                    G::from_openxr_format(info.format),
+                )
+            }) {
+                let initial_format = info.format;
+                session_data.check_format::<G>(&mut info);
+                let swapchain = session_data
+                    .create_swapchain(&info)
+                    .map_err(failed("Creating overlay swapchain"))?;
+                let images = swapchain
+                    .enumerate_images()
+                    .map_err(failed("Enumerating overlay swapchain images"))?;
+                backend.store_swapchain_images(images, G::from_openxr_format(info.format));
+                map.insert(
+                    key,
+                    SwapchainData {
+                        swapchain,
+                        info,
+                        initial_format,
+                    },
+                );
+            }
+
+            let swapchain = &mut map[key].swapchain;
+            let mut copy = || {
+                let idx = swapchain.acquire_image()?;
+                swapchain.wait_image(xr::Duration::INFINITE)?;
+                let extent =
+                    backend.copy_overlay_to_swapchain(b_texture, texture_bounds, idx as usize);
+                swapchain.release_image()?;
+                Ok(extent)
             };
-            let idx = swapchain.acquire_image().map_err(failed)?;
-            swapchain
-                .wait_image(xr::Duration::INFINITE)
-                .map_err(failed)?;
-
-            let extent = backend.copy_overlay_to_swapchain(b_texture, texture_bounds, idx as usize);
-            swapchain.release_image().map_err(failed)?;
-
-            Ok(extent)
+            copy().map_err(|e| {
+                // The swapchain might still hold an acquired image, so start over with a new one.
+                map.remove(key);
+                failed("Updating overlay swapchain")(e)
+            })
         }
 
+        // Bounds outside the texture would have the backends copy from outside of it.
+        let b = self.bounds;
+        let clamp = |v: f32| v.clamp(0.0, 1.0);
+        let bounds = vr::VRTextureBounds_t {
+            uMin: clamp(b.uMin),
+            vMin: clamp(b.vMin),
+            uMax: clamp(b.uMax),
+            vMax: clamp(b.vMax),
+        };
         let backend = self.compositor.as_mut().unwrap();
         let extent = backend.with_any_graphics_mut::<set_swapchain_texture>((
             openxr,
             &session_data,
-            self.bounds,
+            bounds,
             swapchains,
             key,
             texture,
@@ -2494,6 +2513,25 @@ mod tests {
             vr::EVROverlayError::None
         );
         assert!(matches!(f.layers(false).as_slice(), [TestLayer::Quad(..)]));
+    }
+
+    #[test]
+    fn empty_overlay_texture_is_rejected() {
+        use crate::compositor::FakeGraphicsData;
+        let f = RealSessionFixture::new();
+        let shown = f.textured_overlay(c"shown");
+        let new = create(&f.man, c"new", c"new");
+
+        FakeGraphicsData::set_texture_size(0, 10);
+        for handle in [shown, new] {
+            assert_eq!(
+                f.man.SetOverlayTexture(handle, &f.texture()),
+                vr::EVROverlayError::InvalidTexture
+            );
+        }
+        FakeGraphicsData::set_texture_size(10, 10);
+        // The previous texture stays up.
+        assert_eq!(f.layers(false).len(), 1);
     }
 
     #[test]
