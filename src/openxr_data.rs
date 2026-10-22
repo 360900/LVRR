@@ -1213,6 +1213,7 @@ impl SessionCreationError {
             | Self::PollEventFailed(e)
             | Self::BeginSessionFailed(e) => e,
             Self::SessionLost(_) => xr::sys::Result::ERROR_SESSION_LOST,
+            Self::TemporaryVulkanFailed(_) => xr::sys::Result::ERROR_RUNTIME_FAILURE,
         }
     }
 }
