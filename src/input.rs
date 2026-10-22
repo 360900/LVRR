@@ -1697,8 +1697,10 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
                 let mut path = xr::Path::NULL;
                 if let Some(new_path) = self.subaction_path_from_handle(set.ulRestrictedToDevice) {
                     path = new_path;
-                    // Handle secondary action set
-                    if set.ulSecondaryActionSet != vr::k_ulInvalidInputValueHandle {
+                    // The secondary set is ignored unless the primary set is restricted.
+                    if path != xr::Path::NULL
+                        && set.ulSecondaryActionSet != vr::k_ulInvalidActionSetHandle
+                    {
                         let left_hand_subaction_path = self.get_subaction_path(Hand::Left);
                         let right_hand_subaction_path = self.get_subaction_path(Hand::Right);
                         let path = if path == left_hand_subaction_path {

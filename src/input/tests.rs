@@ -2099,6 +2099,39 @@ fn restricted_set_without_openxr_actions() {
 }
 
 #[test]
+fn secondary_set_needs_restricted_primary() {
+    let mut f = Fixture::new();
+    f.load_actions(c"actions_pose_only_set.json");
+    let main = f.get_action_set_handle(c"/actions/main");
+    let poses = f.get_action_set_handle(c"/actions/poses");
+    let boolact = f.get_action_handle(c"/actions/main/in/boolact");
+    let left = f.get_input_source_handle(c"/user/hand/left");
+    fakexr::set_action_state(f.get_action::<bool>(boolact), true.into(), RightHand);
+
+    // Unrestricted: the secondary set is ignored, even if it isn't a valid handle.
+    f.sync(vr::VRActiveActionSet_t {
+        ulActionSet: poses,
+        ulSecondaryActionSet: main,
+        ..Default::default()
+    });
+    assert!(!f.get_bool_state(boolact).unwrap().bActive);
+    f.sync(vr::VRActiveActionSet_t {
+        ulActionSet: poses,
+        ulSecondaryActionSet: 12345,
+        ..Default::default()
+    });
+
+    // Restricted to the left hand: the secondary set is active for the right hand.
+    f.sync(vr::VRActiveActionSet_t {
+        ulActionSet: poses,
+        ulRestrictedToDevice: left,
+        ulSecondaryActionSet: main,
+        ..Default::default()
+    });
+    assert!(f.get_bool_state(boolact).unwrap().bActive);
+}
+
+#[test]
 fn push_priority_keeps_highest() {
     let f = Fixture::new();
     let instance = &f.input.openxr.instance;
