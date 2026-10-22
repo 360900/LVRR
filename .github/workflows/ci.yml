@@ -90,7 +90,7 @@ jobs:
         fetch-depth: 0
     - uses: ./.github/actions/build
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo test --workspace --verbose
     - name: Run tests with miri
       run: cargo +nightly miri test
     - name: Format check
