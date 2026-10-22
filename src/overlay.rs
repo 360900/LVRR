@@ -86,7 +86,7 @@ impl OverlayMan {
                 return Err(vr::EVROverlayError::RequestFailed);
             };
             compositor
-                .initialize_real_session(texture, bounds)
+                .initialize_real_session(texture, bounds, vr::EVRSubmitFlags::Default)
                 .map_err(|_| vr::EVROverlayError::InvalidTexture)?;
         }
         Ok(RealSessionData(self.openxr.session_data.get()))
@@ -857,7 +857,7 @@ impl Overlay {
                     std::any::type_name::<G::Api>()
                 );
             });
-            let Some(b_texture) = G::get_texture(&texture) else {
+            let Some(b_texture) = G::get_texture(&texture, vr::EVRSubmitFlags::Default) else {
                 debug!("received invalid overlay texture handle");
                 return Err(vr::EVROverlayError::InvalidTexture);
             };

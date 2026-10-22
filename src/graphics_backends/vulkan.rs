@@ -126,7 +126,7 @@ impl GraphicsBackend for VulkanData {
         }
     }
 
-    fn get_texture(texture: &vr::Texture_t) -> Option<Self::OpenVrTexture> {
+    fn get_texture(texture: &vr::Texture_t, _: vr::EVRSubmitFlags) -> Option<Self::OpenVrTexture> {
         if !texture.handle.is_null() {
             Some(texture.handle.cast())
         } else {

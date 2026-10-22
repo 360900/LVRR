@@ -11,7 +11,7 @@ use openvr as vr;
 use openxr as xr;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr;
-use std::sync::{LazyLock, Once, OnceLock};
+use std::sync::{LazyLock, Mutex, Once, OnceLock, PoisonError};
 use xr::sys::Handle as _;
 use xr::sys::platform::{EGLConfig, EGLContext, EGLDisplay, EglGetProcAddressMNDX};
 
@@ -251,6 +251,58 @@ unsafe fn xlib_session_info(
     }
 }
 
+unsafe fn get_fbconfig(
+    glx: &GlxLib,
+    display: *mut glx::types::Display,
+    glx_context: glx::types::GLXContext,
+) -> Option<glx::types::GLXFBConfig> {
+    unsafe {
+        let mut config_id = 0;
+        let ret = glx.QueryContext(display, glx_context, glx::FBCONFIG_ID as _, &mut config_id);
+        if ret != Success as i32 {
+            warn!("Failed to get fbconfig id from context (error code {ret})");
+            return None;
+        }
+
+        let mut screen = 0;
+        let ret = glx.QueryContext(display, glx_context, glx::SCREEN as _, &mut screen);
+        if ret != Success as i32 {
+            warn!("Failed to get GLX screen for context (error code {ret})");
+            return None;
+        }
+
+        let attrs = [glx::FBCONFIG_ID, config_id as _, glx::NONE];
+        let mut items = 0;
+        let cfgs = glx.ChooseFBConfig(display, screen, attrs.as_ptr() as _, &mut items);
+        if cfgs.is_null() {
+            return None;
+        }
+        // The configs belong to the display, only the array is ours.
+        let cfg = (items > 0).then(|| *cfgs);
+        if let Some(x_free) = glx.x_free {
+            x_free(cfgs.cast());
+        }
+        cfg
+    }
+}
+
+unsafe fn get_visualid(
+    glx: &Glx,
+    display: *mut glx::types::Display,
+    cfg: Option<glx::types::GLXFBConfig>,
+) -> Option<u32> {
+    unsafe {
+        let mut visualid = 0;
+        let ret = glx.GetFBConfigAttrib(display, cfg?, glx::VISUAL_ID as _, &mut visualid);
+        if ret != Success as i32 || visualid == 0 {
+            warn!("No visual available from fbconfig.");
+            None
+        } else {
+            Some(visualid as u32)
+        }
+    }
+}
+
 impl xr::Graphics for GlApi {
     type Requirements = <xr::OpenGL as xr::Graphics>::Requirements;
     type SessionCreateInfo = SessionCreateInfo;
@@ -365,58 +417,16 @@ pub struct GlData {
     format: u32,
     read_fbo: u32,
     draw_fbo: u32,
+    resolved: Mutex<Resolved>,
 }
 
-unsafe fn get_fbconfig(
-    glx: &GlxLib,
-    display: *mut glx::types::Display,
-    glx_context: glx::types::GLXContext,
-) -> Option<glx::types::GLXFBConfig> {
-    unsafe {
-        let mut config_id = 0;
-        let ret = glx.QueryContext(display, glx_context, glx::FBCONFIG_ID as _, &mut config_id);
-        if ret != Success as i32 {
-            warn!("Failed to get fbconfig id from context (error code {ret})");
-            return None;
-        }
-
-        let mut screen = 0;
-        let ret = glx.QueryContext(display, glx_context, glx::SCREEN as _, &mut screen);
-        if ret != Success as i32 {
-            warn!("Failed to get GLX screen for context (error code {ret})");
-            return None;
-        }
-
-        let attrs = [glx::FBCONFIG_ID, config_id as _, glx::NONE];
-        let mut items = 0;
-        let cfgs = glx.ChooseFBConfig(display, screen, attrs.as_ptr() as _, &mut items);
-        if cfgs.is_null() {
-            return None;
-        }
-        // The configs belong to the display, only the array is ours.
-        let cfg = (items > 0).then(|| *cfgs);
-        if let Some(x_free) = glx.x_free {
-            x_free(cfgs.cast());
-        }
-        cfg
-    }
-}
-
-unsafe fn get_visualid(
-    glx: &Glx,
-    display: *mut glx::types::Display,
-    cfg: Option<glx::types::GLXFBConfig>,
-) -> Option<u32> {
-    unsafe {
-        let mut visualid = 0;
-        let ret = glx.GetFBConfigAttrib(display, cfg?, glx::VISUAL_ID as _, &mut visualid);
-        if ret != Success as i32 || visualid == 0 {
-            warn!("No visual available from fbconfig.");
-            None
-        } else {
-            Some(visualid as u32)
-        }
-    }
+/// Single-sample copy of a multisampled renderbuffer, see [GlData::resolve].
+#[derive(Default)]
+struct Resolved {
+    renderbuffer: GLuint,
+    width: GLint,
+    height: GLint,
+    format: GLenum,
 }
 
 impl GlData {
@@ -454,6 +464,7 @@ impl GlData {
             format: 0,
             read_fbo: fbos[0],
             draw_fbo: fbos[1],
+            resolved: Default::default(),
         })
     }
 }
@@ -462,14 +473,21 @@ impl Drop for GlData {
     fn drop(&mut self) {
         // Framebuffers aren't shared between contexts, in another one these could be the app's.
         if self.session_info.is_current() {
-            unsafe { gl::DeleteFramebuffers(2, [self.read_fbo, self.draw_fbo].as_ptr()) };
+            let resolved = self
+                .resolved
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner);
+            unsafe {
+                gl::DeleteFramebuffers(2, [self.read_fbo, self.draw_fbo].as_ptr());
+                gl::DeleteRenderbuffers(1, &resolved.renderbuffer);
+            }
         }
     }
 }
 
 impl GraphicsBackend for GlData {
     type Api = GlApi;
-    type OpenVrTexture = gl::types::GLuint;
+    type OpenVrTexture = GlTexture;
     type Format = u32;
     type NiceFormat = u32;
 
@@ -494,8 +512,19 @@ impl GraphicsBackend for GlData {
     }
 
     #[inline]
-    fn get_texture(texture: &vr::Texture_t) -> Option<Self::OpenVrTexture> {
-        Some(texture.handle as _)
+    fn get_texture(texture: &vr::Texture_t, flags: vr::EVRSubmitFlags) -> Option<GlTexture> {
+        let has_flag = |flag: vr::EVRSubmitFlags| (flags & flag).0 != 0;
+        let target = if has_flag(vr::EVRSubmitFlags::GlRenderBuffer) {
+            gl::RENDERBUFFER
+        } else if has_flag(vr::EVRSubmitFlags::GlArrayTexture) {
+            gl::TEXTURE_2D_ARRAY
+        } else {
+            gl::TEXTURE_2D
+        };
+        Some(GlTexture {
+            name: texture.handle as usize as GLuint,
+            target,
+        })
     }
 
     #[inline]
@@ -515,19 +544,15 @@ impl GraphicsBackend for GlData {
         bounds: vr::VRTextureBounds_t,
         color_space: vr::EColorSpace,
     ) -> xr::SwapchainCreateInfo<Self::Api> {
-        let mut fmt = 0;
-        unsafe {
-            gl::BindTexture(gl::TEXTURE_2D, texture);
-            gl::GetTexLevelParameteriv(gl::TEXTURE_2D, 0, gl::TEXTURE_INTERNAL_FORMAT, &mut fmt);
-        }
-        let xr::Rect2Di { extent, .. } = texture_rect_from_bounds(texture, bounds);
+        let info = texture.info();
+        let xr::Rect2Di { extent, .. } = info.rect(bounds);
 
         xr::SwapchainCreateInfo {
             create_flags: xr::SwapchainCreateFlags::EMPTY,
             // The blit path renders into the swapchain images.
             usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT
                 | xr::SwapchainUsageFlags::TRANSFER_DST,
-            format: swapchain_format(fmt as GLenum, color_space),
+            format: swapchain_format(info.format, color_space),
             sample_count: 1,
             width: extent.width as u32,
             height: extent.height as u32,
@@ -550,7 +575,14 @@ impl GraphicsBackend for GlData {
             name: self.images[image_index],
             target: gl::TEXTURE_2D_ARRAY,
         };
-        self.copy(texture, color_space, bounds, dst, eye.0 as i32)
+        self.copy(
+            texture,
+            eye.0 as GLint,
+            color_space,
+            bounds,
+            dst,
+            eye.0 as GLint,
+        )
     }
 
     fn copy_overlay_to_swapchain(
@@ -566,65 +598,145 @@ impl GraphicsBackend for GlData {
             name: self.images[image_index],
             target: gl::TEXTURE_2D,
         };
-        self.copy(texture, vr::EColorSpace::Auto, bounds, dst, 0)
+        self.copy(texture, 0, vr::EColorSpace::Auto, bounds, dst, 0)
     }
 }
 
-/// A texture name and the target it's bound to.
+/// A texture or renderbuffer name and its target.
 #[derive(Copy, Clone)]
-struct GlTexture {
+pub struct GlTexture {
     name: GLuint,
     target: GLenum,
 }
 
+struct TextureInfo {
+    width: GLint,
+    height: GLint,
+    layers: GLint,
+    format: GLenum,
+    samples: GLint,
+}
+
+impl TextureInfo {
+    fn rect(&self, bounds: vr::VRTextureBounds_t) -> xr::Rect2Di {
+        let width_min = bounds.uMin * self.width as f32;
+        let width_max = bounds.uMax * self.width as f32;
+        let height_min = bounds.vMin * self.height as f32;
+        let height_max = bounds.vMax * self.height as f32;
+
+        xr::Rect2Di {
+            extent: xr::Extent2Di {
+                width: (width_max - width_min).abs() as i32,
+                height: (height_max - height_min).abs() as i32,
+            },
+            offset: xr::Offset2Di {
+                x: width_min.min(width_max) as i32,
+                y: height_min.min(height_max) as i32,
+            },
+        }
+    }
+}
+
 impl GlTexture {
+    /// Queries the texture, leaving the app's bindings as they were.
+    fn info(self) -> TextureInfo {
+        unsafe {
+            if self.target == gl::RENDERBUFFER {
+                let mut bound = 0;
+                gl::GetIntegerv(gl::RENDERBUFFER_BINDING, &mut bound);
+                gl::BindRenderbuffer(gl::RENDERBUFFER, self.name);
+                let get = |param| {
+                    let mut value = 0;
+                    gl::GetRenderbufferParameteriv(gl::RENDERBUFFER, param, &mut value);
+                    value
+                };
+                let info = TextureInfo {
+                    width: get(gl::RENDERBUFFER_WIDTH),
+                    height: get(gl::RENDERBUFFER_HEIGHT),
+                    layers: 1,
+                    format: get(gl::RENDERBUFFER_INTERNAL_FORMAT) as GLenum,
+                    samples: get(gl::RENDERBUFFER_SAMPLES),
+                };
+                gl::BindRenderbuffer(gl::RENDERBUFFER, bound as GLuint);
+                info
+            } else {
+                let array = self.target == gl::TEXTURE_2D_ARRAY;
+                let binding = if array {
+                    gl::TEXTURE_BINDING_2D_ARRAY
+                } else {
+                    gl::TEXTURE_BINDING_2D
+                };
+                let mut bound = 0;
+                gl::GetIntegerv(binding, &mut bound);
+                gl::BindTexture(self.target, self.name);
+                let get = |param| {
+                    let mut value = 0;
+                    gl::GetTexLevelParameteriv(self.target, 0, param, &mut value);
+                    value
+                };
+                let info = TextureInfo {
+                    width: get(gl::TEXTURE_WIDTH),
+                    height: get(gl::TEXTURE_HEIGHT),
+                    layers: if array { get(gl::TEXTURE_DEPTH) } else { 1 },
+                    format: get(gl::TEXTURE_INTERNAL_FORMAT) as GLenum,
+                    samples: 0,
+                };
+                gl::BindTexture(self.target, bound as GLuint);
+                info
+            }
+        }
+    }
+
     unsafe fn attach(self, framebuffer: GLenum, layer: GLint) {
         unsafe {
-            if self.target == gl::TEXTURE_2D_ARRAY {
-                gl::FramebufferTextureLayer(
+            match self.target {
+                gl::RENDERBUFFER => gl::FramebufferRenderbuffer(
+                    framebuffer,
+                    gl::COLOR_ATTACHMENT0,
+                    gl::RENDERBUFFER,
+                    self.name,
+                ),
+                gl::TEXTURE_2D_ARRAY => gl::FramebufferTextureLayer(
                     framebuffer,
                     gl::COLOR_ATTACHMENT0,
                     self.name,
                     0,
                     layer,
-                );
-            } else {
-                gl::FramebufferTexture2D(
+                ),
+                target => gl::FramebufferTexture2D(
                     framebuffer,
                     gl::COLOR_ATTACHMENT0,
-                    self.target,
+                    target,
                     self.name,
                     0,
-                );
+                ),
             }
         }
     }
 }
 
 impl GlData {
-    /// Copies `texture` into layer `dst_layer` of the swapchain image `dst`.
+    /// Copies `src` (layer `eye` if it's an array) into layer `dst_layer` of the swapchain
+    /// image `dst`.
     fn copy(
         &self,
-        texture: GLuint,
+        src: GlTexture,
+        eye: GLint,
         color_space: vr::EColorSpace,
         bounds: vr::VRTextureBounds_t,
         dst: GlTexture,
         dst_layer: GLint,
     ) -> xr::Extent2Di {
-        let rect = texture_rect_from_bounds(texture, bounds);
-        let src = GlTexture {
-            name: texture,
-            target: gl::TEXTURE_2D,
+        let info = src.info();
+        let rect = info.rect(bounds);
+        let (src, src_layer) = if info.samples > 0 {
+            (unsafe { self.resolve(src, &info) }, 0)
+        } else {
+            // Plain Submit has no layer index, so stereo array textures have a layer per eye.
+            (src, if eye < info.layers { eye } else { 0 })
         };
 
-        let mut fmt = 0;
-        unsafe {
-            gl::BindTexture(gl::TEXTURE_2D, texture);
-            gl::GetTexLevelParameteriv(gl::TEXTURE_2D, 0, gl::TEXTURE_INTERNAL_FORMAT, &mut fmt);
-            gl::BindTexture(gl::TEXTURE_2D, 0);
-        }
-
-        match copy_method(fmt as GLenum, color_space, self.format) {
+        match copy_method(info.format, color_space, self.format) {
             CopyMethod::Copy => unsafe {
                 gl::CopyImageSubData(
                     src.name,
@@ -632,7 +744,7 @@ impl GlData {
                     0, // level
                     rect.offset.x,
                     rect.offset.y,
-                    0, // z
+                    src_layer,
                     dst.name,
                     dst.target,
                     0, // level
@@ -644,10 +756,48 @@ impl GlData {
                     1,
                 );
             },
-            CopyMethod::Blit { srgb } => unsafe { self.blit(src, rect, dst, dst_layer, srgb) },
+            CopyMethod::Blit { srgb } => unsafe {
+                self.blit(src, src_layer, rect, dst, dst_layer, srgb)
+            },
         }
 
         rect.extent
+    }
+
+    /// Resolves a multisampled renderbuffer into a single-sample one with the same size and
+    /// format, since resolving blits can't convert formats or move the rect.
+    unsafe fn resolve(&self, src: GlTexture, info: &TextureInfo) -> GlTexture {
+        let mut resolved = self.resolved.lock().unwrap();
+        unsafe {
+            if resolved.renderbuffer == 0 {
+                gl::GenRenderbuffers(1, &mut resolved.renderbuffer);
+            }
+            let dst = GlTexture {
+                name: resolved.renderbuffer,
+                target: gl::RENDERBUFFER,
+            };
+            if (resolved.width, resolved.height, resolved.format)
+                != (info.width, info.height, info.format)
+            {
+                let mut bound = 0;
+                gl::GetIntegerv(gl::RENDERBUFFER_BINDING, &mut bound);
+                gl::BindRenderbuffer(gl::RENDERBUFFER, dst.name);
+                gl::RenderbufferStorage(gl::RENDERBUFFER, info.format, info.width, info.height);
+                gl::BindRenderbuffer(gl::RENDERBUFFER, bound as GLuint);
+                (resolved.width, resolved.height, resolved.format) =
+                    (info.width, info.height, info.format);
+            }
+
+            let rect = xr::Rect2Di {
+                offset: Default::default(),
+                extent: xr::Extent2Di {
+                    width: info.width,
+                    height: info.height,
+                },
+            };
+            self.blit(src, 0, rect, dst, 0, true);
+            dst
+        }
     }
 
     /// Blits `rect` of `src` to the origin of `dst`, with GL_FRAMEBUFFER_SRGB set to `srgb`.
@@ -655,6 +805,7 @@ impl GlData {
     unsafe fn blit(
         &self,
         src: GlTexture,
+        src_layer: GLint,
         rect: xr::Rect2Di,
         dst: GlTexture,
         dst_layer: GLint,
@@ -669,7 +820,7 @@ impl GlData {
             let scissor_test = set_enabled(gl::SCISSOR_TEST, false);
 
             gl::BindFramebuffer(gl::READ_FRAMEBUFFER, self.read_fbo);
-            src.attach(gl::READ_FRAMEBUFFER, 0);
+            src.attach(gl::READ_FRAMEBUFFER, src_layer);
             gl::BindFramebuffer(gl::DRAW_FRAMEBUFFER, self.draw_fbo);
             dst.attach(gl::DRAW_FRAMEBUFFER, dst_layer);
             gl::BlitFramebuffer(
@@ -760,34 +911,6 @@ fn swapchain_format(format: GLenum, color_space: vr::EColorSpace) -> GLenum {
         gl::SRGB8_ALPHA8
     } else {
         sized
-    }
-}
-
-fn texture_rect_from_bounds(
-    texture: glx::types::GLuint,
-    bounds: vr::VRTextureBounds_t,
-) -> xr::Rect2Di {
-    let [mut height, mut width] = Default::default();
-    unsafe {
-        gl::BindTexture(gl::TEXTURE_2D, texture);
-        gl::GetTexLevelParameteriv(gl::TEXTURE_2D, 0, gl::TEXTURE_WIDTH, &mut width);
-        gl::GetTexLevelParameteriv(gl::TEXTURE_2D, 0, gl::TEXTURE_HEIGHT, &mut height);
-        gl::BindTexture(gl::TEXTURE_2D, 0);
-    }
-    let width_min = bounds.uMin * width as f32;
-    let width_max = bounds.uMax * width as f32;
-    let height_min = bounds.vMin * height as f32;
-    let height_max = bounds.vMax * height as f32;
-
-    xr::Rect2Di {
-        extent: xr::Extent2Di {
-            width: (width_max - width_min).abs() as i32,
-            height: (height_max - height_min).abs() as i32,
-        },
-        offset: xr::Offset2Di {
-            x: width_min.min(width_max) as i32,
-            y: height_min.min(height_max) as i32,
-        },
     }
 }
 
@@ -975,6 +1098,24 @@ mod tests {
                 "{format:#x} {color_space:?} {swapchain_format:#x}"
             );
         }
+    }
+
+    #[test]
+    fn submit_flags_pick_texture_target() {
+        use vr::EVRSubmitFlags as Flags;
+        let texture = vr::Texture_t {
+            handle: 5 as _,
+            eType: vr::ETextureType::OpenGL,
+            eColorSpace: vr::EColorSpace::Auto,
+        };
+        let get = |flags| GlData::get_texture(&texture, flags).unwrap();
+        assert_eq!(get(Flags::Default).name, 5);
+        assert_eq!(get(Flags::Default).target, gl::TEXTURE_2D);
+        assert_eq!(get(Flags::GlArrayTexture).target, gl::TEXTURE_2D_ARRAY);
+        assert_eq!(
+            get(Flags::GlRenderBuffer | Flags::LensDistortionAlreadyApplied).target,
+            gl::RENDERBUFFER
+        );
     }
 
     #[test]

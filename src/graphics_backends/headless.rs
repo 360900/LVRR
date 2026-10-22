@@ -50,7 +50,10 @@ impl GraphicsBackend for HeadlessData {
     }
 
     #[inline]
-    fn get_texture(texture: &openvr::Texture_t) -> Option<Self::OpenVrTexture> {
+    fn get_texture(
+        texture: &openvr::Texture_t,
+        _: openvr::EVRSubmitFlags,
+    ) -> Option<Self::OpenVrTexture> {
         if !texture.handle.is_null() {
             Some(texture.handle.cast())
         } else {

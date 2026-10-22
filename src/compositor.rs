@@ -203,6 +203,7 @@ impl Compositor {
         &self,
         texture: &vr::Texture_t,
         bounds: vr::VRTextureBounds_t,
+        submit_flags: vr::EVRSubmitFlags,
     ) -> Result<(), vr::EVRCompositorError> {
         let restart_error = |e| match e {
             RestartError::Exiting => vr::EVRCompositorError::DoNotHaveFocus,
@@ -243,12 +244,13 @@ impl Compositor {
             backend: G,
             texture: &vr::Texture_t,
             bounds: vr::VRTextureBounds_t,
+            submit_flags: vr::EVRSubmitFlags,
         ) -> Result<AnyTempBackendData, vr::EVRCompositorError>
         where
             AnyTempBackendData: From<TempBackendData<G>>,
         {
-            let b_texture =
-                G::get_texture(texture).ok_or(vr::EVRCompositorError::InvalidTexture)?;
+            let b_texture = G::get_texture(texture, submit_flags)
+                .ok_or(vr::EVRCompositorError::InvalidTexture)?;
             let info = backend.swapchain_info_for_texture(b_texture, bounds, texture.eColorSpace);
             Ok(TempBackendData {
                 backend,
@@ -258,7 +260,7 @@ impl Compositor {
         }
 
         let tmp_backend = backend
-            .with_any_graphics_owned::<swapchain_info>((texture, bounds))
+            .with_any_graphics_owned::<swapchain_info>((texture, bounds, submit_flags))
             .inspect_err(|_| debug!("received invalid texture handle, not restarting session"))?;
         *self.tmp_backend.lock().unwrap() = Some(tmp_backend);
 
@@ -921,7 +923,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
                 drop(frame_lock);
                 drop(session_lock);
 
-                if let Err(e) = self.initialize_real_session(texture, bounds) {
+                if let Err(e) = self.initialize_real_session(texture, bounds, submit_flags) {
                     return e;
                 }
                 info!("Received game texture, restarted session with new data");
@@ -952,7 +954,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
             G::Format: Eq + std::fmt::Debug,
         {
             let real_texture =
-                G::get_texture(texture).ok_or(vr::EVRCompositorError::InvalidTexture)?;
+                G::get_texture(texture, flags).ok_or(vr::EVRCompositorError::InvalidTexture)?;
             ctrl.submit_impl(
                 openxr,
                 session_data,
@@ -1883,8 +1885,11 @@ mod tests {
             CONTEXT_CURRENT.get()
         }
 
-        fn get_texture(texture: &openvr::Texture_t) -> Option<Self::OpenVrTexture> {
-            VulkanData::get_texture(texture)
+        fn get_texture(
+            texture: &openvr::Texture_t,
+            flags: openvr::EVRSubmitFlags,
+        ) -> Option<Self::OpenVrTexture> {
+            VulkanData::get_texture(texture, flags)
         }
 
         fn raw_swapchain_info_for_texture(
@@ -2888,7 +2893,11 @@ mod tests {
             uMax: 1.0,
             vMax: 1.0,
         };
-        assert_eq!(f.comp.initialize_real_session(&texture, bounds), Ok(()));
+        assert_eq!(
+            f.comp
+                .initialize_real_session(&texture, bounds, vr::EVRSubmitFlags::Default),
+            Ok(())
+        );
 
         let (tx, rx) = std::sync::mpsc::channel();
         fakexr::on_next_end(
@@ -2897,7 +2906,11 @@ mod tests {
                 let _ = tx.send(());
             },
         );
-        assert_eq!(f.comp.initialize_real_session(&texture, bounds), Ok(()));
+        assert_eq!(
+            f.comp
+                .initialize_real_session(&texture, bounds, vr::EVRSubmitFlags::Default),
+            Ok(())
+        );
         assert!(rx.try_recv().is_err(), "real session was restarted");
     }
 

@@ -31,8 +31,11 @@ pub trait GraphicsBackend: Into<SupportedBackend> {
         true
     }
 
-    /// Returns None if the texture is invalid.
-    fn get_texture(texture: &vr::Texture_t) -> Option<Self::OpenVrTexture>;
+    /// Returns None if the texture is invalid. Submit flags can change what the handle is.
+    fn get_texture(
+        texture: &vr::Texture_t,
+        flags: vr::EVRSubmitFlags,
+    ) -> Option<Self::OpenVrTexture>;
 
     /// Backend implementation for swapchain_info_for_texture. Callers should
     /// use swapchain_info_for_texture instead, which fixes up invalid values
