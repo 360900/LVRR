@@ -1948,6 +1948,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         active_set_size: u32,
         active_set_count: u32,
     ) -> vr::EVRInputError {
+        self.openxr.pump();
         // alyx, portal 2 ce
         if active_set_count == 0 || active_set_size == 0 {
             return vr::EVRInputError::NoActiveActionSet;

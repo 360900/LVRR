@@ -27,6 +27,9 @@ const SESSION_STATE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Unknown to the openxr crate, so it lives in `ExtensionSet::other`, whose names keep their nul.
 pub const XR_VALVE_FRAME_CONTROLLER_INTERACTION: &[u8] = b"XR_VALVE_frame_controller_interaction\0";
 
+/// How long after its last WaitGetPoses an app no longer counts as running a frame loop.
+const FRAME_LOOP_TIMEOUT: Duration = Duration::from_millis(250);
+
 #[cfg(feature = "monado")]
 use openxr_mndx_xdev_space::XR_MNDX_XDEV_SPACE_EXTENSION_NAME;
 
@@ -90,6 +93,8 @@ pub struct OpenXrData<C: Compositor> {
     pending_recenter: parking_lot::Mutex<Option<xr::Time>>,
     /// Set when the runtime moved STAGE and the app's standing zero pose is still in place.
     stage_moved: AtomicBool,
+    /// Held while WaitGetPoses or [Self::pump] run the per-frame update.
+    frame_updates: parking_lot::Mutex<FrameUpdates>,
 
     /// should only be externally accessed for testing
     pub(crate) input: Injected<crate::input::Input<C>>,
@@ -328,10 +333,44 @@ impl<C: Compositor> OpenXrData<C> {
             input_focus_captured: false.into(),
             pending_recenter: parking_lot::Mutex::new(None),
             stage_moved: false.into(),
+            frame_updates: Default::default(),
             input: injector.inject(),
             compositor: injector.inject(),
             system: injector.inject(),
         })
+    }
+
+    /// Marks WaitGetPoses' per-frame update (event polling, action sync), which keeps
+    /// [Self::pump] out of the way while the app runs a frame loop.
+    pub fn frame_update(&self) -> FrameUpdateGuard<'_> {
+        FrameUpdateGuard(self.frame_updates.lock())
+    }
+
+    /// Events are polled and actions synced in WaitGetPoses, which apps that don't render
+    /// (Background/Overlay/Utility apps, tools) never call - so they would never see controllers
+    /// or Quit. This runs that update from the calls such apps do make instead, at most once per
+    /// display period and only while no frame loop is running. Must be called without holding any
+    /// session or device guards.
+    pub fn pump(&self) {
+        let Some(mut updates) = self.frame_updates.try_lock() else {
+            return;
+        };
+        let period = Duration::from_nanos(
+            self.display_period_nanos
+                .load(Ordering::Relaxed)
+                .try_into()
+                .unwrap_or(0),
+        );
+        let within = |time: Option<Instant>, duration| time.is_some_and(|t| t.elapsed() < duration);
+        if within(updates.last_frame, FRAME_LOOP_TIMEOUT) || within(updates.last_pump, period) {
+            return;
+        }
+        updates.last_pump = Some(Instant::now());
+
+        self.poll_events();
+        if let Some(input) = self.input.get() {
+            input.frame_start_update();
+        }
     }
 
     pub fn poll_events(&self) {
@@ -634,12 +673,17 @@ impl<C: Compositor> OpenXrData<C> {
 
         let origin = session_guard.current_origin;
         let offsets = session_guard.origin_offsets();
-        let comp = self
-            .compositor
-            .get()
-            .expect("Session is being restarted, but compositor has not been set up!");
+        // Headless sessions have no graphics to carry over, and headless apps may never have
+        // requested a compositor (e.g. when an action manifest replaces legacy actions).
+        let comp = (!self.headless).then(|| {
+            self.compositor
+                .get()
+                .expect("Session is being restarted, but compositor has not been set up!")
+        });
 
-        let info = comp.get_session_create_info(std::mem::take(&mut session_guard.comp_data));
+        let info = comp
+            .as_ref()
+            .map(|comp| comp.get_session_create_info(std::mem::take(&mut session_guard.comp_data)));
 
         // We need to destroy the old session before creating the new one.
         let _ = unsafe { ManuallyDrop::take(&mut *session_guard) };
@@ -648,7 +692,7 @@ impl<C: Compositor> OpenXrData<C> {
             &self.instance,
             self.system_id,
             origin,
-            Some(&info),
+            info.as_ref(),
             self.headless,
         ) {
             Ok((mut session, waiter, stream)) => {
@@ -660,7 +704,9 @@ impl<C: Compositor> OpenXrData<C> {
                         session.set_origin_offset(origin, offset),
                     );
                 }
-                comp.post_session_restart(&session, waiter, stream);
+                if let Some(comp) = comp {
+                    comp.post_session_restart(&session, waiter, stream);
+                }
                 (session, Ok(()))
             }
             Err(e) => {
@@ -948,6 +994,22 @@ fn supports_user_presence(instance: &xr::Instance, system_id: xr::SystemId) -> b
         return false;
     }
     presence.supports_user_presence.into()
+}
+
+#[derive(Default)]
+struct FrameUpdates {
+    /// When WaitGetPoses last ran.
+    last_frame: Option<Instant>,
+    /// When [OpenXrData::pump] last ran.
+    last_pump: Option<Instant>,
+}
+
+pub struct FrameUpdateGuard<'a>(parking_lot::MutexGuard<'a, FrameUpdates>);
+
+impl Drop for FrameUpdateGuard<'_> {
+    fn drop(&mut self) {
+        self.0.last_frame = Some(Instant::now());
+    }
 }
 
 pub struct AtomicXrTime(AtomicI64);

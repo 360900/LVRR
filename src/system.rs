@@ -345,6 +345,13 @@ impl System {
         }
     }
 
+    /// See [crate::openxr_data::OpenXrData::pump]. Legacy actions, which make controllers show up
+    /// for apps without an action manifest, are set up by Input, so it has to exist.
+    fn pump(&self) {
+        self.input.force(|_| Input::new(self.openxr.clone()));
+        self.openxr.pump();
+    }
+
     /// Drops the cached views. Those in LOCAL and STAGE are relative to the tracking origin, so
     /// the last located ones in them are stale too.
     pub fn clear_views(&self) {
@@ -794,6 +801,7 @@ impl vr::IVRSystem026_Interface for System {
         size: u32,
         pose: *mut vr::TrackedDevicePose_t,
     ) -> bool {
+        self.pump();
         if let Some(queued) = self.events.lock().unwrap().pop_front() {
             // Truncated to the app's size, so older event structs only get what they have room for.
             Self::copy_event(&queued, event, size);
@@ -1280,6 +1288,7 @@ impl vr::IVRSystem026_Interface for System {
         pose_array: *mut vr::TrackedDevicePose_t,
         pose_count: u32,
     ) {
+        self.pump();
         if pose_array.is_null() || pose_count == 0 {
             return;
         }
@@ -2363,6 +2372,112 @@ mod tests {
             "{:?}",
             pose.vAngularVelocity
         );
+    }
+
+    /// Apps that never call WaitGetPoses (VRCX, VNyan) still need their events polled and actions
+    /// synced, or controllers never show up and Quit never arrives.
+    #[test]
+    fn controllers_and_quit_without_frame_loop() {
+        use fakexr::UserPath::*;
+        use vr::IVRInput010_Interface;
+        crate::init_logging();
+        fakexr::set_headless_supported(true);
+        for hand in [LeftHand, RightHand] {
+            fakexr::set_default_interaction_profile(
+                hand,
+                Some("/interaction_profiles/oculus/touch_controller"),
+            );
+        }
+        let xr = Arc::new(
+            OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Background).unwrap(),
+        );
+        assert!(xr.headless);
+        let system = Arc::new(System::new(xr.clone(), &Injector::default()));
+        let input = Arc::new(Input::new(xr.clone()));
+        system.input.set(Arc::downgrade(&input));
+        xr.input.set(Arc::downgrade(&input));
+        xr.system.set(Arc::downgrade(&system));
+
+        let mut event = vr::VREvent_t::default();
+        let size = std::mem::size_of_val(&event) as u32;
+        let mut poll_until = |done: &mut dyn FnMut(&vr::VREvent_t) -> bool| {
+            for _ in 0..100 {
+                while system.PollNextEvent(&mut event, size) {
+                    if done(&event) {
+                        return true;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(12));
+            }
+            false
+        };
+
+        let mut activated = [false; 3];
+        assert!(
+            poll_until(&mut |event| {
+                if event.eventType == vr::EVREventType::TrackedDeviceActivated as u32 {
+                    activated[event.trackedDeviceIndex as usize] = true;
+                }
+                activated[1] && activated[2]
+            }),
+            "controllers never activated"
+        );
+        assert!(system.IsTrackedDeviceConnected(1));
+        assert!(system.IsTrackedDeviceConnected(2));
+
+        // Replacing the legacy actions restarts the session, which has no compositor here.
+        let manifest = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/input_data/actions.json\0"
+        );
+        assert_eq!(
+            input.SetActionManifestPath(manifest.as_ptr().cast()),
+            vr::EVRInputError::None
+        );
+
+        xr.session_data.get().session.request_exit().unwrap();
+        assert!(
+            poll_until(&mut |event| event.eventType == vr::EVREventType::Quit as u32),
+            "Quit never arrived"
+        );
+    }
+
+    /// While the app runs a frame loop, events are left to WaitGetPoses.
+    #[test]
+    fn no_pumping_during_frame_loop() {
+        use crate::compositor::Compositor;
+        use vr::IVRCompositor028_Interface;
+        crate::init_logging();
+        let xr =
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
+        let comp = Arc::new(Compositor::new(xr.clone(), &Injector::default()));
+        xr.compositor.set(Arc::downgrade(&comp));
+        let system = Arc::new(System::new(xr.clone(), &Injector::default()));
+        xr.system.set(Arc::downgrade(&system));
+        // Created up front to keep the first PollNextEvent short: Miri's clock advances with the
+        // code it runs, and the poll has to land within the frame loop timeout.
+        let input = Arc::new(Input::new(xr.clone()));
+        system.input.set(Arc::downgrade(&input));
+        xr.input.set(Arc::downgrade(&input));
+
+        let mut event = vr::VREvent_t::default();
+        let size = std::mem::size_of_val(&event) as u32;
+        let mut got_quit = || {
+            let mut quit = false;
+            while system.PollNextEvent(&mut event, size) {
+                quit |= event.eventType == vr::EVREventType::Quit as u32;
+            }
+            quit
+        };
+
+        let wait_get_poses = || {
+            comp.WaitGetPoses(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
+        };
+        wait_get_poses();
+        xr.session_data.get().session.request_exit().unwrap();
+        assert!(!got_quit());
+        wait_get_poses();
+        assert!(got_quit());
     }
 
     #[test]
