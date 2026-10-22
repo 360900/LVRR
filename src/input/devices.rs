@@ -1305,6 +1305,30 @@ mod tests {
         assert_eq!(serial.to_str().unwrap(), "FAKEXR-SERIAL");
     }
 
+    #[test]
+    #[cfg_attr(not(feature = "monado"), ignore)]
+    fn tracker_role_hint_and_device_class() {
+        let mut f = Fixture::new();
+        f.load_actions(c"actions.json");
+        f.set_interaction_profile::<Knuckles>(fakexr::UserPath::LeftHand);
+        fakexr::add_trackers(f.input.openxr.session_data.get().session.as_raw());
+        // we need to wait two frames for the tracker to be connected.
+        for _ in 0..2 {
+            f.input.openxr.poll_events();
+            f.input.frame_start_update();
+        }
+
+        let get = |prop| f.input.get_device_int_tracked_property(3, prop);
+        assert_eq!(
+            get(vr::ETrackedDeviceProperty::ControllerRoleHint_Int32),
+            Some(vr::ETrackedControllerRole::OptOut as i32)
+        );
+        assert_eq!(
+            get(vr::ETrackedDeviceProperty::DeviceClass_Int32),
+            Some(vr::ETrackedDeviceClass::GenericTracker as i32)
+        );
+    }
+
     fn hand_skeleton(f: &Fixture, hand: Hand) -> Option<super::HandSkeleton> {
         let session = f.input.openxr.session_data.get();
         let devices = session.input_data.devices.read().unwrap();

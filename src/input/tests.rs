@@ -2159,6 +2159,14 @@ fn unrestricted_digital_action_origin() {
     fakexr::set_action_state(action, true.into(), LeftHand);
     sync(&mut f);
     assert_eq!(f.get_bool_state(boolact).unwrap().activeOrigin, left);
+
+    // Left wins ties.
+    fakexr::set_action_state(action, false.into(), LeftHand);
+    sync(&mut f);
+    fakexr::set_action_state(action, true.into(), LeftHand);
+    fakexr::set_action_state(action, true.into(), RightHand);
+    sync(&mut f);
+    assert_eq!(f.get_bool_state(boolact).unwrap().activeOrigin, left);
 }
 
 #[test]
@@ -2283,6 +2291,46 @@ fn vector1_deltas_per_sync_and_hand() {
 }
 
 #[test]
+fn analog_action_update_time() {
+    let mut f = Fixture::new();
+    let set1 = f.get_action_set_handle(c"/actions/set1");
+    let vec1 = f.get_action_handle(c"/actions/set1/in/vec1act");
+    let vec2 = f.get_action_handle(c"/actions/set1/in/vec2act");
+    f.load_actions(c"actions.json");
+    let left = f.get_input_source_handle(c"/user/hand/left");
+    let sync = |f: &mut Fixture| {
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: set1,
+            ..Default::default()
+        })
+    };
+    let secs = |secs: f64| xr::Time::from_nanos((secs * 1e9) as i64);
+    f.input.openxr.display_time.set(secs(10.0));
+
+    fakexr::set_action_state_with_time(
+        f.get_action::<f32>(vec1),
+        fakexr::ActionState::Float(0.5),
+        LeftHand,
+        secs(9.75),
+    );
+    fakexr::set_action_state_with_time(
+        f.get_action::<xr::Vector2f>(vec2),
+        fakexr::ActionState::Vector2(0.5, 0.5),
+        LeftHand,
+        secs(9.5),
+    );
+    sync(&mut f);
+    for restrict in [left, 0] {
+        assert_eq!(get_analog_state(&f, vec1, restrict).fUpdateTime, -0.25);
+        assert_eq!(get_analog_state(&f, vec2, restrict).fUpdateTime, -0.5);
+    }
+
+    sync(&mut f);
+    assert_eq!(get_analog_state(&f, vec1, 0).fUpdateTime, 0.0);
+    assert_eq!(get_analog_state(&f, vec2, 0).fUpdateTime, 0.0);
+}
+
+#[test]
 fn skeletal_tracking_level_follows_hand_tracking() {
     use vr::EVRSkeletalTrackingLevel::*;
     use xr::HandTrackingDataSourceEXT as Source;
@@ -2375,6 +2423,7 @@ fn secondary_set_needs_restricted_primary() {
         ulSecondaryActionSet: 12345,
         ..Default::default()
     });
+    assert!(!f.get_bool_state(boolact).unwrap().bActive);
 
     // Restricted to the left hand: the secondary set is active for the right hand.
     f.sync(vr::VRActiveActionSet_t {

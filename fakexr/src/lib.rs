@@ -1835,6 +1835,8 @@ extern "system" fn get_action_state_float(
         let active = action.active.load(Ordering::Relaxed);
         if active {
             state.current_state = f;
+            state.changed_since_last_sync = hand_state.changed.into();
+            state.last_change_time = hand_state.last_change_time;
         }
         state.is_active = active.into();
     }
@@ -1870,6 +1872,8 @@ extern "system" fn get_action_state_vector2f(
         let active = action.active.load(Ordering::Relaxed);
         if active {
             state.current_state = xr::Vector2f { x, y };
+            state.changed_since_last_sync = hand_state.changed.into();
+            state.last_change_time = hand_state.last_change_time;
         }
         state.is_active = active.into();
     }
