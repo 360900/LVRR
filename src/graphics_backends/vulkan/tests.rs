@@ -14,14 +14,23 @@ struct Gpu {
     next_handle: u64,
     live: HashSet<u64>,
     signaled: HashSet<u64>,
-    /// Command buffers allocated from each pool.
+    /// Command buffers and descriptor sets allocated from each pool.
     children: HashMap<u64, Vec<u64>>,
+    /// Image views a descriptor set or framebuffer refers to.
+    refs: HashMap<u64, Vec<u64>>,
     /// Objects used by each command buffer's last recording.
     uses: HashMap<u64, HashSet<u64>>,
     /// Command buffers submitted with each fence, until the backend waits for it.
     pending: HashMap<u64, Vec<u64>>,
     errors: Vec<String>,
     barriers: Vec<vk::ImageMemoryBarrier<'static>>,
+    /// Width, height and attachment count of each framebuffer.
+    framebuffers: Vec<(u32, u32, usize)>,
+    render_areas: Vec<vk::Rect2D>,
+    scissors: Vec<vk::Rect2D>,
+    descriptor_layouts: Vec<vk::ImageLayout>,
+    pipeline_samples: Vec<vk::SampleCountFlags>,
+    draws: usize,
 }
 
 thread_local! {
@@ -47,18 +56,23 @@ impl Gpu {
         self.next_handle
     }
 
+    fn allocate(&mut self, pool: u64) -> u64 {
+        let handle = self.create();
+        self.children.entry(pool).or_default().push(handle);
+        handle
+    }
+
     /// Fences, command buffers and the objects they use that the GPU may still access.
     fn in_flight(&self) -> HashSet<u64> {
         let bufs = self.pending.values().flatten();
         let used = bufs
             .clone()
             .flat_map(|buf| self.uses.get(buf).into_iter().flatten());
-        self.pending
-            .keys()
-            .chain(bufs)
-            .chain(used)
-            .copied()
-            .collect()
+        let referenced = used
+            .clone()
+            .flat_map(|obj| self.refs.get(obj).into_iter().flatten());
+        let pending = self.pending.keys().chain(bufs);
+        pending.chain(used).chain(referenced).copied().collect()
     }
 
     fn destroy(&mut self, handle: u64) {
@@ -68,23 +82,20 @@ impl Gpu {
         for child in self.children.remove(&handle).unwrap_or_default() {
             self.destroy(child);
         }
+        let in_use = self.in_flight().contains(&handle);
         check!(
             self,
-            !self.in_flight().contains(&handle),
+            !in_use,
             "destroyed {handle:#x} while the GPU may use it"
         );
-        check!(
-            self,
-            self.live.remove(&handle),
-            "destroyed unknown {handle:#x}"
-        );
+        let known = self.live.remove(&handle);
+        check!(self, known, "destroyed unknown {handle:#x}");
+        self.refs.remove(&handle);
     }
 
     fn record(&mut self, buf: vk::CommandBuffer, obj: impl Handle) {
-        self.uses
-            .entry(buf.as_raw())
-            .or_default()
-            .insert(obj.as_raw());
+        let uses = self.uses.entry(buf.as_raw()).or_default();
+        uses.insert(obj.as_raw());
     }
 }
 
@@ -120,6 +131,14 @@ macro_rules! create_destroy {
 
 create_destroy! {
     vkCreateCommandPool, vkDestroyCommandPool: CommandPoolCreateInfo -> CommandPool;
+    vkCreateRenderPass, vkDestroyRenderPass: RenderPassCreateInfo -> RenderPass;
+    vkCreateShaderModule, vkDestroyShaderModule: ShaderModuleCreateInfo -> ShaderModule;
+    vkCreateDescriptorSetLayout, vkDestroyDescriptorSetLayout:
+        DescriptorSetLayoutCreateInfo -> DescriptorSetLayout;
+    vkCreateDescriptorPool, vkDestroyDescriptorPool: DescriptorPoolCreateInfo -> DescriptorPool;
+    vkCreatePipelineLayout, vkDestroyPipelineLayout: PipelineLayoutCreateInfo -> PipelineLayout;
+    vkCreateImageView, vkDestroyImageView: ImageViewCreateInfo -> ImageView;
+    vkCreateSampler, vkDestroySampler: SamplerCreateInfo -> Sampler;
 }
 
 unsafe extern "system" fn vkAllocateCommandBuffers(
@@ -130,15 +149,104 @@ unsafe extern "system" fn vkAllocateCommandBuffers(
     let info = unsafe { &*info };
     gpu(|gpu| {
         for i in 0..info.command_buffer_count as usize {
-            let buf = gpu.create();
-            gpu.children
-                .entry(info.command_pool.as_raw())
-                .or_default()
-                .push(buf);
+            let buf = gpu.allocate(info.command_pool.as_raw());
             unsafe { *out.add(i) = vk::CommandBuffer::from_raw(buf) };
         }
     });
     vk::Result::SUCCESS
+}
+
+unsafe extern "system" fn vkAllocateDescriptorSets(
+    _: vk::Device,
+    info: *const vk::DescriptorSetAllocateInfo<'_>,
+    out: *mut vk::DescriptorSet,
+) -> vk::Result {
+    let info = unsafe { &*info };
+    gpu(|gpu| {
+        for i in 0..info.descriptor_set_count as usize {
+            let set = gpu.allocate(info.descriptor_pool.as_raw());
+            unsafe { *out.add(i) = vk::DescriptorSet::from_raw(set) };
+        }
+    });
+    vk::Result::SUCCESS
+}
+
+unsafe extern "system" fn vkUpdateDescriptorSets(
+    _: vk::Device,
+    count: u32,
+    writes: *const vk::WriteDescriptorSet<'_>,
+    _: u32,
+    _: *const vk::CopyDescriptorSet<'_>,
+) {
+    gpu(|gpu| {
+        for write in unsafe { slice(writes, count) } {
+            let set = write.dst_set.as_raw();
+            let in_use = gpu.in_flight().contains(&set);
+            check!(
+                gpu,
+                !in_use,
+                "updated set {set:#x} while the GPU may use it"
+            );
+            let images = unsafe { slice(write.p_image_info, write.descriptor_count) };
+            let views = images.iter().map(|i| i.image_view.as_raw()).collect();
+            gpu.refs.insert(set, views);
+            let layouts = images.iter().map(|i| i.image_layout);
+            gpu.descriptor_layouts.extend(layouts);
+        }
+    });
+}
+
+unsafe extern "system" fn vkCreateFramebuffer(
+    _: vk::Device,
+    info: *const vk::FramebufferCreateInfo<'_>,
+    _: *const vk::AllocationCallbacks<'_>,
+    out: *mut vk::Framebuffer,
+) -> vk::Result {
+    let info = unsafe { &*info };
+    let attachments = unsafe { slice(info.p_attachments, info.attachment_count) };
+    gpu(|gpu| {
+        let framebuffer = gpu.create();
+        let views = attachments.iter().map(|a| a.as_raw()).collect();
+        gpu.refs.insert(framebuffer, views);
+        let size = (info.width, info.height, attachments.len());
+        gpu.framebuffers.push(size);
+        unsafe { *out = vk::Framebuffer::from_raw(framebuffer) };
+    });
+    vk::Result::SUCCESS
+}
+
+unsafe extern "system" fn vkDestroyFramebuffer(
+    _: vk::Device,
+    framebuffer: vk::Framebuffer,
+    _: *const vk::AllocationCallbacks<'_>,
+) {
+    gpu(|gpu| gpu.destroy(framebuffer.as_raw()));
+}
+
+unsafe extern "system" fn vkCreateGraphicsPipelines(
+    _: vk::Device,
+    _: vk::PipelineCache,
+    count: u32,
+    infos: *const vk::GraphicsPipelineCreateInfo<'_>,
+    _: *const vk::AllocationCallbacks<'_>,
+    out: *mut vk::Pipeline,
+) -> vk::Result {
+    for (i, info) in unsafe { slice(infos, count) }.iter().enumerate() {
+        let samples = unsafe { &*info.p_multisample_state }.rasterization_samples;
+        gpu(|gpu| {
+            gpu.pipeline_samples.push(samples);
+            unsafe { *out.add(i) = vk::Pipeline::from_raw(gpu.create()) };
+        });
+    }
+    vk::Result::SUCCESS
+}
+
+unsafe extern "system" fn vkDestroyPipeline(
+    _: vk::Device,
+    pipeline: vk::Pipeline,
+    _: *const vk::AllocationCallbacks<'_>,
+) {
+    gpu(|gpu| gpu.destroy(pipeline.as_raw()));
 }
 
 unsafe extern "system" fn vkCreateFence(
@@ -147,12 +255,10 @@ unsafe extern "system" fn vkCreateFence(
     _: *const vk::AllocationCallbacks<'_>,
     out: *mut vk::Fence,
 ) -> vk::Result {
-    let signaled = unsafe { &*info }
-        .flags
-        .contains(vk::FenceCreateFlags::SIGNALED);
+    let flags = unsafe { &*info }.flags;
     gpu(|gpu| {
         let fence = gpu.create();
-        if signaled {
+        if flags.contains(vk::FenceCreateFlags::SIGNALED) {
             gpu.signaled.insert(fence);
         }
         unsafe { *out = vk::Fence::from_raw(fence) };
@@ -179,10 +285,11 @@ unsafe extern "system" fn vkWaitForFences(
     gpu(|gpu| {
         for fence in unsafe { slice(fences, count) } {
             let fence = fence.as_raw();
+            let finished = gpu.pending.remove(&fence).is_some() || gpu.signaled.contains(&fence);
             check!(
                 gpu,
-                gpu.pending.remove(&fence).is_some() || gpu.signaled.contains(&fence),
-                "waiting for fence {fence:#x} that never signals"
+                finished,
+                "waited for fence {fence:#x} that never signals"
             );
             gpu.signaled.insert(fence);
         }
@@ -214,20 +321,18 @@ unsafe extern "system" fn vkQueueSubmit(
     gpu(|gpu| {
         let in_flight = gpu.in_flight();
         let fence = fence.as_raw();
-        check!(
-            gpu,
-            !gpu.signaled.contains(&fence),
-            "submitted with a signaled fence"
-        );
+        let signaled = gpu.signaled.contains(&fence);
+        check!(gpu, !signaled, "submitted with a signaled fence");
         for submit in unsafe { slice(submits, count) } {
             for buf in unsafe { slice(submit.p_command_buffers, submit.command_buffer_count) } {
+                let buf = buf.as_raw();
                 check!(
                     gpu,
-                    !in_flight.contains(&buf.as_raw()),
+                    !in_flight.contains(&buf),
                     "submitted a pending command buffer"
                 );
                 // Without a fence, the work never becomes waitable.
-                gpu.pending.entry(fence).or_default().push(buf.as_raw());
+                gpu.pending.entry(fence).or_default().push(buf);
             }
         }
     });
@@ -239,11 +344,8 @@ unsafe extern "system" fn vkBeginCommandBuffer(
     _: *const vk::CommandBufferBeginInfo<'_>,
 ) -> vk::Result {
     gpu(|gpu| {
-        check!(
-            gpu,
-            !gpu.in_flight().contains(&buf.as_raw()),
-            "re-recorded a pending command buffer"
-        );
+        let pending = gpu.in_flight().contains(&buf.as_raw());
+        check!(gpu, !pending, "re-recorded a pending command buffer");
         gpu.uses.remove(&buf.as_raw());
     });
     vk::Result::SUCCESS
@@ -252,6 +354,81 @@ unsafe extern "system" fn vkBeginCommandBuffer(
 unsafe extern "system" fn vkEndCommandBuffer(_: vk::CommandBuffer) -> vk::Result {
     vk::Result::SUCCESS
 }
+
+unsafe extern "system" fn vkCmdBindPipeline(
+    buf: vk::CommandBuffer,
+    _: vk::PipelineBindPoint,
+    pipeline: vk::Pipeline,
+) {
+    gpu(|gpu| gpu.record(buf, pipeline));
+}
+
+unsafe extern "system" fn vkCmdSetViewport(
+    _: vk::CommandBuffer,
+    _: u32,
+    _: u32,
+    _: *const vk::Viewport,
+) {
+}
+
+unsafe extern "system" fn vkCmdSetScissor(
+    _: vk::CommandBuffer,
+    _: u32,
+    count: u32,
+    scissors: *const vk::Rect2D,
+) {
+    let scissors = unsafe { slice(scissors, count) };
+    gpu(|gpu| gpu.scissors.extend_from_slice(scissors));
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "system" fn vkCmdBindDescriptorSets(
+    buf: vk::CommandBuffer,
+    _: vk::PipelineBindPoint,
+    layout: vk::PipelineLayout,
+    _: u32,
+    count: u32,
+    sets: *const vk::DescriptorSet,
+    _: u32,
+    _: *const u32,
+) {
+    let sets = unsafe { slice(sets, count) };
+    gpu(|gpu| {
+        gpu.record(buf, layout);
+        for &set in sets {
+            gpu.record(buf, set);
+        }
+    });
+}
+
+unsafe extern "system" fn vkCmdPushConstants(
+    _: vk::CommandBuffer,
+    _: vk::PipelineLayout,
+    _: vk::ShaderStageFlags,
+    _: u32,
+    _: u32,
+    _: *const c_void,
+) {
+}
+
+unsafe extern "system" fn vkCmdBeginRenderPass(
+    buf: vk::CommandBuffer,
+    info: *const vk::RenderPassBeginInfo<'_>,
+    _: vk::SubpassContents,
+) {
+    let info = unsafe { &*info };
+    gpu(|gpu| {
+        gpu.record(buf, info.render_pass);
+        gpu.record(buf, info.framebuffer);
+        gpu.render_areas.push(info.render_area);
+    });
+}
+
+unsafe extern "system" fn vkCmdDraw(_: vk::CommandBuffer, _: u32, _: u32, _: u32, _: u32) {
+    gpu(|gpu| gpu.draws += 1);
+}
+
+unsafe extern "system" fn vkCmdEndRenderPass(_: vk::CommandBuffer) {}
 
 #[allow(clippy::too_many_arguments)]
 unsafe extern "system" fn vkCmdPipelineBarrier(
@@ -267,14 +444,12 @@ unsafe extern "system" fn vkCmdPipelineBarrier(
     barriers: *const vk::ImageMemoryBarrier<'_>,
 ) {
     let barriers = unsafe { slice(barriers, count) };
-    gpu(|gpu| {
-        gpu.barriers
-            .extend(barriers.iter().map(|b| vk::ImageMemoryBarrier {
-                p_next: std::ptr::null(),
-                _marker: std::marker::PhantomData,
-                ..*b
-            }))
+    let barriers = barriers.iter().map(|b| vk::ImageMemoryBarrier {
+        p_next: std::ptr::null(),
+        _marker: std::marker::PhantomData,
+        ..*b
     });
+    gpu(|gpu| gpu.barriers.extend(barriers));
 }
 
 unsafe extern "system" fn vkCmdCopyImage(
@@ -304,7 +479,27 @@ fn proc_addr(name: &CStr) -> *const c_void {
     lookup![
         vkCreateCommandPool,
         vkDestroyCommandPool,
+        vkCreateRenderPass,
+        vkDestroyRenderPass,
+        vkCreateShaderModule,
+        vkDestroyShaderModule,
+        vkCreateDescriptorSetLayout,
+        vkDestroyDescriptorSetLayout,
+        vkCreateDescriptorPool,
+        vkDestroyDescriptorPool,
+        vkCreatePipelineLayout,
+        vkDestroyPipelineLayout,
+        vkCreateImageView,
+        vkDestroyImageView,
+        vkCreateSampler,
+        vkDestroySampler,
         vkAllocateCommandBuffers,
+        vkAllocateDescriptorSets,
+        vkUpdateDescriptorSets,
+        vkCreateFramebuffer,
+        vkDestroyFramebuffer,
+        vkCreateGraphicsPipelines,
+        vkDestroyPipeline,
         vkCreateFence,
         vkDestroyFence,
         vkWaitForFences,
@@ -312,6 +507,14 @@ fn proc_addr(name: &CStr) -> *const c_void {
         vkQueueSubmit,
         vkBeginCommandBuffer,
         vkEndCommandBuffer,
+        vkCmdBindPipeline,
+        vkCmdSetViewport,
+        vkCmdSetScissor,
+        vkCmdBindDescriptorSets,
+        vkCmdPushConstants,
+        vkCmdBeginRenderPass,
+        vkCmdDraw,
+        vkCmdEndRenderPass,
         vkCmdPipelineBarrier,
         vkCmdCopyImage,
     ]
@@ -370,6 +573,15 @@ fn copy_eye(vk: &VulkanData, texture: &vr::VRVulkanTextureData_t, image_index: u
     );
 }
 
+fn copy_overlay(
+    vk: &mut VulkanData,
+    texture: &vr::VRVulkanTextureData_t,
+    bounds: vr::VRTextureBounds_t,
+    image_index: usize,
+) -> xr::Extent2Di {
+    vk.copy_overlay_to_swapchain(texture, bounds, image_index)
+}
+
 /// Drops the backend and checks that it used and freed everything correctly.
 fn finish(vk: VulkanData) {
     drop(vk);
@@ -398,6 +610,93 @@ fn swapchain_recreation_waits_for_pending_copies() {
     copy_eye(&vk, &texture, 1);
     store_images(&mut vk, 3);
     copy_eye(&vk, &texture, 2);
+    finish(vk);
+}
+
+#[test]
+fn overlay_copy_draws_bounds_at_origin() {
+    let mut vk = fake_vulkan();
+    store_images(&mut vk, 3);
+    let bounds = vr::VRTextureBounds_t {
+        uMin: 0.5,
+        uMax: 1.0,
+        vMin: 0.75,
+        vMax: 0.25,
+    };
+    let extent = copy_overlay(&mut vk, &texture(200, 100), bounds, 0);
+    assert_eq!((extent.width, extent.height), (100, 50));
+
+    let area = vk::Rect2D {
+        offset: vk::Offset2D::default(),
+        extent: vk::Extent2D {
+            width: 100,
+            height: 50,
+        },
+    };
+    gpu(|gpu| {
+        assert_eq!(gpu.render_areas, [area]);
+        assert_eq!(gpu.scissors, [area]);
+        // The texture is sampled, not used as an attachment.
+        assert_eq!(gpu.framebuffers, [(100, 50, 1)]);
+        assert_eq!(
+            gpu.descriptor_layouts,
+            [vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL]
+        );
+        assert_eq!(gpu.pipeline_samples, [vk::SampleCountFlags::TYPE_1]);
+        assert_eq!(gpu.draws, 1);
+        let layouts: Vec<_> = gpu
+            .barriers
+            .iter()
+            .filter(|b| b.image.as_raw() == GAME_IMAGE)
+            .map(|b| (b.old_layout, b.new_layout))
+            .collect();
+        assert_eq!(
+            layouts,
+            [
+                (
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
+                ),
+                (
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL
+                ),
+            ]
+        );
+    });
+    finish(vk);
+}
+
+#[test]
+fn overlay_copies_keep_resources_until_finished() {
+    let mut vk = fake_vulkan();
+    store_images(&mut vk, 3);
+    let texture = texture(64, 32);
+    // Overlays can be updated many times per frame, so images come back while their last copy is
+    // still pending.
+    for i in 0..7 {
+        copy_overlay(&mut vk, &texture, FULL_BOUNDS, i % 3);
+    }
+    // Recreating the swapchain replaces the pipeline.
+    store_images(&mut vk, 2);
+    copy_overlay(&mut vk, &texture, FULL_BOUNDS, 1);
+    finish(vk);
+}
+
+#[test]
+fn multisampled_overlay_is_cleared() {
+    let mut vk = fake_vulkan();
+    store_images(&mut vk, 2);
+    let texture = vr::VRVulkanTextureData_t {
+        m_nSampleCount: 4,
+        ..texture(16, 16)
+    };
+    copy_overlay(&mut vk, &texture, FULL_BOUNDS, 0);
+    gpu(|gpu| {
+        assert_eq!(gpu.render_areas.len(), 1);
+        assert_eq!(gpu.draws, 0);
+        assert!(gpu.barriers.is_empty());
+    });
     finish(vk);
 }
 

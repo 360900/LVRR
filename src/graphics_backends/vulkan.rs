@@ -355,98 +355,148 @@ impl GraphicsBackend for VulkanData {
         bounds: vr::VRTextureBounds_t,
         image_index: usize,
     ) -> xr::Extent2Di {
-        let mut data = self.real_data.as_ref().unwrap();
-        let buf = data.bufs[image_index];
         let texture = unsafe { texture.as_ref() }.unwrap();
-        let (extent, offset) = texture_extent_from_bounds(texture, bounds);
+        // The swapchain only holds the bounds' sub-rect, which the vertex shader picks from the
+        // texture, so the destination always starts at the origin.
+        let (extent, _) = texture_extent_from_bounds(texture, bounds);
         let rect = vk::Rect2D {
-            offset: vk::Offset2D {
-                x: offset.x,
-                y: offset.y,
-            },
+            offset: vk::Offset2D::default(),
             extent: vk::Extent2D {
                 width: extent.width,
                 height: extent.height,
             },
         };
-        let pipeline_data = match &data.overlay_pipeline {
-            Some(d) => {
-                assert_eq!(
-                    d.image_format, data.format,
-                    "Overlay image format unexpectedly changed"
-                );
-                d
-            }
-            None => {
-                self.real_data.as_mut().unwrap().overlay_pipeline = Some(PipelineData::new(
-                    &self.device,
-                    vk::Format::from_raw(texture.m_nFormat as _),
-                    data.format,
-                    texture.m_nSampleCount,
-                    &data.images,
-                ));
-                data = self.real_data.as_ref().unwrap();
-                data.overlay_pipeline.as_ref().unwrap()
-            }
+        let xr_extent = xr::Extent2Di {
+            width: extent.width as _,
+            height: extent.height as _,
         };
+        // Nothing to draw, and Vulkan doesn't allow empty framebuffers or viewports.
+        if extent.width == 0 || extent.height == 0 {
+            return xr_extent;
+        }
+        let multisampled = texture.m_nSampleCount > 1;
+        if multisampled {
+            crate::warn_once!(
+                "Multisampled overlay textures are unsupported, clearing the overlay"
+            );
+        }
 
-        let swapchain_view = pipeline_data.image_views[image_index];
-        let game_view = unsafe {
-            self.device
+        let data = self.real_data.as_mut().unwrap();
+        let buf = data.bufs[image_index];
+        // The image's resources can only be replaced once its previous copy has finished.
+        wait_for_fences(&self.device, &data.fences[image_index..=image_index]);
+        let pipeline_data = data.overlay_pipeline.get_or_insert_with(|| {
+            PipelineData::new(
+                &self.device,
+                data.format,
+                texture.m_nSampleCount,
+                &data.images,
+            )
+        });
+
+        let game_image = vk::Image::from_raw(texture.m_nImage);
+        let game_range = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+        let slot = &mut pipeline_data.slots[image_index];
+        unsafe {
+            self.device.destroy_framebuffer(slot.framebuffer, None);
+            self.device.destroy_image_view(slot.source, None);
+            slot.source = self
+                .device
                 .create_image_view(
                     &vk::ImageViewCreateInfo::default()
-                        .image(vk::Image::from_raw(texture.m_nImage))
+                        .image(game_image)
                         .format(vk::Format::from_raw(texture.m_nFormat as _))
                         .view_type(vk::ImageViewType::TYPE_2D)
                         .components(vk::ComponentMapping::default())
-                        .subresource_range(vk::ImageSubresourceRange {
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_mip_level: 0,
-                            level_count: 1,
-                            base_array_layer: 0,
-                            layer_count: 1,
-                        }),
+                        .subresource_range(game_range),
                     None,
                 )
-                .unwrap()
-        };
-        let fb = unsafe {
-            self.device
+                .unwrap();
+            slot.framebuffer = self
+                .device
                 .create_framebuffer(
                     &vk::FramebufferCreateInfo::default()
                         .render_pass(pipeline_data.renderpass)
-                        .attachments(&[game_view, swapchain_view])
-                        .width(texture.m_nWidth)
-                        .height(texture.m_nHeight)
+                        .attachments(&[slot.target])
+                        .width(extent.width)
+                        .height(extent.height)
                         .layers(1),
                     None,
                 )
-                .unwrap()
-        };
-
-        unsafe {
+                .unwrap();
             self.device.update_descriptor_sets(
                 &[vk::WriteDescriptorSet::default()
-                    .dst_set(pipeline_data.set)
+                    .dst_set(slot.set)
                     .dst_binding(0)
                     .dst_array_element(0)
                     .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                     .image_info(&[vk::DescriptorImageInfo {
                         sampler: pipeline_data.sampler,
-                        image_view: game_view,
-                        image_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        image_view: slot.source,
+                        image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                     }])],
                 &[],
-            )
+            );
         }
 
+        let PipelineData {
+            pipeline,
+            layout,
+            renderpass,
+            ..
+        } = *pipeline_data;
+        let OverlaySlot {
+            set, framebuffer, ..
+        } = *slot;
+        let clear = [vk::ClearValue::default()];
+        let render_pass_info = vk::RenderPassBeginInfo::default()
+            .render_pass(renderpass)
+            .framebuffer(framebuffer)
+            .render_area(rect)
+            .clear_values(&clear);
+        // OpenVR hands over textures in TRANSFER_SRC_OPTIMAL, which can't be sampled.
+        let to_sampled = vk::ImageMemoryBarrier {
+            src_access_mask: vk::AccessFlags::MEMORY_WRITE,
+            dst_access_mask: vk::AccessFlags::SHADER_READ,
+            old_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            image: game_image,
+            subresource_range: game_range,
+            ..Default::default()
+        };
+        let to_transfer_src = vk::ImageMemoryBarrier {
+            src_access_mask: vk::AccessFlags::empty(),
+            dst_access_mask: vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE,
+            old_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            new_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            ..to_sampled
+        };
+
         self.record_commands(image_index, || unsafe {
-            self.device.cmd_bind_pipeline(
+            let device = &self.device;
+            if multisampled {
+                // The render pass clears the overlay.
+                device.cmd_begin_render_pass(buf, &render_pass_info, vk::SubpassContents::INLINE);
+                device.cmd_end_render_pass(buf);
+                return;
+            }
+            device.cmd_pipeline_barrier(
                 buf,
-                vk::PipelineBindPoint::GRAPHICS,
-                pipeline_data.pipeline,
+                vk::PipelineStageFlags::ALL_COMMANDS,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_sampled],
             );
-            self.device.cmd_set_viewport(
+            device.cmd_bind_pipeline(buf, vk::PipelineBindPoint::GRAPHICS, pipeline);
+            device.cmd_set_viewport(
                 buf,
                 0,
                 &[vk::Viewport {
@@ -458,45 +508,38 @@ impl GraphicsBackend for VulkanData {
                     max_depth: 0.0,
                 }],
             );
-            self.device.cmd_set_scissor(buf, 0, &[rect]);
-            self.device.cmd_bind_descriptor_sets(
+            device.cmd_set_scissor(buf, 0, &[rect]);
+            device.cmd_bind_descriptor_sets(
                 buf,
                 vk::PipelineBindPoint::GRAPHICS,
-                pipeline_data.layout,
+                layout,
                 0,
-                &[pipeline_data.set],
+                &[set],
                 &[],
             );
             let pc = [bounds.uMin, bounds.uMax, bounds.vMin, bounds.vMax];
-            self.device.cmd_push_constants(
+            device.cmd_push_constants(
                 buf,
-                pipeline_data.layout,
+                layout,
                 vk::ShaderStageFlags::VERTEX,
                 0,
                 pc.align_to().1,
             );
-            self.device.cmd_begin_render_pass(
+            device.cmd_begin_render_pass(buf, &render_pass_info, vk::SubpassContents::INLINE);
+            device.cmd_draw(buf, 4, 1, 0, 0);
+            device.cmd_end_render_pass(buf);
+            device.cmd_pipeline_barrier(
                 buf,
-                &vk::RenderPassBeginInfo::default()
-                    .render_pass(pipeline_data.renderpass)
-                    .framebuffer(fb)
-                    .render_area(rect),
-                vk::SubpassContents::INLINE,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::PipelineStageFlags::ALL_COMMANDS,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[to_transfer_src],
             );
-            self.device.cmd_draw(buf, 4, 1, 0, 0);
-
-            self.device.cmd_end_render_pass(buf);
         });
 
-        unsafe {
-            self.device.destroy_framebuffer(fb, None);
-            self.device.destroy_image_view(game_view, None);
-        }
-
-        xr::Extent2Di {
-            width: extent.width as _,
-            height: extent.height as _,
-        }
+        xr_extent
     }
 }
 impl VulkanData {
@@ -639,28 +682,36 @@ impl VulkanData {
     }
 }
 
+/// Overlay resources for one swapchain image.
+#[derive(Clone, Copy)]
+struct OverlaySlot {
+    target: vk::ImageView,
+    set: vk::DescriptorSet,
+    /// The texture view and framebuffer of the last copy into the image, which may only be
+    /// destroyed once that copy has finished.
+    source: vk::ImageView,
+    framebuffer: vk::Framebuffer,
+}
+
 struct PipelineData {
     pipeline: vk::Pipeline,
     layout: vk::PipelineLayout,
     renderpass: vk::RenderPass,
-    image_views: Vec<vk::ImageView>,
-    image_format: vk::Format,
     set_layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
-    set: vk::DescriptorSet,
     sampler: vk::Sampler,
+    slots: Vec<OverlaySlot>,
 }
 
 impl PipelineData {
     fn new(
         device: &ash::Device,
-        source_format: vk::Format,
         target_format: vk::Format,
         sample_count: u32,
         images: &[vk::Image],
     ) -> Self {
         let samples = match sample_count {
-            1 => vk::SampleCountFlags::TYPE_1,
+            0 | 1 => vk::SampleCountFlags::TYPE_1,
             2 => vk::SampleCountFlags::TYPE_2,
             4 => vk::SampleCountFlags::TYPE_4,
             8 => vk::SampleCountFlags::TYPE_8,
@@ -672,41 +723,25 @@ impl PipelineData {
                 vk::SampleCountFlags::TYPE_1
             }
         };
-        let attachments = [
-            // game image
-            vk::AttachmentDescription {
-                format: source_format,
-                samples,
-                load_op: vk::AttachmentLoadOp::LOAD,
-                store_op: vk::AttachmentStoreOp::DONT_CARE,
-                initial_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                final_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                ..Default::default()
-            },
-            // swapchain image
-            vk::AttachmentDescription {
-                format: target_format,
-                samples,
-                load_op: vk::AttachmentLoadOp::DONT_CARE,
-                store_op: vk::AttachmentStoreOp::STORE,
-                initial_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                final_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                ..Default::default()
-            },
-        ];
+        // The texture is only sampled, so the swapchain image is the only attachment.
+        let attachment = vk::AttachmentDescription {
+            format: target_format,
+            samples,
+            load_op: vk::AttachmentLoadOp::CLEAR,
+            store_op: vk::AttachmentStoreOp::STORE,
+            initial_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            final_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            ..Default::default()
+        };
 
         let subpass = vk::SubpassDescription::default()
             .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-            .input_attachments(&[vk::AttachmentReference {
-                attachment: 0,
-                layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            }])
             .color_attachments(&[vk::AttachmentReference {
-                attachment: 1,
+                attachment: 0,
                 layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             }]);
         let info = vk::RenderPassCreateInfo::default()
-            .attachments(&attachments)
+            .attachments(std::slice::from_ref(&attachment))
             .subpasses(std::slice::from_ref(&subpass));
 
         let renderpass = unsafe { device.create_render_pass(&info, None).unwrap() };
@@ -764,27 +799,28 @@ impl PipelineData {
                 )
                 .unwrap()
         };
+        // One set per image, so a set is never updated while a pending copy uses it.
         let pool = unsafe {
             device
                 .create_descriptor_pool(
                     &vk::DescriptorPoolCreateInfo::default()
-                        .max_sets(1)
+                        .max_sets(images.len() as u32)
                         .pool_sizes(&[vk::DescriptorPoolSize {
                             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                            descriptor_count: 1,
+                            descriptor_count: images.len() as u32,
                         }]),
                     None,
                 )
                 .unwrap()
         };
-        let set = unsafe {
+        let sets = unsafe {
             device
                 .allocate_descriptor_sets(
                     &vk::DescriptorSetAllocateInfo::default()
                         .descriptor_pool(pool)
-                        .set_layouts(&[set_layout]),
+                        .set_layouts(&vec![set_layout; images.len()]),
                 )
-                .unwrap()[0]
+                .unwrap()
         };
 
         let texture_coordinates_pc = vk::PushConstantRange {
@@ -817,7 +853,8 @@ impl PipelineData {
             .cull_mode(vk::CullModeFlags::NONE)
             .line_width(1.0)
             .depth_bias_enable(false);
-        let multi_state = vk::PipelineMultisampleStateCreateInfo::default();
+        let multi_state =
+            vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(samples);
         let depth_state = vk::PipelineDepthStencilStateCreateInfo::default();
         let blend = vk::PipelineColorBlendAttachmentState {
             blend_enable: vk::FALSE,
@@ -856,27 +893,35 @@ impl PipelineData {
                 .unwrap()[0]
         };
 
-        let image_views = images
+        let slots = images
             .iter()
-            .copied()
-            .map(|img| unsafe {
-                device
-                    .create_image_view(
-                        &vk::ImageViewCreateInfo::default()
-                            .image(img)
-                            .view_type(vk::ImageViewType::TYPE_2D)
-                            .format(target_format)
-                            .components(vk::ComponentMapping::default())
-                            .subresource_range(vk::ImageSubresourceRange {
-                                aspect_mask: vk::ImageAspectFlags::COLOR,
-                                base_mip_level: 0,
-                                level_count: 1,
-                                base_array_layer: 0,
-                                layer_count: 1,
-                            }),
-                        None,
-                    )
-                    .unwrap()
+            .zip(sets)
+            .map(|(&img, set)| {
+                let target = unsafe {
+                    device
+                        .create_image_view(
+                            &vk::ImageViewCreateInfo::default()
+                                .image(img)
+                                .view_type(vk::ImageViewType::TYPE_2D)
+                                .format(target_format)
+                                .components(vk::ComponentMapping::default())
+                                .subresource_range(vk::ImageSubresourceRange {
+                                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                                    base_mip_level: 0,
+                                    level_count: 1,
+                                    base_array_layer: 0,
+                                    layer_count: 1,
+                                }),
+                            None,
+                        )
+                        .unwrap()
+                };
+                OverlaySlot {
+                    target,
+                    set,
+                    source: vk::ImageView::null(),
+                    framebuffer: vk::Framebuffer::null(),
+                }
             })
             .collect();
 
@@ -890,19 +935,19 @@ impl PipelineData {
             pipeline,
             layout: pipeline_layout,
             renderpass,
-            image_views,
-            image_format: target_format,
             set_layout,
             pool,
-            set,
             sampler,
+            slots,
         }
     }
 
     fn destroy(&self, device: &ash::Device) {
         unsafe {
-            for &view in &self.image_views {
-                device.destroy_image_view(view, None);
+            for slot in &self.slots {
+                device.destroy_framebuffer(slot.framebuffer, None);
+                device.destroy_image_view(slot.source, None);
+                device.destroy_image_view(slot.target, None);
             }
             device.destroy_pipeline(self.pipeline, None);
             device.destroy_pipeline_layout(self.layout, None);
