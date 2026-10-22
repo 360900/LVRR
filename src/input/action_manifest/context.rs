@@ -186,6 +186,7 @@ impl InputActionType for f32 {
         ActionData::Vector1 {
             action,
             state: Default::default(),
+            input_only: true,
         }
     }
     fn from_data(data: &ActionData) -> Option<&xr::Action<Self>> {

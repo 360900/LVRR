@@ -857,6 +857,9 @@ enum ActionData {
         action: xr::Action<f32>,
         /// Left, right, unrestricted. See [Input::sync_vector1].
         state: Mutex<[vr::InputAnalogActionData_t; 3]>,
+        /// For actions that only feed custom bindings. Those read the action themselves, so the
+        /// state isn't synced.
+        input_only: bool,
     },
     Vector2 {
         action: xr::Action<xr::Vector2f>,
@@ -2161,7 +2164,12 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
 
         // After the custom bindings were unsynced, so they're evaluated for this sync.
         for (key, action) in &actions.actions {
-            if let ActionData::Vector1 { action, state } = action {
+            if let ActionData::Vector1 {
+                action,
+                state,
+                input_only: false,
+            } = action
+            {
                 self.sync_vector1(&data, actions, key, action, state, masked_hands(key));
             }
         }

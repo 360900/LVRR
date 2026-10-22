@@ -359,6 +359,7 @@ pub fn load_actions(
                 Vector1 {
                     action: create_action!(f32, data),
                     state: Default::default(),
+                    input_only: false,
                 },
             ),
             ActionType::Vector2(data) => (
