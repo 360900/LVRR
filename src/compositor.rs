@@ -991,14 +991,31 @@ impl vr::IVRCompositor029_Interface for Compositor {
     }
     fn SubmitWithArrayIndex(
         &self,
-        _eEye: vr::EVREye,
-        _pTexture: *const vr::Texture_t,
-        _unTextureArrayIndex: u32,
-        _pBounds: *const vr::VRTextureBounds_t,
-        _nSubmitFlags: vr::EVRSubmitFlags,
+        eEye: vr::EVREye,
+        pTexture: *const vr::Texture_t,
+        unTextureArrayIndex: u32,
+        pBounds: *const vr::VRTextureBounds_t,
+        nSubmitFlags: vr::EVRSubmitFlags,
     ) -> vr::EVRCompositorError {
-        crate::warn_unimplemented!("SubmitWithArrayIndex");
-        vr::EVRCompositorError::IncompatibleVersion
+        let Some(texture) = (unsafe { pTexture.as_ref() }) else {
+            return vr::EVRCompositorError::InvalidTexture;
+        };
+        if texture.eType != vr::ETextureType::Vulkan {
+            // Only Vulkan textures can say which layer to use.
+            return match unTextureArrayIndex {
+                0 => self.Submit(eEye, pTexture, pBounds, nSubmitFlags),
+                _ => vr::EVRCompositorError::InvalidTexture,
+            };
+        }
+        if texture.handle.is_null() {
+            return vr::EVRCompositorError::InvalidTexture;
+        }
+
+        let mut array_data = Default::default();
+        let (texture, flags) = unsafe {
+            vulkan_array_layer(pTexture, unTextureArrayIndex, nSubmitFlags, &mut array_data)
+        };
+        self.Submit(eEye, std::ptr::from_ref(&texture).cast(), pBounds, flags)
     }
 
     fn GetSubmitTexture(
@@ -1970,6 +1987,47 @@ impl<G: GraphicsBackend> FrameController<G> {
 
         trace!("frame submitted");
         Ok(proj_layer.is_some())
+    }
+}
+
+/// The texture and flags to submit layer `index` of a Vulkan texture with. The texture's handle points
+/// to `array_data`.
+///
+/// # Safety
+/// `texture` must point to a Vulkan texture with a valid handle, as described by `flags`.
+unsafe fn vulkan_array_layer(
+    texture: *const vr::Texture_t,
+    index: u32,
+    flags: vr::EVRSubmitFlags,
+    array_data: &mut vr::VRVulkanTextureArrayData_t,
+) -> (vr::VRTextureWithPose_t, vr::EVRSubmitFlags) {
+    let has = |flag: vr::EVRSubmitFlags| (flags & flag).0 != 0;
+    unsafe {
+        let mut texture = if has(vr::EVRSubmitFlags::TextureWithPose) {
+            *texture.cast::<vr::VRTextureWithPose_t>()
+        } else {
+            vr::VRTextureWithPose_t {
+                _base: *texture,
+                ..Default::default()
+            }
+        };
+        let handle = texture._base.handle;
+        *array_data = vr::VRVulkanTextureArrayData_t {
+            _base: if has(vr::EVRSubmitFlags::VulkanTextureWithArrayData) {
+                (*handle.cast::<vr::VRVulkanTextureArrayData_t>())._base
+            } else {
+                *handle.cast::<vr::VRVulkanTextureData_t>()
+            },
+            m_unArrayIndex: index,
+            m_unArraySize: index.saturating_add(1),
+        };
+        texture._base.handle = std::ptr::from_mut(array_data).cast();
+        // The depth info isn't copied, and isn't used either.
+        let flags = vr::EVRSubmitFlags(
+            (flags | vr::EVRSubmitFlags::VulkanTextureWithArrayData).0
+                & !vr::EVRSubmitFlags::TextureWithDepth.0,
+        );
+        (texture, flags)
     }
 }
 
@@ -3711,6 +3769,82 @@ mod tests {
             vr::EVRSubmitFlags::TextureWithPose,
         );
         assert_eq!(positions(layer), [[-0.03, 0.0, 0.0], [0.03, 0.0, 0.0]]);
+    }
+
+    #[test]
+    fn submit_with_array_index() {
+        use vr::IVRCompositor029_Interface as C29;
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+        assert_eq!(f.wait_get_poses(), None);
+
+        let texture = FakeGraphicsData::texture(&f.vk);
+        let submit = |eye, texture, index| {
+            C29::SubmitWithArrayIndex(
+                &*f.comp,
+                eye,
+                texture,
+                index,
+                std::ptr::null(),
+                vr::EVRSubmitFlags::Default,
+            )
+        };
+        assert_eq!(
+            submit(vr::EVREye::Left, std::ptr::null(), 0),
+            InvalidTexture
+        );
+        // Only Vulkan textures have layers.
+        assert_eq!(submit(vr::EVREye::Left, &texture, 1), InvalidTexture);
+        assert_eq!(submit(vr::EVREye::Left, &texture, 0), None);
+        let vulkan = texture_of_type(vr::ETextureType::Vulkan, std::ptr::null_mut());
+        assert_eq!(submit(vr::EVREye::Right, &vulkan, 1), InvalidTexture);
+    }
+
+    #[test]
+    fn vulkan_array_layer_texture() {
+        let mut data = vr::VRVulkanTextureArrayData_t::default();
+        data._base.m_nImage = 7;
+        data.m_unArrayIndex = 3;
+        let mut texture = vr::VRTextureWithPose_t {
+            _base: texture_of_type(vr::ETextureType::Vulkan, (&raw mut data).cast()),
+            mDeviceToAbsoluteTracking: xr::Posef::IDENTITY.into(),
+        };
+        let layer = |texture: &vr::VRTextureWithPose_t, flags| {
+            let mut array_data = Default::default();
+            let (texture, flags) = unsafe {
+                vulkan_array_layer(
+                    std::ptr::from_ref(texture).cast(),
+                    1,
+                    flags,
+                    &mut array_data,
+                )
+            };
+            assert_eq!(
+                texture._base.handle,
+                std::ptr::from_mut(&mut array_data).cast()
+            );
+            (texture, flags, array_data)
+        };
+
+        let (_, flags, array) = layer(&texture, vr::EVRSubmitFlags::Default);
+        assert_eq!(flags, vr::EVRSubmitFlags::VulkanTextureWithArrayData);
+        assert_eq!((array._base.m_nImage, array.m_unArrayIndex), (7, 1));
+
+        // An array texture the app already describes gets its layer replaced, and the pose is kept.
+        let flags = vr::EVRSubmitFlags::VulkanTextureWithArrayData
+            | vr::EVRSubmitFlags::TextureWithPose
+            | vr::EVRSubmitFlags::TextureWithDepth;
+        let (with_pose, flags, array) = layer(&texture, flags);
+        assert_eq!(
+            flags,
+            vr::EVRSubmitFlags::VulkanTextureWithArrayData | vr::EVRSubmitFlags::TextureWithPose
+        );
+        assert_eq!((array._base.m_nImage, array.m_unArrayIndex), (7, 1));
+        assert_eq!(with_pose.mDeviceToAbsoluteTracking.m[0][0], 1.0);
+
+        texture._base.handle = (&raw mut data._base).cast();
+        let (_, _, array) = layer(&texture, vr::EVRSubmitFlags::Default);
+        assert_eq!((array._base.m_nImage, array.m_unArrayIndex), (7, 1));
     }
 
     #[test]
