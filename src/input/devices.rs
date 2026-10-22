@@ -483,6 +483,12 @@ impl TrackedDevice {
         origin: vr::ETrackingUniverseOrigin,
         pose_type: Option<BoundPoseType>,
     ) -> vr::TrackedDevicePose_t {
+        // Any other value from the app is located like RawAndUncalibrated, so it shares those
+        // cache entries rather than adding its own.
+        let origin = match origin {
+            vr::ETrackingUniverseOrigin::Seated | vr::ETrackingUniverseOrigin::Standing => origin,
+            _ => vr::ETrackingUniverseOrigin::RawAndUncalibrated,
+        };
         let nanos = xr_time.as_nanos();
         let mut pose_cache = self.pose_cache.lock().unwrap();
         let mut pose = if let Some(pose) = pose_cache.get(nanos, origin) {
