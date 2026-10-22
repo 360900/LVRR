@@ -1294,21 +1294,20 @@ impl vr::IVRSystem026_Interface for System {
         texture_type: vr::ETextureType,
         instance: *mut vr::VkInstance_T,
     ) {
-        if texture_type != vr::ETextureType::Vulkan {
-            // Proton doesn't seem to properly translate this function, but it doesn't appear to
-            // actually matter.
-            log::error!("Unsupported texture type: {texture_type:?}");
-            return;
-        }
-
         let Some(device) = (unsafe { device.as_mut() }) else {
             return;
         };
-        // 0 means failure.
+        // "If an error occurs the device will be set to 0."
         *device = 0;
+        if texture_type != vr::ETextureType::Vulkan {
+            // Proton doesn't seem to properly translate this function, but it doesn't appear to
+            // actually matter.
+            warn!("GetOutputDevice: unsupported texture type {texture_type:?}, returning 0");
+            return;
+        }
         // IVRSystem_016 has no instance to pass, and runtimes don't check it.
         if instance.is_null() {
-            warn!("GetOutputDevice called without a Vulkan instance");
+            warn!("GetOutputDevice: no VkInstance given, returning 0");
             return;
         }
         // Without the extension, the openxr crate panics instead of returning an error.
@@ -1377,6 +1376,7 @@ impl vr::IVRSystem017On019 for System {
 }
 
 impl vr::IVRSystem016On017 for System {
+    // Without an instance there's no physical device to return, so this always writes 0.
     fn GetOutputDevice(&self, device: *mut u64, texture_type: vr::ETextureType) {
         vr::IVRSystem022_Interface::GetOutputDevice(
             self,
@@ -1762,6 +1762,11 @@ mod tests {
             Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
         let system = System::new(xr, &Injector::default());
 
+        let mut device = u64::MAX;
+        system.GetOutputDevice(&mut device, vr::ETextureType::DirectX, std::ptr::null_mut());
+        assert_eq!(device, 0);
+
+        // 016 has no instance parameter.
         let mut device = u64::MAX;
         vr::IVRSystem016On017::GetOutputDevice(&system, &mut device, vr::ETextureType::Vulkan);
         assert_eq!(device, 0);
