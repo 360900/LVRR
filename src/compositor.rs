@@ -3,7 +3,7 @@ use crate::{
     clientcore::{Injected, Injector},
     graphics_backends::{GraphicsBackend, SupportedBackend, supported_backends_enum},
     input::Input,
-    openxr_data::{self, FrameStream, OpenXrData, SessionCreateInfo, SessionData},
+    openxr_data::{self, FrameStream, OpenXrData, RestartError, SessionCreateInfo, SessionData},
     overlay::OverlayMan,
     system::System,
     tracy_span,
@@ -188,9 +188,19 @@ impl Compositor {
         texture: &vr::Texture_t,
         bounds: vr::VRTextureBounds_t,
     ) -> Result<(), vr::EVRCompositorError> {
-        // The app was told to quit, so no new session is started.
-        if self.openxr.restart_blocked().is_some() {
-            return Err(vr::EVRCompositorError::DoNotHaveFocus);
+        let restart_error = |e| match e {
+            RestartError::Exiting => vr::EVRCompositorError::DoNotHaveFocus,
+            RestartError::CreationFailed => vr::EVRCompositorError::InvalidTexture,
+        };
+        if let Some(e) = self.openxr.restart_blocked() {
+            return Err(restart_error(e));
+        }
+        // openxr panics instead of failing when asked for OpenGL requirements without it.
+        if texture.eType == vr::ETextureType::OpenGL
+            && !self.openxr.enabled_extensions.khr_opengl_enable
+        {
+            crate::warn_once!("OpenGL texture submitted, but the runtime has no OpenGL support");
+            return Err(vr::EVRCompositorError::InvalidTexture);
         }
         let backend =
             SupportedBackend::new(texture, bounds).ok_or(vr::EVRCompositorError::InvalidTexture)?;
@@ -237,9 +247,11 @@ impl Compositor {
         *self.tmp_backend.lock().unwrap() = Some(tmp_backend);
 
         info!("Creating real backend for texture type {:?}", texture.eType);
-        self.openxr
-            .restart_session()
-            .map_err(|_| vr::EVRCompositorError::DoNotHaveFocus)
+        self.openxr.restart_session().map_err(|e| {
+            // No session will be created with it anymore.
+            self.tmp_backend.lock().unwrap().take();
+            restart_error(e)
+        })
     }
 }
 
@@ -2800,6 +2812,26 @@ mod tests {
         assert_eq!(quit_events(&system), [false]);
         assert_eq!(f.submit(vr::EVREye::Left), DoNotHaveFocus);
         assert!(!f.comp.openxr.session_data.get().is_real_session());
+    }
+
+    /// A runtime rejecting the real session (e.g. its graphics binding) must leave the game running
+    /// on the temporary session, without tearing that down again on every Submit.
+    #[test]
+    fn real_session_creation_failure() {
+        let f = Fixture::new();
+        assert_eq!(f.wait_get_poses(), None);
+
+        fakexr::fail_next_session_creation(xr::sys::Result::ERROR_GRAPHICS_DEVICE_INVALID);
+        assert_eq!(f.submit(vr::EVREye::Left), InvalidTexture);
+        assert!(!f.comp.openxr.session_data.get().is_real_session());
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        fakexr::on_next_end(f.raw_session(), move || {
+            let _ = tx.send(());
+        });
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(f.submit(vr::EVREye::Left), InvalidTexture);
+        assert!(rx.try_recv().is_err(), "temporary session was restarted");
     }
 
     #[test]

@@ -64,6 +64,9 @@ pub struct OpenXrData<C: Compositor> {
     /// Set once the runtime lost the session or instance. Every call on the session fails from
     /// then on, so callers skip them.
     lost: AtomicBool,
+    /// Set when creating the real session failed, so Submit doesn't tear down the temporary
+    /// session for another attempt every frame.
+    session_creation_failed: AtomicBool,
 
     /// should only be externally accessed for testing
     pub(crate) input: Injected<crate::input::Input<C>>,
@@ -271,6 +274,7 @@ impl<C: Compositor> OpenXrData<C> {
             exit_requested: false.into(),
             exiting: false.into(),
             lost: false.into(),
+            session_creation_failed: false.into(),
             input: injector.inject(),
             compositor: injector.inject(),
             system: injector.inject(),
@@ -391,9 +395,13 @@ impl<C: Compositor> OpenXrData<C> {
 
     /// Why [Self::restart_session] would refuse to start a new session, if it would.
     pub fn restart_blocked(&self) -> Option<RestartError> {
-        self.exiting
-            .load(Ordering::Relaxed)
-            .then_some(RestartError::Exiting)
+        if self.exiting.load(Ordering::Relaxed) {
+            Some(RestartError::Exiting)
+        } else if self.session_creation_failed.load(Ordering::Relaxed) {
+            Some(RestartError::CreationFailed)
+        } else {
+            None
+        }
     }
 
     pub fn restart_session(&self) -> Result<(), RestartError> {
@@ -419,23 +427,34 @@ impl<C: Compositor> OpenXrData<C> {
         // We need to destroy the old session before creating the new one.
         let _ = unsafe { ManuallyDrop::take(&mut *session_guard) };
 
-        let (session, waiter, stream) = SessionData::new(
+        let (session, result) = match SessionData::new(
             &self.instance,
             self.system_id,
             origin,
             Some(&info),
             self.headless,
-        )
-        .expect("Failed to initalize new session");
-
-        comp.post_session_restart(&session, waiter, stream);
+        ) {
+            Ok((session, waiter, stream)) => {
+                comp.post_session_restart(&session, waiter, stream);
+                (session, Ok(()))
+            }
+            Err(e) => {
+                error!("Failed to create new session ({e:?}), going back to a temporary session");
+                self.session_creation_failed.store(true, Ordering::Relaxed);
+                // Without a session in the guard there is nothing left to run on.
+                let (session, ..) =
+                    SessionData::new(&self.instance, self.system_id, origin, None, self.headless)
+                        .expect("Failed to recreate temporary session");
+                (session, Err(RestartError::CreationFailed))
+            }
+        };
 
         if let Some(input) = self.input.get() {
             input.post_session_restart(&session);
         }
 
         *session_guard = ManuallyDrop::new(session);
-        Ok(())
+        result
     }
 
     pub fn set_tracking_space(&self, space: vr::ETrackingUniverseOrigin) {
@@ -724,6 +743,8 @@ pub enum RestartError {
     /// The runtime stopped or lost the session and the application was told to quit, so no new
     /// session is started.
     Exiting,
+    /// Creating the new session failed, so we went back to a temporary session.
+    CreationFailed,
 }
 
 #[derive(Debug)]
@@ -751,7 +772,8 @@ impl SessionData {
             if let SessionCreateInfo::Vulkan(info) = info {
                 // Monado seems to (incorrectly) give validation errors unless we call this.
                 let expected_pd = vk::PhysicalDevice::from_raw(
-                    unsafe { instance.vulkan_graphics_device(system_id, info.instance) }.unwrap()
+                    unsafe { instance.vulkan_graphics_device(system_id, info.instance) }
+                        .map_err(SessionCreationError::SessionCreationFailed)?
                         as _,
                 );
                 let pd = vk::PhysicalDevice::from_raw(info.physical_device as _);
@@ -805,23 +827,20 @@ impl SessionData {
                 std::any::type_name::<G>()
             );
             // required to call
-            let _ = instance.graphics_requirements::<G>(system_id).unwrap();
+            instance.graphics_requirements::<G>(system_id)?;
 
-            unsafe { instance.create_session(system_id, &info.0) }.map(|(session, w, s)| {
-                let swapchain_formats = session
-                    .enumerate_swapchain_formats()
-                    .expect("Couldn't enumerate session swapchain formats!");
-                (
-                    session.clone().into_any_graphics(),
-                    Session {
-                        session,
-                        swapchain_formats,
-                    }
-                    .into(),
-                    w,
-                    s.into(),
-                )
-            })
+            let (session, w, s) = unsafe { instance.create_session(system_id, &info.0) }?;
+            let swapchain_formats = session.enumerate_swapchain_formats()?;
+            Ok((
+                session.clone().into_any_graphics(),
+                Session {
+                    session,
+                    swapchain_formats,
+                }
+                .into(),
+                w,
+                s.into(),
+            ))
         }
 
         let (session, session_graphics, waiter, stream) = info

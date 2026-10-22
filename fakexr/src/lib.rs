@@ -11,7 +11,7 @@ use openxr_sys as xr;
 use openxr_sys::Handle as _;
 use paste::paste;
 use slotmap::{DefaultKey, Key, KeyData, SlotMap};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString, c_char};
 use std::sync::{
@@ -232,6 +232,15 @@ pub fn lose_session(session: xr::Session) {
 pub fn lose_instance(instance: xr::Instance) {
     let instance = instance.to_handle().unwrap();
     instance.lost.store(true, Ordering::Relaxed);
+}
+
+thread_local! {
+    static SESSION_CREATION_ERROR: Cell<Option<xr::Result>> = const { Cell::new(None) };
+}
+
+/// Makes the next xrCreateSession on this thread fail with `error`.
+pub fn fail_next_session_creation(error: xr::Result) {
+    SESSION_CREATION_ERROR.set(Some(error));
 }
 
 /// Like get_handle!, but for a session call that fails once the session was lost.
@@ -1019,6 +1028,9 @@ extern "system" fn create_session(
     session: *mut xr::Session,
 ) -> xr::Result {
     let instance = get_handle!(instance);
+    if let Some(error) = SESSION_CREATION_ERROR.take() {
+        return error;
+    }
     let info = unsafe { create_info.as_ref().unwrap() };
     let vk = unsafe {
         (info.next as *const xr::GraphicsBindingVulkanKHR)

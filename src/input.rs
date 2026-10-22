@@ -22,7 +22,7 @@ use crate::input::devices::ProfileData;
 use crate::input::profiles::ProfileProperties;
 use crate::{
     AtomicF32,
-    openxr_data::{self, Hand, OpenXrData, SessionData},
+    openxr_data::{self, Hand, OpenXrData, RestartError, SessionData},
     tracy_span,
 };
 use custom_bindings::{BoolBindingData, GrabActions, Vector2ActionData};
@@ -1881,7 +1881,8 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         let mut data = self.openxr.session_data.get();
         if data.input_data.get_legacy_actions().is_some() {
             drop(data);
-            if self.openxr.restart_session().is_err() {
+            // After a failed creation we're on a fresh temporary session, which can still load it.
+            if self.openxr.restart_session() == Err(RestartError::Exiting) {
                 return vr::EVRInputError::IPCError;
             }
             data = self.openxr.session_data.get();
