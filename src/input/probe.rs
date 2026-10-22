@@ -85,6 +85,7 @@ fn probe(
         instance: &'a xr::Instance,
         enabled_extensions: &'a xr::ExtensionSet,
         action: &'a xr::Action<xr::Posef>,
+        /// Ok once any profile was accepted, otherwise the last error.
         result: xr::Result<()>,
     }
     impl RunWithProfile for Suggester<'_> {
@@ -92,7 +93,8 @@ fn probe(
             if !P::has_required_extensions(self.enabled_extensions) {
                 return;
             }
-            self.result = (|| {
+            // A runtime rejecting one profile shouldn't keep the others from being probed.
+            let result = (|| {
                 let profile = self.instance.string_to_path(P::profile_path())?;
                 let bindings = [
                     self.instance
@@ -104,17 +106,22 @@ fn probe(
                 self.instance
                     .suggest_interaction_profile_bindings(profile, &bindings)
             })();
-        }
-
-        fn keep_running(&self) -> bool {
-            self.result.is_ok()
+            match result {
+                Ok(()) => self.result = Ok(()),
+                Err(e) => {
+                    warn!("Skipping {} in profile probe: {e}", P::profile_path());
+                    if self.result.is_err() {
+                        self.result = Err(e);
+                    }
+                }
+            }
         }
     }
     let mut suggester = Suggester {
         instance,
         enabled_extensions,
         action: &action,
-        result: Ok(()),
+        result: Err(xr::sys::Result::ERROR_PATH_UNSUPPORTED),
     };
     profiles::run_for_all_profiles(&mut suggester);
     suggester.result?;
@@ -245,6 +252,14 @@ mod tests {
         let xr = RealOpenXrData::new(&Injector::default(), Other).unwrap();
         fakexr::set_default_interaction_profile(fakexr::UserPath::LeftHand, None);
         xr.probed_profiles.left.clone()
+    }
+
+    #[test]
+    fn rejected_profile_doesnt_stop_probe() {
+        // The first profile we suggest.
+        fakexr::reject_profile("/interaction_profiles/htc/vive_controller");
+        let touch = "/interaction_profiles/oculus/touch_controller";
+        assert_eq!(probe_with_profile(touch).as_deref(), Some(touch));
     }
 
     #[test]

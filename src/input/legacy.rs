@@ -68,20 +68,23 @@ impl<C: openxr_data::Compositor> Input<C> {
                     return;
                 }
 
-                let conv = super::profiles::InputToXrPath::new(&self.openxr.instance);
-                let bindings = P::legacy_bindings(&conv);
-                self.openxr
-                    .instance
-                    .suggest_interaction_profile_bindings(
-                        self.openxr
-                            .instance
-                            .string_to_path(P::profile_path())
-                            .unwrap(),
-                        &bindings
-                            .into_iter(&self.legacy.actions, &self.input_data.pose_data)
-                            .collect::<Vec<_>>(),
-                    )
-                    .unwrap();
+                let instance = &self.openxr.instance;
+                let conv = super::profiles::InputToXrPath::new(instance);
+                let bindings = P::legacy_bindings(&conv)
+                    .into_iter(&self.legacy.actions, &self.input_data.pose_data)
+                    .collect::<Vec<_>>();
+                // A runtime rejecting one profile shouldn't take down the others.
+                if let Err(e) = instance
+                    .string_to_path(P::profile_path())
+                    .and_then(|profile| {
+                        instance.suggest_interaction_profile_bindings(profile, &bindings)
+                    })
+                {
+                    warn!(
+                        "Couldn't suggest legacy bindings for {}, skipping it: {e}",
+                        P::profile_path()
+                    );
+                }
             }
         }
 
@@ -985,6 +988,22 @@ mod tests {
             .unwrap();
         (!fakexr::check_no_suggested_bindings(action, profile))
             .then(|| fakexr::get_suggested_bindings(action, profile))
+    }
+
+    #[test]
+    fn rejected_profile_is_skipped() {
+        use crate::input::profiles::InteractionProfile;
+        use crate::input::profiles::oculus_touch::OculusTouch;
+
+        fakexr::reject_profile(Knuckles::profile_path());
+        let f = Fixture::new();
+        f.input.openxr.restart_session();
+        f.input.frame_start_update();
+
+        let trigger = |actions: &super::LegacyActions| actions.trigger.as_raw();
+        assert!(legacy_bindings_for::<Knuckles>(&f, trigger).is_none());
+        // Profiles suggested after the rejected one are still bound.
+        assert!(legacy_bindings_for::<OculusTouch>(&f, trigger).is_some());
     }
 
     #[test]
