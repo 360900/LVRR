@@ -55,19 +55,17 @@ impl ActionPath {
     /// so that it's compatible with the OpenXR path semantics
     /// See Section 6.2 (Well-Formed Path Strings) of the OpenXR spec
     pub fn cleaned_name(&self) -> String {
-        self.path
+        let name = self
+            .path
             .rsplit_once('/')
-            .expect("Action path missing slash?")
-            .1
-            .replace(
-                |c| !matches!(c, 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '/'),
-                "_",
-            )
+            .map_or(&*self.path, |(_, name)| name);
+        super::actions::xr_friendly(name)
     }
 
-    pub fn action_set_name(&self) -> &str {
-        let set_end_idx = self.path.match_indices('/').nth(2).unwrap().0;
-        &self.path[0..set_end_idx]
+    /// The `/actions/<set>` part, if the path has one.
+    pub fn action_set_name(&self) -> Option<&str> {
+        let (set_end_idx, _) = self.path.match_indices('/').nth(2)?;
+        Some(&self.path[0..set_end_idx])
     }
 }
 
@@ -76,8 +74,9 @@ impl<'de> Deserialize<'de> for ActionPath {
     where
         D: serde::Deserializer<'de>,
     {
+        // Lowercased like the names given to GetActionHandle.
         String::deserialize(deserializer).map(|s| Self {
-            path: s.to_ascii_lowercase(),
+            path: s.to_lowercase(),
         })
     }
 }

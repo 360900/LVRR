@@ -554,6 +554,38 @@ fn second_manifest_path() {
     assert!(f.get_bool_state(boolact).unwrap().bState);
 }
 
+#[test]
+fn awkward_action_names() {
+    let f = Fixture::new();
+    // Names OpenVR accepts but OpenXR doesn't: missing sets, colliding cleaned names, long
+    // and duplicated (localized) names. None of them may abort the load.
+    f.load_actions(c"actions_names.json");
+
+    let localized = |name: &CStr| {
+        let handle = f.get_action_handle(name);
+        fakexr::get_action_localized_name(f.get_action::<bool>(handle))
+    };
+    for name in [
+        c"/actions/main/in/grab",
+        c"/actions/main/in/jump!",
+        c"/actions/main/in/jump?",
+        c"/actions/main/in/",
+        c"/actions/averyveryverylongactionsetnamethatgoespastthesixtyfourbytelimitofopenxr/in/action",
+        c"/actions/other/in/action",
+    ] {
+        let name = localized(name);
+        assert!(!name.is_empty() && name.len() < 128, "{name:?}");
+    }
+    assert_eq!(localized(c"/actions/main/in/mixedcase"), "Mixed Case");
+    f.get_action::<xr::Haptic>(f.get_action_handle(c"/actions/main/out/grab"));
+
+    let data = f.input.openxr.session_data.get();
+    let loaded = data.input_data.get_loaded_actions().unwrap();
+    for name in [c"/actions/grab", c"/noprefix/in/action"] {
+        assert!(loaded.try_get_action(f.get_action_handle(name)).is_err());
+    }
+}
+
 #[track_caller]
 pub fn compare_pose(expected: xr::Posef, actual: xr::Posef) {
     fn float_eq(a: f32, b: f32) -> bool {

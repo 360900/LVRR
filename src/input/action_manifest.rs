@@ -84,13 +84,17 @@ impl<C: openxr_data::Compositor> Input<C> {
         // TODO: support non english localization?
         let english = manifest
             .localization
-            .and_then(|l| l.into_iter().find(|l| l.language_tag == "en_US"));
+            .and_then(|l| l.into_iter().find(|l| l.language_tag == "en_US"))
+            .map(actions::Localization::into_names)
+            .unwrap_or_default();
 
+        let mut names = actions::XrNames::default();
         let mut sets = actions::load_action_sets(
             &self.openxr.instance,
-            english.as_ref(),
+            &mut names,
+            &english,
             manifest.action_sets,
-        )?;
+        );
         debug!("Loaded {} action sets.", sets.len());
 
         let left_hand_subaction_path = self.get_subaction_path(Hand::Left);
@@ -98,12 +102,13 @@ impl<C: openxr_data::Compositor> Input<C> {
 
         let actions = actions::load_actions(
             &self.openxr.instance,
-            english.as_ref(),
+            &mut names,
+            &english,
             &mut sets,
             manifest.actions,
             left_hand_subaction_path,
             right_hand_subaction_path,
-        )?;
+        );
         debug!("Loaded {} actions.", actions.len());
 
         let skeletal_input = session_data

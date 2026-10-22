@@ -3,13 +3,13 @@
 use super::bindings::ActionPath;
 use crate::openxr_data::Hand;
 use log::{error, trace, warn};
-use openvr as vr;
 use openxr as xr;
 use serde::{
     Deserialize,
     de::{Error, Unexpected},
 };
-use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 /**
@@ -136,118 +136,217 @@ fn parse_skeleton<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Hand, D::Err
 pub struct Localization {
     pub language_tag: String,
     #[serde(flatten)]
-    pub localized_names: HashMap<String, String>,
+    localized_names: HashMap<String, serde_json::Value>,
+}
+
+impl Localization {
+    /// Localized names keyed by lowercase path, like action and set paths.
+    pub fn into_names(self) -> HashMap<String, String> {
+        self.localized_names
+            .into_iter()
+            .filter_map(|(path, name)| Some((path.to_lowercase(), name.as_str()?.to_owned())))
+            .collect()
+    }
+}
+
+/// Replaces every character OpenXR doesn't allow in action (set) names.
+pub fn xr_friendly(name: &str) -> String {
+    name.replace(
+        |c| !matches!(c, 'a'..='z' | '0'..='9' | '-' | '_' | '.'),
+        "_",
+    )
+}
+
+/// Cuts `s` to at most `max` bytes, on a character boundary.
+fn truncate(s: &str, max: usize) -> &str {
+    let mut end = s.len().min(max);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// OpenXR names handed out so far. They must be unique (per instance for sets, per set for
+/// actions) and fit the runtime's buffers, while OpenVR paths may be any length and different
+/// paths can clean to the same name.
+#[derive(Default)]
+pub struct XrNames {
+    sets: HashSet<String>,
+    actions: HashMap<String, HashSet<String>>,
+}
+
+impl XrNames {
+    fn set_name(&mut self, base: &str) -> String {
+        Self::unique(&mut self.sets, base, xr::sys::MAX_ACTION_SET_NAME_SIZE)
+    }
+
+    pub fn action_name(&mut self, set_path: &str, base: &str) -> String {
+        Self::unique(
+            self.actions.entry(set_path.to_owned()).or_default(),
+            base,
+            xr::sys::MAX_ACTION_NAME_SIZE,
+        )
+    }
+
+    fn unique(used: &mut HashSet<String>, base: &str, size: usize) -> String {
+        let base = if base.is_empty() { "unnamed" } else { base };
+        // The buffer includes the NUL terminator.
+        let max = size - 1;
+        let mut name = truncate(base, max).to_owned();
+        let mut idx = 0;
+        while used.contains(&name) {
+            idx += 1;
+            let suffix = format!("_{idx}");
+            name = [truncate(base, max - suffix.len()), &suffix].concat();
+        }
+        used.insert(name.clone());
+        name
+    }
+}
+
+/// Creates an OpenXR action or action set with a localized name that fits `size` (including the
+/// NUL terminator), making it unique with the (unique) name if the runtime says it isn't.
+fn create_localized<T>(
+    localized: Option<&str>,
+    name: &str,
+    size: usize,
+    create: impl Fn(&str) -> xr::Result<T>,
+) -> xr::Result<T> {
+    let localized = truncate(
+        localized.filter(|l| !l.is_empty()).unwrap_or(name),
+        size - 1,
+    );
+    create(localized).or_else(|err| {
+        if err != xr::sys::Result::ERROR_LOCALIZED_NAME_DUPLICATED {
+            return Err(err);
+        }
+        let suffix = format!(" ({name})");
+        create(&[truncate(localized, size - 1 - suffix.len()), &suffix].concat())
+    })
 }
 
 fn create_action_set(
     instance: &xr::Instance,
+    names: &mut XrNames,
     path: &str,
     localized: Option<&str>,
-) -> Result<xr::ActionSet, vr::EVRInputError> {
+) -> Option<xr::ActionSet> {
     // OpenXR does not like the "/actions/<set name>" format, so we need to strip the prefix
     let Some(name) = path.strip_prefix("/actions/") else {
         error!("Action set {path} missing actions prefix.");
-        return Err(vr::EVRInputError::InvalidParam);
+        return None;
     };
-    let xr_friendly_name = name.replace(
-        |c| !matches!(c, 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '/'),
-        "_",
-    );
+    let xr_friendly_name = names.set_name(&xr_friendly(name));
 
     trace!("Creating action set {xr_friendly_name} ({path:?}) (localized: {localized:?})");
-    instance
-        .create_action_set(xr_friendly_name.as_str(), localized.unwrap_or(path), 0)
-        .map_err(|e| {
-            error!("Failed to create action set {xr_friendly_name}: {e}");
-            vr::EVRInputError::InvalidParam
-        })
+    create_localized(
+        Some(localized.unwrap_or(path)),
+        &xr_friendly_name,
+        xr::sys::MAX_LOCALIZED_ACTION_SET_NAME_SIZE,
+        |localized| instance.create_action_set(&xr_friendly_name, localized, 0),
+    )
+    .inspect_err(|e| error!("Failed to create action set {xr_friendly_name}: {e}"))
+    .ok()
 }
 
 pub fn load_action_sets(
     instance: &xr::Instance,
-    english: Option<&Localization>,
+    names: &mut XrNames,
+    english: &HashMap<String, String>,
     sets: Vec<ActionSetJson>,
-) -> Result<HashMap<String, xr::ActionSet>, vr::EVRInputError> {
+) -> HashMap<String, xr::ActionSet> {
     let mut action_sets = HashMap::new();
     for ActionSetJson { path } in sets {
-        let localized = english.and_then(|e| e.localized_names.get(&path));
-
         let path = path.to_lowercase();
-        let set = create_action_set(instance, &path, localized.map(String::as_str))?;
-        action_sets.insert(path, set);
+        if action_sets.contains_key(&path) {
+            warn!("Action set {path} is listed twice, ignoring the second one");
+            continue;
+        }
+        let localized = english.get(&path).map(String::as_str);
+        // Actions in a set that couldn't be created are skipped.
+        if let Some(set) = create_action_set(instance, names, &path, localized) {
+            action_sets.insert(path, set);
+        }
     }
-    Ok(action_sets)
+    action_sets
 }
 
 fn create_action<T: xr::ActionTy>(
     instance: &xr::Instance,
+    names: &mut XrNames,
     data: &ActionDataCommon,
     sets: &mut HashMap<String, xr::ActionSet>,
-    english: Option<&Localization>,
+    english: &HashMap<String, String>,
     paths: &[xr::Path],
-    long_name_idx: &mut usize,
-) -> xr::Result<xr::Action<T>> {
-    let localized = english
-        .and_then(|e| e.localized_names.get(&data.name.path))
-        .map(|s| s.as_str());
-
-    let set_name = data.name.action_set_name();
-    let entry;
-    let set = if let Some(set) = sets.get(set_name) {
-        set
-    } else {
-        warn!("Action set {set_name} is missing from manifest, creating it...");
-        let set = create_action_set(instance, set_name, None).map_err(|e| {
-            error!("Creating implicit action set failed: {e:?}");
-            xr::sys::Result::ERROR_INITIALIZATION_FAILED
-        })?;
-        entry = sets.entry(set_name.to_string()).insert_entry(set);
-        entry.get()
-    };
-    let mut xr_friendly_name = data.name.cleaned_name();
-    if xr_friendly_name.len() + 1 > xr::sys::MAX_ACTION_NAME_SIZE {
-        let idx_str = ["_ln", &long_name_idx.to_string()].concat();
-        xr_friendly_name.replace_range(
-            xr::sys::MAX_ACTION_NAME_SIZE - idx_str.len() - 1..,
-            &idx_str,
+) -> Option<xr::Action<T>> {
+    let Some(set_name) = data.name.action_set_name() else {
+        warn!(
+            "Action {} is not in an action set, skipping",
+            data.name.path
         );
-        *long_name_idx += 1;
-    }
-    let localized = localized.unwrap_or(&xr_friendly_name);
-    trace!("Creating action {xr_friendly_name} (localized: {localized}) in set {set_name:?}");
+        return None;
+    };
+    let set = match sets.entry(set_name.to_owned()) {
+        Entry::Occupied(set) => set.into_mut(),
+        Entry::Vacant(entry) => {
+            warn!("Action set {set_name} is missing from manifest, creating it...");
+            entry.insert(create_action_set(instance, names, set_name, None)?)
+        }
+    };
+    let xr_friendly_name = names.action_name(set_name, &data.name.cleaned_name());
+    let localized = english.get(&data.name.path).map(String::as_str);
+    trace!("Creating action {xr_friendly_name} (localized: {localized:?}) in set {set_name:?}");
 
-    set.create_action(&xr_friendly_name, localized, paths)
-        .or_else(|err| {
-            // If we get a duplicated localized name, just deduplicate it and try again
-            if err == xr::sys::Result::ERROR_LOCALIZED_NAME_DUPLICATED {
-                // Action names are inherently unique, so just throw it at the end of the
-                // localized name to make it a unique
-                let localized = format!("{localized} ({xr_friendly_name})");
-                set.create_action(&xr_friendly_name, &localized, paths)
-            } else {
-                Err(err)
-            }
-        })
+    create_localized(
+        localized,
+        &xr_friendly_name,
+        xr::sys::MAX_LOCALIZED_ACTION_NAME_SIZE,
+        |localized| set.create_action(&xr_friendly_name, localized, paths),
+    )
+    .inspect_err(|e| {
+        warn!(
+            "Failed to create action {} ({xr_friendly_name}), skipping: {e}",
+            data.name.path
+        )
+    })
+    .ok()
 }
 
 pub type LoadedActionDataMap = HashMap<String, crate::input::ActionData>;
 pub fn load_actions(
     instance: &xr::Instance,
-    english: Option<&Localization>,
+    names: &mut XrNames,
+    english: &HashMap<String, String>,
     sets: &mut HashMap<String, xr::ActionSet>,
     actions: Vec<ActionType>,
     left_hand: xr::Path,
     right_hand: xr::Path,
-) -> Result<LoadedActionDataMap, vr::EVRInputError> {
+) -> LoadedActionDataMap {
     let mut ret = HashMap::with_capacity(actions.len());
-    let mut long_name_idx = 0;
     for action in actions {
         let paths = &[left_hand, right_hand];
         macro_rules! create_action {
-            ($ty:ty, $data:expr) => {
-                create_action::<$ty>(instance, &$data, sets, english, paths, &mut long_name_idx)
-                    .unwrap()
-            };
+            ($ty:ty, $data:expr) => {{
+                let Some(action) =
+                    create_action::<$ty>(instance, names, &$data, sets, english, paths)
+                else {
+                    continue;
+                };
+                action
+            }};
+        }
+        let name = match &action {
+            ActionType::Boolean(data)
+            | ActionType::Vector1(data)
+            | ActionType::Vector2(data)
+            | ActionType::Vector3(data)
+            | ActionType::Vibration(data)
+            | ActionType::Pose(data)
+            | ActionType::Skeleton(SkeletonData { data, .. }) => &data.name.path,
+        };
+        if ret.contains_key(name) {
+            warn!("Action {name} is listed twice, ignoring the second one");
+            continue;
         }
         use crate::input::ActionData::*;
         let (path, action) = match &action {
@@ -282,5 +381,5 @@ pub fn load_actions(
         };
         ret.insert(path.path.clone(), action);
     }
-    Ok(ret)
+    ret
 }

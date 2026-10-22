@@ -274,7 +274,7 @@ impl BindingsProfileLoadContext<'_> {
         let action = action_set
             .create_action::<xr::Vector2f>(&name, &name, &self.hands)
             .unwrap();
-        let key = format!("{}/{name}", output.action_set_name());
+        let key = format!("{}/{name}", output.action_set_name().unwrap_or_default());
         self.actions.insert(
             key.clone(),
             ActionData::Vector2 {

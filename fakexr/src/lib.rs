@@ -215,6 +215,11 @@ pub fn get_suggested_bindings(action: xr::Action, profile: xr::Path) -> Vec<Stri
         .collect()
 }
 
+pub fn get_action_localized_name(action: xr::Action) -> String {
+    let action = xr::Action::to_handle(action).unwrap();
+    action.localized_name.to_str().unwrap().to_owned()
+}
+
 pub fn set_stage_bounds(session: xr::Session, bounds: Option<xr::Extent2Df>) {
     let session = session.to_handle().unwrap();
     session.stage_bounds.store(bounds);
