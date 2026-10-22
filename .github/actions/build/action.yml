@@ -1,0 +1,26 @@
+name: Build
+description: Build the 64-bit and 32-bit runtime into out/xrizer-edge
+runs:
+  using: composite
+  steps:
+    - name: Set version
+      shell: sh
+      # actions/checkout only marks the workspace safe in a temporary config.
+      # Without this, git and vergen reject the checkout as owned by another
+      # user and the version comes out empty.
+      run: |
+        git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        v=$(git describe --tags --always)
+        echo "XRIZER_VERSION=$v" >> "$GITHUB_ENV"
+    - name: Build
+      shell: sh
+      run: cargo xbuild --release --features static-openxr --verbose
+    - name: Build 32-bit
+      shell: sh
+      run: cargo xbuild --release --target i686-unknown-linux-gnu --features static-openxr --verbose
+    - name: Copy to directory
+      shell: sh
+      run: |
+        mkdir -p out/xrizer-edge
+        cp -r -L target/release/bin out/xrizer-edge
+        cp -L target/i686-unknown-linux-gnu/release/bin/vrclient.so out/xrizer-edge/bin/

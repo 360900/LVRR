@@ -33,42 +33,33 @@ jobs:
         path: ${{ steps.vendor.outputs.vendor }}
     outputs:
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
-  get-latest-build:
+  build:
     runs-on: ubuntu-latest
-    needs: vendor-dependencies
+    container:
+      image: 'ghcr.io/360900/xrizer-edge-ubuntu:latest'
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - name: Get latest build
-        id: latest-build
-        uses: actions/github-script@v8
-        env:
-          REPO: ${{ github.repository }}
-          SHA: ${{ github.sha }}
-        with:
-          script: |
-            const repo_split = process.env.REPO.split("/");
-            const owner = repo_split[0];
-            const repo = repo_split[1];
-            const { data: runs } = await github.rest.actions.listWorkflowRuns({
-              owner: owner,
-              repo: repo,
-              workflow_id: 'ci.yml',
-              head_sha: process.env.SHA,
-              status: "success"
-            });
-
-            if (runs.total_count === 0) {
-              console.error(runs);
-              throw new Error("No workflow runs?");
-            }
-
-            return runs.workflow_runs[0].id
+    - uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+    - uses: ./.github/actions/build
+    - name: Run tests
+      run: cargo test --verbose
+    - name: Upload
+      uses: actions/upload-artifact@v6
+      with:
+        name: xrizer-edge-release
+        path: out
+  draft-release:
+    runs-on: ubuntu-latest
+    needs: [vendor-dependencies, build]
+    steps:
       - name: Download build
-        id: download-build
         uses: actions/download-artifact@v7
         with:
-          name: xrizer-edge-nightly-release
-          run-id: ${{ steps.latest-build.outputs.result }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          name: xrizer-edge-release
       - name: Download vendored dependencies
         uses: actions/download-artifact@v7
         with:
