@@ -16,7 +16,7 @@ use openxr as xr;
 use std::mem::offset_of;
 use std::sync::{
     Arc, Mutex, Once, PoisonError,
-    atomic::{AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicU32, Ordering},
 };
 use std::time::Instant;
 use std::{ffi::c_char, ops::Deref};
@@ -58,6 +58,8 @@ pub struct Compositor {
     metrics: FrameMetrics,
     timing_mode: Mutex<vr::EVRCompositorTimingMode>,
     frame_state: Mutex<FrameState>,
+    /// Whether the app submitted an eye since the last handoff.
+    submitted: AtomicBool,
     focused: Once,
     /// The scene and background fades.
     fades: Mutex<[Fade; 2]>,
@@ -163,6 +165,7 @@ impl Compositor {
             },
             timing_mode: vr::EVRCompositorTimingMode::Implicit.into(),
             frame_state: FrameState::Submitted.into(),
+            submitted: false.into(),
             focused: Once::new(),
             fades: Mutex::default(),
         }
@@ -932,6 +935,13 @@ impl vr::IVRCompositor029_Interface for Compositor {
             return;
         }
         let session_data = self.openxr.session_data.get();
+        // A frame handed off without being begun only shows overlays, as long as no eyes were
+        // submitted. Otherwise the app already waited for its next frame before handing this one
+        // off, and that frame must not be ended empty.
+        let submitted = self.submitted.swap(false, Ordering::Relaxed);
+        if !submitted && *self.frame_state.lock().unwrap() == FrameState::Waited {
+            self.maybe_begin_frame(&session_data);
+        }
         let mut frame_lock = session_data.comp_data.0.lock().unwrap();
         let Some(ctrl) = frame_lock.as_mut() else {
             debug!("no frame controller - not presenting frame");
@@ -1145,6 +1155,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
         )) {
             return e;
         }
+        self.submitted.store(true, Ordering::Relaxed);
         vr::EVRCompositorError::None
     }
 
@@ -3350,6 +3361,34 @@ mod tests {
         assert_eq!(f.submit(vr::EVREye::Right), None);
         f.comp.PostPresentHandoff();
         f.check_frame_state(fakexr::FrameState::Ended);
+    }
+
+    /// A frame the app hands off without beginning it is still ended, so overlays are shown.
+    #[test]
+    fn explicit_timing_handoff_without_begun_frame() {
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+        f.comp.SetExplicitTimingMode(
+            vr::EVRCompositorTimingMode::Explicit_ApplicationPerformsPostPresentHandoff,
+        );
+
+        for _ in 0..2 {
+            assert_eq!(f.wait_get_poses(), None);
+            f.check_frame_state(fakexr::FrameState::Waited);
+            f.comp.PostPresentHandoff();
+            f.check_frame_state(fakexr::FrameState::Ended);
+        }
+
+        // A frame the app submitted to but handed off only after waiting for the next one isn't
+        // replaced with an empty one.
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(f.comp.SubmitExplicitTimingData(), None);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        assert_eq!(f.wait_get_poses(), None);
+        f.check_frame_state(fakexr::FrameState::Waited);
+        f.comp.PostPresentHandoff();
+        f.check_frame_state(fakexr::FrameState::Waited);
     }
 
     /// The runtime ending the frame keeps flushing frames the app never submitted.
