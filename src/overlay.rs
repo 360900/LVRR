@@ -152,7 +152,7 @@ impl OverlayMan {
             };
             overlay.z_order = SKYBOX_Z_ORDER;
             // SteamVR draws the skybox opaque, whatever the texture's alpha says.
-            overlay.flags = vr::VROverlayFlags::IgnoreTextureAlpha as u32;
+            overlay.flags = vr::VROverlayFlags::IgnoreTextureAlpha.0;
             overlay.bounds = bounds;
             overlay.visible = true;
             overlay.set_transform(
@@ -459,7 +459,7 @@ impl OverlayMan {
         };
 
         let closed = vr::VREvent_t {
-            eventType: vr::EVREventType::KeyboardClosed as u32,
+            eventType: vr::EVREventType::KeyboardClosed.0,
             ..done
         };
         // Closed follows whatever closed the keyboard; there's no Done key to press if it's hidden.
@@ -1085,7 +1085,7 @@ impl Overlay {
     }
 
     fn has_flag(&self, flag: vr::VROverlayFlags) -> bool {
-        self.flags & flag as u32 != 0
+        self.flags & flag.0 != 0
     }
 
     pub fn set_flag(&mut self, flag: vr::VROverlayFlags, value: bool) {
@@ -2895,7 +2895,7 @@ mod tests {
 
     #[test]
     fn layer_alpha_follows_overlay_flags() {
-        use vr::VROverlayFlags::{IgnoreTextureAlpha, IsPremultiplied};
+        use vr::VROverlayFlags as OverlayFlags;
         use xr::CompositionLayerFlags as Flags;
 
         let f = RealSessionFixture::with_extensions(|e| {
@@ -2925,12 +2925,12 @@ mod tests {
         );
         assert_eq!(layer().color_scale(), Some([1.0, 1.0, 1.0, 0.5]));
 
-        set_flag(IsPremultiplied, true);
+        set_flag(OverlayFlags::IsPremultiplied, true);
         assert_eq!(layer().flags(), Flags::BLEND_TEXTURE_SOURCE_ALPHA);
         assert_eq!(layer().color_scale(), Some([0.5; 4]));
 
-        set_flag(IsPremultiplied, false);
-        set_flag(IgnoreTextureAlpha, true);
+        set_flag(OverlayFlags::IsPremultiplied, false);
+        set_flag(OverlayFlags::IgnoreTextureAlpha, true);
         assert_eq!(layer().flags(), Flags::UNPREMULTIPLIED_ALPHA);
     }
 
