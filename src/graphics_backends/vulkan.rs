@@ -250,8 +250,15 @@ impl GraphicsBackend for VulkanData {
     }
 
     fn get_texture(texture: &vr::Texture_t, _: vr::EVRSubmitFlags) -> Option<Self::OpenVrTexture> {
-        (texture.eType == vr::ETextureType::Vulkan && !texture.handle.is_null())
-            .then_some(texture.handle.cast())
+        let data = texture.handle.cast::<vr::VRVulkanTextureData_t>();
+        (texture.eType == vr::ETextureType::Vulkan
+            && unsafe { data.as_ref() }.is_some_and(|data| data.m_nImage != 0))
+        .then_some(data)
+    }
+
+    fn is_texture_on_device(&self, texture: Self::OpenVrTexture) -> bool {
+        let device = unsafe { (*texture).m_pDevice };
+        vk::Device::from_raw(device as _) == self.device.handle()
     }
     fn store_swapchain_images(&mut self, images: Vec<u64>, format: Self::Format) {
         let images: Vec<vk::Image> = images.into_iter().map(vk::Image::from_raw).collect();

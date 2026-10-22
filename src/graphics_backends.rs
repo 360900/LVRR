@@ -37,6 +37,11 @@ pub trait GraphicsBackend: Into<SupportedBackend> {
         flags: vr::EVRSubmitFlags,
     ) -> Option<Self::OpenVrTexture>;
 
+    /// Whether the texture belongs to the device the session was set up with.
+    fn is_texture_on_device(&self, _texture: Self::OpenVrTexture) -> bool {
+        true
+    }
+
     /// Backend implementation for swapchain_info_for_texture. Callers should
     /// use swapchain_info_for_texture instead, which fixes up invalid values
     /// games are known to submit.

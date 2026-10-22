@@ -883,3 +883,28 @@ fn resolve_only_into_the_same_format() {
     assert_eq!(EyeCopy::new(unorm, srgb, other, true), EyeCopy::Blit);
     assert_eq!(EyeCopy::new(unorm, srgb, other, false), EyeCopy::Blit);
 }
+
+#[test]
+fn reject_null_image() {
+    let mut data = vr::VRVulkanTextureData_t {
+        m_nImage: 0,
+        m_pDevice: std::ptr::null_mut(),
+        m_pPhysicalDevice: std::ptr::null_mut(),
+        m_pInstance: std::ptr::null_mut(),
+        m_pQueue: std::ptr::null_mut(),
+        m_nQueueFamilyIndex: 0,
+        m_nWidth: 1,
+        m_nHeight: 1,
+        m_nFormat: 0,
+        m_nSampleCount: 1,
+    };
+    let texture = |data: &mut vr::VRVulkanTextureData_t| vr::Texture_t {
+        handle: std::ptr::from_mut(data).cast(),
+        eType: vr::ETextureType::Vulkan,
+        eColorSpace: vr::EColorSpace::Auto,
+    };
+    let flags = vr::EVRSubmitFlags::Default;
+    assert!(VulkanData::get_texture(&texture(&mut data), flags).is_none());
+    data.m_nImage = 1;
+    assert!(VulkanData::get_texture(&texture(&mut data), flags).is_some());
+}

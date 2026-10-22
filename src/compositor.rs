@@ -1819,6 +1819,11 @@ impl<G: GraphicsBackend> FrameController<G> {
         let color_space = texture.eColorSpace;
         let texture = G::get_texture(texture, submit_flags)
             .ok_or(vr::EVRCompositorError::InvalidTexture)?;
+        // The session can only use the device it was set up with, e.g. not one the app recreated.
+        if !self.backend.is_texture_on_device(texture) {
+            crate::warn_once!("Texture submitted from a different graphics device than before");
+            return Err(vr::EVRCompositorError::TextureIsOnWrongDevice);
+        }
         let bounds = requested_bounds
             .clamped()
             .ok_or(vr::EVRCompositorError::InvalidBounds)?;
@@ -2253,6 +2258,10 @@ mod tests {
                 .then_some(texture.handle.cast())
         }
 
+        fn is_texture_on_device(&self, texture: Self::OpenVrTexture) -> bool {
+            std::ptr::eq(texture.cast(), Arc::as_ptr(&self.vk))
+        }
+
         fn raw_swapchain_info_for_texture(
             &self,
             _: Self::OpenVrTexture,
@@ -2505,6 +2514,26 @@ mod tests {
             assert_eq!(f.wait_get_poses(), None);
         }
         assert!(start.elapsed() >= 2 * period);
+    }
+
+    #[test]
+    fn texture_on_other_device() {
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+        let xr = &f.comp.openxr;
+        let other = Arc::new(VulkanData::new_temporary(&xr.instance, xr.system_id));
+
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(
+            f.comp.Submit(
+                vr::EVREye::Left,
+                &FakeGraphicsData::texture(&other),
+                std::ptr::null(),
+                vr::EVRSubmitFlags::Default,
+            ),
+            vr::EVRCompositorError::TextureIsOnWrongDevice
+        );
+        assert_eq!(f.submit(vr::EVREye::Left), None);
     }
 
     /// The game may see a Vulkan driver without all the device extensions the runtime asks for.
