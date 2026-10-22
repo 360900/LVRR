@@ -522,22 +522,12 @@ impl GraphicsBackend for GlData {
         }
         let xr::Rect2Di { extent, .. } = texture_rect_from_bounds(texture, bounds);
 
-        let fmt = match color_space {
-            vr::EColorSpace::Linear => fmt,
-            // Gamma, Auto, and Auto for values that aren't a color space
-            _ => match fmt as gl::types::GLenum {
-                gl::RGBA8 => gl::SRGB8_ALPHA8 as gl::types::GLint,
-                gl::RGB8 => gl::SRGB8 as gl::types::GLint,
-                _ => fmt,
-            },
-        };
-
         xr::SwapchainCreateInfo {
             create_flags: xr::SwapchainCreateFlags::EMPTY,
             // The blit path renders into the swapchain images.
             usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT
                 | xr::SwapchainUsageFlags::TRANSFER_DST,
-            format: fmt as u32,
+            format: swapchain_format(fmt as GLenum, color_space),
             sample_count: 1,
             width: extent.width as u32,
             height: extent.height as u32,
@@ -681,6 +671,39 @@ impl GlData {
         }
 
         extent
+    }
+}
+
+/// Runtimes rarely support 3-channel formats (Vulkan drivers can't render to them), and unsized
+/// formats aren't swapchain formats at all.
+fn sized_format(format: GLenum) -> GLenum {
+    match format {
+        gl::RGBA | gl::RGB | gl::RGB8 => gl::RGBA8,
+        gl::SRGB_ALPHA | gl::SRGB | gl::SRGB8 => gl::SRGB8_ALPHA8,
+        gl::RGB16F => gl::RGBA16F,
+        gl::RGB16 => gl::RGBA16,
+        other => other,
+    }
+}
+
+/// Whether the texture holds gamma-encoded data in a format GL treats as linear.
+fn holds_gamma(format: GLenum, color_space: vr::EColorSpace) -> bool {
+    let format = sized_format(format);
+    match color_space {
+        vr::EColorSpace::Linear => false,
+        vr::EColorSpace::Gamma => format != gl::SRGB8_ALPHA8,
+        // Auto: 8-bit formats are gamma, everything else linear.
+        _ => format == gl::RGBA8,
+    }
+}
+
+/// Gamma-encoded 8-bit data goes into an sRGB swapchain, so the runtime doesn't encode it again.
+fn swapchain_format(format: GLenum, color_space: vr::EColorSpace) -> GLenum {
+    let sized = sized_format(format);
+    if sized == gl::RGBA8 && holds_gamma(format, color_space) {
+        gl::SRGB8_ALPHA8
+    } else {
+        sized
     }
 }
 
@@ -841,6 +864,34 @@ mod tests {
             })
             .unwrap();
         assert_eq!(swapchain.enumerate_images(), Ok(vec![]));
+    }
+
+    #[test]
+    fn swapchain_formats() {
+        use vr::EColorSpace::*;
+        for (format, color_space, expected) in [
+            (gl::RGBA8, Auto, gl::SRGB8_ALPHA8),
+            (gl::RGBA8, Gamma, gl::SRGB8_ALPHA8),
+            (gl::RGBA8, Linear, gl::RGBA8),
+            (gl::RGBA, Auto, gl::SRGB8_ALPHA8),
+            (gl::RGBA, Linear, gl::RGBA8),
+            (gl::RGB, Gamma, gl::SRGB8_ALPHA8),
+            (gl::RGB8, Auto, gl::SRGB8_ALPHA8),
+            (gl::RGB8, Linear, gl::RGBA8),
+            (gl::SRGB8, Linear, gl::SRGB8_ALPHA8),
+            (gl::SRGB_ALPHA, Auto, gl::SRGB8_ALPHA8),
+            (gl::SRGB8_ALPHA8, Gamma, gl::SRGB8_ALPHA8),
+            (gl::RGBA16F, Auto, gl::RGBA16F),
+            (gl::RGBA16F, Gamma, gl::RGBA16F),
+            (gl::RGB16F, Linear, gl::RGBA16F),
+            (gl::RGB10_A2, Auto, gl::RGB10_A2),
+        ] {
+            assert_eq!(
+                swapchain_format(format, color_space),
+                expected,
+                "{format:#x} {color_space:?}"
+            );
+        }
     }
 
     #[test]
