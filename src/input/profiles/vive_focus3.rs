@@ -107,6 +107,10 @@ impl InteractionProfile for ViveFocus3 {
             main_xy: c.leftright::<Thumbstick, (), _, _>(),
             main_xy_click: c.leftright::<Thumbstick, Click, _, _>(),
             main_xy_touch: c.leftright::<Thumbstick, Touch, _, _>(),
+            trigger_touch: c.leftright::<Trigger, Touch, _, _>(),
+            app_menu_touch: vec![],
+            a_touch: vec![],
+            grip_touch: c.leftright::<Squeeze, Touch, _, _>(),
             haptic: c.haptics(),
         }
     }

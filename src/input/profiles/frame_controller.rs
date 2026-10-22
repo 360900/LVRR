@@ -130,6 +130,18 @@ impl InteractionProfile for FrameController {
             main_xy: c.leftright::<Thumbstick, (), _, _>(),
             main_xy_click: c.leftright::<Thumbstick, Click, _, _>(),
             main_xy_touch: c.leftright::<Thumbstick, Touch, _, _>(),
+            trigger_touch: c.leftright::<Trigger, Touch, _, _>(),
+            app_menu_touch: [
+                c.into::<Left<DPadRight, Touch>, _>(),
+                c.into::<Right<B, Touch>, _>(),
+            ]
+            .concat(),
+            a_touch: [
+                c.into::<Left<DPadDown, Touch>, _>(),
+                c.into::<Right<A, Touch>, _>(),
+            ]
+            .concat(),
+            grip_touch: c.leftright::<Squeeze, Touch, _, _>(),
             haptic: c.haptics(),
         }
     }

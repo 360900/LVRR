@@ -103,6 +103,10 @@ impl InteractionProfile for ViveWands {
             main_xy: c.leftright::<Trackpad, (), _, _>(),
             main_xy_click: c.leftright::<Trackpad, Click, _, _>(),
             main_xy_touch: c.leftright::<Trackpad, Touch, _, _>(),
+            app_menu_touch: vec![],
+            a_touch: vec![],
+            trigger_touch: vec![],
+            grip_touch: vec![],
             haptic: c.haptics(),
         }
     }

@@ -107,6 +107,10 @@ impl InteractionProfile for ReverbG2Controller {
             main_xy: c.leftright::<Thumbstick, (), _, _>(),
             main_xy_click: c.leftright::<Thumbstick, Click, _, _>(),
             main_xy_touch: vec![],
+            app_menu_touch: vec![],
+            a_touch: vec![],
+            trigger_touch: vec![],
+            grip_touch: vec![],
             haptic: c.haptics(),
         }
     }

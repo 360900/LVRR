@@ -49,6 +49,10 @@ impl InteractionProfile for ViveTracker {
             main_xy: vec![],
             main_xy_touch: vec![],
             main_xy_click: vec![],
+            app_menu_touch: vec![],
+            a_touch: vec![],
+            trigger_touch: vec![],
+            grip_touch: vec![],
             haptic: vec![],
             extra: Bindings {
                 grip_pose: c.pose(),

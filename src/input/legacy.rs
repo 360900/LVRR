@@ -16,7 +16,14 @@ use std::sync::atomic::{AtomicU32, Ordering};
 pub(super) struct LegacyState {
     packet_num: AtomicU32,
     /// Controller state per hand as of the last legacy action sync.
-    hands: [Mutex<vr::VRControllerState_t>; 2],
+    hands: [Mutex<HandState>; 2],
+}
+
+#[derive(Default)]
+struct HandState {
+    state: vr::VRControllerState_t,
+    /// Whether the trigger value passed the touch threshold.
+    trigger_touched: bool,
 }
 
 impl LegacyState {
@@ -229,7 +236,10 @@ impl<C: openxr_data::Compositor> Input<C> {
             return false;
         };
 
-        **state = *self.legacy_state.hands[hand as usize - 1].lock().unwrap();
+        **state = self.legacy_state.hands[hand as usize - 1]
+            .lock()
+            .unwrap()
+            .state;
         state.unPacketNum = self.legacy_state.packet_num.load(Ordering::Relaxed);
 
         true
@@ -247,9 +257,14 @@ impl<C: openxr_data::Compositor> Input<C> {
             let Some(device_index) = devices.get_controller_index(hand) else {
                 continue;
             };
-            let new =
-                read_controller_state(&legacy.actions, session, self.get_subaction_path(hand));
-            let mut old = self.legacy_state.hands[hand as usize - 1].lock().unwrap();
+            let mut hand_state = self.legacy_state.hands[hand as usize - 1].lock().unwrap();
+            let new = read_hand_state(
+                &legacy.actions,
+                session,
+                self.get_subaction_path(hand),
+                &hand_state,
+            );
+            let (old, new_state) = (&hand_state.state, &new.state);
 
             let mut events = self.events.lock().unwrap();
             let mut push = |ty, id: vr::EVRButtonId| {
@@ -261,8 +276,8 @@ impl<C: openxr_data::Compositor> Input<C> {
             };
             for id in LEGACY_BUTTONS {
                 let mask = button_mask_from_id(id);
-                let touched = new.ulButtonTouched & mask != 0;
-                let pressed = new.ulButtonPressed & mask != 0;
+                let touched = new_state.ulButtonTouched & mask != 0;
+                let pressed = new_state.ulButtonPressed & mask != 0;
                 let touch_changed = touched != (old.ulButtonTouched & mask != 0);
                 // Touch comes before the press, and the untouch after the release.
                 if touch_changed && touched {
@@ -285,7 +300,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             let excess = events.len().saturating_sub(MAX_QUEUED_EVENTS);
             events.drain(..excess);
 
-            *old = new;
+            *hand_state = new;
         }
     }
 }
@@ -300,11 +315,17 @@ const LEGACY_BUTTONS: [vr::EVRButtonId; 6] = [
     vr::EVRButtonId::Axis2,
 ];
 
-fn read_controller_state(
+/// Applies a threshold with hysteresis, like SteamVR's activate/deactivate thresholds.
+fn threshold(was_active: bool, value: f32, activate: f32, deactivate: f32) -> bool {
+    value >= if was_active { deactivate } else { activate }
+}
+
+fn read_hand_state(
     actions: &LegacyActions,
     session: &xr::Session<xr::AnyGraphics>,
     hand_path: xr::Path,
-) -> vr::VRControllerState_t {
+    previous: &HandState,
+) -> HandState {
     let bool_state = |action: &xr::Action<bool>| {
         action
             .state(session, hand_path)
@@ -316,13 +337,19 @@ fn read_controller_state(
             .map_or(0.0, |s| s.current_state)
     };
 
+    let trigger = float_state(&actions.trigger);
+    // SteamVR's legacy bindings also touch the trigger once it is pulled, which is all
+    // controllers without a capacitive trigger can report.
+    let trigger_touched = threshold(previous.trigger_touched, trigger, 0.1, 0.05);
+
     let mut state = vr::VRControllerState_t::default();
     let mut set_button = |id, pressed: bool, touched: bool| {
         let mask = button_mask_from_id(id);
         if pressed {
             state.ulButtonPressed |= mask;
         }
-        if touched {
+        // A button can't be pressed without being touched.
+        if touched || pressed {
             state.ulButtonTouched |= mask;
         }
     };
@@ -335,16 +362,24 @@ fn read_controller_state(
     set_button(
         vr::EVRButtonId::SteamVR_Trigger,
         bool_state(&actions.trigger_click),
-        false,
+        bool_state(&actions.trigger_touch) || trigger_touched,
     );
     set_button(
         vr::EVRButtonId::ApplicationMenu,
         bool_state(&actions.app_menu),
-        false,
+        bool_state(&actions.app_menu_touch),
     );
-    set_button(vr::EVRButtonId::A, bool_state(&actions.a), false);
+    set_button(
+        vr::EVRButtonId::A,
+        bool_state(&actions.a),
+        bool_state(&actions.a_touch),
+    );
     let squeeze_click = bool_state(&actions.squeeze_click);
-    set_button(vr::EVRButtonId::Grip, squeeze_click, false);
+    set_button(
+        vr::EVRButtonId::Grip,
+        squeeze_click,
+        bool_state(&actions.grip_touch),
+    );
     set_button(vr::EVRButtonId::Axis2, squeeze_click, false);
 
     let main_xy = actions
@@ -355,10 +390,13 @@ fn read_controller_state(
         x: main_xy.x,
         y: main_xy.y,
     };
-    state.rAxis[1].x = float_state(&actions.trigger);
+    state.rAxis[1].x = trigger;
     state.rAxis[2].x = float_state(&actions.squeeze);
 
-    state
+    HandState {
+        state,
+        trigger_touched,
+    }
 }
 
 mod marker {
@@ -391,9 +429,14 @@ use marker::*;
 #[allow(private_interfaces, private_bounds)]
 pub(super) struct Legacy<M: ActionsMarker> {
     pub app_menu: Action<bool, M>,
+    pub app_menu_touch: Action<bool, M>,
     pub a: Action<bool, M>,
+    pub a_touch: Action<bool, M>,
     pub trigger_click: Action<bool, M>,
+    pub trigger_touch: Action<bool, M>,
     pub squeeze_click: Action<bool, M>,
+    /// Touches k_EButton_Grip.
+    pub grip_touch: Action<bool, M>,
     pub trigger: Action<f32, M>,
     pub squeeze: Action<f32, M>,
     // This can be a stick or a trackpad, so we'll just call it "xy"
@@ -430,9 +473,13 @@ impl LegacyBindings {
                 .into_iter()
                 .map(|path| xr::Binding::new(&pose_data.grip, path)),
             app_menu,
+            app_menu_touch,
             a,
+            a_touch,
             trigger_click,
+            trigger_touch,
             squeeze_click,
+            grip_touch,
             trigger,
             squeeze,
             main_xy,
@@ -461,14 +508,26 @@ impl LegacyActionData {
             trigger_click: set
                 .create_action("trigger-click", "Trigger Click", &leftright)
                 .unwrap(),
+            trigger_touch: set
+                .create_action("trigger-touch", "Trigger Touch", &leftright)
+                .unwrap(),
             trigger: set.create_action("trigger", "Trigger", &leftright).unwrap(),
             squeeze: set.create_action("squeeze", "Squeeze", &leftright).unwrap(),
             app_menu: set
                 .create_action("app-menu", "Application Menu", &leftright)
                 .unwrap(),
+            app_menu_touch: set
+                .create_action("app-menu-touch", "Application Menu Touch", &leftright)
+                .unwrap(),
             a: set.create_action("a", "A Button", &leftright).unwrap(),
+            a_touch: set
+                .create_action("a-touch", "A Button Touch", &leftright)
+                .unwrap(),
             squeeze_click: set
                 .create_action("grip-click", "Grip Click", &leftright)
+                .unwrap(),
+            grip_touch: set
+                .create_action("grip-touch", "Grip Touch", &leftright)
                 .unwrap(),
             main_xy: set
                 .create_action("main-joystick", "Main Joystick/Trackpad", &leftright)
@@ -489,7 +548,11 @@ impl LegacyActionData {
 
 #[cfg(test)]
 mod tests {
-    use crate::input::profiles::{knuckles::Knuckles, simple_controller::SimpleController};
+    use crate::input::InteractionProfile;
+    use crate::input::profiles::{
+        knuckles::Knuckles, oculus_touch::OculusTouch, simple_controller::SimpleController,
+        vive_focus3::ViveFocus3,
+    };
     use crate::input::tests::{Fixture, compare_pose};
     use crate::openxr_data::Hand;
     use openvr as vr;
@@ -562,6 +625,41 @@ mod tests {
             .then_some(event)
     }
 
+    fn legacy_action(
+        f: &Fixture,
+        get_action: impl FnOnce(&super::LegacyActions) -> openxr::sys::Action,
+    ) -> openxr::sys::Action {
+        get_action(
+            &f.input
+                .openxr
+                .session_data
+                .get()
+                .input_data
+                .get_legacy_actions()
+                .unwrap()
+                .actions,
+        )
+    }
+
+    #[track_caller]
+    fn assert_legacy_bindings<P: InteractionProfile>(
+        f: &Fixture,
+        get_action: impl FnOnce(&super::LegacyActions) -> openxr::sys::Action,
+        expected: &[&str],
+    ) {
+        let profile = f
+            .input
+            .openxr
+            .instance
+            .string_to_path(P::profile_path())
+            .unwrap();
+        let mut bindings = fakexr::get_suggested_bindings(legacy_action(f, get_action), profile);
+        bindings.sort();
+        let mut expected: Vec<_> = expected.iter().map(|s| s.to_string()).collect();
+        expected.sort();
+        assert_eq!(bindings, expected);
+    }
+
     /// Sets up legacy input with Index controllers, returning the requested legacy action.
     fn legacy_fixture(
         get_action: impl FnOnce(&super::LegacyActions) -> openxr::sys::Action,
@@ -574,22 +672,40 @@ mod tests {
         f.set_interaction_profile::<Knuckles>(RightHand);
         f.input.frame_start_update();
         f.input.openxr.poll_events();
-        let action = get_action(
-            &f.input
-                .openxr
-                .session_data
-                .get()
-                .input_data
-                .get_legacy_actions()
-                .unwrap()
-                .actions,
-        );
+        let action = legacy_action(&f, get_action);
         while let Some(event) = next_event(&f) {
             assert_eq!(event.ty, vr::EVREventType::TrackedDeviceActivated as u32);
         }
         (f, action)
     }
 
+    fn get_state(f: &Fixture, device_index: vr::TrackedDeviceIndex_t) -> vr::VRControllerState_t {
+        let mut state = vr::VRControllerState_t::default();
+        assert!(f.input.get_legacy_controller_state(
+            device_index,
+            &mut state,
+            std::mem::size_of_val(&state) as u32
+        ));
+        state
+    }
+
+    #[track_caller]
+    fn expect_button_event(f: &Fixture, ty: vr::EVREventType, index: u32, id: vr::EVRButtonId) {
+        let event = next_event(f).unwrap_or_else(|| panic!("Expected {ty:?} for {id:?}"));
+        assert_eq!(event.ty, ty as u32, "{id:?}");
+        assert_eq!(event.index, index, "{id:?}");
+        assert_eq!(unsafe { event.data.controller }.button, id as u32);
+    }
+
+    #[track_caller]
+    fn expect_no_event(f: &Fixture) {
+        if let Some(event) = next_event(f) {
+            panic!("Got unexpected event: {}", event.ty);
+        }
+    }
+
+    /// Toggles a boolean legacy action and checks the reported buttons and events.
+    /// A pressed button is touched as well.
     fn legacy_input(
         get_action: impl FnOnce(&super::LegacyActions) -> openxr::sys::Action,
         ids: &[vr::EVRButtonId],
@@ -598,147 +714,81 @@ mod tests {
         use fakexr::UserPath::*;
         let (f, action) = legacy_fixture(get_action);
 
-        let get_state = |hand: fakexr::UserPath| {
-            let mut state = vr::VRControllerState_t::default();
-            assert!(f.input.get_legacy_controller_state(
-                match hand {
-                    LeftHand => 1,
-                    RightHand => 2,
-                },
-                &mut state,
-                std::mem::size_of_val(&state) as u32
-            ));
-            state
-        };
-
-        let get_event = || next_event(&f);
-
-        let expect_event =
-            |msg| get_event().unwrap_or_else(|| panic!("Expected to get an event ({msg})"));
-        let expect_no_event = |msg| {
-            let event = get_event();
-            assert!(
-                event.is_none(),
-                "Got unexpected event: {} ({msg})",
-                event.unwrap().ty
+        let mask = ids
+            .iter()
+            .fold(0, |mask, id| mask | super::button_mask_from_id(*id));
+        let expect_state = |index, active: bool| {
+            let state = get_state(&f, index);
+            // Copy the fields out, since references to packed fields are undefined.
+            let (pressed, touched) = (state.ulButtonPressed, state.ulButtonTouched);
+            let mask = if active { mask } else { 0 };
+            assert_eq!(touched, mask, "touched {pressed:b} (device {index})");
+            assert_eq!(
+                pressed,
+                mask * !touch as u64,
+                "pressed {pressed:b} (device {index})"
             );
         };
-
+        let expect_events = |index, active: bool| {
+            use vr::EVREventType::*;
+            let types: &[vr::EVREventType] = match (touch, active) {
+                (true, true) => &[ButtonTouch],
+                (true, false) => &[ButtonUntouch],
+                (false, true) => &[ButtonTouch, ButtonPress],
+                (false, false) => &[ButtonUnpress, ButtonUntouch],
+            };
+            for id in ids {
+                for ty in types {
+                    expect_button_event(&f, *ty, index, *id);
+                }
+            }
+        };
         let update_action_state = |left_state, right_state| {
             fakexr::set_action_state(action, fakexr::ActionState::Bool(left_state), LeftHand);
             fakexr::set_action_state(action, fakexr::ActionState::Bool(right_state), RightHand);
             f.input.frame_start_update();
         };
 
-        let expect_press = |state: &vr::VRControllerState_t, expect: bool| {
-            // The braces around state.ulButtonPressed are to force create a copy, because
-            // VRControllerState_t is a packed struct and references to unaligned fields are undefined.
-            let mask = if touch {
-                state.ulButtonTouched
-            } else {
-                state.ulButtonPressed
-            };
-
-            match expect {
-                true => {
-                    let active_mask = ids
-                        .iter()
-                        .copied()
-                        .fold(0, |val, id| val | super::button_mask_from_id(id));
-
-                    assert_eq!(
-                        mask, active_mask,
-                        "Button not active - state: {mask:b} | button mask: {mask:b}"
-                    );
-                }
-                false => {
-                    assert_eq!(mask, 0, "Button should be inactive - state: {mask:b}");
-                }
-            }
-        };
-
-        let (active_event, inactive_event) = if touch {
-            (
-                vr::EVREventType::ButtonTouch.0,
-                vr::EVREventType::ButtonUntouch.0,
-            )
-        } else {
-            (
-                vr::EVREventType::ButtonPress.0,
-                vr::EVREventType::ButtonUnpress.0,
-            )
-        };
-
-        let hands = [LeftHand, RightHand];
-
-        for hand in hands {
-            let state = get_state(hand);
-            expect_press(&state, false);
-            expect_no_event(format!("{hand:?}"));
+        for index in [1, 2] {
+            expect_state(index, false);
         }
+        expect_no_event(&f);
 
         // State change to true
         update_action_state(true, true);
-
-        for (idx, hand) in hands.iter().copied().enumerate() {
-            let idx = idx as u32 + 1;
-            let state = get_state(hand);
-            expect_press(&state, true);
-
-            for id in ids {
-                let event = expect_event(format!("{hand:?}"));
-                assert_eq!(event.ty, active_event, "{hand:?}");
-                assert_eq!(event.index, idx, "{hand:?}");
-                assert_eq!(unsafe { event.data.controller }.button, id.0, "{hand:?}");
-            }
+        for index in [1, 2] {
+            expect_state(index, true);
+            expect_events(index, true);
         }
+        expect_no_event(&f);
 
         // No frame update - no change
-        for hand in hands {
-            let state = get_state(hand);
-            expect_press(&state, true);
-            expect_no_event(format!("{hand:?}"));
+        for index in [1, 2] {
+            expect_state(index, true);
         }
+        expect_no_event(&f);
 
         // Frame update but no change
         f.input.frame_start_update();
-        for hand in hands {
-            let state = get_state(hand);
-            expect_press(&state, true);
-            expect_no_event(format!("{hand:?}"));
+        for index in [1, 2] {
+            expect_state(index, true);
         }
+        expect_no_event(&f);
 
         // State change to false
         update_action_state(false, false);
-
-        for (idx, hand) in hands.iter().copied().enumerate() {
-            let idx = idx as u32 + 1;
-            let state = get_state(hand);
-            expect_press(&state, false);
-
-            for id in ids {
-                let event = expect_event(format!("{id:?}"));
-                assert_eq!(event.ty, inactive_event, "{hand:?}");
-                assert_eq!(event.index, idx, "{hand:?}");
-                assert_eq!(unsafe { event.data.controller }.button, id.0, "{hand:?}");
-            }
+        for index in [1, 2] {
+            expect_state(index, false);
+            expect_events(index, false);
         }
+        expect_no_event(&f);
 
         // State change one hand
         update_action_state(true, false);
-
-        let state = get_state(LeftHand);
-        expect_press(&state, true);
-        for id in ids {
-            let event = expect_event(format!("{id:?}"));
-            assert_eq!(event.ty, active_event, "{id:?}");
-            assert_eq!(event.index, 1, "{id:?}");
-            assert_eq!(unsafe { event.data.controller }.button, id.0, "{id:?}");
-        }
-
-        let state = get_state(RightHand);
-        expect_press(&state, false);
-        expect_no_event("RightHand".to_string());
+        expect_state(1, true);
+        expect_state(2, false);
+        expect_events(1, true);
+        expect_no_event(&f);
     }
 
     macro_rules! test_button {
@@ -762,13 +812,97 @@ mod tests {
     }
 
     test_button!(main_xy_click, vr::EVRButtonId::Axis0, main_xy_touch);
-    test_button!(trigger_click, vr::EVRButtonId::SteamVR_Trigger);
-    test_button!(app_menu, vr::EVRButtonId::ApplicationMenu);
+    test_button!(
+        trigger_click,
+        vr::EVRButtonId::SteamVR_Trigger,
+        trigger_touch
+    );
+    test_button!(app_menu, vr::EVRButtonId::ApplicationMenu, app_menu_touch);
     test_button!(
         squeeze_click,
         vr::EVRButtonId::Grip | vr::EVRButtonId::Axis2
     );
-    test_button!(a, vr::EVRButtonId::A);
+    test_button!(a, vr::EVRButtonId::A, a_touch);
+
+    #[test]
+    fn button_grip_touch() {
+        legacy_input(
+            |actions| actions.grip_touch.as_raw(),
+            &[vr::EVRButtonId::Grip],
+            true,
+        );
+    }
+
+    #[test]
+    fn touch_bindings() {
+        let (f, _) = legacy_fixture(|actions| actions.a.as_raw());
+        assert_legacy_bindings::<OculusTouch>(
+            &f,
+            |actions| actions.trigger_touch.as_raw(),
+            &[
+                "/user/hand/left/input/trigger/touch",
+                "/user/hand/right/input/trigger/touch",
+            ],
+        );
+        assert_legacy_bindings::<OculusTouch>(
+            &f,
+            |actions| actions.a_touch.as_raw(),
+            &[
+                "/user/hand/left/input/x/touch",
+                "/user/hand/right/input/a/touch",
+            ],
+        );
+        assert_legacy_bindings::<OculusTouch>(
+            &f,
+            |actions| actions.app_menu_touch.as_raw(),
+            &[
+                "/user/hand/left/input/y/touch",
+                "/user/hand/right/input/b/touch",
+            ],
+        );
+        assert_legacy_bindings::<ViveFocus3>(
+            &f,
+            |actions| actions.grip_touch.as_raw(),
+            &[
+                "/user/hand/left/input/squeeze/touch",
+                "/user/hand/right/input/squeeze/touch",
+            ],
+        );
+    }
+
+    #[test]
+    fn trigger_value_touches_trigger() {
+        use fakexr::UserPath::*;
+        let (f, trigger) = legacy_fixture(|actions| actions.trigger.as_raw());
+        let set_trigger = |value| {
+            fakexr::set_action_state(trigger, fakexr::ActionState::Float(value), RightHand);
+            f.input.frame_start_update();
+            get_state(&f, 2)
+        };
+        let mask = super::button_mask_from_id(vr::EVRButtonId::SteamVR_Trigger);
+
+        let state = set_trigger(0.2);
+        assert_eq!({ state.ulButtonTouched }, mask);
+        assert_eq!({ state.ulButtonPressed }, 0);
+        expect_button_event(
+            &f,
+            vr::EVREventType::ButtonTouch,
+            2,
+            vr::EVRButtonId::SteamVR_Trigger,
+        );
+
+        // Hysteresis: stays touched until the value drops below the release threshold.
+        assert_eq!({ set_trigger(0.07).ulButtonTouched }, mask);
+        expect_no_event(&f);
+
+        assert_eq!({ set_trigger(0.03).ulButtonTouched }, 0);
+        expect_button_event(
+            &f,
+            vr::EVREventType::ButtonUntouch,
+            2,
+            vr::EVRButtonId::SteamVR_Trigger,
+        );
+    }
 
     /// Reading the controller state must not panic once the runtime lost the session.
     #[test]
@@ -822,18 +956,14 @@ mod tests {
         f.input.frame_start_update();
 
         for ty in [
+            vr::EVREventType::ButtonTouch,
             vr::EVREventType::ButtonPress,
             vr::EVREventType::ButtonUnpress,
+            vr::EVREventType::ButtonUntouch,
         ] {
-            let event = next_event(&f).expect("missing button event");
-            assert_eq!(event.ty, ty as u32);
-            assert_eq!(event.index, 2);
-            assert_eq!(
-                unsafe { event.data.controller }.button,
-                vr::EVRButtonId::SteamVR_Trigger as u32
-            );
+            expect_button_event(&f, ty, 2, vr::EVRButtonId::SteamVR_Trigger);
         }
-        assert!(next_event(&f).is_none());
+        expect_no_event(&f);
     }
 
     #[test]
@@ -841,14 +971,15 @@ mod tests {
         use fakexr::UserPath::*;
         let (f, trigger) = legacy_fixture(|actions| actions.trigger_click.as_raw());
 
-        for i in 0..super::MAX_QUEUED_EVENTS + 1 {
+        // Each frame queues a touch and a press, or a release and an untouch.
+        for i in 0..=super::MAX_QUEUED_EVENTS / 2 {
             fakexr::set_action_state(trigger, (i % 2 == 0).into(), RightHand);
             f.input.frame_start_update();
         }
 
         let events: Vec<_> = std::iter::from_fn(|| next_event(&f)).collect();
         assert_eq!(events.len(), super::MAX_QUEUED_EVENTS);
-        // The oldest event is dropped, the newest one kept.
+        // The oldest events are dropped, the newest ones kept.
         assert_eq!(events[0].ty, vr::EVREventType::ButtonUnpress as u32);
         assert_eq!(
             events.last().unwrap().ty,

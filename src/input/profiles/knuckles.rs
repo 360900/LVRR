@@ -112,6 +112,10 @@ impl InteractionProfile for Knuckles {
             main_xy: c.leftright::<Thumbstick, (), _, _>(),
             main_xy_click: c.leftright::<Thumbstick, Click, _, _>(),
             main_xy_touch: c.leftright::<Thumbstick, Touch, _, _>(),
+            trigger_touch: c.leftright::<Trigger, Touch, _, _>(),
+            app_menu_touch: c.leftright::<B, Touch, _, _>(),
+            a_touch: c.leftright::<A, Touch, _, _>(),
+            grip_touch: vec![],
             haptic: c.haptics(),
         }
     }
