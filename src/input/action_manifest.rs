@@ -168,13 +168,20 @@ impl<C: openxr_data::Compositor> Input<C> {
                 &skeletal_input.set,
             ])
             .collect();
-        session_data.session.attach_action_sets(&xr_sets).unwrap();
+        let attached = session_data.session.attach_action_sets(&xr_sets);
+        if self
+            .openxr
+            .check("xrAttachSessionActionSets", attached)
+            .is_none()
+        {
+            return Err(vr::EVRInputError::IPCError);
+        }
 
         // Try forcing an interaction profile now
-        session_data
+        let synced = session_data
             .session
-            .sync_actions(&[xr::ActiveActionSet::new(&info_set)])
-            .unwrap();
+            .sync_actions(&[xr::ActiveActionSet::new(&info_set)]);
+        self.openxr.check("xrSyncActions", synced);
 
         // Every manifest OpenXR action is created with both hand subaction paths, so a set can
         // only be synced restricted to a hand if it has at least one.

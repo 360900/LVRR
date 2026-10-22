@@ -479,13 +479,18 @@ impl<C: Compositor> OpenXrData<C> {
 
     pub fn get_display_time(&self) -> xr::Time {
         if self.headless {
-            self.instance.now().unwrap()
+            self.instance
+                .now()
+                .unwrap_or_else(|_| self.display_time.get())
         } else {
             self.display_time.get()
         }
     }
 
     pub fn reset_tracking_space(&self, origin: vr::ETrackingUniverseOrigin) {
+        if self.is_lost() {
+            return;
+        }
         let mut guard = self.session_data.0.write();
         let SessionData {
             session,
@@ -498,13 +503,20 @@ impl<C: Compositor> OpenXrData<C> {
         } = &mut **guard;
 
         let reset_space = |ref_space, adjusted_space: &mut xr::Space, ty| {
-            let xr::Posef {
-                position,
-                orientation,
-            } = view_space
-                .locate(ref_space, self.get_display_time())
-                .unwrap()
-                .pose;
+            let Some(xr::SpaceLocation {
+                pose:
+                    xr::Posef {
+                        position,
+                        orientation,
+                    },
+                ..
+            }) = self.check(
+                "xrLocateSpace",
+                view_space.locate(ref_space, self.get_display_time()),
+            )
+            else {
+                return;
+            };
 
             // Only set the rotation around the y axis
             let (twist, _) = swing_twist_decomposition(
@@ -516,20 +528,21 @@ impl<C: Compositor> OpenXrData<C> {
                 (Quat::IDENTITY, Quat::IDENTITY)
             });
 
-            *adjusted_space = session
-                .create_reference_space(
-                    ty,
-                    xr::Posef {
-                        position,
-                        orientation: xr::Quaternionf {
-                            x: twist.x,
-                            y: twist.y,
-                            z: twist.z,
-                            w: twist.w,
-                        },
+            let space = session.create_reference_space(
+                ty,
+                xr::Posef {
+                    position,
+                    orientation: xr::Quaternionf {
+                        x: twist.x,
+                        y: twist.y,
+                        z: twist.z,
+                        w: twist.w,
                     },
-                )
-                .unwrap();
+                },
+            );
+            if let Some(space) = self.check("xrCreateReferenceSpace", space) {
+                *adjusted_space = space;
+            }
         };
 
         match origin {

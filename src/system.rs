@@ -705,7 +705,7 @@ impl vr::IVRSystem026_Interface for System {
                 pose.write(
                     input
                         .get_device_pose(index, Some(origin), self.openxr.display_time.get(), None)
-                        .unwrap(),
+                        .unwrap_or_default(),
                 );
             }
         }

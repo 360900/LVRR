@@ -870,16 +870,19 @@ impl TrackedDeviceList {
             xdevs.len()
         );
 
-        let trackers = xdevs.into_iter().map(|xdev| {
+        let trackers = xdevs.into_iter().filter_map(|xdev| {
             let serial = CString::new(xdev.serial()).unwrap();
-            let space = xdev.create_space(xr::Posef::IDENTITY).unwrap();
+            let space = xdev
+                .create_space(xr::Posef::IDENTITY)
+                .inspect_err(|e| log::warn!("Failed to create space for {serial:?}: {e}"))
+                .ok()?;
             let mut tracker = TrackedDevice::new(
                 TrackedDeviceType::GenericTracker { serial, space },
                 None,
                 Some(ProfileData::new::<ViveTracker>()),
             );
             tracker.connected = true;
-            tracker
+            Some(tracker)
         });
         self.devices.extend(trackers);
 

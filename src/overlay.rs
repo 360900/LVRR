@@ -65,6 +65,9 @@ impl OverlayMan {
             log::warn!("Unsupported texture type: {:?}", texture.eType);
             return Err(vr::EVROverlayError::InvalidTexture);
         }
+        if self.openxr.is_lost() {
+            return Err(vr::EVROverlayError::RequestFailed);
+        }
 
         if !self.openxr.session_data.get().is_real_session()
             && self
@@ -684,11 +687,17 @@ impl Overlay {
                 }
                 &mut data.swapchain
             };
-            let idx = swapchain.acquire_image().unwrap();
-            swapchain.wait_image(xr::Duration::INFINITE).unwrap();
+            let failed = |e| {
+                log::warn!("Failed to update overlay swapchain: {e}");
+                vr::EVROverlayError::RequestFailed
+            };
+            let idx = swapchain.acquire_image().map_err(failed)?;
+            swapchain
+                .wait_image(xr::Duration::INFINITE)
+                .map_err(failed)?;
 
             let extent = backend.copy_overlay_to_swapchain(b_texture, texture_bounds, idx as usize);
-            swapchain.release_image().unwrap();
+            swapchain.release_image().map_err(failed)?;
 
             Ok(extent)
         }
