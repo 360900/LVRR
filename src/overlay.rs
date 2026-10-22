@@ -851,12 +851,17 @@ impl Overlay {
             for<'a> &'a GraphicalSession: TryInto<&'a Session<G::Api>, Error: std::fmt::Display>,
             G::Format: Eq,
         {
-            let map: &mut SwapchainMap<G::Api> = map.try_into().unwrap_or_else(|e| {
-                panic!(
-                    "Received different texture type for overlay than current ({}) - {e}",
-                    std::any::type_name::<G::Api>()
-                );
-            });
+            let map: &mut SwapchainMap<G::Api> = match map.try_into() {
+                Ok(map) => map,
+                Err(e) => {
+                    crate::warn_once!(
+                        "Received different texture type for overlay than current ({}) - {}",
+                        std::any::type_name::<G::Api>(),
+                        e
+                    );
+                    return Err(vr::EVROverlayError::InvalidTexture);
+                }
+            };
             let Some(b_texture) = G::get_texture(&texture, vr::EVRSubmitFlags::Default) else {
                 debug!("received invalid overlay texture handle");
                 return Err(vr::EVROverlayError::InvalidTexture);
