@@ -35,6 +35,8 @@ pub struct Compositor {
     system: Injected<System>,
     /// Stores the backend data in between session restarts.
     tmp_backend: Mutex<Option<AnyTempBackendData>>,
+    /// Serializes setting up the real session. Never take it while holding a session guard.
+    real_session_init: Mutex<()>,
     overlays: Injected<OverlayMan>,
     metrics: FrameMetrics,
     timing_mode: Mutex<vr::EVRCompositorTimingMode>,
@@ -87,6 +89,7 @@ impl Compositor {
             input: injector.inject(),
             system: injector.inject(),
             tmp_backend: Mutex::default(),
+            real_session_init: Mutex::default(),
             overlays: injector.inject(),
             metrics: FrameMetrics {
                 system_start: Instant::now(),
@@ -157,6 +160,23 @@ impl Compositor {
     ) -> Result<(), vr::EVRCompositorError> {
         let backend =
             SupportedBackend::new(texture, bounds).ok_or(vr::EVRCompositorError::InvalidTexture)?;
+
+        // Submit and the overlay calls can race to get here. Restarting again would destroy the
+        // swapchains created in the first real session.
+        let _init = self.real_session_init.lock().unwrap();
+        if self
+            .openxr
+            .session_data
+            .get()
+            .comp_data
+            .0
+            .lock()
+            .unwrap()
+            .is_some()
+        {
+            debug!("real session already set up by another thread");
+            return Ok(());
+        }
 
         #[macros::any_graphics(SupportedBackend)]
         fn swapchain_info<G: GraphicsBackend>(
@@ -2344,6 +2364,28 @@ mod tests {
         assert_eq!(overlays.ShowOverlay(overlay), vr::EVROverlayError::None);
         f.comp.PostPresentHandoff();
         f.check_frame_state(fakexr::FrameState::Ended);
+    }
+
+    /// Submit and the overlay calls can race to set up the real session. The one that comes second
+    /// must not restart it again.
+    #[test]
+    fn real_session_set_up_once() {
+        let f = Fixture::new();
+        let texture = FakeGraphicsData::texture(&f.vk);
+        let bounds = vr::VRTextureBounds_t {
+            uMin: 0.0,
+            vMin: 0.0,
+            uMax: 1.0,
+            vMax: 1.0,
+        };
+        assert_eq!(f.comp.initialize_real_session(&texture, bounds), Ok(()));
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        fakexr::on_next_end(f.comp.openxr.session_data.get().session.as_raw(), move || {
+            let _ = tx.send(());
+        });
+        assert_eq!(f.comp.initialize_real_session(&texture, bounds), Ok(()));
+        assert!(rx.try_recv().is_err(), "real session was restarted");
     }
 
     /// Overlays keep their rect across a session restart, but the new session has no swapchain
