@@ -2387,6 +2387,43 @@ mod tests {
     }
 
     #[test]
+    fn scalar_constant() {
+        // Buttons drive the action (Blade & Sorcery binds Touch A and X this way), and analog
+        // inputs set it to 1 when pressed rather than passing on the pull.
+        let mut f = Fixture::new();
+        let set = vr::VRActiveActionSet_t {
+            ulActionSet: f.get_action_set_handle(c"/actions/main"),
+            ..Default::default()
+        };
+        let repel = f.get_action_handle(c"/actions/main/in/repel");
+        let left = f.get_input_source_handle(c"/user/hand/left");
+        f.load_actions(c"actions_scalar_constant.json");
+        f.verify_bindings::<f32>(
+            OculusTouch::profile_path(),
+            c"/actions/main/in/alternateuse",
+            ["/user/hand/right/input/a/click".into()],
+        );
+
+        f.set_interaction_profile::<OculusTouch>(LeftHand);
+        let trigger = f.get_action::<f32>(
+            f.get_action_handle(c"/user/hand/left/input/trigger/value-/actions/main"),
+        );
+        for (pull, expected) in [(0.1, 0.0), (0.6, 1.0)] {
+            fakexr::set_action_state(trigger, ActionState::Float(pull), LeftHand);
+            f.sync(set);
+            let mut data = vr::InputAnalogActionData_t::default();
+            f.input.GetAnalogActionData(
+                repel,
+                &mut data,
+                std::mem::size_of_val(&data) as u32,
+                left,
+            );
+            assert!(data.bActive);
+            assert_eq!(data.x, expected, "{pull}");
+        }
+    }
+
+    #[test]
     fn double_tap_bindings() {
         let f = Fixture::new();
         f.load_actions(c"actions.json");

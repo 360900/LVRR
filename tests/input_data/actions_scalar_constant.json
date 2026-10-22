@@ -1,0 +1,24 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/main",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/main/in/alternateuse",
+			"type": "vector1"
+		},
+		{
+			"name": "/actions/main/in/repel",
+			"type": "vector1"
+		}
+	],
+	"default_bindings": [
+		{
+			"controller_type": "oculus_touch",
+			"binding_url": "oculus_scalar_constant.json"
+		}
+	]
+}

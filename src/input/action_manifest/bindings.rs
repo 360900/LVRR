@@ -429,8 +429,7 @@ impl ClickThresholdParams {
 #[derive(Deserialize)]
 struct ScalarConstantParameters {
     #[serde(rename = "on/x")]
-    #[allow(unused)]
-    on_x: Option<String>,
+    on_x: Option<StringOrTyped<f32>>,
 }
 
 #[derive(Deserialize)]
@@ -1066,15 +1065,36 @@ pub fn handle_sources(
                 let Some(ValidActionBindingData {
                     path,
                     inputs: ScalarConstantInput { value },
-                    ..
+                    parameters,
                 }) = data.validate_path()
                 else {
                     continue;
                 };
+                if let Some(on) = parameters.and_then(|p| p.on_x.as_deref().copied())
+                    && on != 1.0
+                {
+                    warn!(
+                        "{} is set to {on} by {path}, but only 1.0 is supported",
+                        value.output.path
+                    );
+                }
 
-                let _ = value
-                    .try_bind_with_component(path, context, validate_path)
-                    .inspect_err(InvalidActionPath::warn);
+                // The action is 1 while the input is pressed, like a button.
+                match button_press_input(path, None, validate_path) {
+                    // A float action bound to a boolean input reads 0 or 1.
+                    Some((press, true)) => {
+                        context.try_suggest_binding::<bool>(value.output.path.clone(), press)
+                    }
+                    Some((press, false)) => bind_threshold(
+                        &value.output,
+                        press,
+                        None,
+                        action_set_name,
+                        action_set,
+                        context,
+                    ),
+                    None => InvalidActionPath(path, &value.output.path).warn(),
+                }
             }
             ActionBinding::ForceSensor(data) => {
                 let Some(ValidActionBindingData {
