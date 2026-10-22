@@ -188,7 +188,8 @@ pub struct TrackedDevice {
 #[derive(Default)]
 struct PoseCache {
     /// Bounded, since apps that never call WaitGetPoses never clear it, and "now" based queries
-    /// like GetDeviceToAbsoluteTrackingPose use a new time on every call.
+    /// like GetDeviceToAbsoluteTrackingPose use a new time on every call. Least recently used
+    /// first, so those are evicted before the display time poses the frame keeps reading.
     recent: VecDeque<(i64, vr::ETrackingUniverseOrigin, vr::TrackedDevicePose_t)>,
     /// The last valid pose per origin, reported while the device is untracked.
     last_valid: HashMap<vr::ETrackingUniverseOrigin, vr::HmdMatrix34_t>,
@@ -198,14 +199,17 @@ impl PoseCache {
     const MAX_RECENT: usize = 16;
 
     fn get(
-        &self,
+        &mut self,
         nanos: i64,
         origin: vr::ETrackingUniverseOrigin,
     ) -> Option<vr::TrackedDevicePose_t> {
-        self.recent
+        let i = self
+            .recent
             .iter()
-            .find(|(t, o, _)| *t == nanos && *o == origin)
-            .map(|(.., pose)| *pose)
+            .position(|(t, o, _)| *t == nanos && *o == origin)?;
+        let entry = self.recent.remove(i)?;
+        self.recent.push_back(entry);
+        Some(entry.2)
     }
 
     fn insert(
@@ -1343,6 +1347,31 @@ mod tests {
 
         assert_eq!(hmd_height(&f, standing, 2), 1.5);
         assert_eq!(hmd_height(&f, seated, 2), 0.0);
+    }
+
+    #[test]
+    fn pose_cache_keeps_poses_read_again() {
+        let f = Fixture::new();
+        let standing = vr::ETrackingUniverseOrigin::Standing;
+        assert_eq!(hmd_height(&f, standing, 1), 0.0);
+
+        fakexr::set_reference_space_pose(
+            f.raw_session(),
+            xr::ReferenceSpaceType::STAGE,
+            xr::Posef {
+                position: xr::Vector3f {
+                    x: 0.0,
+                    y: -1.5,
+                    z: 0.0,
+                },
+                ..xr::Posef::IDENTITY
+            },
+        );
+        // the display time pose stays the same, however many "now" queries come in between
+        for nanos in 2..=100 {
+            assert_eq!(hmd_height(&f, standing, nanos), 1.5);
+            assert_eq!(hmd_height(&f, standing, 1), 0.0);
+        }
     }
 
     #[test]
