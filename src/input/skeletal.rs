@@ -127,10 +127,6 @@ impl<C: openxr_data::Compositor> Input<C> {
             };
         };
 
-        for (aux, joint) in AUX_BONES.iter().copied() {
-            xr_joint_to_vr_bone(&joints[joint], &mut transforms[aux as usize]);
-        }
-
         // The wrists appear to have to some sort of strange orientation compared
         // to the other joints - this rotation fixes it up
         joints[xr::HandJoint::WRIST] *= Affine3A::from_quat(Quat::from_euler(
@@ -193,6 +189,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         {
             xr_joint_to_vr_bone(&joints[joint], &mut transforms[bone as usize])
         }
+        set_aux_bones(&mut transforms, hand);
 
         *bone_cache = Some(transforms);
 
@@ -612,13 +609,34 @@ static JOINTS_TO_BONES: &[&[(xr::HandJoint, HandSkeletonBone)]] = &[
     joints_for_finger!(LITTLE, Pinky),
 ];
 
-static AUX_BONES: &[(HandSkeletonBone, xr::HandJoint)] = &[
-    (AuxThumb, xr::HandJoint::THUMB_DISTAL),
-    (AuxIndexFinger, xr::HandJoint::INDEX_DISTAL),
-    (AuxMiddleFinger, xr::HandJoint::MIDDLE_DISTAL),
-    (AuxRingFinger, xr::HandJoint::RING_DISTAL),
-    (AuxPinkyFinger, xr::HandJoint::LITTLE_DISTAL),
+/// Each aux bone and the last knuckle of its finger.
+static AUX_BONES: &[(HandSkeletonBone, HandSkeletonBone)] = &[
+    (AuxThumb, Thumb2),
+    (AuxIndexFinger, IndexFinger3),
+    (AuxMiddleFinger, MiddleFinger3),
+    (AuxRingFinger, RingFinger3),
+    (AuxPinkyFinger, PinkyFinger3),
 ];
+
+/// Aux bones are children of the root that share the model space pose of their finger's last
+/// knuckle, so they have to be derived from the finished finger chain.
+fn set_aux_bones(transforms: &mut [vr::VRBoneTransform_t; Count as usize], hand: Hand) {
+    let model_space: Vec<_> =
+        parent_to_model_space_bone_data(transforms.iter().map(|t| bone_transform_to_glam(*t)))
+            .collect();
+    // SteamVR's left hand aux bones are turned around the knuckle's X axis.
+    let flip = match hand {
+        Hand::Left => Quat::from_rotation_x(PI),
+        Hand::Right => Quat::IDENTITY,
+    };
+    for (aux, knuckle) in AUX_BONES.iter().copied() {
+        let (pos, rot) = model_space[knuckle as usize];
+        transforms[aux as usize] = vr::VRBoneTransform_t {
+            position: pos.into(),
+            orientation: (rot * flip).into(),
+        };
+    }
+}
 
 /// SteamVR's bone names, with `#` standing for the hand ("l" or "r").
 static BONE_NAMES: [&str; Count as usize] = [
@@ -1057,5 +1075,33 @@ mod tests {
         f.set_interaction_profile::<OculusTouch>(fakexr::UserPath::LeftHand);
         sync(&mut f);
         assert_eq!(level(&f), vr::EVRSkeletalTrackingLevel::Estimated);
+    }
+
+    #[test]
+    fn aux_bones_follow_the_last_knuckles() {
+        use super::{AUX_BONES, set_aux_bones};
+        use crate::openxr_data::Hand;
+        // SteamVR's own open hand. (Its fist moves the thumb but not the thumb's aux bone.)
+        for (hand, reference) in [
+            (Hand::Left, &generated::left_hand::OPENHAND),
+            (Hand::Right, &generated::right_hand::OPENHAND),
+        ] {
+            let mut bones = *reference;
+            set_aux_bones(&mut bones, hand);
+            for (aux, _) in AUX_BONES {
+                let (pos, rot) = bone_transform_to_glam(bones[*aux as usize]);
+                let (expected_pos, expected_rot) = bone_transform_to_glam(reference[*aux as usize]);
+                assert!(
+                    pos.distance(expected_pos) < 0.0015,
+                    "{hand:?} bone {}: {pos} != {expected_pos}",
+                    *aux as usize
+                );
+                assert!(
+                    rot.dot(expected_rot).abs() > 0.999,
+                    "{hand:?} bone {}: {rot} != {expected_rot}",
+                    *aux as usize
+                );
+            }
+        }
     }
 }
