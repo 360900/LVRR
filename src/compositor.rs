@@ -2895,6 +2895,26 @@ mod tests {
         assert_eq!(quit_events(&system), [false]);
     }
 
+    /// A loss first seen when the frame's views are located at the end of the frame, because
+    /// locating them at its start failed.
+    #[test]
+    fn session_lost_on_locate_views() {
+        let f = Fixture::new();
+        let system = f.system();
+        f.ensure_real_session(false);
+        fakexr::set_locate_views_error(Some(xr::sys::Result::ERROR_RUNTIME_FAILURE));
+        assert_eq!(f.wait_get_poses(), None);
+        fakexr::set_locate_views_error(Option::None);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+
+        fakexr::lose_session(f.raw_session());
+        f.comp.PostPresentHandoff();
+        assert!(f.comp.openxr.is_lost());
+        assert_eq!(f.wait_get_poses(), DoNotHaveFocus);
+        assert_eq!(quit_events(&system), [true]);
+    }
+
     #[test]
     fn instance_lost() {
         let f = Fixture::new();

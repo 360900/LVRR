@@ -213,6 +213,10 @@ impl Views {
         openxr: &RealOpenXrData,
         ty: xr::ReferenceSpaceType,
     ) -> Option<ViewData> {
+        // Every call fails once the session is lost.
+        if openxr.is_lost() {
+            return self.last.cached(ty);
+        }
         let result = self
             .frame
             .get_views(session, openxr.get_display_time(), ty)
@@ -235,6 +239,8 @@ impl Views {
                 Some(data)
             }
             Err(e) => {
+                // A loss has to reach the app.
+                openxr.handle_error("xrLocateViews", e);
                 if !std::mem::replace(&mut self.failing, true) {
                     warn!("Couldn't locate views, using the last ones: {e}");
                 }
@@ -629,7 +635,7 @@ impl vr::IVRSystem026_Interface for System {
             }
         };
 
-        let Ok(mask) = self
+        let mask = self
             .openxr
             .session_data
             .get()
@@ -639,8 +645,8 @@ impl vr::IVRSystem026_Interface for System {
                 eye as u32,
                 mask_ty,
             )
-            .inspect_err(|e| warn!("Failed to get {ty:?} hidden area mesh for {eye:?}: {e}"))
-        else {
+            .inspect_err(|e| debug!("Failed to get {ty:?} hidden area mesh for {eye:?}: {e}"));
+        let Some(mask) = self.openxr.check("xrGetVisibilityMaskKHR", mask) else {
             return Default::default();
         };
 
@@ -1667,6 +1673,43 @@ mod tests {
         );
         assert!(mesh.pVertexData.is_null());
         assert_eq!(mesh.unTriangleCount, 0);
+    }
+
+    /// A loss first seen when locating views or getting the visibility mask has to reach the app.
+    #[test]
+    fn session_lost_on_view_queries() {
+        let queries: [fn(&System); 2] = [
+            |system| {
+                // Nothing is cached yet, so this locates views.
+                system.GetEyeToHeadTransform(vr::EVREye::Left);
+            },
+            |system| {
+                vr::IVRSystem026_Interface::GetHiddenAreaMesh(
+                    system,
+                    vr::EVREye::Left,
+                    vr::EHiddenAreaMeshType::Standard,
+                );
+            },
+        ];
+        for query in queries {
+            let xr = Arc::new(
+                OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap(),
+            );
+            let system = Arc::new(System::new(xr.clone(), &Injector::default()));
+            xr.system.set(Arc::downgrade(&system));
+            fakexr::lose_session(xr.session_data.get().session.as_raw());
+
+            query(&system);
+            assert!(xr.is_lost());
+            let mut event = vr::VREvent_t::default();
+            assert!(system.PollNextEventWithPose(
+                vr::ETrackingUniverseOrigin::Standing,
+                &mut event,
+                std::mem::size_of_val(&event) as u32,
+                std::ptr::null_mut(),
+            ));
+            assert_eq!(event.eventType, vr::EVREventType::Quit as u32);
+        }
     }
 
     #[test]

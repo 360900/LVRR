@@ -2145,7 +2145,7 @@ extern "system" fn get_visibility_mask_k_h_r(
     _: xr::VisibilityMaskTypeKHR,
     mask: *mut xr::VisibilityMaskKHR,
 ) -> xr::Result {
-    let _session = get_handle!(session);
+    let _session = get_session!(session);
     let Some((vertices, indices)) = VISIBILITY_MASK.with_borrow(Clone::clone) else {
         return xr::Result::ERROR_RUNTIME_FAILURE;
     };
@@ -2175,7 +2175,7 @@ extern "system" fn locate_views(
     output: *mut u32,
     views: *mut xr::View,
 ) -> xr::Result {
-    let _session = get_handle!(session);
+    let _session = get_session!(session);
     if let Some(error) = LOCATE_VIEWS_ERROR.get() {
         return error;
     }
