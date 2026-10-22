@@ -360,10 +360,7 @@ impl BindingsProfileLoadContext<'_> {
         if let Ok(input) = self.instance.string_to_path(&path.to_string()) {
             self.push_input_path(&output.path, input);
         }
-        let hand = self
-            .instance
-            .string_to_path(hand_to_path(path.hand))
-            .unwrap();
+        let hand = self.hand_path(path.hand);
         let ActionData::Vector2 { data, .. } = self.actions.get_mut(&output.path).unwrap() else {
             unreachable!();
         };

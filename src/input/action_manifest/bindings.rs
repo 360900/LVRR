@@ -1224,10 +1224,10 @@ pub fn handle_sources(
                     continue;
                 };
                 let input = match path.subpath {
-                    paths::DynSubpath::Trackpad => custom_bindings::ScrollInput::Trackpad,
-                    _ => custom_bindings::ScrollInput::Joystick,
+                    paths::DynSubpath::Trackpad => custom_bindings::ScrollSource::Trackpad,
+                    _ => custom_bindings::ScrollSource::Joystick,
                 };
-                let touch = (input == custom_bindings::ScrollInput::Trackpad)
+                let touch = (input == custom_bindings::ScrollSource::Trackpad)
                     .then(|| validate_path(path.with_component(DynComponent::Touch)))
                     .flatten()
                     .filter(|touch| touch.component == Some(DynComponent::Touch))

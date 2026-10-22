@@ -142,7 +142,7 @@ fn deadzone_remap() {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum ScrollInput {
+pub(super) enum ScrollSource {
     Trackpad,
     Joystick,
 }
@@ -161,7 +161,7 @@ struct ScrollState {
 /// Scroll mode: reports scroll amounts rather than the position. Discrete scrolling reports
 /// ticks of ±1, smooth scrolling fractional amounts.
 pub(super) struct ScrollData {
-    input: ScrollInput,
+    input: ScrollSource,
     smooth: bool,
     multiplier: f32,
     /// The trackpad's touch, if it has one.
@@ -180,7 +180,7 @@ impl ScrollData {
     const JOYSTICK_SMOOTH_RATE: f32 = 8.0;
 
     pub fn new(
-        input: ScrollInput,
+        input: ScrollSource,
         smooth: bool,
         multiplier: f32,
         touch: Option<xr::Action<f32>>,
@@ -208,7 +208,7 @@ impl ScrollData {
             .map_or(0.0, |last| (now - last).as_secs_f32().min(0.1));
 
         match self.input {
-            ScrollInput::Trackpad => {
+            ScrollSource::Trackpad => {
                 let touched = match self.touch.as_ref().map(|t| t.state(session, hand)) {
                     Some(Ok(touch)) if touch.is_active => touch.current_state > 0.5,
                     _ => position.x != 0.0 || position.y != 0.0,
@@ -243,11 +243,11 @@ impl ScrollData {
                     y: tick(&mut state.accumulated.y, delta.y),
                 }
             }
-            ScrollInput::Joystick if self.smooth => xr::Vector2f {
+            ScrollSource::Joystick if self.smooth => xr::Vector2f {
                 x: position.x * self.multiplier * Self::JOYSTICK_SMOOTH_RATE * dt,
                 y: position.y * self.multiplier * Self::JOYSTICK_SMOOTH_RATE * dt,
             },
-            ScrollInput::Joystick => {
+            ScrollSource::Joystick => {
                 let mut tick = |axis: usize, value: f32| {
                     let (direction, next_repeat) = &mut state.joystick[axis];
                     let threshold = if *direction == 0 {
