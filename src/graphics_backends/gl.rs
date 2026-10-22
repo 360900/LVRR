@@ -515,6 +515,9 @@ impl GraphicsBackend for GlData {
 
     #[inline]
     fn get_texture(texture: &vr::Texture_t, flags: vr::EVRSubmitFlags) -> Option<GlTexture> {
+        if texture.eType != vr::ETextureType::OpenGL {
+            return None;
+        }
         let has_flag = |flag: vr::EVRSubmitFlags| (flags & flag).0 != 0;
         let target = if has_flag(vr::EVRSubmitFlags::GlRenderBuffer) {
             gl::RENDERBUFFER
