@@ -102,24 +102,26 @@ impl Compositor {
         }
     }
 
-    fn maybe_wait_frame(&self, session_data: &SessionData) {
+    /// Returns false if xrWaitFrame didn't block and won't, so the caller has to pace the app.
+    fn maybe_wait_frame(&self, session_data: &SessionData) -> bool {
         tracy_span!();
         if self.openxr.is_lost() {
-            return;
+            return false;
         }
         let mut frame_lock = { session_data.comp_data.0.lock().unwrap() };
-        // Waiting again before the waited frame was begun would block forever.
-        if !self
-            .frame_state
-            .lock()
-            .unwrap()
-            .advance_to(FrameState::Waited)
         {
-            return;
+            let mut state = self.frame_state.lock().unwrap();
+            // The waited frame failed to begin. Waiting again before it was begun would block
+            // forever.
+            if *state == FrameState::Waited {
+                return false;
+            }
+            state.advance_to(FrameState::Waited);
         }
         let Some(ctrl) = frame_lock.as_mut() else {
             debug!("no frame controller - not starting frame");
-            return;
+            // The temporary session is replaced on the first Submit, unless that can't happen.
+            return self.openxr.restart_blocked().is_none();
         };
 
         #[macros::any_graphics(DynFrameController)]
@@ -135,12 +137,13 @@ impl Compositor {
         ) else {
             // No frame was waited, so the next WaitGetPoses waits again.
             *self.frame_state.lock().unwrap() = FrameState::Submitted;
-            return;
+            return false;
         };
         self.openxr.display_time.set(display_time);
         self.openxr
             .display_period_nanos
             .store(display_period, Ordering::Relaxed);
+        true
     }
 
     fn maybe_begin_frame(&self, session_data: &SessionData) {
@@ -363,10 +366,13 @@ impl openxr_data::Compositor for Compositor {
         trace!("returning to {old_state:?} frame state");
         match old_state {
             FrameState::Submitted => {}
-            FrameState::Waited => self.maybe_wait_frame(session_data),
-            FrameState::Begun => {
+            FrameState::Waited => {
                 self.maybe_wait_frame(session_data);
-                self.maybe_begin_frame(session_data);
+            }
+            FrameState::Begun => {
+                if self.maybe_wait_frame(session_data) {
+                    self.maybe_begin_frame(session_data);
+                }
             }
         }
     }
@@ -1031,7 +1037,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
         // This should be called every frame - we must regularly poll events
         self.openxr.poll_events();
         self.focused.call_once(|| {});
-        {
+        let paced = {
             let session_data = self.openxr.session_data.get();
             let timing_mode = *self.timing_mode.lock().unwrap();
             if matches!(
@@ -1054,18 +1060,21 @@ impl vr::IVRCompositor029_Interface for Compositor {
                     self.PostPresentHandoff();
                 }
             }
-            self.maybe_wait_frame(&session_data);
+            let paced = self.maybe_wait_frame(&session_data);
 
-            if timing_mode == vr::EVRCompositorTimingMode::Implicit {
+            if paced && timing_mode == vr::EVRCompositorTimingMode::Implicit {
                 self.maybe_begin_frame(&session_data);
             }
-        }
-        if self.openxr.is_lost() {
-            // xrWaitFrame no longer paces the app, so keep it from spinning until it quits.
+            paced
+        };
+        if !paced {
+            // Keep the app from spinning, e.g. after the session was lost and it ignores Quit.
             let period = self.openxr.display_period_nanos.load(Ordering::Relaxed);
             std::thread::sleep(std::time::Duration::from_nanos(
                 period.clamp(1_000_000, 100_000_000) as u64,
             ));
+        }
+        if self.openxr.is_lost() {
             return self.GetLastPoses(
                 render_pose_array,
                 render_pose_count,
@@ -2893,6 +2902,11 @@ mod tests {
         assert_eq!(quit_events(&system), [false]);
         assert_eq!(f.submit(vr::EVREye::Left), DoNotHaveFocus);
         assert!(!f.comp.openxr.session_data.get().is_real_session());
+
+        // No frame is ever waited, so WaitGetPoses has to keep a game ignoring Quit from spinning.
+        let start = Instant::now();
+        assert_eq!(f.wait_get_poses(), None);
+        assert!(start.elapsed() >= std::time::Duration::from_millis(1));
     }
 
     /// A runtime rejecting the real session (e.g. its graphics binding) must leave the game running
@@ -2910,7 +2924,9 @@ mod tests {
         fakexr::on_next_end(f.raw_session(), move || {
             let _ = tx.send(());
         });
+        let start = Instant::now();
         assert_eq!(f.wait_get_poses(), None);
+        assert!(start.elapsed() >= std::time::Duration::from_millis(1));
         assert_eq!(f.submit(vr::EVREye::Left), InvalidTexture);
         assert!(rx.try_recv().is_err(), "temporary session was restarted");
     }
