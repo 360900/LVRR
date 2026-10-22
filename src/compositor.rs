@@ -2643,28 +2643,24 @@ mod tests {
     }
 
     #[test]
-    fn zero_sample_count_texture() {
-        // Games submit sample count 0 when MSAA is disabled (e.g. HL2VR with
-        // antialiasing set to None) - it should be treated as 1, not crash
-        // swapchain creation.
+    fn swapchain_sample_count() {
+        // Games submit sample count 0 when MSAA is disabled (e.g. HL2VR with antialiasing set to
+        // None), and multisampled textures are resolved into a single sampled swapchain.
         let f = Fixture::new();
-        SWAPCHAIN_SAMPLE_COUNT.set(0);
+        for sample_count in [0, 4, 1] {
+            SWAPCHAIN_SAMPLE_COUNT.set(sample_count);
+            assert_eq!(f.wait_get_poses(), None);
+            assert_eq!(f.submit(vr::EVREye::Left), None);
+            assert_eq!(f.submit(vr::EVREye::Right), None);
 
-        assert_eq!(f.wait_get_poses(), None);
-        assert_eq!(f.submit(vr::EVREye::Left), None);
-        assert_eq!(f.submit(vr::EVREye::Right), None);
-
-        assert_eq!(f.wait_get_poses(), None);
-        {
             let data = f.comp.openxr.session_data.get();
             let lock = data.comp_data.0.lock().unwrap();
             let DynFrameController::Fake(ctrl) = lock.as_ref().unwrap() else {
                 panic!("Frame controller was not set up or not faked!");
             };
             let swapchain_data = ctrl.swapchain_data.as_ref().expect("no swapchain created");
-            assert_eq!(swapchain_data.info.sample_count, 1);
+            assert_eq!(swapchain_data.info.sample_count, 1, "{sample_count}");
         }
-        SWAPCHAIN_SAMPLE_COUNT.set(1);
     }
 
     #[test]

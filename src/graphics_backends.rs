@@ -54,9 +54,10 @@ pub trait GraphicsBackend: Into<SupportedBackend> {
         color_space: vr::EColorSpace,
     ) -> xr::SwapchainCreateInfo<Self::Api> {
         let mut info = self.raw_swapchain_info_for_texture(texture, bounds, color_space);
-        // Games submit a sample count of 0 when MSAA is disabled (e.g. Half-Life
-        // 2: VR with antialiasing set to None), but OpenXR requires at least 1.
-        info.sample_count = info.sample_count.max(1);
+        // Multisampled textures are resolved into the swapchain, and Monado and WiVRn reject
+        // multisampled swapchains. Games also submit a sample count of 0 when MSAA is disabled
+        // (e.g. Half-Life 2: VR with antialiasing set to None).
+        info.sample_count = 1;
         info
     }
 
