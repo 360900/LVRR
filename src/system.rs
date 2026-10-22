@@ -1623,14 +1623,23 @@ mod tests {
             c"TrackedProp_BufferTooSmall"
         );
 
-        // Enums the app passes in print a value without a name as its number.
-        struct Unnamed;
-        impl std::fmt::Debug for Unnamed {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("99")
-            }
-        }
-        assert_eq!(name(crate::enum_name("k_EButton_", Unnamed)), c"Unknown");
+        // Values the headers don't name, e.g. from a 0..k_EButton_Max loop.
+        assert_eq!(
+            name(system.GetButtonIdNameFromEnum(vr::EVRButtonId(20))),
+            c"Unknown"
+        );
+        assert_eq!(
+            name(system.GetControllerAxisTypeNameFromEnum(vr::EVRControllerAxisType(99))),
+            c"Unknown"
+        );
+        assert_eq!(
+            name(system.GetEventTypeNameFromEnum(vr::EVREventType(u32::MAX))),
+            c"Unknown"
+        );
+        assert_eq!(
+            name(system.GetPropErrorNameFromEnum(vr::ETrackedPropertyError(1000))),
+            c"Unknown"
+        );
     }
 
     #[test]
