@@ -306,6 +306,7 @@ impl Vector2ActionData {
         direct: &xr::Action<xr::Vector2f>,
         session: &xr::Session<xr::AnyGraphics>,
         hands: [(xr::Path, xr::Path, vr::VRInputValueHandle_t); 2],
+        update_time: impl Fn(bool, xr::Time) -> f32,
     ) {
         if self.input_only {
             return;
@@ -330,7 +331,7 @@ impl Vector2ActionData {
                     activeOrigin: origin,
                     x: state.current_state.x,
                     y: state.current_state.y,
-                    // Like other analog actions, fUpdateTime is currently zero.
+                    fUpdateTime: update_time(state.changed_since_last_sync, state.last_change_time),
                     ..Default::default()
                 };
                 if prefer(&candidate, &next[index]) {

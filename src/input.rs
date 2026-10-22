@@ -438,6 +438,19 @@ impl<C: openxr_data::Compositor> Input<C> {
 }
 
 impl<C: openxr_data::Compositor> Input<C> {
+    /// fUpdateTime for an action state: when it changed, relative to now. OpenXR samples inputs
+    /// on every sync, so an unchanged state was updated just now. The age is capped, so an app
+    /// that stalled doesn't go looking for poses from the distant past.
+    fn update_time(&self, changed: bool, last_change_time: xr::Time) -> f32 {
+        const MAX_AGE_SECS: f64 = 1.0;
+        if !changed || last_change_time.as_nanos() <= 0 {
+            return 0.0;
+        }
+        let now = self.openxr.time_from_now(0.0);
+        let age = now.as_nanos().saturating_sub(last_change_time.as_nanos()) as f64 / 1e9;
+        -(age.clamp(0.0, MAX_AGE_SECS) as f32)
+    }
+
     /// Updates a Vector1 action's state for each subaction (left, right, unrestricted). Like for
     /// Vector2 actions, this happens once per UpdateActionState, since OpenVR deltas are relative
     /// to the previous one, and must neither be consumed by reads nor shared between subactions.
@@ -483,6 +496,8 @@ impl<C: openxr_data::Compositor> Input<C> {
                     bActive: true,
                     activeOrigin: origin,
                     x: current.current_state,
+                    fUpdateTime: self
+                        .update_time(current.changed_since_last_sync, current.last_change_time),
                     ..Default::default()
                 };
             }
@@ -1643,7 +1658,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             bState: state.current_state,
             activeOrigin: active_hand,
             bChanged: state.changed_since_last_sync,
-            fUpdateTime: 0.0, // TODO
+            fUpdateTime: self.update_time(state.changed_since_last_sync, state.last_change_time),
         };
 
         vr::EVRInputError::None
@@ -1860,7 +1875,9 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
                 data: vector2,
             } = action
             {
-                vector2.sync(action, &data.session, hands);
+                vector2.sync(action, &data.session, hands, |changed, time| {
+                    self.update_time(changed, time)
+                });
             }
         }
 

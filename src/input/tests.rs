@@ -2178,6 +2178,36 @@ fn pose_relative_to_now_in_the_past() {
     }
 }
 
+#[test]
+fn digital_action_update_time() {
+    let mut f = Fixture::new();
+    let set1 = f.get_action_set_handle(c"/actions/set1");
+    let boolact = f.get_action_handle(c"/actions/set1/in/boolact");
+    f.load_actions(c"actions.json");
+    let action = f.get_action::<bool>(boolact);
+    let sync = |f: &mut Fixture| {
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: set1,
+            ..Default::default()
+        })
+    };
+    let secs = |secs: f64| xr::Time::from_nanos((secs * 1e9) as i64);
+    // Without XR_KHR_convert_timespec_time (fakexr has none), this is the closest to now.
+    f.input.openxr.display_time.set(secs(10.0));
+
+    fakexr::set_action_state_with_time(action, true.into(), LeftHand, secs(9.75));
+    sync(&mut f);
+    assert_eq!(f.get_bool_state(boolact).unwrap().fUpdateTime, -0.25);
+
+    // Unchanged states were updated by the sync.
+    sync(&mut f);
+    assert_eq!(f.get_bool_state(boolact).unwrap().fUpdateTime, 0.0);
+
+    fakexr::set_action_state_with_time(action, false.into(), LeftHand, secs(1.0));
+    sync(&mut f);
+    assert_eq!(f.get_bool_state(boolact).unwrap().fUpdateTime, -1.0);
+}
+
 #[track_caller]
 fn get_analog_state(
     f: &Fixture,
