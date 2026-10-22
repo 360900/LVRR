@@ -2726,6 +2726,15 @@ mod tests {
     fn keyboard_reports_done_with_existing_text() {
         use vr::IVRSystem026_Interface;
         let man = overlay_man();
+        let system = man.system.force(|i| System::new(man.openxr.clone(), i));
+        let size = std::mem::size_of::<vr::VREvent_t>() as u32;
+        let poll = || {
+            let mut event: vr::VREvent_t = unsafe { std::mem::zeroed() };
+            system.PollNextEvent(&mut event, size).then_some(event)
+        };
+        // The first poll sets up input, which reports the headset. The test looks at what follows.
+        while poll().is_some() {}
+
         assert_eq!(
             man.ShowKeyboard(
                 vr::EGamepadTextInputMode::Normal,
@@ -2738,13 +2747,6 @@ mod tests {
             ),
             vr::EVROverlayError::None
         );
-
-        let system = man.system.get().unwrap();
-        let size = std::mem::size_of::<vr::VREvent_t>() as u32;
-        let poll = || {
-            let mut event: vr::VREvent_t = unsafe { std::mem::zeroed() };
-            system.PollNextEvent(&mut event, size).then_some(event)
-        };
         keyboard_event(vr::EVREventType::KeyboardDone, 1234)(&poll().unwrap());
         keyboard_event(vr::EVREventType::KeyboardClosed, 1234)(&poll().unwrap());
         assert!(poll().is_none());
