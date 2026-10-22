@@ -426,6 +426,23 @@ mod tests {
     }
 
     #[test]
+    fn unknown_enum_values() {
+        let core = ClientCore::new(c"IVRClientCore_003").unwrap();
+        assert_eq!(
+            core.clone()
+                .Init(vr::EVRApplicationType(1234), std::ptr::null()),
+            vr::EVRInitError::Init_InvalidApplicationType
+        );
+
+        let error = |e| unsafe { CStr::from_ptr(core.GetEnglishStringForHmdError(e)) };
+        assert_eq!(error(vr::EVRInitError(12345)), c"EVRInitError 12345");
+        assert_eq!(
+            error(vr::EVRInitError::Init_HmdNotFound),
+            c"EVRInitError Init_HmdNotFound"
+        );
+    }
+
+    #[test]
     fn restart() {
         let core = ClientCore::new(c"IVRClientCore_003").unwrap();
         core.clone()

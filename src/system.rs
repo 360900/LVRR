@@ -23,6 +23,12 @@ pub struct ViewData {
     pub views: [xr::View; 2],
 }
 
+/// Index of the eye's view. Like the OpenVR sample driver, anything that isn't the left eye is the
+/// right eye.
+fn view_index(eye: vr::EVREye) -> usize {
+    usize::from(eye != vr::EVREye::Left)
+}
+
 #[derive(Copy, Clone)]
 struct ViewDataViewSpace {
     data: ViewData,
@@ -440,7 +446,7 @@ impl vr::IVRSystem026_Interface for System {
             .session_data
             .get()
             .current_origin_as_reference_space();
-        let view = self.get_views(ty).views[eye as usize];
+        let view = self.get_views(ty).views[view_index(eye)];
 
         // Top and bottom are flipped, for some reason
         unsafe {
@@ -490,7 +496,7 @@ impl vr::IVRSystem026_Interface for System {
     }
     fn GetEyeToHeadTransform(&self, eye: vr::EVREye) -> vr::HmdMatrix34_t {
         let views = self.get_views(xr::ReferenceSpaceType::VIEW).views;
-        let view = views[eye as usize];
+        let view = views[view_index(eye)];
         let view_rot = view.pose.orientation;
 
         {
@@ -629,8 +635,10 @@ impl vr::IVRSystem026_Interface for System {
             vr::EHiddenAreaMeshType::Standard => xr::VisibilityMaskTypeKHR::HIDDEN_TRIANGLE_MESH,
             vr::EHiddenAreaMeshType::Inverse => xr::VisibilityMaskTypeKHR::VISIBLE_TRIANGLE_MESH,
             vr::EHiddenAreaMeshType::LineLoop => xr::VisibilityMaskTypeKHR::LINE_LOOP,
-            vr::EHiddenAreaMeshType::Max => {
-                warn!("Unexpectedly got EHiddenAreaMeshType::Max - returning default area mesh");
+            _ => {
+                warn!(
+                    "Unexpectedly got hidden area mesh type {ty:?} - returning default area mesh"
+                );
                 return Default::default();
             }
         };
@@ -642,7 +650,7 @@ impl vr::IVRSystem026_Interface for System {
             .session
             .get_visibility_mask_khr(
                 xr::ViewConfigurationType::PRIMARY_STEREO,
-                eye as u32,
+                view_index(eye) as u32,
                 mask_ty,
             )
             .inspect_err(|e| debug!("Failed to get {ty:?} hidden area mesh for {eye:?}: {e}"));
@@ -777,7 +785,7 @@ impl vr::IVRSystem026_Interface for System {
             unsafe {
                 (&raw mut (*event).eventType).write(queued.eventType);
                 (&raw mut (*event).eventAgeSeconds).write(queued.eventAgeSeconds);
-                match vr::EVREventType::try_from(queued.eventType).unwrap() {
+                match vr::EVREventType(queued.eventType) {
                     vr::EVREventType::Quit => {
                         const CONNECTION_LOST_OFFSET: usize =
                             std::mem::offset_of!(vr::VREvent_t, data)
@@ -1480,10 +1488,7 @@ impl vr::IVRSystem009On011 for System {
         );
 
         if ret && !event.is_null() {
-            let Ok(event_type) = vr::EVREventType::try_from(e.eventType) else {
-                error!("Unhandled event type for 0.9.12: {}", e.eventType);
-                return false;
-            };
+            let event_type = vr::EVREventType(e.eventType);
 
             unsafe {
                 (&raw mut (*event).eventType).write(event_type);
@@ -1777,6 +1782,71 @@ mod tests {
     }
 
     #[test]
+    fn unknown_enum_values() {
+        let xr =
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
+        let injector = Injector::default();
+        let input = Arc::new(Input::new(xr.clone()));
+        let system = System::new(xr, &injector);
+        system.input.set(Arc::downgrade(&input));
+
+        const HMD: u32 = vr::k_unTrackedDeviceIndex_Hmd;
+        // A hole in the enum (PreviousUniverseId_Uint64 in older SDKs), a vendor property, garbage
+        for prop in [2005, 10500, u32::MAX].map(vr::ETrackedDeviceProperty) {
+            assert_eq!(format!("{prop:?}"), prop.0.to_string());
+
+            let mut err = vr::ETrackedPropertyError::Success;
+            let check = |err: &mut vr::ETrackedPropertyError| {
+                assert_eq!(*err, vr::ETrackedPropertyError::UnknownProperty, "{prop:?}");
+                *err = vr::ETrackedPropertyError::Success;
+            };
+            assert!(!system.GetBoolTrackedDeviceProperty(HMD, prop, &mut err));
+            check(&mut err);
+            assert_eq!(
+                system.GetFloatTrackedDeviceProperty(HMD, prop, &mut err),
+                0.0
+            );
+            check(&mut err);
+            assert_eq!(system.GetInt32TrackedDeviceProperty(HMD, prop, &mut err), 0);
+            check(&mut err);
+            assert_eq!(
+                system.GetUint64TrackedDeviceProperty(HMD, prop, &mut err),
+                0
+            );
+            check(&mut err);
+            system.GetMatrix34TrackedDeviceProperty(HMD, prop, &mut err);
+            check(&mut err);
+            let len =
+                system.GetStringTrackedDeviceProperty(HMD, prop, std::ptr::null_mut(), 0, &mut err);
+            assert_eq!(len, 0);
+            check(&mut err);
+        }
+        assert_eq!(
+            format!("{:?}", vr::ETrackedDeviceProperty::ModelNumber_String),
+            "ModelNumber_String"
+        );
+
+        // Anything that isn't the left eye is the right eye.
+        let right = system.GetEyeToHeadTransform(vr::EVREye::Right);
+        let eye = vr::EVREye(2);
+        assert_eq!(system.GetEyeToHeadTransform(eye).m, right.m);
+        let projection = |eye| {
+            let mut p = [0.0; 4];
+            let [left, right, top, bottom] = p.each_mut();
+            system.GetProjectionRaw(eye, left, right, top, bottom);
+            p
+        };
+        assert_eq!(projection(eye), projection(vr::EVREye::Right));
+
+        let mesh = vr::IVRSystem026_Interface::GetHiddenAreaMesh(
+            &system,
+            vr::EVREye::Left,
+            vr::EHiddenAreaMeshType(77),
+        );
+        assert!(mesh.pVertexData.is_null());
+    }
+
+    #[test]
     fn display_frequency_fallback_is_hz() {
         let xr =
             Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
@@ -1812,7 +1882,7 @@ mod tests {
             std::mem::size_of_val(&event) as u32,
             std::ptr::null_mut()
         ));
-        assert_eq!(event.eventType, vr::EVREventType::Quit as u32);
+        assert_eq!(event.eventType, vr::EVREventType::Quit.0);
     }
 
     #[test]

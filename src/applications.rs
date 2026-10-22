@@ -69,6 +69,7 @@ impl vr::IVRApplications008_Interface for Applications {
             vr::EVRSceneApplicationState::Quitting => c"Quitting".as_ptr(),
             vr::EVRSceneApplicationState::Running => c"Running".as_ptr(),
             vr::EVRSceneApplicationState::Waiting => c"Waiting".as_ptr(),
+            _ => c"Unknown".as_ptr(),
         }
     }
     fn PerformApplicationPrelaunchCheck(&self, _: *const c_char) -> vr::EVRApplicationError {
@@ -191,6 +192,7 @@ impl vr::IVRApplications008_Interface for Applications {
             vr::EVRApplicationError::UnknownProperty => c"UnknownProperty".as_ptr(),
             vr::EVRApplicationError::InvalidParameter => c"InvalidParameter".as_ptr(),
             vr::EVRApplicationError::NotImplemented => c"NotImplemented".as_ptr(),
+            _ => c"Unknown".as_ptr(),
         }
     }
     fn GetApplicationProcessId(&self, _: *const c_char) -> u32 {
@@ -295,10 +297,38 @@ impl vr::IVRApplications006On007 for Applications {
                 c"WaitingForExternalLaunch".as_ptr()
             }
             vr::EVRApplicationTransitionState::NewAppLaunched => c"NewAppLaunched".as_ptr(),
+            _ => c"Unknown".as_ptr(),
         }
     }
     fn IsQuitUserPromptRequested(&self) -> bool {
         crate::warn_unimplemented!("IsQuitUserPromptRequested");
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::CStr;
+    use vr::{IVRApplications006On007, IVRApplications008_Interface};
+
+    #[test]
+    fn unknown_enum_names() {
+        let apps = Applications::default();
+        let name = |ptr| unsafe { CStr::from_ptr(ptr) };
+
+        let error = |e| name(apps.GetApplicationsErrorNameFromEnum(vr::EVRApplicationError(e)));
+        assert_eq!(error(vr::EVRApplicationError::IPCFailed.0), c"IPCFailed");
+        assert_eq!(error(5), c"Unknown");
+        let state = vr::EVRSceneApplicationState(99);
+        assert_eq!(
+            name(apps.GetSceneApplicationStateNameFromEnum(state)),
+            c"Unknown"
+        );
+        let state = vr::EVRApplicationTransitionState(5);
+        assert_eq!(
+            name(apps.GetApplicationsTransitionStateNameFromEnum(state)),
+            c"Unknown"
+        );
     }
 }

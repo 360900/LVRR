@@ -28,7 +28,7 @@ impl LegacyState {
 
 // Adapted from openvr.h
 pub const fn button_mask_from_id(id: vr::EVRButtonId) -> u64 {
-    1_u64 << (id as u32)
+    1_u64 << id.0
 }
 #[macro_export]
 macro_rules! button_mask_from_ids {
@@ -261,7 +261,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                                 vr::EVREventType::ButtonUntouch
                             },
                             index: device_index,
-                            data: vr::VREvent_Controller_t { button: id as u32 },
+                            data: vr::VREvent_Controller_t { button: id.0 },
                         });
                     }
                     if click_state.changed_since_last_sync {
@@ -272,7 +272,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                                 vr::EVREventType::ButtonUnpress
                             },
                             index: device_index,
-                            data: vr::VREvent_Controller_t { button: id as u32 },
+                            data: vr::VREvent_Controller_t { button: id.0 },
                         });
                     }
                 }
@@ -608,20 +608,20 @@ mod tests {
 
         let (active_event, inactive_event) = if touch {
             (
-                vr::EVREventType::ButtonTouch as u32,
-                vr::EVREventType::ButtonUntouch as u32,
+                vr::EVREventType::ButtonTouch.0,
+                vr::EVREventType::ButtonUntouch.0,
             )
         } else {
             (
-                vr::EVREventType::ButtonPress as u32,
-                vr::EVREventType::ButtonUnpress as u32,
+                vr::EVREventType::ButtonPress.0,
+                vr::EVREventType::ButtonUnpress.0,
             )
         };
 
         let hands = [LeftHand, RightHand];
 
         while let Some(event) = get_event() {
-            assert_eq!(event.ty, vr::EVREventType::TrackedDeviceActivated as u32);
+            assert_eq!(event.ty, vr::EVREventType::TrackedDeviceActivated.0);
         }
 
         for hand in hands {
@@ -642,11 +642,7 @@ mod tests {
                 let event = expect_event(format!("{hand:?}"));
                 assert_eq!(event.ty, active_event, "{hand:?}");
                 assert_eq!(event.index, idx, "{hand:?}");
-                assert_eq!(
-                    unsafe { event.data.controller }.button,
-                    *id as u32,
-                    "{hand:?}"
-                );
+                assert_eq!(unsafe { event.data.controller }.button, id.0, "{hand:?}");
             }
         }
 
@@ -677,11 +673,7 @@ mod tests {
                 let event = expect_event(format!("{id:?}"));
                 assert_eq!(event.ty, inactive_event, "{hand:?}");
                 assert_eq!(event.index, idx, "{hand:?}");
-                assert_eq!(
-                    unsafe { event.data.controller }.button,
-                    *id as u32,
-                    "{hand:?}"
-                );
+                assert_eq!(unsafe { event.data.controller }.button, id.0, "{hand:?}");
             }
         }
 
@@ -694,11 +686,7 @@ mod tests {
             let event = expect_event(format!("{id:?}"));
             assert_eq!(event.ty, active_event, "{id:?}");
             assert_eq!(event.index, 1, "{id:?}");
-            assert_eq!(
-                unsafe { event.data.controller }.button,
-                *id as u32,
-                "{id:?}"
-            );
+            assert_eq!(unsafe { event.data.controller }.button, id.0, "{id:?}");
         }
 
         let state = get_state(RightHand);

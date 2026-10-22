@@ -1324,7 +1324,6 @@ name = "openvr"
 version = "0.1.0"
 dependencies = [
  "bindgen",
- "derive_more",
  "glam",
  "log",
  "openxr",

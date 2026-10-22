@@ -480,24 +480,27 @@ impl<C: openxr_data::Compositor> Input<C> {
         space: vr::EVRSkeletalTransformSpace,
         pose: vr::EVRSkeletalReferencePose,
         out_transforms: &mut [vr::VRBoneTransform_t],
-    ) {
+    ) -> Result<(), vr::EVRInputError> {
         let mut skeleton = match hand {
             Hand::Left => match pose {
                 vr::EVRSkeletalReferencePose::BindPose => generated::left_hand::BINDPOSE,
                 vr::EVRSkeletalReferencePose::OpenHand => generated::left_hand::OPENHAND,
                 vr::EVRSkeletalReferencePose::Fist => generated::left_hand::FIST,
                 vr::EVRSkeletalReferencePose::GripLimit => generated::left_hand::GRIPLIMIT,
+                _ => return Err(vr::EVRInputError::InvalidParam),
             },
             Hand::Right => match pose {
                 vr::EVRSkeletalReferencePose::BindPose => generated::right_hand::BINDPOSE,
                 vr::EVRSkeletalReferencePose::OpenHand => generated::right_hand::OPENHAND,
                 vr::EVRSkeletalReferencePose::Fist => generated::right_hand::FIST,
                 vr::EVRSkeletalReferencePose::GripLimit => generated::right_hand::GRIPLIMIT,
+                _ => return Err(vr::EVRInputError::InvalidParam),
             },
         };
 
         finalize_transforms(&mut skeleton, space);
         out_transforms.copy_from_slice(&skeleton[0..out_transforms.len()]);
+        Ok(())
     }
 }
 

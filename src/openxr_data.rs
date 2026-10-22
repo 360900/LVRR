@@ -405,7 +405,7 @@ impl<C: Compositor> OpenXrData<C> {
         };
         debug!("pushing Quit event");
         system.push_event(vr::VREvent_t {
-            eventType: vr::EVREventType::Quit as u32,
+            eventType: vr::EVREventType::Quit.0,
             trackedDeviceIndex: vr::k_unTrackedDeviceIndexInvalid,
             eventAgeSeconds: 0.0,
             data: vr::VREvent_Data_t {
@@ -495,6 +495,15 @@ impl<C: Compositor> OpenXrData<C> {
     }
 
     pub fn set_tracking_space(&self, space: vr::ETrackingUniverseOrigin) {
+        if !matches!(
+            space,
+            vr::ETrackingUniverseOrigin::Seated
+                | vr::ETrackingUniverseOrigin::Standing
+                | vr::ETrackingUniverseOrigin::RawAndUncalibrated
+        ) {
+            crate::warn_once!("Ignoring unknown tracking universe {:?}", space);
+            return;
+        }
         // The SteamVR Unity plugin sets the same space every frame. Don't make it wait for the
         // write lock, which takes up to a frame while WaitGetPoses holds a read across xrWaitFrame.
         if self.session_data.get().current_origin != space {
@@ -588,6 +597,7 @@ impl<C: Compositor> OpenXrData<C> {
                 local_space_adjusted,
                 xr::ReferenceSpaceType::LOCAL,
             ),
+            _ => crate::warn_once!("Not resetting unknown tracking universe {:?}", origin),
         };
     }
 
@@ -1081,6 +1091,10 @@ impl SessionData {
                 crate::warn_unimplemented!("RawAndUncalibrated tracking space");
                 &self.stage_space_reference
             }
+            _ => {
+                crate::warn_once!("Unknown tracking universe {:?}, using raw", origin);
+                &self.stage_space_reference
+            }
         }
     }
 
@@ -1099,7 +1113,8 @@ impl SessionData {
         match self.current_origin {
             vr::ETrackingUniverseOrigin::Seated => xr::ReferenceSpaceType::LOCAL,
             vr::ETrackingUniverseOrigin::Standing => xr::ReferenceSpaceType::STAGE,
-            vr::ETrackingUniverseOrigin::RawAndUncalibrated => {
+            // RawAndUncalibrated, set_tracking_space doesn't store other values
+            _ => {
                 crate::warn_unimplemented!("RawAndUncalibrated tracking space");
                 xr::ReferenceSpaceType::STAGE
             }
@@ -1442,5 +1457,29 @@ mod tests {
         setter.join().unwrap();
         done.expect("SetTrackingSpace waited for a reader");
         assert_eq!(data.get_tracking_space(), origin);
+    }
+
+    #[test]
+    fn unknown_tracking_universe() {
+        let data = OpenXrData::<FakeCompositor>::new(
+            &Injector::default(),
+            openvr::EVRApplicationType::Other,
+        )
+        .unwrap();
+        let unknown = openvr::ETrackingUniverseOrigin(7);
+
+        data.set_tracking_space(openvr::ETrackingUniverseOrigin::Seated);
+        data.set_tracking_space(unknown);
+        assert_eq!(
+            data.get_tracking_space(),
+            openvr::ETrackingUniverseOrigin::Seated
+        );
+
+        data.reset_tracking_space(unknown);
+        let session = data.session_data.get();
+        assert_eq!(
+            session.get_space_for_origin(unknown).as_raw(),
+            session.stage_space_reference.as_raw()
+        );
     }
 }

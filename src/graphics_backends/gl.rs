@@ -194,7 +194,8 @@ impl GraphicsBackend for GlData {
 
         let fmt = match color_space {
             vr::EColorSpace::Linear => fmt,
-            vr::EColorSpace::Gamma | vr::EColorSpace::Auto => match fmt as gl::types::GLenum {
+            // Gamma, Auto, and Auto for values that aren't a color space
+            _ => match fmt as gl::types::GLenum {
                 gl::RGBA8 => gl::SRGB8_ALPHA8 as gl::types::GLint,
                 gl::RGB8 => gl::SRGB8 as gl::types::GLint,
                 _ => fmt,
@@ -248,7 +249,7 @@ impl GraphicsBackend for GlData {
                     0, // x
                     0, // y
                     0, // z
-                    eye as i32,
+                    eye.0 as i32,
                     extent.width,
                     extent.height,
                     1,
@@ -270,7 +271,7 @@ impl GraphicsBackend for GlData {
                     gl::COLOR_ATTACHMENT0,
                     swapchain_texture,
                     0,
-                    eye as i32,
+                    eye.0 as i32,
                 );
 
                 gl::BlitFramebuffer(

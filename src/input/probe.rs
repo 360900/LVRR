@@ -245,11 +245,11 @@ mod tests {
     use super::*;
     use crate::clientcore::Injector;
     use crate::openxr_data::RealOpenXrData;
-    use vr::EVRApplicationType::*;
+    use vr::EVRApplicationType as App;
 
     fn probe_with_profile(profile: &str) -> Option<String> {
         fakexr::set_default_interaction_profile(fakexr::UserPath::LeftHand, Some(profile));
-        let xr = RealOpenXrData::new(&Injector::default(), Other).unwrap();
+        let xr = RealOpenXrData::new(&Injector::default(), App::Other).unwrap();
         fakexr::set_default_interaction_profile(fakexr::UserPath::LeftHand, None);
         xr.probed_profiles.left.clone()
     }
@@ -264,12 +264,12 @@ mod tests {
 
     #[test]
     fn should_probe_skips_non_rendering_apps() {
-        assert!(should_probe(Scene, None));
-        assert!(should_probe(Overlay, None));
-        assert!(should_probe(Other, Some(true)));
-        assert!(!should_probe(Background, None));
-        assert!(!should_probe(Utility, None));
-        assert!(!should_probe(Background, Some(true)));
-        assert!(!should_probe(Scene, Some(false)));
+        assert!(should_probe(App::Scene, None));
+        assert!(should_probe(App::Overlay, None));
+        assert!(should_probe(App::Other, Some(true)));
+        assert!(!should_probe(App::Background, None));
+        assert!(!should_probe(App::Utility, None));
+        assert!(!should_probe(App::Background, Some(true)));
+        assert!(!should_probe(App::Scene, Some(false)));
     }
 }

@@ -232,7 +232,7 @@ impl OverlayMan {
                         .eye_visibility(xr::EyeVisibility::BOTH)
                         .sub_image(
                             xr::SwapchainSubImage::new()
-                                .image_array_index(vr::EVREye::Left as u32)
+                                .image_array_index(vr::EVREye::Left.0)
                                 .swapchain(swapchain)
                                 .image_rect(rect),
                         )
@@ -369,7 +369,7 @@ impl OverlayMan {
         *self.keyboard_text.lock().unwrap() = text;
 
         let event = vr::VREvent_t {
-            eventType: vr::EVREventType::KeyboardDone as u32,
+            eventType: vr::EVREventType::KeyboardDone.0,
             trackedDeviceIndex: vr::k_unTrackedDeviceIndex_Hmd,
             eventAgeSeconds: 0.0,
             data: vr::VREvent_Data_t {
@@ -872,9 +872,9 @@ impl Overlay {
             self.name
         );
         self.flags = if value {
-            self.flags | flag as u32
+            self.flags | flag.0
         } else {
-            self.flags & !(flag as u32)
+            self.flags & !flag.0
         };
     }
     pub fn set_name(&mut self, name: CString) {
@@ -1719,7 +1719,7 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         if enabled.is_null() {
             return vr::EVROverlayError::InvalidParameter;
         }
-        unsafe { enabled.write(overlay.flags & flag as u32 != 0) };
+        unsafe { enabled.write(overlay.flags & flag.0 != 0) };
         vr::EVROverlayError::None
     }
     fn SetOverlayFlag(
@@ -1768,6 +1768,7 @@ impl vr::IVROverlay028_Interface for OverlayMan {
             vr::EVROverlayError::TextureLockCapacityReached => c"TextureLockCapacityReached",
             vr::EVROverlayError::TextureNotLocked => c"TextureNotLocked",
             vr::EVROverlayError::TimedOut => c"TimedOut",
+            _ => c"Unknown",
         };
         res.as_ptr()
     }
@@ -2057,6 +2058,14 @@ mod tests {
     }
 
     #[test]
+    fn unknown_error_name() {
+        let man = overlay_man();
+        let name = |e| unsafe { CStr::from_ptr(man.GetOverlayErrorNameFromEnum(e)) };
+        assert_eq!(name(vr::EVROverlayError::KeyInUse), c"KeyInUse");
+        assert_eq!(name(vr::EVROverlayError(9999)), c"Unknown");
+    }
+
+    #[test]
     fn get_overlay_flags() {
         let man = overlay_man();
         let handle = create(&man, c"key", c"name");
@@ -2083,7 +2092,7 @@ mod tests {
             man.GetOverlayFlags(handle, &mut flags),
             vr::EVROverlayError::None
         );
-        assert_eq!(flags, flag as u32);
+        assert_eq!(flags, flag.0);
 
         assert_eq!(
             man.GetOverlayFlags(handle + 1, &mut flags),
@@ -2146,7 +2155,7 @@ mod tests {
 
     fn keyboard_done_event(user_value: u64) -> impl Fn(&vr::VREvent_t) {
         move |event| {
-            assert_eq!(event.eventType, vr::EVREventType::KeyboardDone as u32);
+            assert_eq!(event.eventType, vr::EVREventType::KeyboardDone.0);
             assert_eq!(unsafe { event.data.keyboard.uUserValue }, user_value);
         }
     }

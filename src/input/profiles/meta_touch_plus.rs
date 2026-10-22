@@ -27,7 +27,7 @@ impl InteractionProfile for MetaTouchPlus {
         Right::<(A, Click), (A, Touch), (B, Click), (B, Touch), (System, Click)>
     ];
     fn properties() -> &'static ProfileProperties {
-        use openvr::EVRButtonId::*;
+        use openvr::EVRButtonId as btn;
         static DEVICE_PROPERTIES: ProfileProperties = ProfileProperties {
             model: Property::PerHand {
                 left: c"Oculus Quest3 (Left Controller)",
@@ -51,13 +51,13 @@ impl InteractionProfile for MetaTouchPlus {
             input_profile_path: c"{meta}/input/touch_controller_plus_profile.json",
             main_axis: MainAxisType::Thumbstick,
             legacy_buttons_mask: button_mask_from_ids!(
-                System,
-                ApplicationMenu,
-                Grip,
-                A,
-                Axis0,
-                Axis1,
-                Axis2
+                btn::System,
+                btn::ApplicationMenu,
+                btn::Grip,
+                btn::A,
+                btn::Axis0,
+                btn::Axis1,
+                btn::Axis2
             ),
             hmd: HmdProperties {
                 model: c"Oculus Quest3",

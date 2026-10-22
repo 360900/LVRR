@@ -657,20 +657,22 @@ impl TrackedDevice {
 
                 match property {
                     vr::ETrackedDeviceProperty::Axis0Type_Int32 => match data.main_axis {
-                        MainAxisType::Thumbstick => Some(vr::EVRControllerAxisType::Joystick as _),
-                        MainAxisType::Trackpad => Some(vr::EVRControllerAxisType::TrackPad as _),
+                        MainAxisType::Thumbstick => {
+                            Some(vr::EVRControllerAxisType::Joystick.0 as _)
+                        }
+                        MainAxisType::Trackpad => Some(vr::EVRControllerAxisType::TrackPad.0 as _),
                     },
                     vr::ETrackedDeviceProperty::Axis1Type_Int32 => {
-                        Some(vr::EVRControllerAxisType::Trigger as _)
+                        Some(vr::EVRControllerAxisType::Trigger.0 as _)
                     }
                     vr::ETrackedDeviceProperty::Axis2Type_Int32 => {
                         // This is actually the grip, and gets recognized as such
-                        Some(vr::EVRControllerAxisType::Trigger as _)
+                        Some(vr::EVRControllerAxisType::Trigger.0 as _)
                     }
                     // TODO: report knuckles trackpad?
                     vr::ETrackedDeviceProperty::Axis3Type_Int32
                     | vr::ETrackedDeviceProperty::Axis4Type_Int32 => {
-                        Some(vr::EVRControllerAxisType::None as _)
+                        Some(vr::EVRControllerAxisType::None.0 as _)
                     }
                     _ => None,
                 }
@@ -1109,7 +1111,7 @@ mod tests {
     #[test]
     fn hmd_properties_follow_controller_profile() {
         use crate::input::profiles::oculus_touch::OculusTouch;
-        use vr::ETrackedDeviceProperty::*;
+        use vr::ETrackedDeviceProperty as Prop;
 
         let mut f = Fixture::new();
         f.load_actions(c"actions.json");
@@ -1121,7 +1123,7 @@ mod tests {
         };
 
         // No controllers connected yet - nothing to derive HMD identity from.
-        assert_eq!(get(&f, TrackingSystemName_String), None);
+        assert_eq!(get(&f, Prop::TrackingSystemName_String), None);
 
         let set = f.get_action_set_handle(c"/actions/set1");
         // profile changes are only applied by the runtime after an action sync
@@ -1136,17 +1138,23 @@ mod tests {
         sync(&mut f);
 
         assert_eq!(
-            get(&f, TrackingSystemName_String).as_deref(),
+            get(&f, Prop::TrackingSystemName_String).as_deref(),
             Some("oculus")
         );
-        assert_eq!(get(&f, ManufacturerName_String).as_deref(), Some("Oculus"));
         assert_eq!(
-            get(&f, ModelNumber_String).as_deref(),
+            get(&f, Prop::ManufacturerName_String).as_deref(),
+            Some("Oculus")
+        );
+        assert_eq!(
+            get(&f, Prop::ModelNumber_String).as_deref(),
             Some("Oculus Quest2")
         );
-        assert_eq!(get(&f, ControllerType_String).as_deref(), Some("rift"));
         assert_eq!(
-            get(&f, SerialNumber_String).as_deref(),
+            get(&f, Prop::ControllerType_String).as_deref(),
+            Some("rift")
+        );
+        assert_eq!(
+            get(&f, Prop::SerialNumber_String).as_deref(),
             Some("WMHD315M3010GV")
         );
 
@@ -1154,10 +1162,13 @@ mod tests {
         sync(&mut f);
 
         assert_eq!(
-            get(&f, TrackingSystemName_String).as_deref(),
+            get(&f, Prop::TrackingSystemName_String).as_deref(),
             Some("lighthouse")
         );
-        assert_eq!(get(&f, ModelNumber_String).as_deref(), Some("Index"));
-        assert_eq!(get(&f, ControllerType_String).as_deref(), Some("indexhmd"));
+        assert_eq!(get(&f, Prop::ModelNumber_String).as_deref(), Some("Index"));
+        assert_eq!(
+            get(&f, Prop::ControllerType_String).as_deref(),
+            Some("indexhmd")
+        );
     }
 }

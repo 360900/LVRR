@@ -48,7 +48,7 @@ impl vr::IVRExtendedDisplay001_Interface for ExtendedDisplay {
         let (eye_width, eye_height) = self.openxr.recommended_eye_size();
         let eye_x = match eye {
             vr::EVREye::Left => 0,
-            vr::EVREye::Right => eye_width,
+            _ => eye_width,
         };
         if let Some(x) = unsafe { x.as_mut() } {
             *x = eye_x;

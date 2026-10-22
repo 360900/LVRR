@@ -454,6 +454,15 @@ impl vr::IVRCompositor029_Interface for Compositor {
         vr::EVRCompositorError::None
     }
     fn SetExplicitTimingMode(&self, timing_mode: vr::EVRCompositorTimingMode) {
+        if !matches!(
+            timing_mode,
+            vr::EVRCompositorTimingMode::Implicit
+                | vr::EVRCompositorTimingMode::Explicit_RuntimePerformsPostPresentHandoff
+                | vr::EVRCompositorTimingMode::Explicit_ApplicationPerformsPostPresentHandoff
+        ) {
+            crate::warn_once!("Ignoring unknown timing mode {:?}", timing_mode);
+            return;
+        }
         debug!("Setting timing mode to {timing_mode:?}");
         *self.timing_mode.lock().unwrap() = timing_mode;
     }
@@ -1537,12 +1546,16 @@ impl<G: GraphicsBackend> FrameController<G> {
             TryInto<&'b openxr_data::Session<G::Api>, Error: std::fmt::Display>,
         G::Format: PartialEq + std::fmt::Debug,
     {
+        if !matches!(eye, vr::EVREye::Left | vr::EVREye::Right) {
+            return Err(vr::EVRCompositorError::IndexOutOfRange);
+        }
+
         // No Man's Sky does this.
-        if self.eyes_submitted[eye as usize].is_some() {
+        if self.eyes_submitted[eye.0 as usize].is_some() {
             return Err(vr::EVRCompositorError::AlreadySubmitted);
         }
 
-        self.eyes_submitted[eye as usize] = if self.should_render {
+        self.eyes_submitted[eye.0 as usize] = if self.should_render {
             // Make sure our image dimensions haven't changed.
             let new_info = self
                 .backend
@@ -2071,6 +2084,34 @@ mod tests {
 
         assert_eq!(f.wait_get_poses(), None);
         assert_eq!(f.submit(vr::EVREye::Left), None);
+    }
+
+    #[test]
+    fn unknown_enum_values() {
+        let f = Fixture::new();
+        f.comp.SetExplicitTimingMode(vr::EVRCompositorTimingMode(7));
+        assert_eq!(
+            *f.comp.timing_mode.lock().unwrap(),
+            vr::EVRCompositorTimingMode::Implicit
+        );
+
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(f.submit(vr::EVREye(2)), IndexOutOfRange);
+        assert_eq!(f.submit(vr::EVREye(u32::MAX)), IndexOutOfRange);
+
+        // An uninitialized color space is treated like Auto.
+        let mut texture = FakeGraphicsData::texture(&f.vk);
+        texture.eColorSpace = vr::EColorSpace(0xdead);
+        assert_eq!(
+            f.comp.Submit(
+                vr::EVREye::Left,
+                &texture,
+                std::ptr::null(),
+                vr::EVRSubmitFlags::Default
+            ),
+            None
+        );
+        assert_eq!(f.submit(vr::EVREye::Right), None);
     }
 
     #[test]
@@ -3048,7 +3089,7 @@ mod tests {
             std::mem::size_of_val(&event) as u32,
             std::ptr::null_mut(),
         ) {
-            assert_ne!(event.eventType, vr::EVREventType::Quit as u32);
+            assert_ne!(event.eventType, vr::EVREventType::Quit.0);
         }
     }
 }

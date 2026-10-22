@@ -35,11 +35,12 @@ macro_rules! vcall {
 }
 
 /// Calls a vtable method that returns an OpenVR error enum and asserts it reports no error.
-/// Every OpenVR error enum uses 0 for its `None`/`Success` variant.
+/// Every OpenVR error enum is 32 bits and uses 0 for its `None`/`Success` variant.
 macro_rules! vcheck {
     ($this:expr, $method:ident $(, $arg:expr)* $(,)?) => {{
         let err = vcall!($this, $method $(, $arg)*);
-        assert!(err as i32 == 0, "{} failed: {err:?}", stringify!($method));
+        let code: i32 = unsafe { std::mem::transmute_copy(&err) };
+        assert!(code == 0, "{} failed: {err:?}", stringify!($method));
     }};
 }
 
@@ -670,7 +671,7 @@ fn scene_app() {
         println!("{eye:?} eye to head: {:?}", eye_to_head.m);
         assert!(eye_to_head.m.iter().flatten().all(|v| v.is_finite()));
         assert!(eye_to_head.m[0][0] != 0.0);
-        eye_x[eye as usize] = eye_to_head.m[0][3];
+        eye_x[eye.0 as usize] = eye_to_head.m[0][3];
     }
     assert!(eye_x[0] < eye_x[1], "eyes are not separated: {eye_x:?}");
 

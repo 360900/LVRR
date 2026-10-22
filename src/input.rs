@@ -1255,8 +1255,9 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             return vr::EVRInputError::WrongType;
         };
 
-        self.get_reference_transforms(*hand, space, pose, transforms);
-        vr::EVRInputError::None
+        self.get_reference_transforms(*hand, space, pose, transforms)
+            .err()
+            .unwrap_or(vr::EVRInputError::None)
     }
     fn GetBoneName(
         &self,
@@ -2464,7 +2465,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             // so we use raw pointers to avoid creating a reference, because if the
             // size doesn't match our VREvent_t's size, we are in UB land
             unsafe {
-                (&raw mut (*out).eventType).write(event.ty as u32);
+                (&raw mut (*out).eventType).write(event.ty.0);
                 (&raw mut (*out).trackedDeviceIndex).write(event.index);
                 (&raw mut (*out).eventAgeSeconds).write(0.0);
                 (&raw mut (*out).data.controller).write(event.data);

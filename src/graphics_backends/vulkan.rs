@@ -188,7 +188,7 @@ impl GraphicsBackend for VulkanData {
 
         let data = self.real_data.as_ref().unwrap();
         let swapchain_image = data.images[image_index];
-        let buf = data.bufs[2 * image_index + eye as usize];
+        let buf = data.bufs[2 * image_index + eye.0 as usize];
 
         let (extent, offset) = texture_extent_from_bounds(texture, bounds);
         log::trace!("{eye:?} extent: {extent:?} | bounds: {bounds:?}");
@@ -199,7 +199,7 @@ impl GraphicsBackend for VulkanData {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
                 base_mip_level: 0,
                 level_count: 1,
-                base_array_layer: eye as u32,
+                base_array_layer: eye.0,
                 layer_count: 1,
             };
 
@@ -239,7 +239,7 @@ impl GraphicsBackend for VulkanData {
                 },
                 src_offset: offset,
                 dst_subresource: vk::ImageSubresourceLayers {
-                    base_array_layer: eye as u32,
+                    base_array_layer: eye.0,
                     ..subresource
                 },
                 dst_offset: vk::Offset3D::default(),
@@ -871,7 +871,12 @@ fn get_colorspace_corrected_format(format: vk::Format, color_space: vr::EColorSp
     static UNSUPPORTED: LazyLock<Mutex<HashSet<vk::Format>>> = LazyLock::new(Mutex::default);
     // https://github.com/ValveSoftware/openvr/wiki/Vulkan#image-formats
     match color_space {
-        vr::EColorSpace::Auto | vr::EColorSpace::Gamma => match format {
+        vr::EColorSpace::Linear => {
+            crate::warn_unimplemented!("Linear colorspace");
+            format
+        }
+        // Auto, Gamma, and Auto for values that aren't a color space
+        _ => match format {
             vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => vk::Format::R8G8B8A8_SRGB,
             vk::Format::B8G8R8A8_UNORM | vk::Format::B8G8R8A8_SRGB => vk::Format::B8G8R8A8_SRGB,
             vk::Format::BC3_SRGB_BLOCK => format,
@@ -882,10 +887,6 @@ fn get_colorspace_corrected_format(format: vk::Format, color_space: vr::EColorSp
                 format
             }
         },
-        vr::EColorSpace::Linear => {
-            crate::warn_unimplemented!("Linear colorspace");
-            format
-        }
     }
 }
 

@@ -25,7 +25,7 @@ impl InteractionProfile for OculusTouch {
         Right::<(A, Click), (A, Touch), (B, Click), (B, Touch), (System, Click)>
     ];
     fn properties() -> &'static ProfileProperties {
-        use openvr::EVRButtonId::*;
+        use openvr::EVRButtonId as btn;
         static DEVICE_PROPERTIES: ProfileProperties = ProfileProperties {
             model: Property::PerHand {
                 left: c"Oculus Quest2 (Left Controller)",
@@ -49,13 +49,13 @@ impl InteractionProfile for OculusTouch {
             input_profile_path: c"{oculus}/input/touch_profile.json",
             main_axis: MainAxisType::Thumbstick,
             legacy_buttons_mask: button_mask_from_ids!(
-                System,
-                ApplicationMenu,
-                Grip,
-                A,
-                Axis0,
-                Axis1,
-                Axis2
+                btn::System,
+                btn::ApplicationMenu,
+                btn::Grip,
+                btn::A,
+                btn::Axis0,
+                btn::Axis1,
+                btn::Axis2
             ),
             hmd: HmdProperties {
                 model: c"Oculus Quest2",

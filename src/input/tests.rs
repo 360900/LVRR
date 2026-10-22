@@ -387,22 +387,29 @@ fn unknown_handles() {
 
 #[test]
 fn dominant_hand() {
-    use vr::ETrackedControllerRole::*;
+    use vr::ETrackedControllerRole as Role;
     let f = Fixture::new();
     let get = || {
-        let mut hand = Invalid;
+        let mut hand = Role::Invalid;
         assert_eq!(f.input.GetDominantHand(&mut hand), vr::EVRInputError::None);
         hand
     };
 
-    assert_eq!(get(), RightHand);
-    assert_eq!(f.input.SetDominantHand(LeftHand), vr::EVRInputError::None);
-    assert_eq!(get(), LeftHand);
+    assert_eq!(get(), Role::RightHand);
     assert_eq!(
-        f.input.SetDominantHand(Treadmill),
+        f.input.SetDominantHand(Role::LeftHand),
+        vr::EVRInputError::None
+    );
+    assert_eq!(get(), Role::LeftHand);
+    assert_eq!(
+        f.input.SetDominantHand(Role::Treadmill),
         vr::EVRInputError::InvalidParam
     );
-    assert_eq!(get(), LeftHand);
+    assert_eq!(
+        f.input.SetDominantHand(Role(1234)),
+        vr::EVRInputError::InvalidParam
+    );
+    assert_eq!(get(), Role::LeftHand);
     assert_eq!(
         f.input.GetDominantHand(std::ptr::null_mut()),
         vr::EVRInputError::InvalidParam
@@ -1298,7 +1305,7 @@ fn poll_event_while_devices_are_read() {
         drop(devices);
         let (got, ty) = polled.expect("PollNextEvent waited for a device list reader");
         assert!(got);
-        assert_eq!(ty, vr::EVREventType::TrackedDeviceActivated as u32);
+        assert_eq!(ty, vr::EVREventType::TrackedDeviceActivated.0);
     });
 
     // The HMD's activation is only reported once.
@@ -1406,6 +1413,37 @@ fn release_edge_with_native_and_threshold_bindings() {
     assert!(
         s.bChanged,
         "threshold release must report the edge, not the idle native binding's state: {s:?}"
+    );
+}
+
+#[test]
+fn skeletal_reference_transforms_unknown_pose() {
+    let mut f = Fixture::new();
+    let set1 = f.get_action_set_handle(c"/actions/set1");
+    f.load_actions(c"actions.json");
+    f.sync(vr::VRActiveActionSet_t {
+        ulActionSet: set1,
+        ..Default::default()
+    });
+
+    let action = f.get_action_handle(c"/actions/set1/in/SkellyL");
+    let mut transforms = [vr::VRBoneTransform_t::default(); 31];
+    let mut get = |pose| {
+        f.input.GetSkeletalReferenceTransforms(
+            action,
+            vr::EVRSkeletalTransformSpace::Parent,
+            pose,
+            transforms.as_mut_ptr(),
+            transforms.len() as u32,
+        )
+    };
+    assert_eq!(
+        get(vr::EVRSkeletalReferencePose(99)),
+        vr::EVRInputError::InvalidParam
+    );
+    assert_eq!(
+        get(vr::EVRSkeletalReferencePose::OpenHand),
+        vr::EVRInputError::None
     );
 }
 

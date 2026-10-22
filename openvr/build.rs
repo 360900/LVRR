@@ -11,6 +11,7 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::LazyLock;
 use syn::parse_quote;
+use syn::punctuated::Punctuated;
 
 #[allow(unused_macros)]
 macro_rules! dbg {
@@ -21,16 +22,35 @@ macro_rules! dbg {
     }
 }
 
-// Bindgen will generate UB for the Default implementation of structs
-// that have a rustified enum member.
-// We will instead manually place a derive(Default) on these.
-// https://github.com/rust-lang/rust-bindgen/issues/2974
+// Bindgen zero fills the Default implementation of structs that have an enum member, which is UB
+// for Rust enums (https://github.com/rust-lang/rust-bindgen/issues/2974) and the wrong value for
+// ETrackingResult, so we manually place a derive(Default) on these.
 static MANUAL_DERIVE_DEFAULT: &[&str] = &[
     // Have a vr::ETrackingResult member
     "TrackedDevicePose_t",
     "InputPoseActionData_t",
     "Compositor_FrameTiming",
 ];
+
+// Enums that only ever go from xrizer to the app: return values, out parameters and fields of
+// structs xrizer fills. Every other enum is a newtype over its integer, because the app can pass
+// any value for it (vendor properties, ids from other SDK versions, garbage) and an out of range
+// value in a Rust enum is undefined behaviour.
+static RUST_ENUMS: &[&str] = &[
+    "ChaperoneCalibrationState",
+    "EDeviceActivityLevel",
+    "EVRCompositorError",
+    "EVRDebugError",
+    "EVRFirmwareError",
+    "EVRInputError",
+    "EVRRenderModelTextureFormat",
+    "EVRScreenshotError",
+    "EVRSkeletalTrackingLevel",
+    "VRMessageOverlayResponse",
+    "VROverlayTransformType",
+];
+
+static BITFIELD_ENUMS: &[&str] = &["EVRSubmitFlags", "EVRComponentProperty", "EKeyboardFlags"];
 
 #[derive(Debug)]
 struct Callbacks;
@@ -41,9 +61,6 @@ impl ParseCallbacks for Callbacks {
         match (info.kind, info.name) {
             (TypeKind::Struct, x) if MANUAL_DERIVE_DEFAULT.contains(&x) => {
                 vec!["Default".to_string()]
-            }
-            (TypeKind::Enum, "EVREventType") => {
-                vec!["derive_more::TryFrom".to_string()]
             }
             _ => Vec::new(),
         }
@@ -181,6 +198,9 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     for s in MANUAL_DERIVE_DEFAULT {
         builder = builder.no_default(format!("vr.*::{s}"));
     }
+    for e in BITFIELD_ENUMS {
+        builder = builder.bitfield_enum(format!("vr.*::{e}"));
+    }
     let bindings = builder
         .clang_args([
             "-x",
@@ -198,10 +218,11 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
         .blocklist_function("vr.*::VR_.*")
         .derive_default(true)
         .no_default("vr.*::IVR.*")
-        .bitfield_enum("vr.*::EVRSubmitFlags")
-        .bitfield_enum("vr.*::EVRComponentProperty")
-        .bitfield_enum("vr.*::EKeyboardFlags")
-        .rustified_enum(".*")
+        .default_enum_style(bindgen::EnumVariation::NewType {
+            is_bitfield: false,
+            is_global: false,
+        })
+        .rustified_enum(format!("vr.*::({})", RUST_ENUMS.join("|")))
         .vtable_generation(true)
         .generate_cstr(true)
         .generate_comments(true)
@@ -641,9 +662,18 @@ fn versionify_interface(
         *this.elem = parse_quote!(#versioned_ident);
 
         for arg in args {
+            let from_app = !matches!(&arg.ty, syn::Type::Ptr(p) if p.mutability.is_some());
             let syn::Type::Path(path) = extract_array_or_ptr_type(&mut arg.ty) else {
                 unreachable!()
             };
+
+            if let Some(ident) = path.path.get_ident() {
+                let ident = ident.to_string();
+                assert!(
+                    !from_app || !RUST_ENUMS.contains(&ident.as_str()),
+                    "{interface}{version_str} takes {ident} from the app, remove it from RUST_ENUMS"
+                );
+            }
 
             if path
                 .path
@@ -815,6 +845,11 @@ fn process_vr_namespace_content(
                     incompatible_items.insert(item.ident.to_string(), item.into());
                     continue;
                 }
+                // Replace like Rust enums are, so the constants are the same as their variants.
+                if is_newtype_enum(&item) {
+                    unversioned.insert(item.ident.to_string(), (item.into(), vr_mod.ident.clone()));
+                    continue;
+                }
                 match unversioned.entry(item.ident.to_string()) {
                     Entry::Vacant(e) => {
                         e.insert((item.into(), vr_mod.ident.clone()));
@@ -979,13 +1014,25 @@ fn process_and_versionify_types(tokens: TokenStream) -> String {
     let unversioned = unversioned
         .into_iter()
         .flat_map(|(name, (mut item, parent))| {
-            // TODO: use the add_attributes method on ParseCallbacks instead
-            // after updating bindgen?
-            if let syn::Item::Enum(e) = &mut item
-                && e.ident == "EVREventType"
-            {
-                e.attrs.push(parse_quote!(#[try_from(repr)]));
-            }
+            let newtype_enum = match &mut item {
+                syn::Item::Struct(s) if is_newtype_enum(s) => {
+                    // Debug is implemented below, to print the name of known values.
+                    for attr in &mut s.attrs {
+                        if attr.path().is_ident("derive") {
+                            let derives = attr
+                                .parse_args_with(
+                                    Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
+                                )
+                                .unwrap()
+                                .into_iter()
+                                .filter(|d| !d.is_ident("Debug"));
+                            *attr = parse_quote!(#[derive(#(#derives),*)]);
+                        }
+                    }
+                    Some(s.ident.clone())
+                }
+                _ => None,
+            };
 
             let mut items = vec![item];
 
@@ -1001,6 +1048,9 @@ fn process_and_versionify_types(tokens: TokenStream) -> String {
                     }
                     ImplItem::TraitImpl(item) => Some((*item).into()),
                 }));
+                if let Some(ident) = &newtype_enum {
+                    items.push(newtype_enum_debug(ident, &free_items).into());
+                }
                 if !free_items.is_empty() {
                     let ident = syn::Ident::new(&name, proc_macro2::Span::call_site());
                     items.push(parse_quote! { impl #ident { #(#free_items)* }})
@@ -1043,6 +1093,37 @@ fn process_and_versionify_types(tokens: TokenStream) -> String {
         attrs: file.attrs,
         items: vec![m.into()],
     })
+}
+
+/// Newtype enums are tuple structs, bitfields are as well but don't count.
+fn is_newtype_enum(item: &syn::ItemStruct) -> bool {
+    matches!(item.fields, syn::Fields::Unnamed(_))
+        && !BITFIELD_ENUMS.contains(&item.ident.to_string().as_str())
+}
+
+/// Debug for a newtype enum: the name of a known value or the raw number.
+fn newtype_enum_debug(ident: &syn::Ident, items: &[Box<syn::ImplItem>]) -> syn::ItemImpl {
+    let consts: Vec<_> = items
+        .iter()
+        .filter_map(|item| match &**item {
+            syn::ImplItem::Const(c) => Some(&c.ident),
+            _ => None,
+        })
+        .collect();
+    let names = consts.iter().map(|c| c.to_string());
+    parse_quote! {
+        impl ::std::fmt::Debug for #ident {
+            // Aliases share a value with an earlier constant.
+            #[allow(unreachable_patterns)]
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                let name = match *self {
+                    #(Self::#consts => #names,)*
+                    _ => return ::std::fmt::Debug::fmt(&self.0, f),
+                };
+                f.write_str(name)
+            }
+        }
+    }
 }
 
 struct GeneratedInterfaceData {
