@@ -11,7 +11,7 @@ pub fn dialog(error: String, backtrace: Backtrace) {
     let r = std::panic::catch_unwind(|| {
         miniquad::start(
             Conf {
-                window_title: "xrizer error".to_string(),
+                window_title: "xrizer-edge error".to_string(),
                 high_dpi: true,
                 window_width: 400,
                 window_height: 200,
@@ -79,7 +79,7 @@ fn ui(ctx: &egui::Context, info: &ErrorInfo) {
                 .size(20.)
                 .strong()
                 .append_to(&mut job, ui.style(), FontSelection::Default, Align::Center);
-            RichText::new("xrizer has crashed!")
+            RichText::new("xrizer-edge has crashed!")
                 .heading()
                 .strong()
                 .append_to(&mut job, ui.style(), FontSelection::Default, Align::Center);
@@ -147,7 +147,7 @@ fn ui(ctx: &egui::Context, info: &ErrorInfo) {
                         let _ = Command::new("xdg-open").arg(log_file).spawn();
                     }
                     if ui.button("Report on GitHub").clicked() {
-                        let _ = webbrowser::open("https://github.com/Supreeeme/xrizer/issues/new?template=bug_report.yaml");
+                        let _ = webbrowser::open("https://github.com/360900/xrizer-edge/issues/new?template=bug_report.yaml");
                     }
                 })
             })

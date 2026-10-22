@@ -2793,7 +2793,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 
 [[package]]
-name = "xrizer"
+name = "xrizer-edge"
 version = "0.6.0"
 dependencies = [
  "anyhow",

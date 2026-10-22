@@ -102,11 +102,11 @@ jobs:
       run: cargo clippy --workspace --all-targets
     - name: Copy to directory
       run: |
-        mkdir -p out/xrizer
-        cp -r -L target/release/bin out/xrizer
-        cp -L target/i686-unknown-linux-gnu/release/bin/vrclient.so out/xrizer/bin/
+        mkdir -p out/xrizer-edge
+        cp -r -L target/release/bin out/xrizer-edge
+        cp -L target/i686-unknown-linux-gnu/release/bin/vrclient.so out/xrizer-edge/bin/
     - name: Upload
       uses: actions/upload-artifact@v6
       with:
-        name: xrizer-nightly-release
+        name: xrizer-edge-nightly-release
         path: out

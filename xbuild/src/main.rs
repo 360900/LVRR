@@ -36,7 +36,7 @@ fn main() {
             "--message-format",
             "json-render-diagnostics",
             "-p",
-            "xrizer",
+            "xrizer-edge",
         ])
         .args(std::env::args_os().skip(1))
         .stdout(Stdio::piped())
@@ -58,7 +58,8 @@ fn main() {
         match msg {
             Message::CompilerArtifact(a) => {
                 let target = a.target;
-                if !(target.name == "xrizer" && target.crate_types.contains(&"cdylib".into())) {
+                if !(target.name == "xrizer_edge" && target.crate_types.contains(&"cdylib".into()))
+                {
                     continue;
                 }
 
@@ -70,7 +71,8 @@ fn main() {
                 )
             }
             Message::BuildScriptExecuted(b) => {
-                if !b.package_id.contains("xrizer#") && !b.package_id.contains("xrizer@") {
+                if !b.package_id.contains("xrizer-edge#") && !b.package_id.contains("xrizer-edge@")
+                {
                     continue;
                 }
                 for [name, value] in b.env {

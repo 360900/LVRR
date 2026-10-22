@@ -8,7 +8,7 @@ Things will still break. Please open issues here, not on upstream xrizer.
 
 # Download
 
-- [Latest nightly](https://nightly.link/360900/xrizer-edge/workflows/ci/main/xrizer-nightly-release.zip)
+- [Latest nightly](https://nightly.link/360900/xrizer-edge/workflows/ci/main/xrizer-edge-nightly-release.zip)
 - [Releases](https://github.com/360900/xrizer-edge/releases)
 
 Unzip it anywhere.

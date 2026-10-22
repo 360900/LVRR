@@ -66,7 +66,7 @@ jobs:
         id: download-build
         uses: actions/download-artifact@v7
         with:
-          name: xrizer-nightly-release
+          name: xrizer-edge-nightly-release
           run-id: ${{ steps.latest-build.outputs.result }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Download vendored dependencies
@@ -80,14 +80,14 @@ jobs:
         env:
             VERSION: ${{ github.ref_name }}
         run: |
-          mv xrizer xrizer-$VERSION
-          zip -r xrizer-$VERSION.zip xrizer-$VERSION
+          mv xrizer-edge xrizer-edge-$VERSION
+          zip -r xrizer-edge-$VERSION.zip xrizer-edge-$VERSION
           zip -r dependencies.zip vendor
       - name: Draft release
         uses: softprops/action-gh-release@v3
         with:
           draft: true
           files: |
-            ${{ format('xrizer-{0}.zip', github.ref_name) }}
+            ${{ format('xrizer-edge-{0}.zip', github.ref_name) }}
             dependencies.zip
           fail_on_unmatched_files: true
