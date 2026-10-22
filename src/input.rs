@@ -115,6 +115,7 @@ pub struct Input<C: openxr_data::Compositor> {
     set_map: RwLock<SlotMap<ActionSetKey, String>>,
     loaded_actions_path: OnceLock<PathBuf>,
     legacy_state: legacy::LegacyState,
+    /// See [Input::current_skeletal_tracking_level], the only writer besides profile changes.
     skeletal_tracking_level: RwLock<[vr::EVRSkeletalTrackingLevel; 2]>,
     /// The sets activated by the last UpdateActionState, with the hand they're restricted to
     /// (or NULL).

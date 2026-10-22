@@ -2282,6 +2282,18 @@ fn skeletal_tracking_level_follows_hand_tracking() {
     f.load_actions(c"actions.json");
     let set1 = f.get_action_set_handle(c"/actions/set1");
     let skeleton = f.get_action_handle(c"/actions/set1/in/skellyl");
+    // fakexr can't locate in the stage space.
+    f.input
+        .openxr
+        .set_tracking_space(vr::ETrackingUniverseOrigin::Seated);
+    let get_level = |f: &Fixture| {
+        let mut level = Estimated;
+        assert_eq!(
+            f.input.GetSkeletalTrackingLevel(skeleton, &mut level),
+            vr::EVRInputError::None
+        );
+        level
+    };
     let level = |f: &mut Fixture| {
         f.sync(vr::VRActiveActionSet_t {
             ulActionSet: set1,
@@ -2289,12 +2301,7 @@ fn skeletal_tracking_level_follows_hand_tracking() {
         });
         // drop cached hand skeletons
         f.input.frame_start_update();
-        let mut level = Estimated;
-        assert_eq!(
-            f.input.GetSkeletalTrackingLevel(skeleton, &mut level),
-            vr::EVRInputError::None
-        );
-        level
+        get_level(f)
     };
 
     // Reported before any bone data was requested.
@@ -2303,6 +2310,19 @@ fn skeletal_tracking_level_follows_hand_tracking() {
     assert_eq!(level(&mut f), Full);
     fakexr::set_hand_tracked(f.raw_session(), LeftHand, None);
     assert_eq!(level(&mut f), Full);
+    // Nor do estimated bones lower it.
+    let mut bones = [vr::VRBoneTransform_t::default(); super::HandSkeletonBone::Count as usize];
+    assert_eq!(
+        f.input.GetSkeletalBoneData(
+            skeleton,
+            vr::EVRSkeletalTransformSpace::Parent,
+            vr::EVRSkeletalMotionRange::WithController,
+            bones.as_mut_ptr(),
+            bones.len() as u32,
+        ),
+        vr::EVRInputError::None
+    );
+    assert_eq!(get_level(&f), Full);
 
     // A different device doesn't inherit it.
     f.set_interaction_profile::<OculusTouch>(LeftHand);
