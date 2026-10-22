@@ -13,7 +13,7 @@ pub use devices::TrackedDeviceType;
 pub use probe::{ProbedProfiles, probe_interaction_profiles};
 pub use profiles::InteractionProfile;
 
-use devices::{SubactionPaths, TrackedDevice, TrackedDeviceList};
+use devices::{SubactionPaths, TrackedDevice, TrackedDeviceList, is_simple_controller};
 use skeletal::FingerState;
 use skeletal::HandSkeletonBone;
 use skeletal::SkeletalInputActionData;
@@ -192,7 +192,8 @@ impl<C: openxr_data::Compositor> Input<C> {
         let probed_profile = [Hand::Left, Hand::Right]
             .into_iter()
             .filter_map(|hand| openxr.probed_profiles.get(hand))
-            .find_map(|name| ProfileData::for_profile_name(name).map(|d| d.properties));
+            .filter_map(|name| ProfileData::for_profile_name(name).map(|d| d.properties))
+            .min_by_key(|properties| is_simple_controller(properties));
 
         Self {
             openxr,
@@ -2497,6 +2498,9 @@ impl<C: openxr_data::Compositor> Input<C> {
             };
 
             if let Some(controller) = controller.as_mut() {
+                if controller.profile_path != profile_path {
+                    controller.reset_tracked_hand();
+                }
                 controller.profile_path = profile_path;
             }
 
@@ -2516,7 +2520,14 @@ impl<C: openxr_data::Compositor> Input<C> {
             };
 
             if let Some(data) = ProfileData::for_profile_name(&profile_name) {
-                *self.last_profile_properties.lock().unwrap() = Some(data.properties);
+                {
+                    // simple_controller says nothing about the headset, so don't let it replace a
+                    // real controller (e.g. when switching to hand tracking).
+                    let mut last_profile = self.last_profile_properties.lock().unwrap();
+                    if last_profile.is_none() || !is_simple_controller(data.properties) {
+                        *last_profile = Some(data.properties);
+                    }
+                }
                 if let Some(controller) = controller.as_mut() {
                     controller.profile_data = Some(data);
                 } else {

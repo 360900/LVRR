@@ -27,7 +27,10 @@ use log::trace;
 
 use super::{
     Input, InteractionProfile,
-    profiles::{self, MainAxisType, RunWithProfile, vrlink_hand::VRLinkHand},
+    profiles::{
+        self, MainAxisType, RunWithProfile, simple_controller::SimpleController,
+        vrlink_hand::VRLinkHand,
+    },
 };
 
 #[derive(Clone)]
@@ -175,6 +178,8 @@ pub struct TrackedDevice {
     /// The connection state last reported to the app. Atomic so polling events only needs a read
     /// lock on the device list.
     previous_connected: AtomicBool,
+    /// See [TrackedDevice::is_tracked_hand].
+    tracked_hand: AtomicBool,
     pose_cache: Mutex<HashMap<i64, vr::TrackedDevicePose_t>>,
 }
 
@@ -406,6 +411,12 @@ fn get_generic_tracker_pose(
     Some(vr::space_relation_to_openvr_pose(location, velocity))
 }
 
+/// simple_controller is what runtimes bind when nothing better matches, e.g. optically tracked
+/// hands, so it says little about the hardware.
+pub(super) fn is_simple_controller(properties: &ProfileProperties) -> bool {
+    std::ptr::eq(properties, SimpleController::properties())
+}
+
 impl TrackedDevice {
     pub(super) fn new(
         device_type: TrackedDeviceType,
@@ -418,6 +429,7 @@ impl TrackedDevice {
             connected: matches!(device_type, TrackedDeviceType::Hmd),
             device_type,
             previous_connected: false.into(),
+            tracked_hand: false.into(),
             pose_cache: Mutex::new(HashMap::new()),
         }
     }
@@ -550,22 +562,85 @@ impl TrackedDevice {
     /// should be derived from.
     fn get_profile_properties(
         &self,
+        xr_data: &OpenXrData<impl openxr_data::Compositor>,
+        session_data: &SessionData,
         devices: &TrackedDeviceList,
         last_profile: Option<&'static ProfileProperties>,
     ) -> Option<&'static ProfileProperties> {
         match self.device_type {
-            TrackedDeviceType::Hmd => [Hand::Left, Hand::Right]
-                .into_iter()
-                .filter_map(|hand| devices.get_controller(hand))
-                .find_map(|controller| controller.profile_data.as_ref())
-                .map(|data| data.properties)
-                .or(last_profile),
+            TrackedDeviceType::Hmd => {
+                let controllers = || {
+                    [Hand::Left, Hand::Right]
+                        .into_iter()
+                        .filter_map(|hand| devices.get_controller(hand))
+                };
+                let profiles = || {
+                    controllers()
+                        .filter_map(|controller| controller.profile_data.as_ref())
+                        .map(|data| data.properties)
+                };
+                // simple_controller says nothing about the headset, so prefer any real
+                // controller seen before, then tracked hands.
+                let real = |properties: &&ProfileProperties| !is_simple_controller(properties);
+                profiles()
+                    .find(real)
+                    .or(last_profile.filter(real))
+                    .or_else(|| {
+                        controllers()
+                            .any(|controller| controller.is_tracked_hand(xr_data, session_data))
+                            .then(VRLinkHand::properties)
+                    })
+                    .or_else(|| profiles().next())
+                    .or(last_profile)
+            }
+            _ if self.is_tracked_hand(xr_data, session_data) => Some(VRLinkHand::properties()),
             _ => self
                 .profile_data
                 .as_ref()
                 .map(|data| data.properties)
                 .or_else(|| self.synthesised_profile()),
         }
+    }
+
+    /// Whether this controller is a hand the runtime tracks optically and binds to
+    /// simple_controller (as Monado and WiVRn do), so it should be reported as a hand rather than
+    /// a generic controller. This is latched until the interaction profile changes, so the
+    /// identity doesn't flip whenever the hand briefly loses tracking.
+    pub(super) fn is_tracked_hand(
+        &self,
+        xr_data: &OpenXrData<impl openxr_data::Compositor>,
+        session_data: &SessionData,
+    ) -> bool {
+        let has_tracker = matches!(
+            self.device_type,
+            TrackedDeviceType::Controller {
+                hand_tracker: Some(_),
+                ..
+            }
+        );
+        if !has_tracker
+            || !self
+                .profile_data
+                .as_ref()
+                .is_some_and(|data| is_simple_controller(data.properties))
+        {
+            return false;
+        }
+
+        if !self.tracked_hand.load(Ordering::Relaxed)
+            && self
+                .get_hand_skeleton(xr_data, session_data.tracking_space())
+                .is_some_and(|skeleton| {
+                    skeleton.data_source == xr::HandTrackingDataSourceEXT::UNOBSTRUCTED
+                })
+        {
+            self.tracked_hand.store(true, Ordering::Relaxed);
+        }
+        self.tracked_hand.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn reset_tracked_hand(&self) {
+        self.tracked_hand.store(false, Ordering::Relaxed);
     }
 
     /// The interaction profile reported when the controller has no bound
@@ -627,6 +702,8 @@ impl TrackedDevice {
 
     fn get_string_property(
         &self,
+        xr_data: &OpenXrData<impl openxr_data::Compositor>,
+        session_data: &SessionData,
         devices: &TrackedDeviceList,
         last_profile: Option<&'static ProfileProperties>,
         property: vr::ETrackedDeviceProperty,
@@ -636,7 +713,7 @@ impl TrackedDevice {
             _ => Hand::Left,
         };
 
-        let data = self.get_profile_properties(devices, last_profile)?;
+        let data = self.get_profile_properties(xr_data, session_data, devices, last_profile)?;
 
         if let TrackedDeviceType::Hmd = self.device_type {
             return match property {
@@ -690,8 +767,9 @@ impl TrackedDevice {
 
     fn get_int_property(
         &self,
-        _xr_data: &OpenXrData<impl openxr_data::Compositor>,
-        _session_data: &SessionData,
+        xr_data: &OpenXrData<impl openxr_data::Compositor>,
+        session_data: &SessionData,
+        devices: &TrackedDeviceList,
         property: vr::ETrackedDeviceProperty,
     ) -> Option<i32> {
         match property {
@@ -715,11 +793,7 @@ impl TrackedDevice {
 
         match self.device_type {
             TrackedDeviceType::Controller { .. } => {
-                let data = self
-                    .profile_data
-                    .as_ref()
-                    .map(|data| data.properties)
-                    .or_else(|| self.synthesised_profile())?;
+                let data = self.get_profile_properties(xr_data, session_data, devices, None)?;
 
                 match property {
                     vr::ETrackedDeviceProperty::Axis0Type_Int32 => match data.main_axis {
@@ -749,17 +823,14 @@ impl TrackedDevice {
 
     fn get_uint_property(
         &self,
-        _xr_data: &OpenXrData<impl openxr_data::Compositor>,
-        _session_data: &SessionData,
+        xr_data: &OpenXrData<impl openxr_data::Compositor>,
+        session_data: &SessionData,
+        devices: &TrackedDeviceList,
         property: vr::ETrackedDeviceProperty,
     ) -> Option<u64> {
         match self.device_type {
             TrackedDeviceType::Controller { .. } => {
-                let data = self
-                    .profile_data
-                    .as_ref()
-                    .map(|data| data.properties)
-                    .or_else(|| self.synthesised_profile())?;
+                let data = self.get_profile_properties(xr_data, session_data, devices, None)?;
 
                 match property {
                     vr::ETrackedDeviceProperty::SupportedButtons_Uint64 => {
@@ -1111,7 +1182,13 @@ impl<C: openxr_data::Compositor> Input<C> {
 
         let last_profile = *self.last_profile_properties.lock().unwrap();
         device
-            .get_string_property(&devices, last_profile, property)
+            .get_string_property(
+                &self.openxr,
+                &session_data,
+                &devices,
+                last_profile,
+                property,
+            )
             .map(|s| s.to_owned())
     }
 
@@ -1124,7 +1201,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         let devices = session_data.input_data.devices.read().unwrap();
         let device = devices.get_device(index)?;
 
-        device.get_int_property(&self.openxr, &session_data, property)
+        device.get_int_property(&self.openxr, &session_data, &devices, property)
     }
 
     pub fn get_device_uint_tracked_property(
@@ -1136,7 +1213,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         let devices = session_data.input_data.devices.read().unwrap();
         let device = devices.get_device(index)?;
 
-        device.get_uint_property(&self.openxr, &session_data, property)
+        device.get_uint_property(&self.openxr, &session_data, &devices, property)
     }
 }
 
@@ -1250,6 +1327,72 @@ mod tests {
             xr::HandTrackingDataSourceEXT::CONTROLLER
         );
         assert!(hand_skeleton(&f, Hand::Right).is_none());
+    }
+
+    #[test]
+    fn tracked_hands_report_hand_identity() {
+        use crate::input::profiles::{
+            oculus_touch::OculusTouch, simple_controller::SimpleController,
+        };
+        use fakexr::UserPath::*;
+        use vr::ETrackedDeviceProperty::*;
+        use xr::HandTrackingDataSourceEXT as Source;
+        const HAND: Option<&str> = Some("svl_hand_interaction_augmented");
+        const GENERIC: Option<&str> = Some("<unknown>");
+        const TOUCH: Option<&str> = Some("oculus_touch");
+
+        fakexr::set_hand_tracking_supported(true);
+        let mut f = Fixture::new();
+        f.load_actions(c"actions.json");
+        let set = f.get_action_set_handle(c"/actions/set1");
+        let sync = |f: &mut Fixture| {
+            f.sync(vr::VRActiveActionSet_t {
+                ulActionSet: set,
+                ..Default::default()
+            });
+            // drop cached hand skeletons
+            f.input.frame_start_update();
+        };
+        let get = |f: &Fixture, index, prop| {
+            f.input
+                .get_device_string_tracked_property(index, prop)
+                .map(|s| s.into_string().unwrap())
+        };
+        let ty = |f: &Fixture, index| get(f, index, ControllerType_String);
+        let hmd = |f: &Fixture| get(f, vr::k_unTrackedDeviceIndex_Hmd, TrackingSystemName_String);
+
+        // Hands bound to simple_controller, before any real controller showed up.
+        f.set_interaction_profile::<SimpleController>(LeftHand);
+        fakexr::set_hand_tracked(f.raw_session(), LeftHand, Some(Source::UNOBSTRUCTED));
+        sync(&mut f);
+        assert_eq!(ty(&f, 1).as_deref(), HAND);
+        assert_eq!(hmd(&f).as_deref(), Some("vrlink"));
+
+        // A real controller identifies the headset from then on.
+        f.set_interaction_profile::<OculusTouch>(RightHand);
+        sync(&mut f);
+        assert_eq!(ty(&f, 2).as_deref(), TOUCH);
+        assert_eq!(hmd(&f).as_deref(), Some("oculus"));
+
+        // Joints derived from a controller aren't a hand.
+        f.set_interaction_profile::<SimpleController>(RightHand);
+        fakexr::set_hand_tracked(f.raw_session(), RightHand, Some(Source::CONTROLLER));
+        sync(&mut f);
+        assert_eq!(ty(&f, 2).as_deref(), GENERIC);
+        assert_eq!(hmd(&f).as_deref(), Some("oculus"));
+
+        // A hand stays one while it isn't tracked, until the profile changes.
+        fakexr::set_hand_tracked(f.raw_session(), RightHand, Some(Source::UNOBSTRUCTED));
+        sync(&mut f);
+        assert_eq!(ty(&f, 2).as_deref(), HAND);
+        fakexr::set_hand_tracked(f.raw_session(), RightHand, None);
+        sync(&mut f);
+        assert_eq!(ty(&f, 2).as_deref(), HAND);
+        assert_eq!(hmd(&f).as_deref(), Some("oculus"));
+
+        f.set_interaction_profile::<OculusTouch>(RightHand);
+        sync(&mut f);
+        assert_eq!(ty(&f, 2).as_deref(), TOUCH);
     }
 
     #[test]
