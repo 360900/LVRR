@@ -380,7 +380,7 @@ impl GraphicsBackend for VulkanData {
 
         let clear = {
             let mut eye_extents = data.eye_extents.lock().unwrap();
-            let last = &mut eye_extents[image_index][eye as usize];
+            let last = &mut eye_extents[image_index][eye.0 as usize];
             let new = vk::Extent2D {
                 width: extent.width,
                 height: extent.height,
