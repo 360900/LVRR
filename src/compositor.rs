@@ -851,7 +851,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
             input.get_device_pose(
                 vr::k_unTrackedDeviceIndex_Hmd,
                 None,
-                self.openxr.display_time.get(),
+                self.openxr.get_display_time(),
                 None,
             )
         });
