@@ -1,4 +1,5 @@
 use crate::openxr_data::RealOpenXrData;
+use glam::{Quat, Vec3};
 use openvr as vr;
 use openxr as xr;
 use std::sync::Arc;
@@ -18,27 +19,68 @@ impl Chaperone {
             openxr,
         }
     }
+}
 
-    /// Play area extents from the runtime's stage bounds. `height` is the Z extent.
-    fn stage_bounds(&self) -> Option<xr::Extent2Df> {
-        let bounds = self
-            .openxr
-            .session_data
-            .get()
-            .session
-            .reference_space_bounds_rect(xr::ReferenceSpaceType::STAGE);
-        match bounds {
-            Ok(Some(bounds)) if bounds.width > 0.0 && bounds.height > 0.0 => Some(bounds),
-            Ok(_) => {
-                crate::warn_once!("Stage bounds unavailable, play area is unknown");
-                None
-            }
-            Err(e) => {
-                crate::warn_once!("Failed to get stage bounds: {:?}", e);
-                None
-            }
+/// Play area extents from the runtime's stage bounds. `height` is the Z extent.
+fn stage_bounds(openxr: &RealOpenXrData) -> Option<xr::Extent2Df> {
+    let bounds = openxr
+        .session_data
+        .get()
+        .session
+        .reference_space_bounds_rect(xr::ReferenceSpaceType::STAGE);
+    match bounds {
+        Ok(Some(bounds)) if bounds.width > 0.0 && bounds.height > 0.0 => Some(bounds),
+        Ok(_) => {
+            crate::warn_once!("Stage bounds unavailable, play area is unknown");
+            None
+        }
+        Err(e) => {
+            crate::warn_once!("Failed to get stage bounds: {:?}", e);
+            None
         }
     }
+}
+
+/// The play area size, 1x1 m if the runtime doesn't know it.
+pub(crate) fn play_area_size(openxr: &RealOpenXrData) -> xr::Extent2Df {
+    stage_bounds(openxr).unwrap_or(xr::Extent2Df {
+        width: 1.0,
+        height: 1.0,
+    })
+}
+
+/// The play area corners in the standing universe, counter-clockwise seen from above starting at
+/// the front right, on the floor.
+pub(crate) fn play_area_rect(openxr: &RealOpenXrData) -> Option<vr::HmdQuad_t> {
+    let bounds = stage_bounds(openxr)?;
+    // The bounds are centered on the runtime's stage, which a standing zero pose reset moves the
+    // standing universe away from.
+    let xr::Posef {
+        position: p,
+        orientation: o,
+    } = openxr
+        .session_data
+        .get()
+        .locate_origin(
+            vr::ETrackingUniverseOrigin::RawAndUncalibrated,
+            vr::ETrackingUniverseOrigin::Standing,
+            openxr.get_display_time(),
+        )
+        .unwrap_or(xr::Posef::IDENTITY);
+    let (rotation, translation) = (
+        Quat::from_xyzw(o.x, o.y, o.z, o.w),
+        Vec3::new(p.x, p.y, p.z),
+    );
+    let (x, z) = (bounds.width / 2.0, bounds.height / 2.0);
+    let corner = |x, z| {
+        let corner = translation + rotation * Vec3::new(x, 0.0, z);
+        vr::HmdVector3_t {
+            v: [corner.x, 0.0, corner.z],
+        }
+    };
+    Some(vr::HmdQuad_t {
+        vCorners: [corner(x, -z), corner(-x, -z), corner(-x, z), corner(x, z)],
+    })
 }
 
 impl vr::IVRChaperone004_Interface for Chaperone {
@@ -80,28 +122,15 @@ impl vr::IVRChaperone004_Interface for Chaperone {
         if rect.is_null() {
             return false;
         }
-        let Some(bounds) = self.stage_bounds() else {
-            unsafe { rect.write(Default::default()) };
-            return false;
-        };
-        let (x, z) = (bounds.width / 2.0, bounds.height / 2.0);
-        // Counter-clockwise seen from above, centered on the stage origin, on the floor.
-        let corner = |x, z| vr::HmdVector3_t { v: [x, 0.0, z] };
-        unsafe {
-            rect.write(vr::HmdQuad_t {
-                vCorners: [corner(x, -z), corner(-x, -z), corner(-x, z), corner(x, z)],
-            })
-        };
-        true
+        let quad = play_area_rect(&self.openxr);
+        unsafe { rect.write(quad.unwrap_or_default()) };
+        quad.is_some()
     }
     fn GetPlayAreaSize(&self, size_x: *mut f32, size_z: *mut f32) -> bool {
         if size_x.is_null() || size_z.is_null() {
             return false;
         }
-        let bounds = self.stage_bounds().unwrap_or(xr::Extent2Df {
-            width: 1.0,
-            height: 1.0,
-        });
+        let bounds = play_area_size(&self.openxr);
         unsafe {
             size_x.write(bounds.width);
             size_z.write(bounds.height);
@@ -157,6 +186,56 @@ mod tests {
                 [1.0, 0.0, 1.5]
             ]
         );
+    }
+
+    /// The rect is in the standing universe, which a standing zero pose reset moves away from
+    /// the stage the bounds are centered on.
+    #[test]
+    fn play_area_follows_standing_zero_pose() {
+        let chaperone = chaperone();
+        set_bounds(
+            &chaperone,
+            Some(xr::Extent2Df {
+                width: 2.0,
+                height: 3.0,
+            }),
+        );
+        let rot = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        fakexr::set_reference_space_pose(
+            chaperone.openxr.session_data.get().session.as_raw(),
+            xr::ReferenceSpaceType::VIEW,
+            xr::Posef {
+                position: xr::Vector3f {
+                    x: 1.0,
+                    y: 1.7,
+                    z: 0.0,
+                },
+                orientation: xr::Quaternionf {
+                    x: rot.x,
+                    y: rot.y,
+                    z: rot.z,
+                    w: rot.w,
+                },
+            },
+        );
+        chaperone.ResetZeroPose(vr::ETrackingUniverseOrigin::Standing);
+
+        let mut rect = vr::HmdQuad_t::default();
+        assert!(chaperone.GetPlayAreaRect(&mut rect));
+        // Facing -x from (1, 0): the stage's front right corner (1, -1.5) is 1.5 m to the right.
+        let expected = [
+            [1.5, 0.0, 0.0],
+            [1.5, 0.0, -2.0],
+            [-1.5, 0.0, -2.0],
+            [-1.5, 0.0, 0.0],
+        ];
+        for (corner, expected) in rect.vCorners.iter().zip(expected) {
+            assert!(
+                Vec3::from(corner.v).abs_diff_eq(Vec3::from(expected), 1e-5),
+                "{:?}",
+                rect.vCorners.map(|c| c.v)
+            );
+        }
     }
 
     #[test]
