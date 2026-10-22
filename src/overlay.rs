@@ -2328,6 +2328,42 @@ impl vr::IVROverlay020On021 for OverlayMan {
         crate::warn_unimplemented!("SetOverlayAutoCurveDistanceRangeInMeters");
         vr::EVROverlayError::None
     }
+    fn SetOverlayFlag(
+        &self,
+        handle: vr::VROverlayHandle_t,
+        flag: u32,
+        value: bool,
+    ) -> vr::EVROverlayError {
+        <Self as vr::IVROverlay028_Interface>::SetOverlayFlag(
+            self,
+            handle,
+            legacy_overlay_flag(flag),
+            value,
+        )
+    }
+    fn GetOverlayFlag(
+        &self,
+        handle: vr::VROverlayHandle_t,
+        flag: u32,
+        enabled: *mut bool,
+    ) -> vr::EVROverlayError {
+        <Self as vr::IVROverlay028_Interface>::GetOverlayFlag(
+            self,
+            handle,
+            legacy_overlay_flag(flag),
+            enabled,
+        )
+    }
+}
+
+/// Up to IVROverlay_020, flags are numbered: flag n is the mask 1 << n. None (0) and numbers past
+/// the mask's bits are no flag.
+fn legacy_overlay_flag(number: u32) -> vr::VROverlayFlags {
+    let mask = match number {
+        0 => 0,
+        n => 1u32.checked_shl(n).unwrap_or(0),
+    };
+    vr::VROverlayFlags(mask)
 }
 
 // The OpenVR commit messages mention that these functions just go through the standard overlay
@@ -3352,6 +3388,54 @@ mod tests {
             ..f.texture()
         };
         assert_eq!(copied_color_space(gamma), vr::EColorSpace::Gamma);
+    }
+
+    /// Up to IVROverlay_020, flags are numbered instead of masks.
+    #[test]
+    fn legacy_overlay_flags_are_numbered() {
+        use vr::IVROverlay019_Interface as Old;
+        let man = overlay_man();
+        let handle = create(&man, c"key", c"name");
+        let set = |flag, value| {
+            assert_eq!(
+                Old::SetOverlayFlag(&man, handle, flag, value),
+                vr::EVROverlayError::None
+            );
+        };
+        let get = |flag| {
+            let mut enabled = true;
+            assert_eq!(
+                Old::GetOverlayFlag(&man, handle, flag, &mut enabled),
+                vr::EVROverlayError::None
+            );
+            enabled
+        };
+        let flags = || {
+            let mut flags = 0;
+            assert_eq!(
+                IVROverlay028_Interface::GetOverlayFlags(&man, handle, &mut flags),
+                vr::EVROverlayError::None
+            );
+            flags
+        };
+
+        // SideBySide_Parallel, which shares a bit with SendVRTouchpadEvents (7) as a mask.
+        set(10, true);
+        assert!(get(10));
+        assert!(!get(7));
+        assert_eq!(flags(), vr::VROverlayFlags::SideBySide_Parallel.0);
+
+        // NoDashboardTab survives clearing Curved.
+        set(3, true);
+        set(1, false);
+        assert!(get(3));
+
+        // None and numbers past the mask's bits are no flag.
+        set(0, true);
+        set(40, true);
+        assert!(!get(0));
+        assert!(!get(40));
+        assert_eq!(flags(), 1 << 10 | 1 << 3);
     }
 
     /// IVROverlay_007 and _008 poll overlay events in the 0.9.12 layout.

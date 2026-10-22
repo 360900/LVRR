@@ -703,6 +703,15 @@ fn versionify_interface(
                 );
             }
 
+            // Up to IVROverlay_020, VROverlayFlags are bit numbers rather than masks, so they
+            // can't be passed on as the current type.
+            if interface == "IVROverlay"
+                && version_num <= 20
+                && path.path.is_ident("VROverlayFlags")
+            {
+                *path = parse_quote!(u32);
+            }
+
             if path
                 .path
                 .get_ident()
