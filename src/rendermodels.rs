@@ -14,6 +14,9 @@ use obj::{IndexTuple, ObjData};
 use openvr as vr;
 use openxr as xr;
 
+use crate::input::ProfileData;
+use crate::openxr_data::Hand;
+
 // all render models will use this color
 const RENDER_MODEL_COLOR: [u8; 4] = [32, 32, 32, 255];
 
@@ -28,8 +31,22 @@ static DEFAULT_COMPONENT: &CStr = c"xrizer_component";
 // invalid if GetComponentState fails for these components.
 static POSE_COMPONENTS: &[&CStr] = &[c"tip", c"base", c"handgrip", c"grip"];
 
-fn is_supported_component(component_name: &CStr) -> bool {
-    component_name == DEFAULT_COMPONENT || POSE_COMPONENTS.contains(&component_name)
+/// Whether GetComponentState and RenderModelHasComponent know this component.
+fn has_component(render_model_name: &CStr, component_name: &CStr) -> bool {
+    if component_name == DEFAULT_COMPONENT {
+        get_render_model_data(render_model_name).is_some()
+    } else {
+        // Models without a mesh, like the hand tracking one, still have the pose components.
+        POSE_COMPONENTS.contains(&component_name)
+            && (get_render_model_data(render_model_name).is_some()
+                || profile_for_render_model(render_model_name).is_some())
+    }
+}
+
+/// The profile and hand that report this render model name.
+fn profile_for_render_model(render_model_name: &CStr) -> Option<(ProfileData, Hand)> {
+    let name = model_name(render_model_name)?;
+    ProfileData::for_render_model(|reported| model_name(reported) == Some(name))
 }
 
 struct RenderModelObjLz4 {
@@ -130,7 +147,8 @@ static RENDER_MODELS: LazyLock<BTreeMap<&'static str, RenderModelObjLz4>> = Lazy
     .into()
 });
 
-fn get_render_model_data(render_model_name: &CStr) -> Option<&RenderModelObjLz4> {
+/// The model name without the `{driver}` prefix.
+fn model_name(render_model_name: &CStr) -> Option<&str> {
     let name = render_model_name.to_str().ok().or_else(|| {
         warn!(
             "render_model_name is not a valid UTF-8 string: {:?}",
@@ -139,12 +157,31 @@ fn get_render_model_data(render_model_name: &CStr) -> Option<&RenderModelObjLz4>
         None
     })?;
 
-    let model_name = name
-        .strip_prefix('{')
-        .and_then(|s| s.split_once('}').map(|(_driver, model)| model))
-        .unwrap_or(name);
+    Some(
+        name.strip_prefix('{')
+            .and_then(|s| s.split_once('}').map(|(_driver, model)| model))
+            .unwrap_or(name),
+    )
+}
 
-    RENDER_MODELS.get(&model_name)
+/// The embedded model closest to the controllers our profiles report models for, but which we
+/// don't ship. Hand tracking gets none: a controller drawn on a bare hand would be worse.
+fn fallback_model(model_name: &str) -> Option<&'static str> {
+    match model_name {
+        // The Steam Frame profile uses the Index controllers' raw pose.
+        "frame_controller_left" => Some("valve_controller_knu_1_0_left"),
+        "frame_controller_right" => Some("valve_controller_knu_1_0_right"),
+        // WMR reports the path the driver extracted the model to.
+        name if name.ends_with("\\controller.obj") => Some("generic_controller"),
+        _ => None,
+    }
+}
+
+fn get_render_model_data(render_model_name: &CStr) -> Option<&RenderModelObjLz4> {
+    let name = model_name(render_model_name)?;
+    RENDER_MODELS
+        .get(name)
+        .or_else(|| RENDER_MODELS.get(fallback_model(name)?))
 }
 
 #[derive(Default, macros::InterfaceImpl)]
@@ -216,7 +253,7 @@ impl vr::IVRRenderModels006_Interface for RenderModels {
         let render_model_name = unsafe { CStr::from_ptr(render_model_name) };
         let component_name = unsafe { CStr::from_ptr(component_name) };
 
-        is_supported_component(component_name) && get_render_model_data(render_model_name).is_some()
+        has_component(render_model_name, component_name)
     }
     fn GetComponentState(
         &self,
@@ -245,10 +282,7 @@ impl vr::IVRRenderModels006_Interface for RenderModels {
         let render_model_name = unsafe { CStr::from_ptr(render_model_name) };
         let component_name = unsafe { CStr::from_ptr(component_name) };
 
-        if !is_supported_component(component_name)
-            || get_render_model_data(render_model_name).is_none()
-        {
-            // unsupported model or component
+        if !has_component(render_model_name, component_name) {
             return false;
         }
 
@@ -1120,6 +1154,45 @@ mod tests {
             assert_eq!(state.mTrackingToComponentLocal.m, ident);
             assert_eq!(state.uProperties, 0);
         }
+    }
+
+    #[test]
+    fn profile_render_models_resolve() {
+        let mut names = Vec::new();
+        ProfileData::for_render_model(|name| {
+            names.push(name.to_owned());
+            false
+        });
+        assert!(!names.is_empty());
+
+        let rm = RenderModels::default();
+        for name in &names {
+            assert!(
+                rm.RenderModelHasComponent(name.as_ptr(), c"tip".as_ptr()),
+                "{name:?} has no tip"
+            );
+
+            let has_mesh = rm.GetComponentRenderModelName(
+                name.as_ptr(),
+                DEFAULT_COMPONENT.as_ptr(),
+                ptr::null_mut(),
+                0,
+            ) > 0;
+            // No controller mesh for tracked hands.
+            let hand = name.to_bytes().ends_with(b"shuttlecock");
+            assert_eq!(has_mesh, !hand, "{name:?}");
+        }
+
+        let wmr = names
+            .iter()
+            .find(|name| name.to_bytes().ends_with(b"controller.obj"))
+            .unwrap();
+        let mut model: *mut vr::RenderModel_t = ptr::null_mut();
+        assert_eq!(
+            rm.LoadRenderModel_Async(wmr.as_ptr(), &mut model),
+            vr::EVRRenderModelError::None
+        );
+        rm.FreeRenderModel(model);
     }
 
     #[test]
