@@ -15,7 +15,9 @@ use log::{debug, error, info, warn};
 use openvr as vr;
 use openxr as xr;
 use parking_lot::{RwLock, RwLockReadGuard};
+use std::collections::HashSet;
 use std::mem::ManuallyDrop;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -69,6 +71,8 @@ pub struct OpenXrData<C: Compositor> {
     session_creation_failed: AtomicBool,
     /// The most composition layers the runtime accepts in one frame.
     pub max_layer_count: usize,
+    /// Runtime errors already logged as warnings, so one that repeats every frame is logged once.
+    logged_errors: Mutex<HashSet<(&'static str, i32)>>,
 
     /// should only be externally accessed for testing
     pub(crate) input: Injected<crate::input::Input<C>>,
@@ -283,6 +287,7 @@ impl<C: Compositor> OpenXrData<C> {
             lost: false.into(),
             session_creation_failed: false.into(),
             max_layer_count,
+            logged_errors: Mutex::default(),
             input: injector.inject(),
             compositor: injector.inject(),
             system: injector.inject(),
@@ -356,17 +361,25 @@ impl<C: Compositor> OpenXrData<C> {
 
     /// Passes through a successful result. A failure is logged, and if it means the runtime lost
     /// the session or instance, the session is marked lost and the application told to quit.
-    pub fn check<T>(&self, call: &str, result: xr::Result<T>) -> Option<T> {
+    pub fn check<T>(&self, call: &'static str, result: xr::Result<T>) -> Option<T> {
         result.map_err(|e| self.handle_error(call, e)).ok()
     }
 
     /// See [Self::check].
-    pub fn handle_error(&self, call: &str, error: xr::sys::Result) {
+    pub fn handle_error(&self, call: &'static str, error: xr::sys::Result) {
         match error {
             xr::sys::Result::ERROR_SESSION_LOST | xr::sys::Result::ERROR_INSTANCE_LOST => {
                 self.mark_lost(format_args!("{call} failed: {error}"))
             }
-            _ => warn!("{call} failed: {error}"),
+            _ if self
+                .logged_errors
+                .lock()
+                .unwrap()
+                .insert((call, error.into_raw())) =>
+            {
+                warn!("{call} failed: {error}")
+            }
+            _ => debug!("{call} failed: {error}"),
         }
     }
 
