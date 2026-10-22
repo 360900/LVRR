@@ -29,6 +29,7 @@ use std::any::{Any, TypeId};
 use std::collections::{HashMap, hash_map::Entry};
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock, Weak};
+use std::time::{Duration, Instant};
 
 type ErasedInterface = dyn Any + Sync + Send;
 
@@ -64,6 +65,58 @@ pub struct ClientCore {
     pub base: OnceLock<Vtable>,
     interface_store: Arc<Mutex<InterfaceStore>>,
     openxr: RwLock<Option<Arc<RealOpenXrData>>>,
+    /// The last [probe_hmd] result and when it was taken.
+    hmd_present: Mutex<Option<(Instant, bool)>>,
+}
+
+/// How long a [probe_hmd] result is reused. Apps may poll VR_IsHmdPresent, and each probe
+/// creates an OpenXR instance.
+const HMD_PRESENT_CACHE_TIME: Duration = Duration::from_secs(2);
+
+/// Whether an OpenXR runtime is reachable and has a head-mounted display, like Init would need.
+fn probe_hmd() -> bool {
+    let platform_info = ();
+
+    #[cfg(all(not(test), feature = "static-openxr"))]
+    let entry = xr::Entry::linked(&platform_info).map_err(|e| format!("{e}"));
+
+    #[cfg(all(not(test), not(feature = "static-openxr")))]
+    let entry = unsafe { xr::Entry::load(&platform_info) }.map_err(|e| format!("{e}"));
+
+    #[cfg(test)]
+    let entry = unsafe {
+        xr::Entry::from_get_instance_proc_addr(fakexr::get_instance_proc_addr, &platform_info)
+    }
+    .map_err(|e| format!("{e}"));
+
+    let result = entry
+        .and_then(|entry| {
+            entry
+                .create_instance(
+                    &xr::ApplicationInfo {
+                        application_name: "XRizer",
+                        engine_name: "XRizer",
+                        ..Default::default()
+                    },
+                    &xr::ExtensionSet::default(),
+                    &[],
+                    &platform_info,
+                )
+                .map_err(|e| format!("instance creation failed: {e}"))
+        })
+        .and_then(|instance| {
+            instance
+                .system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)
+                .map_err(|e| format!("no HMD system: {e}"))
+        });
+
+    match result {
+        Ok(_) => true,
+        Err(e) => {
+            debug!("reporting no HMD present: {e}");
+            false
+        }
+    }
 }
 
 /// The error SteamVR reports in the same situation, so apps and Proton can tell a missing
@@ -108,6 +161,7 @@ impl ClientCore {
             base: OnceLock::new(),
             interface_store: Default::default(),
             openxr: RwLock::default(),
+            hmd_present: Mutex::default(),
         });
 
         #[allow(clippy::redundant_guards)]
@@ -264,7 +318,20 @@ impl IVRClientCore003_Interface for ClientCore {
         text.as_ptr()
     }
     fn BIsHmdPresent(&self) -> bool {
-        true
+        if self.openxr.read().unwrap().is_some() {
+            return true;
+        }
+
+        // Held across the probe so concurrent callers don't each create an instance.
+        let mut cached = self.hmd_present.lock().unwrap();
+        if let Some((time, present)) = *cached
+            && time.elapsed() < HMD_PRESENT_CACHE_TIME
+        {
+            return present;
+        }
+        let present = probe_hmd();
+        *cached = Some((Instant::now(), present));
+        present
     }
     fn GetGenericInterface(
         &self,
@@ -594,11 +661,24 @@ mod tests {
     fn no_headset() {
         fakexr::set_get_system_result(xr::sys::Result::ERROR_FORM_FACTOR_UNAVAILABLE);
         let core = ClientCore::new(c"IVRClientCore_003").unwrap();
+        assert!(!core.BIsHmdPresent());
         assert_eq!(
             core.clone()
                 .Init(vr::EVRApplicationType::Scene, std::ptr::null()),
             vr::EVRInitError::Init_HmdNotFound
         );
+
+        fakexr::set_get_system_result(xr::sys::Result::SUCCESS);
+        let core = ClientCore::new(c"IVRClientCore_003").unwrap();
+        assert!(core.BIsHmdPresent());
+        assert_eq!(
+            core.clone()
+                .Init(vr::EVRApplicationType::Scene, std::ptr::null()),
+            vr::EVRInitError::None
+        );
+        // Answered from the live instance, not a new probe.
+        fakexr::set_get_system_result(xr::sys::Result::ERROR_FORM_FACTOR_UNAVAILABLE);
+        assert!(core.BIsHmdPresent());
         fakexr::set_get_system_result(xr::sys::Result::SUCCESS);
     }
 
