@@ -315,6 +315,35 @@ pub fn last_layer_count(session: xr::Session) -> u32 {
     session.last_layer_count.load()
 }
 
+/// The pose and FOV of each view, as returned by xrLocateViews in any space.
+pub fn set_views(session: xr::Session, views: [(xr::Posef, xr::Fovf); 2]) {
+    let session = session.to_handle().unwrap();
+    *session.views.lock().unwrap() = views;
+}
+
+/// The projection layer submitted by an xrEndFrame call.
+#[derive(Clone, Copy, Debug)]
+pub struct ProjectionLayer {
+    pub views: [(xr::Posef, xr::Fovf); 2],
+    /// The color scale and bias chained to the layer.
+    pub color_scale_bias: Option<(xr::Color4f, xr::Color4f)>,
+}
+
+/// Makes xrEndFrame record the projection layer for [last_projection_layer]. Tests using this
+/// can't run under miri: the openxr crate passes layers as references to just their header.
+pub fn record_projection_layers(session: xr::Session) {
+    let session = session.to_handle().unwrap();
+    session
+        .record_projection_layers
+        .store(true, Ordering::Relaxed);
+}
+
+/// The projection layer of the last ended frame, if it had one.
+pub fn last_projection_layer(session: xr::Session) -> Option<ProjectionLayer> {
+    let session = session.to_handle().unwrap();
+    *session.last_projection_layer.lock().unwrap()
+}
+
 type Hook = Mutex<Option<Box<dyn FnOnce() + Send>>>;
 
 fn run_hook(hook: &Hook) {
@@ -605,7 +634,7 @@ extern "system" fn enumerate_instance_extension_properties(
     properties: *mut xr::ExtensionProperties,
 ) -> xr::Result {
     assert!(layer_name.is_null());
-    let fixed: [&[u8]; 13] = [
+    let fixed: [&[u8]; 14] = [
         xr::KHR_VULKAN_ENABLE_EXTENSION_NAME,
         openxr_mndx_xdev_space::XR_MNDX_XDEV_SPACE_EXTENSION_NAME.as_bytes(),
         xr::HTC_VIVE_FOCUS3_CONTROLLER_INTERACTION_EXTENSION_NAME,
@@ -619,6 +648,7 @@ extern "system" fn enumerate_instance_extension_properties(
         xr::EXT_USER_PRESENCE_EXTENSION_NAME,
         xr::KHR_OPENGL_ENABLE_EXTENSION_NAME,
         xr::MNDX_EGL_ENABLE_EXTENSION_NAME,
+        xr::KHR_COMPOSITION_LAYER_COLOR_SCALE_BIAS_EXTENSION_NAME,
     ];
     let mut extra = EXTRA_EXTENSIONS.with_borrow(Clone::clone);
     if HEADLESS_SUPPORTED.get() {
@@ -810,6 +840,9 @@ struct Session {
     end_frame_hook: Hook,
     lost: AtomicBool,
     last_frame_layers: Mutex<Vec<xr::StructureType>>,
+    record_projection_layers: AtomicBool,
+    views: Mutex<[(xr::Posef, xr::Fovf); 2]>,
+    last_projection_layer: Mutex<Option<ProjectionLayer>>,
 }
 
 impl Session {
@@ -1238,6 +1271,9 @@ extern "system" fn create_session(
         end_frame_hook: Mutex::default(),
         lost: false.into(),
         last_frame_layers: Mutex::default(),
+        record_projection_layers: false.into(),
+        views: Mutex::default(),
+        last_projection_layer: Mutex::default(),
     });
 
     DEFAULT_PROFILES.with_borrow(|profiles| {
@@ -2283,6 +2319,19 @@ extern "system" fn end_frame(session: xr::Session, info: *const xr::FrameEndInfo
     *session.last_frame_layers.lock().unwrap() = (0..info.layer_count as usize)
         .map(|i| unsafe { (**info.layers.add(i)).ty })
         .collect();
+    if session.record_projection_layers.load(Ordering::Relaxed) {
+        let layers = if info.layer_count == 0 {
+            &[][..]
+        } else {
+            unsafe { std::slice::from_raw_parts(info.layers, info.layer_count as usize) }
+        };
+        *session.last_projection_layer.lock().unwrap() = layers
+            .iter()
+            .find(|layer| unsafe { (***layer).ty } == xr::CompositionLayerProjection::TYPE)
+            .map(|layer| unsafe {
+                projection_layer(&*layer.cast::<xr::CompositionLayerProjection>())
+            });
+    }
     if session.state.load() == xr::SessionState::READY {
         session.synchronized();
     }
@@ -2301,6 +2350,25 @@ extern "system" fn convert_timespec_time_to_time_k_h_r(
         ))
     };
     xr::Result::SUCCESS
+}
+
+unsafe fn projection_layer(layer: &xr::CompositionLayerProjection) -> ProjectionLayer {
+    unsafe {
+        let views = std::slice::from_raw_parts(layer.views, layer.view_count as usize);
+        let mut color_scale_bias = None;
+        let mut next = layer.next.cast::<xr::BaseInStructure>();
+        while let Some(item) = next.as_ref() {
+            if item.ty == xr::CompositionLayerColorScaleBiasKHR::TYPE {
+                let item = &*next.cast::<xr::CompositionLayerColorScaleBiasKHR>();
+                color_scale_bias = Some((item.color_scale, item.color_bias));
+            }
+            next = item.next;
+        }
+        ProjectionLayer {
+            views: [0, 1].map(|i| (views[i].pose, views[i].fov)),
+            color_scale_bias,
+        }
+    }
 }
 
 /// Fails unless a mask was set with [set_visibility_mask], like a runtime that can't provide one.
@@ -2341,7 +2409,7 @@ extern "system" fn locate_views(
     output: *mut u32,
     views: *mut xr::View,
 ) -> xr::Result {
-    let _session = get_session!(session);
+    let session = get_session!(session);
     if let Some(error) = LOCATE_VIEWS_ERROR.get() {
         return error;
     }
@@ -2365,14 +2433,14 @@ extern "system" fn locate_views(
             return xr::Result::ERROR_SIZE_INSUFFICIENT;
         }
         let views = unsafe { std::slice::from_raw_parts_mut(views, capacity as usize) };
-        let view = xr::View {
-            ty: xr::View::TYPE,
-            next: std::ptr::null_mut(),
-            pose: xr::Posef::default(),
-            fov: xr::Fovf::default(),
-        };
-        views[0] = view;
-        views[1] = view;
+        for (view, (pose, fov)) in views.iter_mut().zip(*session.views.lock().unwrap()) {
+            *view = xr::View {
+                ty: xr::View::TYPE,
+                next: std::ptr::null_mut(),
+                pose,
+                fov,
+            };
+        }
     }
 
     xr::Result::SUCCESS
