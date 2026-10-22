@@ -112,7 +112,13 @@ atomic_float!(AtomicF64, f64, AtomicU64);
 fn enum_name(prefix: &str, value: impl std::fmt::Debug) -> *const c_char {
     static NAMES: LazyLock<Mutex<HashMap<String, Box<CStr>>>> = LazyLock::new(Default::default);
 
-    let name = format!("{prefix}{value:?}");
+    let name = format!("{value:?}");
+    // A value the headers don't name prints as its number. Apps can pass any of those, so
+    // don't keep a string for each.
+    if name.starts_with(|c: char| c.is_ascii_digit() || c == '-') {
+        return c"Unknown".as_ptr();
+    }
+    let name = format!("{prefix}{name}");
     NAMES
         .lock()
         .unwrap()

@@ -1622,6 +1622,15 @@ mod tests {
             name(system.GetPropErrorNameFromEnum(vr::ETrackedPropertyError::BufferTooSmall)),
             c"TrackedProp_BufferTooSmall"
         );
+
+        // Enums the app passes in print a value without a name as its number.
+        struct Unnamed;
+        impl std::fmt::Debug for Unnamed {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("99")
+            }
+        }
+        assert_eq!(name(crate::enum_name("k_EButton_", Unnamed)), c"Unknown");
     }
 
     #[test]
