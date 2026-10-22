@@ -1312,13 +1312,16 @@ impl vr::IVRSystem026_Interface for System {
         if !self.openxr.enabled_extensions.khr_vulkan_enable {
             return;
         }
-        match unsafe {
+        let physical_device = unsafe {
             self.openxr
                 .instance
                 .vulkan_graphics_device(self.openxr.system_id, instance as _)
-        } {
-            Ok(physical_device) => *device = physical_device as _,
-            Err(e) => warn!("Failed to get the Vulkan physical device: {e}"),
+        };
+        if let Some(physical_device) = self
+            .openxr
+            .check("xrGetVulkanGraphicsDeviceKHR", physical_device)
+        {
+            *device = physical_device as _;
         }
     }
     fn GetDXGIOutputInfo(&self, output_info: *mut i32) {
