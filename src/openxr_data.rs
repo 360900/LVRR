@@ -771,11 +771,11 @@ impl SessionCreateInfo {
     }
 }
 
-/// Apps pass negative seconds for past poses, and occasionally garbage.
+/// Apps pass negative seconds for past poses, and occasionally garbage. Runtimes extrapolate as
+/// far as they're asked to, so keep it within a second.
 fn offset_time(time: xr::Time, seconds: f32) -> xr::Time {
     let offset = if seconds.is_finite() {
-        // Saturates on overflow.
-        (seconds as f64 * 1e9) as i64
+        (seconds.clamp(-1.0, 1.0) as f64 * 1e9) as i64
     } else {
         0
     };
@@ -1273,8 +1273,8 @@ mod tests {
         assert_eq!(offset(f32::NAN), 1_000_000_000);
         assert_eq!(offset(f32::INFINITY), 1_000_000_000);
         assert_eq!(offset(f32::NEG_INFINITY), 1_000_000_000);
-        assert_eq!(offset(f32::MAX), i64::MAX);
-        assert_eq!(offset(f32::MIN), i64::MIN + 1_000_000_000);
+        assert_eq!(offset(f32::MAX), 2_000_000_000);
+        assert_eq!(offset(f32::MIN), 0);
     }
 
     #[test]
