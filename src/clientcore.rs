@@ -8,7 +8,7 @@ use crate::{
     headset_view::HeadsetView,
     input::Input,
     misc_unknown::UnknownInterfaces,
-    openxr_data::{InitError, OpenXrData, RealOpenXrData},
+    openxr_data::{self, InitError, OpenXrData, RealOpenXrData},
     overlay::OverlayMan,
     overlayview::OverlayView,
     rendermodels::RenderModels,
@@ -76,18 +76,7 @@ const HMD_PRESENT_CACHE_TIME: Duration = Duration::from_secs(2);
 /// Whether an OpenXR runtime is reachable and has a head-mounted display, like Init would need.
 fn probe_hmd() -> bool {
     let platform_info = ();
-
-    #[cfg(all(not(test), feature = "static-openxr"))]
-    let entry = xr::Entry::linked(&platform_info).map_err(|e| format!("{e}"));
-
-    #[cfg(all(not(test), not(feature = "static-openxr")))]
-    let entry = unsafe { xr::Entry::load(&platform_info) }.map_err(|e| format!("{e}"));
-
-    #[cfg(test)]
-    let entry = unsafe {
-        xr::Entry::from_get_instance_proc_addr(fakexr::get_instance_proc_addr, &platform_info)
-    }
-    .map_err(|e| format!("{e}"));
+    let entry = openxr_data::load_entry().map_err(|e| format!("{e:?}"));
 
     let result = entry.and_then(|entry| {
         let instance = match entry.create_instance(

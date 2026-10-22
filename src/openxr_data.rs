@@ -131,6 +131,35 @@ fn get_app_name() -> Option<String> {
     Some(basename.to_string_lossy().into_owned())
 }
 
+/// The OpenXR loader, for Init and the HMD probe alike. Games with a flat mode fall back to it
+/// on an init error, so this doesn't abort.
+pub fn load_entry() -> Result<xr::Entry, InitError> {
+    let platform_info = ();
+
+    #[cfg(all(not(test), feature = "static-openxr"))]
+    let entry =
+        xr::Entry::linked(&platform_info).map_err(|e| InitError::LoaderUnavailable(e.to_string()));
+
+    #[cfg(all(not(test), not(feature = "static-openxr")))]
+    let entry = unsafe { xr::Entry::load(&platform_info) }.map_err(|e| {
+        let hint = if cfg!(target_pointer_width = "32") {
+            "this is the 32-bit xrizer, which needs a 32-bit OpenXR loader \
+            (e.g. lib32-openxr) - alternatively, build with --features static-openxr"
+        } else {
+            "is libopenxr-loader installed?"
+        };
+        InitError::LoaderUnavailable(format!("Failed to load OpenXR loader ({hint}): {e:?}"))
+    });
+
+    #[cfg(test)]
+    let entry = unsafe {
+        xr::Entry::from_get_instance_proc_addr(fakexr::get_instance_proc_addr, &platform_info)
+    }
+    .map_err(|e| InitError::LoaderUnavailable(format!("{e:?}")));
+
+    entry
+}
+
 fn make_version() -> u32 {
     env!("CARGO_PKG_VERSION_MAJOR").parse::<u32>().unwrap_or(0) * 1000000
         + env!("CARGO_PKG_VERSION_MINOR").parse::<u32>().unwrap_or(0) * 1000
@@ -143,28 +172,7 @@ impl<C: Compositor> OpenXrData<C> {
         application_type: vr::EVRApplicationType,
     ) -> Result<Self, InitError> {
         let platform_info = ();
-
-        // Games with a flat mode fall back to it on an init error, so don't abort.
-        #[cfg(all(not(test), feature = "static-openxr"))]
-        let entry = xr::Entry::linked(&platform_info)
-            .map_err(|e| InitError::LoaderUnavailable(e.to_string()))?;
-
-        #[cfg(all(not(test), not(feature = "static-openxr")))]
-        let entry = unsafe { xr::Entry::load(&platform_info) }.map_err(|e| {
-            let hint = if cfg!(target_pointer_width = "32") {
-                "this is the 32-bit xrizer, which needs a 32-bit OpenXR loader \
-                (e.g. lib32-openxr) - alternatively, build with --features static-openxr"
-            } else {
-                "is libopenxr-loader installed?"
-            };
-            InitError::LoaderUnavailable(format!("Failed to load OpenXR loader ({hint}): {e:?}"))
-        })?;
-
-        #[cfg(test)]
-        let entry = unsafe {
-            xr::Entry::from_get_instance_proc_addr(fakexr::get_instance_proc_addr, &platform_info)
-        }
-        .unwrap();
+        let entry = load_entry()?;
 
         let supported_exts = entry
             .enumerate_extensions()
