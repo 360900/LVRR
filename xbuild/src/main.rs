@@ -159,6 +159,12 @@ fn link_vrclient(lib_path: &Path, vrclient_path: &Path) -> std::io::Result<()> {
         Ok(target) if target == lib_path => return Ok(()),
         Ok(_) => std::fs::remove_file(vrclient_path)?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "exists and is not a symlink; remove it so xbuild can link the new build",
+            ));
+        }
         Err(e) => return Err(e),
     }
     std::os::unix::fs::symlink(lib_path, vrclient_path)
@@ -239,7 +245,8 @@ mod tests {
         std::fs::write(&lib, "lib").unwrap();
         std::fs::write(&vrclient, "copied").unwrap();
 
-        assert!(link_vrclient(&lib, &vrclient).is_err());
+        let err = link_vrclient(&lib, &vrclient).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read_to_string(&vrclient).unwrap(), "copied");
 
         std::fs::remove_dir_all(&dir).unwrap();
