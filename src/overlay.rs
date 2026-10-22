@@ -527,6 +527,13 @@ pub struct OverlaySessionData {
     swapchains: Mutex<Option<AnySwapchainMap>>,
 }
 
+#[cfg(test)]
+impl OverlaySessionData {
+    pub fn swapchains_locked(&self) -> bool {
+        self.swapchains.try_lock().is_err()
+    }
+}
+
 /// The X and Y scale of an overlay transform: the lengths of its basis vectors. The diagonal alone
 /// would shrink rotated overlays.
 fn transform_scale(transform: &vr::HmdMatrix34_t) -> (f32, f32) {
@@ -2181,40 +2188,79 @@ mod tests {
         });
     }
 
+    /// An overlay manager connected to a compositor, so overlay textures can set up the real
+    /// session.
+    struct RealSessionFixture {
+        man: Arc<OverlayMan>,
+        _comp: Arc<Compositor>,
+        xr: Arc<OpenXrData<Compositor>>,
+        // Session must be dropped before Vulkan data.
+        vk: Arc<crate::graphics_backends::VulkanData>,
+    }
+
+    impl RealSessionFixture {
+        fn new() -> Self {
+            let xr = Arc::new(
+                OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap(),
+            );
+            let vk = Arc::new(crate::graphics_backends::VulkanData::new_temporary(
+                &xr.instance,
+                xr.system_id,
+            ));
+            let comp = Arc::new(Compositor::new(xr.clone(), &Injector::default()));
+            xr.compositor.set(Arc::downgrade(&comp));
+            let man = Arc::new(OverlayMan::new(xr.clone(), &Injector::default()));
+            man.compositor.set(Arc::downgrade(&comp));
+            Self {
+                man,
+                _comp: comp,
+                xr,
+                vk,
+            }
+        }
+
+        fn texture(&self) -> vr::Texture_t {
+            crate::compositor::FakeGraphicsData::texture(&self.vk)
+        }
+
+        /// Reports whether the overlay locks were free when the session got restarted.
+        fn overlay_locks_free_on_restart(&self) -> std::sync::mpsc::Receiver<bool> {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let weak = Arc::downgrade(&self.man);
+            fakexr::on_next_end(self.xr.session_data.get().session.as_raw(), move || {
+                let man = weak.upgrade().unwrap();
+                let free = man.overlays.try_read().is_ok() && man.skybox.try_read().is_ok();
+                tx.send(free).unwrap();
+            });
+            rx
+        }
+    }
+
     /// The frame thread takes the overlay lock while holding the session lock, so the first
     /// overlay texture must not move to the real session while holding the overlay lock.
     #[test]
     fn overlay_texture_restarts_session_without_overlay_lock() {
-        use crate::compositor::FakeGraphicsData;
-        use crate::graphics_backends::VulkanData;
+        let f = RealSessionFixture::new();
+        let handle = create(&f.man, c"key", c"name");
 
-        let xr =
-            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
-        let vk = Arc::new(VulkanData::new_temporary(&xr.instance, xr.system_id));
-        let comp = Arc::new(Compositor::new(xr.clone(), &Injector::default()));
-        xr.compositor.set(Arc::downgrade(&comp));
-        let man = Arc::new(OverlayMan::new(xr.clone(), &Injector::default()));
-        man.compositor.set(Arc::downgrade(&comp));
-        let handle = create(&man, c"key", c"name");
-
-        let (tx, rx) = std::sync::mpsc::channel();
-        let weak = Arc::downgrade(&man);
-        fakexr::on_next_end(xr.session_data.get().session.as_raw(), move || {
-            let man = weak.upgrade().unwrap();
-            tx.send(man.overlays.try_read().is_ok()).unwrap();
-        });
+        let unlocked = f.overlay_locks_free_on_restart();
         assert_eq!(
-            man.SetOverlayTexture(handle, &FakeGraphicsData::texture(&vk)),
+            f.man.SetOverlayTexture(handle, &f.texture()),
             vr::EVROverlayError::None
         );
-        let unlocked = rx.try_recv().expect("session was not restarted");
+        let unlocked = unlocked.try_recv().expect("session was not restarted");
         assert!(unlocked, "overlay lock held while restarting the session");
+    }
 
-        // Session must be dropped before Vulkan data.
-        drop(man);
-        drop(comp);
-        drop(xr);
-        drop(vk);
+    #[test]
+    fn skybox_restarts_session_without_overlay_lock() {
+        let f = RealSessionFixture::new();
+
+        let unlocked = f.overlay_locks_free_on_restart();
+        assert_eq!(f.man.set_skybox(&[f.texture()]), Ok(()));
+        let unlocked = unlocked.try_recv().expect("session was not restarted");
+        assert!(unlocked, "overlay locks held while restarting the session");
+        assert_eq!(f.man.skybox.read().unwrap().len(), 1);
     }
 
     #[test]

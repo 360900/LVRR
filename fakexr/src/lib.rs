@@ -204,6 +204,12 @@ pub fn on_next_end(session: xr::Session, hook: impl FnOnce() + Send + 'static) {
     *session.end_hook.lock().unwrap() = Some(Box::new(hook));
 }
 
+/// Runs `hook` on the calling thread at the start of the next xrEndFrame call on `session`.
+pub fn on_next_end_frame(session: xr::Session, hook: impl FnOnce() + Send + 'static) {
+    let session = session.to_handle().unwrap();
+    *session.end_frame_hook.lock().unwrap() = Some(Box::new(hook));
+}
+
 macro_rules! fn_unimplemented_impl {
     ($($param:ident),+) => {
         fn_unimplemented_impl!($($param),+  -> []);
@@ -633,6 +639,7 @@ struct Session {
     stage_bounds: AtomicCell<Option<xr::Extent2Df>>,
     attach_hook: Hook,
     end_hook: Hook,
+    end_frame_hook: Hook,
 }
 
 impl Session {
@@ -997,6 +1004,7 @@ extern "system" fn create_session(
         stage_bounds: None.into(),
         attach_hook: Mutex::default(),
         end_hook: Mutex::default(),
+        end_frame_hook: Mutex::default(),
     });
 
     DEFAULT_PROFILES.with_borrow(|profiles| {
@@ -1909,6 +1917,7 @@ extern "system" fn begin_frame(
 
 extern "system" fn end_frame(session: xr::Session, _info: *const xr::FrameEndInfo) -> xr::Result {
     let session = get_handle!(session);
+    run_hook(&session.end_frame_hook);
     if let Err(e) = transition_frame_state(&session.frame_state, FrameState::Ended) {
         return e;
     }

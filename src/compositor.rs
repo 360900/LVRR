@@ -1829,6 +1829,16 @@ mod tests {
             assert!(!ctrl.should_render);
         }
 
+        fn overlay_man(&self) -> Arc<OverlayMan> {
+            let overlays = Arc::new(OverlayMan::new(
+                self.comp.openxr.clone(),
+                &Injector::default(),
+            ));
+            self.comp.overlays.set(Arc::downgrade(&overlays));
+            overlays.compositor.set(Arc::downgrade(&self.comp));
+            overlays
+        }
+
         #[track_caller]
         fn check_frame_state(&self, state: fakexr::FrameState) {
             let session = self.comp.openxr.session_data.get().session.as_raw();
@@ -2381,9 +2391,12 @@ mod tests {
         assert_eq!(f.comp.initialize_real_session(&texture, bounds), Ok(()));
 
         let (tx, rx) = std::sync::mpsc::channel();
-        fakexr::on_next_end(f.comp.openxr.session_data.get().session.as_raw(), move || {
-            let _ = tx.send(());
-        });
+        fakexr::on_next_end(
+            f.comp.openxr.session_data.get().session.as_raw(),
+            move || {
+                let _ = tx.send(());
+            },
+        );
         assert_eq!(f.comp.initialize_real_session(&texture, bounds), Ok(()));
         assert!(rx.try_recv().is_err(), "real session was restarted");
     }
@@ -2392,13 +2405,10 @@ mod tests {
     /// for them until they get a new texture.
     #[test]
     fn overlay_without_swapchain_after_restart() {
-        use crate::overlay::OverlayMan;
         use vr::IVROverlay027_Interface;
 
         let f = Fixture::new();
-        let overlays = Arc::new(OverlayMan::new(f.comp.openxr.clone(), &Injector::default()));
-        f.comp.overlays.set(Arc::downgrade(&overlays));
-        overlays.compositor.set(Arc::downgrade(&f.comp));
+        let overlays = f.overlay_man();
 
         let create = |key: &CStr| {
             let mut overlay = 0;
@@ -2429,6 +2439,44 @@ mod tests {
         f.check_frame_state(fakexr::FrameState::Begun);
         f.comp.PostPresentHandoff();
         f.check_frame_state(fakexr::FrameState::Ended);
+    }
+
+    /// The overlay layers refer to the overlay swapchains, so another thread must not be able to
+    /// replace them until xrEndFrame is done.
+    #[test]
+    fn overlay_swapchains_locked_during_end_frame() {
+        use vr::IVROverlay027_Interface;
+
+        let f = Fixture::new();
+        let overlays = f.overlay_man();
+        let mut overlay = 0;
+        assert_eq!(
+            overlays.CreateOverlay(c"key".as_ptr(), c"key".as_ptr(), &mut overlay),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(overlays.ShowOverlay(overlay), vr::EVROverlayError::None);
+
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(
+            overlays.SetOverlayTexture(overlay, &FakeGraphicsData::texture(&f.vk)),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(f.wait_get_poses(), None);
+        f.check_frame_state(fakexr::FrameState::Begun);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let openxr = Arc::downgrade(&f.comp.openxr);
+        fakexr::on_next_end_frame(
+            f.comp.openxr.session_data.get().session.as_raw(),
+            move || {
+                let openxr = openxr.upgrade().unwrap();
+                let locked = openxr.session_data.get().overlay_data.swapchains_locked();
+                tx.send(locked).unwrap();
+            },
+        );
+        f.comp.PostPresentHandoff();
+        let locked = rx.try_recv().expect("frame was not ended");
+        assert!(locked, "overlay swapchains unlocked during xrEndFrame");
     }
 
     #[test]
