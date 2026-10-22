@@ -46,7 +46,7 @@ Status: `pending` | `merged` | `superseded-by-<n>` | `blocked` | `dropped` | `re
 | 338 | XR_EXT_hand_tracking_data_source skeletal level | merged | CI fixed (xr::sys::Handle import); unblocks 261 |
 | 388 | overlays, skybox, color conversion, canting | merged | CI fixed (unused PI import); high value (#79, racing) |
 | 440 | Steamframe profile | merged | adapted to HmdProperties/input_profile_path/pose_transformation; pose transforms TODO |
-| 41 | action set priorities and device restriction | merged | needs VRChat validation on edge build; priority dedup, offset overflow, sync failures fixed in `a0e4ea0`; XR_EXT_active_action_set_priority stays off (skeletal set would be blocked) |
+| 41 | action set priorities and device restriction | merged | needs VRChat validation on edge build; priority dedup, offset overflow, sync failures fixed in `a0e4ea0`; XR_EXT_active_action_set_priority stays off (it would block xrizer's own sets), priorities are emulated per input instead |
 
 ## Phase 2: rebase conflicted
 
