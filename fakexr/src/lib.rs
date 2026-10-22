@@ -339,6 +339,11 @@ pub fn last_frame_layers(session: xr::Session) -> Vec<xr::StructureType> {
     session.last_frame_layers.lock().unwrap().clone()
 }
 
+/// Whether `swapchain` has not been destroyed yet.
+pub fn swapchain_exists(swapchain: xr::Swapchain) -> bool {
+    swapchain.to_handle().is_some()
+}
+
 /// Runs `hook` on the calling thread at the start of the next xrEndFrame call on `session`.
 pub fn on_next_end_frame(session: xr::Session, hook: impl FnOnce() + Send + 'static) {
     let session = session.to_handle().unwrap();

@@ -73,6 +73,9 @@ pub trait GraphicsBackend: Into<SupportedBackend> {
         bounds: vr::VRTextureBounds_t,
         image_index: usize,
     ) -> xr::Extent2Di;
+
+    /// Waits for the copies into the swapchain images to finish, so the swapchain can be destroyed.
+    fn wait_for_copies(&self) {}
 }
 
 #[derive(macros::Backends, TryInto, From)]

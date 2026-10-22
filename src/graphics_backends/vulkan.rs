@@ -564,6 +564,12 @@ impl GraphicsBackend for VulkanData {
 
         xr_extent
     }
+
+    fn wait_for_copies(&self) {
+        if let Some(data) = &self.real_data {
+            wait_for_fences(&self.device, &data.fences);
+        }
+    }
 }
 impl VulkanData {
     /// Records and submits `bufs[idx]` once its previous submission has finished, or skips the

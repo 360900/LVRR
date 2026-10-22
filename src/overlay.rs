@@ -183,6 +183,20 @@ impl OverlayMan {
         Ok(())
     }
 
+    /// Waits for the copies into the overlay swapchains, which are destroyed with the session.
+    pub fn wait_for_copies(&self) {
+        #[macros::any_graphics(SupportedBackend)]
+        fn wait<G: GraphicsBackend>(backend: &G) {
+            backend.wait_for_copies();
+        }
+
+        for overlay in self.overlays.read().unwrap().values() {
+            if let Some(backend) = &overlay.compositor {
+                backend.with_any_graphics::<wait>(());
+            }
+        }
+    }
+
     pub fn clear_skybox(&self) {
         let session = self.openxr.session_data.get();
         let mut overlays = self.overlays.write().unwrap();

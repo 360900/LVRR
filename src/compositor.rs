@@ -271,6 +271,11 @@ fn fill_vk_extensions_buffer(extensions: String, buffer: *mut c_char, buffer_siz
 
 impl openxr_data::Compositor for Compositor {
     fn get_session_create_info(&self, data: CompositorSessionData) -> SessionCreateInfo {
+        // The old session gets destroyed next, and the overlay swapchains with it.
+        if let Some(overlays) = self.overlays.get() {
+            overlays.wait_for_copies();
+        }
+
         #[macros::any_graphics(AnyTempBackendData)]
         fn info<G: GraphicsBackend>(data: &TempBackendData<G>) -> SessionCreateInfo
         where
@@ -288,6 +293,7 @@ impl openxr_data::Compositor for Compositor {
                 where
                     AnyTempBackendData: From<TempBackendData<G>>,
                 {
+                    ctrl.backend.wait_for_copies();
                     TempBackendData {
                         backend: ctrl.backend,
                         swapchain_create_info: ctrl.swapchain_data.map(|d| d.info),
@@ -1362,6 +1368,9 @@ struct SwapchainData<G: xr::Graphics> {
 }
 
 struct FrameController<G: GraphicsBackend> {
+    /// Declared first so it's dropped before the swapchain, since dropping it waits for the copies
+    /// into the swapchain.
+    backend: G,
     stream: xr::FrameStream<G::Api>,
     waiter: xr::FrameWaiter,
     swapchain_data: Option<SwapchainData<G::Api>>,
@@ -1372,7 +1381,6 @@ struct FrameController<G: GraphicsBackend> {
     app_fade_grid: bool,
     eyes_submitted: [Option<SubmittedEye>; 2],
     submitting_null: bool,
-    backend: G,
 }
 supported_backends_enum!(enum DynFrameController: FrameController);
 
@@ -1770,16 +1778,18 @@ pub use tests::FakeGraphicsData;
 mod tests {
     use super::*;
     use crate::graphics_backends::{GraphicsBackend, VulkanData};
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::ffi::CStr;
     use std::mem::MaybeUninit;
     use std::thread_local;
     use vr::EVRCompositorError::*;
     use vr::IVRCompositor028_Interface;
+    use xr::sys::Handle as _;
 
     pub struct FakeGraphicsData {
         vk: Arc<VulkanData>,
         swapchain_format: Option<u32>,
+        swapchain: Option<xr::sys::Swapchain>,
     }
     thread_local! {
         static SWAPCHAIN_WIDTH: Cell<u32> = const { Cell::new(10) };
@@ -1787,6 +1797,8 @@ mod tests {
         static SWAPCHAIN_FORMAT: Cell<u32> = const { Cell::new(0) };
         static SWAPCHAIN_SAMPLE_COUNT: Cell<u32> = const { Cell::new(1) };
         static OVERLAY_COLOR_SPACE: Cell<vr::EColorSpace> = const { Cell::new(vr::EColorSpace::Auto) };
+        /// Whether its swapchain still existed each time a backend waited for its copies.
+        static SWAPCHAIN_EXISTED_ON_WAIT: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
     }
 
     pub enum FakeApi {}
@@ -1819,10 +1831,12 @@ mod tests {
             unsafe { xr::Vulkan::create_session(instance, system, info) }
         }
 
+        /// The swapchain handle stands in for its image, so the backend can tell whether the
+        /// swapchain still exists.
         fn enumerate_swapchain_images(
-            _: &openxr::Swapchain<Self>,
+            swapchain: &openxr::Swapchain<Self>,
         ) -> openxr::Result<Vec<Self::SwapchainImage>> {
-            Ok(Vec::new())
+            Ok(vec![swapchain.as_raw().into_raw()])
         }
     }
 
@@ -1873,10 +1887,13 @@ mod tests {
 
         fn store_swapchain_images(
             &mut self,
-            _images: Vec<<Self::Api as openxr::Graphics>::SwapchainImage>,
+            images: Vec<<Self::Api as openxr::Graphics>::SwapchainImage>,
             format: u32,
         ) {
             self.swapchain_format.replace(format);
+            self.swapchain = images
+                .first()
+                .map(|&image| xr::sys::Swapchain::from_raw(image));
         }
 
         fn copy_texture_to_swapchain(
@@ -1903,6 +1920,20 @@ mod tests {
                 width: SWAPCHAIN_WIDTH.get() as i32,
                 height: SWAPCHAIN_HEIGHT.get() as i32,
             }
+        }
+
+        fn wait_for_copies(&self) {
+            if let Some(swapchain) = self.swapchain {
+                let exists = fakexr::swapchain_exists(swapchain);
+                SWAPCHAIN_EXISTED_ON_WAIT.with_borrow_mut(|waits| waits.push(exists));
+            }
+        }
+    }
+
+    /// Like VulkanData, which waits for its copies when dropped.
+    impl Drop for FakeGraphicsData {
+        fn drop(&mut self) {
+            self.wait_for_copies();
         }
     }
 
@@ -1936,6 +1967,7 @@ mod tests {
             Self {
                 vk,
                 swapchain_format: Option::None,
+                swapchain: Option::None,
             }
         }
     }
@@ -2841,6 +2873,42 @@ mod tests {
         );
         assert_eq!(f.comp.initialize_real_session(&texture, bounds), Ok(()));
         assert!(rx.try_recv().is_err(), "real session was restarted");
+    }
+
+    /// Runtimes may free swapchain images right away, so our copies into them have to finish
+    /// before the swapchains get destroyed.
+    #[test]
+    fn copies_finish_before_swapchains_are_destroyed() {
+        use vr::IVROverlay027_Interface;
+
+        let f = Fixture::new();
+        let overlays = f.overlay_man();
+        let mut overlay = 0;
+        assert_eq!(
+            overlays.CreateOverlay(c"key".as_ptr(), c"key".as_ptr(), &mut overlay),
+            vr::EVROverlayError::None
+        );
+        let frame = || {
+            assert_eq!(f.wait_get_poses(), None);
+            assert_eq!(f.submit(vr::EVREye::Left), None);
+            assert_eq!(f.submit(vr::EVREye::Right), None);
+            assert_eq!(
+                overlays.SetOverlayTexture(overlay, &FakeGraphicsData::texture(&f.vk)),
+                vr::EVROverlayError::None
+            );
+        };
+        let waits = || SWAPCHAIN_EXISTED_ON_WAIT.take();
+
+        frame();
+        f.comp.openxr.restart_session();
+        // The eye and overlay copies.
+        assert_eq!(waits(), [true, true]);
+
+        frame();
+        let session_data = f.comp.openxr.session_data.get();
+        let ctrl = session_data.comp_data.0.lock().unwrap().take();
+        drop(ctrl);
+        assert_eq!(waits(), [true]);
     }
 
     /// Overlays keep their rect across a session restart, but the new session has no swapchain

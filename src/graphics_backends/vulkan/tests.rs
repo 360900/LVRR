@@ -696,6 +696,16 @@ fn failed_submit_does_not_block_the_next_copy() {
 }
 
 #[test]
+fn wait_for_copies_finishes_pending_copies() {
+    let mut vk = fake_vulkan();
+    store_images(&mut vk, 2);
+    copy_eye(&vk, &texture(16, 16), 1);
+    vk.wait_for_copies();
+    gpu(|gpu| assert!(gpu.pending.is_empty()));
+    finish(vk);
+}
+
+#[test]
 fn overlay_copy_draws_bounds_at_origin() {
     let mut vk = fake_vulkan();
     store_images(&mut vk, 3);
