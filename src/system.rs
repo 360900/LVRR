@@ -1222,9 +1222,14 @@ impl vr::IVRSystem026_Interface for System {
             },
         };
 
+        // A fixed transform only rotates velocities.
+        let velocity = rot * Vec3::from(input_pose.vVelocity.v);
+        let angular_velocity = rot * Vec3::from(input_pose.vAngularVelocity.v);
         unsafe {
             (*output) = input_pose;
             (*output).mDeviceToAbsoluteTracking = result.into();
+            (*output).vVelocity = velocity.into();
+            (*output).vAngularVelocity = angular_velocity.into();
         }
     }
     fn GetTrackedDeviceActivityLevel(
@@ -2263,6 +2268,49 @@ mod tests {
         assert_eq!(event.data, [0; 4]);
         assert_eq!(event.age, 0.0);
         assert_eq!(event.canary, 0xdeadbeef);
+    }
+
+    #[test]
+    fn apply_transform_rotates_velocities() {
+        let xr =
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
+        let system = System::new(xr, &Injector::default());
+
+        let rotation = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let transform: vr::HmdMatrix34_t = xr::Posef {
+            orientation: xr::Quaternionf {
+                x: rotation.x,
+                y: rotation.y,
+                z: rotation.z,
+                w: rotation.w,
+            },
+            position: xr::Vector3f {
+                x: 0.0,
+                y: 1.0,
+                z: 0.0,
+            },
+        }
+        .into();
+        let mut pose = vr::TrackedDevicePose_t {
+            mDeviceToAbsoluteTracking: xr::Posef::IDENTITY.into(),
+            vVelocity: vr::HmdVector3_t { v: [1.0, 0.0, 0.0] },
+            vAngularVelocity: vr::HmdVector3_t { v: [0.0, 0.0, 1.0] },
+            ..Default::default()
+        };
+        system.ApplyTransform(&mut pose, &pose, &transform);
+
+        let close =
+            |a: vr::HmdVector3_t, b: [f32; 3]| a.v.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-6);
+        assert!(
+            close(pose.vVelocity, [0.0, 0.0, -1.0]),
+            "{:?}",
+            pose.vVelocity
+        );
+        assert!(
+            close(pose.vAngularVelocity, [1.0, 0.0, 0.0]),
+            "{:?}",
+            pose.vAngularVelocity
+        );
     }
 
     #[test]
