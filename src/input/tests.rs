@@ -1417,6 +1417,74 @@ fn release_edge_with_native_and_threshold_bindings() {
 }
 
 #[test]
+fn wrong_struct_sizes() {
+    use vr::EVRInputError::{InvalidParam, None};
+    use vr::IVRInput010_Interface;
+
+    let mut f = Fixture::new();
+    let set1 = f.get_action_set_handle(c"/actions/set1");
+    f.load_actions(c"actions.json");
+    f.set_interaction_profile::<OculusTouch>(LeftHand);
+    let mut active = vr::VRActiveActionSet_t {
+        ulActionSet: set1,
+        ..Default::default()
+    };
+    let size = std::mem::size_of_val(&active) as u32;
+    assert_eq!(
+        f.input.UpdateActionState(&mut active, size + 8, 1),
+        InvalidParam
+    );
+    f.sync(active);
+
+    // The size is rejected before anything is written, so the marker stays.
+    fn check<T: Default, M: Copy + PartialEq + std::fmt::Debug>(
+        marker: fn(&mut T) -> &mut M,
+        value: M,
+        get: impl Fn(&mut T, u32) -> vr::EVRInputError,
+    ) {
+        let size = std::mem::size_of::<T>() as u32;
+        let mut data = T::default();
+        *marker(&mut data) = value;
+        for wrong_size in [0, size - 4, size + 4] {
+            assert_eq!(
+                get(&mut data, wrong_size),
+                InvalidParam,
+                "size {wrong_size}"
+            );
+            assert_eq!(*marker(&mut data), value);
+        }
+        assert_eq!(get(&mut data, size), None);
+        assert_ne!(*marker(&mut data), value);
+    }
+
+    let digital = f.get_action_handle(c"/actions/set1/in/boolact");
+    let update_time: fn(&mut vr::InputDigitalActionData_t) -> &mut f32 = |d| &mut d.fUpdateTime;
+    check(update_time, 42.0, |data, size| {
+        f.input.GetDigitalActionData(digital, data, size, 0)
+    });
+
+    let analog = f.get_action_handle(c"/actions/set1/in/vec1act");
+    let update_time: fn(&mut vr::InputAnalogActionData_t) -> &mut f32 = |d| &mut d.fUpdateTime;
+    check(update_time, 42.0, |data, size| {
+        f.input.GetAnalogActionData(analog, data, size, 0)
+    });
+
+    let pose = f.get_action_handle(c"/actions/set1/in/posel");
+    let origin = vr::ETrackingUniverseOrigin::Seated;
+    let active_origin: fn(&mut vr::InputPoseActionData_t) -> &mut u64 = |d| &mut d.activeOrigin;
+    check(active_origin, 42, |data, size| {
+        f.input
+            .GetPoseActionDataForNextFrame(pose, origin, data, size, 0)
+    });
+
+    let origins = get_action_origins(&f, set1, digital);
+    let device_index: fn(&mut vr::InputOriginInfo_t) -> &mut u32 = |i| &mut i.trackedDeviceIndex;
+    check(device_index, 42, |info, size| {
+        f.input.GetOriginTrackedDeviceInfo(origins[0], info, size)
+    });
+}
+
+#[test]
 fn skeletal_reference_transforms_unknown_pose() {
     let mut f = Fixture::new();
     let set1 = f.get_action_set_handle(c"/actions/set1");
