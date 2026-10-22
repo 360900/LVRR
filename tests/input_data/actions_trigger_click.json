@@ -9,6 +9,10 @@
 		{
 			"name": "/actions/set1/in/fire",
 			"type": "boolean"
+		},
+		{
+			"name": "/actions/set1/in/fire_light",
+			"type": "boolean"
 		}
 	],
 	"default_bindings": [

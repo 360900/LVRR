@@ -552,15 +552,18 @@ impl GrabBindingData {
         value_action: xr::Action<f32>,
         params: Option<&GrabParameters>,
     ) -> Self {
+        let hold_threshold = params
+            .and_then(|p| p.value_hold_threshold.as_deref().copied())
+            .unwrap_or(Self::DEFAULT_GRAB_THRESHOLD);
         Self {
             force_action,
             value_action,
-            hold_threshold: params
-                .and_then(|p| p.value_hold_threshold.as_deref().copied())
-                .unwrap_or(Self::DEFAULT_GRAB_THRESHOLD),
+            hold_threshold,
             release_threshold: params
                 .and_then(|p| p.value_release_threshold.as_deref().copied())
-                .unwrap_or(Self::DEFAULT_RELEASE_THRESHOLD),
+                .unwrap_or(Self::DEFAULT_RELEASE_THRESHOLD)
+                // Releasing above the grab point would flip the state at every sync between them.
+                .min(hold_threshold),
             last_state: false.into(),
         }
     }
@@ -683,14 +686,17 @@ impl<T: ThresholdInput> ThresholdBindingData<T> {
     const DEFAULT_RELEASE_THRESHOLD: f32 = 0.20;
 
     pub fn new(action: xr::Action<T>, params: Option<&ClickThresholdParams>) -> Self {
+        let click_threshold = params
+            .and_then(|p| p.click_activate_threshold.as_deref().copied())
+            .unwrap_or(Self::DEFAULT_CLICK_THRESHOLD);
         Self {
             action,
-            click_threshold: params
-                .and_then(|p| p.click_activate_threshold.as_deref().copied())
-                .unwrap_or(Self::DEFAULT_CLICK_THRESHOLD),
+            click_threshold,
             release_threshold: params
                 .and_then(|p| p.click_deactivate_threshold.as_deref().copied())
-                .unwrap_or(Self::DEFAULT_RELEASE_THRESHOLD),
+                .unwrap_or(Self::DEFAULT_RELEASE_THRESHOLD)
+                // Releasing above the click point would flip the state at every sync between them.
+                .min(click_threshold),
             last_state: false.into(),
         }
     }
@@ -1957,6 +1963,23 @@ mod tests {
         check(0.76, true);
         check(0.73, true);
         check(0.71, false);
+
+        // Only an activation threshold below the default release threshold: the state holds
+        // between them instead of flipping at every sync.
+        let fire_light = f.get_action_handle(c"/actions/set1/in/fire_light");
+        let right = f.get_input_source_handle(c"/user/hand/right");
+        f.set_interaction_profile::<OculusTouch>(RightHand);
+        let trigger = f.get_action::<f32>(
+            f.get_action_handle(c"/user/hand/right/input/trigger/value-/actions/set1"),
+        );
+        fakexr::set_action_state(trigger, ActionState::Float(0.15), RightHand);
+        for _ in 0..3 {
+            f.sync(vr::VRActiveActionSet_t {
+                ulActionSet: set1,
+                ..Default::default()
+            });
+            assert!(f.get_bool_state_hand(fire_light, right).unwrap().bState);
+        }
     }
 
     #[test]
