@@ -1437,8 +1437,10 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         crate::warn_unimplemented!("IsActiveDashboardOverlay");
         false
     }
+    /// The runtime taking the input focus stands in for SteamVR's dashboard, like in
+    /// IVRSystem::ShouldApplicationPause.
     fn IsDashboardVisible(&self) -> bool {
-        false
+        self.openxr.input_focus_captured()
     }
     fn CreateDashboardOverlay(
         &self,

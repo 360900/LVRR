@@ -2417,7 +2417,9 @@ mod tests {
 
     #[test]
     fn runtime_focus_loss_pauses_app() {
+        use vr::IVROverlay028_Interface;
         let (xr, system) = system_with_events();
+        let overlays = OverlayMan::new(xr.clone(), &Injector::default());
         let set_state = |state| {
             fakexr::set_session_state(session(&xr), state);
             xr.poll_events();
@@ -2430,6 +2432,7 @@ mod tests {
         assert!(next_event(&system).is_none());
         assert!(system.IsInputAvailable());
         assert!(!system.ShouldApplicationPause());
+        assert!(!overlays.IsDashboardVisible());
 
         set_state(xr::SessionState::VISIBLE);
         let event = next_event(&system).expect("no event");
@@ -2437,6 +2440,7 @@ mod tests {
         assert_eq!(unsafe { event.data.process.oldPid }, 0);
         assert!(!system.IsInputAvailable());
         assert!(system.ShouldApplicationPause());
+        assert!(overlays.IsDashboardVisible());
         assert!(system.ShouldApplicationReduceRenderingWork());
         assert!(vr::IVRSystem017On019::IsInputFocusCapturedByAnotherProcess(
             &*system
@@ -2448,6 +2452,7 @@ mod tests {
         assert_eq!(unsafe { event.data.process.pid }, 0);
         assert!(system.IsInputAvailable());
         assert!(!system.ShouldApplicationPause());
+        assert!(!overlays.IsDashboardVisible());
         assert!(next_event(&system).is_none());
     }
 
