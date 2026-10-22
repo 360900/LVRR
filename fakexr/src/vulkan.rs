@@ -1,7 +1,7 @@
 use ash::vk::{self, Handle};
 use openxr_sys as xr_sys;
 use paste::paste;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ffi::{CStr, c_char};
 
 thread_local! {
@@ -30,6 +30,17 @@ macro_rules! get_fn {
     }
 }
 
+thread_local! {
+    static DEVICE_EXTENSIONS: RefCell<Vec<&'static CStr>> =
+        RefCell::new(vec![c"VK_foo", c"VK_bar"]);
+}
+
+/// Sets the extensions physical devices support on this thread. They support all the extensions
+/// the runtime requires by default.
+pub fn set_device_extensions(extensions: &[&'static CStr]) {
+    DEVICE_EXTENSIONS.set(extensions.to_vec());
+}
+
 pub fn session_create_info() -> xr_sys::GraphicsBindingVulkanKHR {
     xr_sys::GraphicsBindingVulkanKHR {
         ty: xr_sys::GraphicsBindingVulkanKHR::TYPE,
@@ -54,6 +65,7 @@ pub unsafe extern "system" fn get_instance_proc_addr(
     } else {
         get_fn![name =>
             GetPhysicalDeviceQueueFamilyProperties,
+            EnumerateDeviceExtensionProperties,
             CreateDevice,
             GetDeviceProcAddr,
             GetDeviceQueue,
@@ -109,12 +121,48 @@ extern "system" fn destroy_instance(instance: vk::Instance, _: *const vk::Alloca
     drop(unsafe { Box::from_raw(instance.as_raw() as *mut Instance) });
 }
 
+extern "system" fn enumerate_device_extension_properties(
+    _: vk::PhysicalDevice,
+    _: *const c_char,
+    count: *mut u32,
+    properties: *mut vk::ExtensionProperties,
+) -> vk::Result {
+    let extensions = DEVICE_EXTENSIONS.with_borrow(Clone::clone);
+    if properties.is_null() {
+        unsafe { *count = extensions.len() as u32 };
+        return vk::Result::SUCCESS;
+    }
+    let properties = unsafe { std::slice::from_raw_parts_mut(properties, *count as usize) };
+    for (property, extension) in properties.iter_mut().zip(&extensions) {
+        *property = vk::ExtensionProperties::default()
+            .extension_name(extension)
+            .unwrap();
+    }
+    if properties.len() < extensions.len() {
+        return vk::Result::INCOMPLETE;
+    }
+    unsafe { *count = extensions.len() as u32 };
+    vk::Result::SUCCESS
+}
+
 extern "system" fn create_device(
     _: vk::PhysicalDevice,
-    _: *const vk::DeviceCreateInfo,
+    info: *const vk::DeviceCreateInfo,
     _: *const vk::AllocationCallbacks<'_>,
     device: *mut vk::Device,
 ) -> vk::Result {
+    let info = unsafe { &*info };
+    let supported = DEVICE_EXTENSIONS.with_borrow(Clone::clone);
+    let requested = match info.enabled_extension_count {
+        0 => &[][..],
+        count => unsafe { std::slice::from_raw_parts(info.pp_enabled_extension_names, count as _) },
+    };
+    if requested
+        .iter()
+        .any(|ext| !supported.contains(&unsafe { CStr::from_ptr(*ext) }))
+    {
+        return vk::Result::ERROR_EXTENSION_NOT_PRESENT;
+    }
     let d = Box::new(Device {
         debug: Device::DEBUG_VAL,
     });
