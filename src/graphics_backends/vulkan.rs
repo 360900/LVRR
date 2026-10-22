@@ -971,25 +971,29 @@ impl VulkanData {
                 as _
         });
 
-        // The temporary session doesn't render, so it can do without device extensions that the
-        // Vulkan driver the game sees lacks.
         let available = unsafe { instance.enumerate_device_extension_properties(physical_device) }
             .map_err(|e| format!("Failed to get Vulkan device extensions: {e}"))?;
         let dev_exts = xr_instance
             .vulkan_legacy_device_extensions(system_id)
             .map_err(|e| format!("Couldn't get the required Vulkan device extensions: {e}"))?;
-        let (dev_exts, missing): (Vec<CString>, Vec<CString>) = dev_exts
+        let dev_exts: Vec<CString> = dev_exts
             .split_ascii_whitespace()
             .map(|ext| CString::new(ext).unwrap())
-            .partition(|ext| {
-                available
+            .collect();
+        // The runtime may use all of them, e.g. Monado assumes fence and semaphore fds work, so
+        // only name the missing ones.
+        let missing: Vec<&CString> = dev_exts
+            .iter()
+            .filter(|ext| {
+                !available
                     .iter()
                     .any(|p| p.extension_name_as_c_str() == Ok(ext.as_c_str()))
-            });
+            })
+            .collect();
         if !missing.is_empty() {
-            warn!(
-                "The Vulkan device lacks extensions the runtime requires, the session might not work: {missing:?}"
-            );
+            return Err(format!(
+                "The Vulkan device lacks extensions the runtime requires: {missing:?}"
+            ));
         }
         let dev_exts: Vec<*const c_char> = dev_exts.iter().map(|ext| ext.as_ptr()).collect();
 

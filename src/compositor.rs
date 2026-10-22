@@ -2536,12 +2536,16 @@ mod tests {
         assert_eq!(f.submit(vr::EVREye::Left), None);
     }
 
-    /// The game may see a Vulkan driver without all the device extensions the runtime asks for.
+    /// The game may see a Vulkan driver without all the device extensions the runtime asks for,
+    /// which fails Init rather than aborting.
     #[test]
     fn temporary_session_without_device_extensions() {
         fakexr::vulkan::set_device_extensions(&[c"VK_foo"]);
         let xr = OpenXrData::<Compositor>::new(&Injector::default(), vr::EVRApplicationType::Scene);
-        assert!(xr.is_ok());
+        let Err(e) = xr else {
+            panic!("Init succeeded without the extensions");
+        };
+        assert!(format!("{e:?}").contains("VK_bar"), "{e:?}");
     }
 
     #[test]
