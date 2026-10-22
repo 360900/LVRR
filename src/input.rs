@@ -104,7 +104,9 @@ pub struct Input<C: openxr_data::Compositor> {
     estimated_finger_state: [Mutex<FingerState>; 2],
     subaction_paths: SubactionPaths,
     events: Mutex<VecDeque<InputEvent>>,
-    loading_actions: AtomicBool,
+    /// Held while actions are set up, so legacy actions (set up from the frame thread) and an
+    /// action manifest are never both attached to a session.
+    action_setup: Mutex<()>,
     left_handed: AtomicBool,
     /// The properties of the most recently seen controller interaction profile. The HMD's
     /// identity is derived from this, so it needs to survive session restarts (which reset the
@@ -178,7 +180,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             ],
             subaction_paths,
             events: Mutex::default(),
-            loading_actions: false.into(),
+            action_setup: Mutex::default(),
             left_handed: false.into(),
             last_profile_properties: Mutex::new(probed_profile),
         }
@@ -1848,8 +1850,8 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         let path = std::path::Path::new(&*path);
         info!("loading action manifest from {path:?}");
 
+        let _setup = self.action_setup.lock().unwrap();
         // We need to restart the session if the legacy actions have already been attached.
-        self.loading_actions.store(true, Ordering::Relaxed);
         let mut data = self.openxr.session_data.get();
         if data.input_data.get_legacy_actions().is_some() {
             drop(data);
@@ -1857,13 +1859,10 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             data = self.openxr.session_data.get();
         }
 
-        let ret = match self.load_action_manifest(&data, path) {
+        match self.load_action_manifest(&data, path) {
             Ok(_) => vr::EVRInputError::None,
             Err(e) => e,
-        };
-
-        self.loading_actions.store(false, Ordering::Relaxed);
-        ret
+        }
     }
 }
 
@@ -2337,7 +2336,14 @@ impl<C: openxr_data::Compositor> Input<C> {
                 self.legacy_state.on_action_sync();
             }
             None => {
-                if self.loading_actions.load(Ordering::Relaxed) {
+                // Don't wait: SetActionManifestPath holds this while restarting the session, which
+                // waits for our session guard.
+                let Ok(_setup) = self.action_setup.try_lock() else {
+                    debug!("not setting up legacy actions while actions are being loaded");
+                    return;
+                };
+                // A manifest may have been loaded since we checked.
+                if input_data.actions.get().is_some() {
                     return;
                 }
 

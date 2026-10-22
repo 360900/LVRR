@@ -1178,6 +1178,42 @@ fn load_actions_race() {
     assert!(res.is_ok(), "{res:?}");
 }
 
+/// Legacy actions set up on the frame thread must not race an action manifest loaded on another
+/// thread - both would attach action sets to the same session.
+#[test]
+fn legacy_setup_racing_manifest_load() {
+    let mut f = Fixture::new();
+    f.input.openxr.restart_session(); // get to real session
+
+    let (attaching_tx, attaching_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let session = f.input.openxr.session_data.get().session.as_raw();
+    fakexr::on_next_attach(session, move || {
+        attaching_tx.send(()).unwrap();
+        let _ = release_rx.recv();
+    });
+
+    std::thread::scope(|s| {
+        let frame = s.spawn(|| f.input.frame_start_update());
+        attaching_rx.recv().unwrap();
+        let manifest = s.spawn(|| f.load_actions(c"actions.json"));
+        // Give the manifest load time to run into the legacy setup.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        release_tx.send(()).unwrap();
+        frame.join().unwrap();
+        manifest.join().unwrap();
+    });
+
+    let set1 = f.get_action_set_handle(c"/actions/set1");
+    let boolact = f.get_action_handle(c"/actions/set1/in/boolact");
+    f.sync(vr::VRActiveActionSet_t {
+        ulActionSet: set1,
+        ..Default::default()
+    });
+    let res = f.get_bool_state(boolact);
+    assert!(res.is_ok(), "{res:?}");
+}
+
 /// An action bound to a native input *and* a custom (threshold) binding must report the release
 /// edge of whichever one was actually being used.
 ///

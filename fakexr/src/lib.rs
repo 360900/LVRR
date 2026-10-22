@@ -182,6 +182,13 @@ pub fn session_frame_state(session: xr::Session) -> FrameState {
     session.frame_state.load()
 }
 
+/// Runs `hook` on the calling thread at the start of the next xrAttachSessionActionSets call on
+/// `session`.
+pub fn on_next_attach(session: xr::Session, hook: impl FnOnce() + Send + 'static) {
+    let session = session.to_handle().unwrap();
+    *session.attach_hook.lock().unwrap() = Some(Box::new(hook));
+}
+
 macro_rules! fn_unimplemented_impl {
     ($($param:ident),+) => {
         fn_unimplemented_impl!($($param),+  -> []);
@@ -597,6 +604,7 @@ struct Session {
     frame_state: AtomicCell<FrameState>,
     with_trackers: AtomicBool,
     stage_bounds: AtomicCell<Option<xr::Extent2Df>>,
+    attach_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Session {
@@ -959,6 +967,7 @@ extern "system" fn create_session(
         frame_state: FrameState::Ended.into(),
         with_trackers: false.into(),
         stage_bounds: None.into(),
+        attach_hook: Mutex::default(),
     });
 
     DEFAULT_PROFILES.with_borrow(|profiles| {
@@ -1409,6 +1418,10 @@ extern "system" fn attach_session_action_sets(
     info: *const xr::SessionActionSetsAttachInfo,
 ) -> xr::Result {
     let sesh = get_handle!(session);
+    let hook = sesh.attach_hook.lock().unwrap().take();
+    if let Some(hook) = hook {
+        hook();
+    }
     let sets =
         unsafe { std::slice::from_raw_parts((*info).action_sets, (*info).count_action_sets as _) };
     if sesh.attached_sets.set(sets.into()).is_ok() {
