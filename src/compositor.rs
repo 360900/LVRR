@@ -2782,6 +2782,34 @@ mod tests {
         assert_eq!(overlays.get_layers::<FakeApi>(&session, true).len(), 1);
     }
 
+    /// The skybox is the compositor's backdrop while the app doesn't show a frame of its own.
+    #[test]
+    fn skybox_only_without_app_frame() {
+        use xr::StructureType as Ty;
+        let f = Fixture::new();
+        let _overlays = f.overlay_man();
+        f.ensure_real_session(false);
+        let texture = FakeGraphicsData::texture(&f.vk);
+        assert_eq!(f.comp.SetSkyboxOverride(&texture, 1), None);
+        let session = f.comp.openxr.session_data.get().session.as_raw();
+        let frame = |submit: bool| {
+            if submit {
+                assert_eq!(f.submit(vr::EVREye::Left), None);
+                assert_eq!(f.submit(vr::EVREye::Right), None);
+            }
+            assert_eq!(f.wait_get_poses(), None);
+            fakexr::last_frame_layers(session)
+        };
+
+        assert_eq!(frame(false), [Ty::COMPOSITION_LAYER_QUAD]);
+        assert_eq!(frame(true), [Ty::COMPOSITION_LAYER_PROJECTION]);
+        f.comp.FadeGrid(0.0, true);
+        assert_eq!(
+            frame(true),
+            [Ty::COMPOSITION_LAYER_PROJECTION, Ty::COMPOSITION_LAYER_QUAD]
+        );
+    }
+
     /// Submit and the overlay calls can race to set up the real session. The one that comes second
     /// must not restart it again.
     #[test]

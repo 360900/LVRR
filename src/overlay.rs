@@ -220,12 +220,9 @@ impl OverlayMan {
 
         let mut layers = Vec::with_capacity(overlays.len());
         for (key, overlay) in overlays.iter_mut() {
-            if !overlay.visible {
+            if !overlay.visible || (overlay.z_order == SKYBOX_Z_ORDER && !render_skybox) {
                 continue;
             }
-            // Skybox is always shown (independent of app_fade_grid) so games that
-            // never enable the fade grid still get their loading-screen image.
-            let _ = render_skybox;
             let Some(rect) = overlay.rect else {
                 continue;
             };

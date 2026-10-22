@@ -333,6 +333,12 @@ pub fn on_next_end(session: xr::Session, hook: impl FnOnce() + Send + 'static) {
     *session.end_hook.lock().unwrap() = Some(Box::new(hook));
 }
 
+/// The types of the layers submitted by the last successful xrEndFrame call on `session`.
+pub fn last_frame_layers(session: xr::Session) -> Vec<xr::StructureType> {
+    let session = session.to_handle().unwrap();
+    session.last_frame_layers.lock().unwrap().clone()
+}
+
 /// Runs `hook` on the calling thread at the start of the next xrEndFrame call on `session`.
 pub fn on_next_end_frame(session: xr::Session, hook: impl FnOnce() + Send + 'static) {
     let session = session.to_handle().unwrap();
@@ -790,6 +796,7 @@ struct Session {
     end_hook: Hook,
     end_frame_hook: Hook,
     lost: AtomicBool,
+    last_frame_layers: Mutex<Vec<xr::StructureType>>,
 }
 
 impl Session {
@@ -1205,6 +1212,7 @@ extern "system" fn create_session(
         end_hook: Mutex::default(),
         end_frame_hook: Mutex::default(),
         lost: false.into(),
+        last_frame_layers: Mutex::default(),
     });
 
     DEFAULT_PROFILES.with_borrow(|profiles| {
@@ -2228,9 +2236,11 @@ extern "system" fn end_frame(session: xr::Session, info: *const xr::FrameEndInfo
     if let Err(e) = transition_frame_state(&session.frame_state, FrameState::Ended) {
         return e;
     }
-    session
-        .last_layer_count
-        .store(unsafe { (*info).layer_count });
+    let info = unsafe { &*info };
+    session.last_layer_count.store(info.layer_count);
+    *session.last_frame_layers.lock().unwrap() = (0..info.layer_count as usize)
+        .map(|i| unsafe { (**info.layers.add(i)).ty })
+        .collect();
     if session.state.load() == xr::SessionState::READY {
         session.synchronized();
     }
