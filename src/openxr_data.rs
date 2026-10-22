@@ -104,6 +104,14 @@ impl<C: Compositor> Drop for OpenXrData<C> {
     fn drop(&mut self) {
         let mut data = unsafe { ManuallyDrop::take(self.session_data.0.get_mut()) };
         self.end_session(&mut data);
+        if !data.comp_data.is_context_current() {
+            // Destroying the swapchains, or the session or instance that own them, makes GL
+            // runtimes make the app's context current, which crashes if the app has already
+            // closed its display (Vivecraft). The leaked session keeps the instance alive too,
+            // and the runtime cleans up when the process disconnects.
+            warn!("Graphics context is no longer current, leaking the OpenXR session");
+            std::mem::forget(data);
+        }
     }
 }
 

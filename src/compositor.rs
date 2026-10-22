@@ -14,7 +14,7 @@ use openvr as vr;
 use openxr as xr;
 use std::mem::offset_of;
 use std::sync::{
-    Arc, Mutex, Once,
+    Arc, Mutex, Once, PoisonError,
     atomic::{AtomicU32, Ordering},
 };
 use std::time::Instant;
@@ -22,6 +22,22 @@ use std::{ffi::c_char, ops::Deref};
 
 #[derive(Default)]
 pub struct CompositorSessionData(Mutex<Option<DynFrameController>>);
+
+impl CompositorSessionData {
+    /// See [GraphicsBackend::is_context_current].
+    pub fn is_context_current(&mut self) -> bool {
+        #[macros::any_graphics(DynFrameController)]
+        fn is_current<G: GraphicsBackend>(ctrl: &FrameController<G>) -> bool {
+            ctrl.backend.is_context_current()
+        }
+
+        self.0
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .is_none_or(|ctrl| ctrl.with_any_graphics::<is_current>(()))
+    }
+}
 
 #[derive(macros::InterfaceImpl)]
 #[interface = "IVRCompositor"]
@@ -1799,6 +1815,7 @@ mod tests {
         static OVERLAY_COLOR_SPACE: Cell<vr::EColorSpace> = const { Cell::new(vr::EColorSpace::Auto) };
         /// Whether its swapchain still existed each time a backend waited for its copies.
         static SWAPCHAIN_EXISTED_ON_WAIT: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
+        static CONTEXT_CURRENT: Cell<bool> = const { Cell::new(true) };
     }
 
     pub enum FakeApi {}
@@ -1860,6 +1877,10 @@ mod tests {
 
         fn session_create_info(&self) -> <Self::Api as openxr::Graphics>::SessionCreateInfo {
             self.vk.session_create_info()
+        }
+
+        fn is_context_current(&self) -> bool {
+            CONTEXT_CURRENT.get()
         }
 
         fn get_texture(texture: &openvr::Texture_t) -> Option<Self::OpenVrTexture> {
@@ -3425,5 +3446,37 @@ mod tests {
         ) {
             assert_ne!(event.eventType, vr::EVREventType::Quit.0);
         }
+    }
+
+    /// Shuts down a real session, returning whether the runtime destroyed it.
+    fn shutdown_destroys_session(context_current: bool) -> bool {
+        let f = Fixture::new();
+        // Forcing System would put it in the injector store, which keeps OpenXrData alive.
+        let system = Arc::new(crate::system::System::new(
+            f.comp.openxr.clone(),
+            &Injector::default(),
+        ));
+        f.comp.system.set(Arc::downgrade(&system));
+        f.ensure_real_session(false);
+        let session = f.comp.openxr.session_data.get().session.as_raw();
+
+        CONTEXT_CURRENT.set(context_current);
+        let Fixture { comp, vk } = f;
+        drop(system);
+        assert_eq!(Arc::strong_count(&comp.openxr), 1);
+        drop(comp);
+        let destroyed = !fakexr::session_exists(session);
+        drop(vk);
+        destroyed
+    }
+
+    #[test]
+    fn shutdown_destroys_session_with_current_context() {
+        assert!(shutdown_destroys_session(true));
+    }
+
+    #[test]
+    fn shutdown_leaks_session_without_current_context() {
+        assert!(!shutdown_destroys_session(false));
     }
 }

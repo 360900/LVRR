@@ -300,6 +300,10 @@ pub fn set_session_state(session: xr::Session, state: xr::SessionState) {
     );
 }
 
+pub fn session_exists(session: xr::Session) -> bool {
+    session.to_handle().is_some()
+}
+
 pub fn session_frame_state(session: xr::Session) -> FrameState {
     let session = session.to_handle().unwrap();
     session.frame_state.load()

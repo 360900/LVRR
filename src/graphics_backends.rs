@@ -24,6 +24,13 @@ pub trait GraphicsBackend: Into<SupportedBackend> {
 
     fn session_create_info(&self) -> <Self::Api as xr::Graphics>::SessionCreateInfo;
 
+    /// Whether the graphics context the session was created with is current on this thread.
+    /// GL runtimes make it current to destroy swapchains if it isn't, which crashes once the app
+    /// has closed it.
+    fn is_context_current(&self) -> bool {
+        true
+    }
+
     /// Returns None if the texture is invalid.
     fn get_texture(texture: &vr::Texture_t) -> Option<Self::OpenVrTexture>;
 

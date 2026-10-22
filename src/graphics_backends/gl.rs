@@ -190,6 +190,30 @@ impl SessionCreateInfo {
         unsafe { egl.session_info() }
     }
 
+    /// Whether this context is current on the calling thread with the same drawables, so the
+    /// runtime can use it without making it current. Only reads thread state, so this is safe
+    /// after the app has closed its display.
+    fn is_current(&self) -> bool {
+        match *self {
+            Self::Xlib {
+                x_display,
+                glx_drawable,
+                glx_context,
+                ..
+            } => GLX.as_ref().is_some_and(|glx| unsafe {
+                glx.GetCurrentContext().cast_mut() == glx_context
+                    && glx.GetCurrentDisplay().cast() == x_display
+                    && glx.GetCurrentDrawable() == glx_drawable
+                    && glx.GetCurrentReadDrawable() == glx_drawable
+            }),
+            Self::Egl {
+                display, context, ..
+            } => Egl::get().is_some_and(|egl| unsafe {
+                egl.current_context() == context && (egl.get_current_display)() == display
+            }),
+        }
+    }
+
     fn get_proc_address(&self, name: &str) -> *const c_void {
         let name = CString::new(name).unwrap();
         match self {
@@ -433,6 +457,15 @@ impl GlData {
     }
 }
 
+impl Drop for GlData {
+    fn drop(&mut self) {
+        // Framebuffers aren't shared between contexts, in another one these could be the app's.
+        if self.session_info.is_current() {
+            unsafe { gl::DeleteFramebuffers(2, [self.read_fbo, self.draw_fbo].as_ptr()) };
+        }
+    }
+}
+
 impl GraphicsBackend for GlData {
     type Api = GlApi;
     type OpenVrTexture = gl::types::GLuint;
@@ -453,6 +486,10 @@ impl GraphicsBackend for GlData {
 
     fn session_create_info(&self) -> <Self::Api as openxr::Graphics>::SessionCreateInfo {
         self.session_info
+    }
+
+    fn is_context_current(&self) -> bool {
+        self.session_info.is_current()
     }
 
     #[inline]
