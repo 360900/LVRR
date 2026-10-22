@@ -1612,12 +1612,8 @@ impl<G: GraphicsBackend> FrameController<G> {
                 .backend
                 .swapchain_info_for_texture(texture, bounds, color_space);
 
-            if is_valid_swapchain_info(&new_info) {
-                assert!(
-                    !self.submitting_null,
-                    "App submitted a null texture and a normal texture in the same frame"
-                );
-
+            // A frame with a null eye has no projection layer, so the other eye is dropped too.
+            if is_valid_swapchain_info(&new_info) && !self.submitting_null {
                 if !self.swapchain_data.as_ref().is_some_and(|data| {
                     is_usable_swapchain(
                         &data.info,
@@ -2740,6 +2736,34 @@ mod tests {
             assert!(ctrl.swapchain_data.is_some());
             assert!(ctrl.should_render);
         }
+    }
+
+    /// A null texture for one eye and a normal one for the other drops the frame in either order.
+    #[test]
+    fn null_and_valid_eye_in_same_frame() {
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+
+        for null_eye in [vr::EVREye::Left, vr::EVREye::Right] {
+            assert_eq!(f.wait_get_poses(), None);
+            for eye in [vr::EVREye::Left, vr::EVREye::Right] {
+                let size = if eye == null_eye { 0 } else { 10 };
+                SWAPCHAIN_WIDTH.set(size);
+                SWAPCHAIN_HEIGHT.set(size);
+                assert_eq!(f.submit(eye), None);
+            }
+            SWAPCHAIN_WIDTH.set(10);
+            SWAPCHAIN_HEIGHT.set(10);
+
+            let data = f.comp.openxr.session_data.get();
+            let lock = data.comp_data.0.lock().unwrap();
+            let DynFrameController::Fake(ctrl) = lock.as_ref().unwrap() else {
+                panic!("Frame controller was not set up or not faked!");
+            };
+            assert!(ctrl.should_render);
+            assert!(ctrl.submitting_null);
+        }
+        assert_eq!(f.wait_get_poses(), None);
     }
 
     #[test]
