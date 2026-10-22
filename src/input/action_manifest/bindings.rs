@@ -656,6 +656,52 @@ fn bind_threshold(
     context.add_custom_binding(output, input.hand, input, ty);
 }
 
+/// Binds a touch output. SteamVR reports any pull as a touch on inputs without a touch sensor,
+/// so analog inputs (picked by the profile or as a fallback) get a tiny threshold instead of the
+/// runtime's click point.
+fn bind_touch(
+    touch: &ActionBindingOutput<paths::Touch>,
+    path: DynInputPath,
+    validate_path: &dyn PathValidator,
+    action_set_name: &str,
+    action_set: &xr::ActionSet,
+    context: &mut BindingsProfileLoadContext,
+) {
+    let touch_path = path.with_component(DynComponent::Touch);
+    let analog = match validate_path(touch_path) {
+        Some(
+            analog @ DynInputPath {
+                component: Some(DynComponent::Value | DynComponent::Force),
+                ..
+            },
+        ) => analog,
+        Some(touch_path) => {
+            context.try_suggest_binding::<bool>(touch.output.path.clone(), touch_path);
+            return;
+        }
+        None => {
+            let pull = path.with_component(DynComponent::Value);
+            let Some(pull) = validate_path(pull) else {
+                InvalidActionPath(touch_path, &touch.output.path).warn();
+                return;
+            };
+            debug!(
+                "Falling back to pull for touch on {path} (action {:?})",
+                touch.output.path
+            );
+            pull
+        }
+    };
+    bind_threshold(
+        &touch.output,
+        analog,
+        Some(&ClickThresholdParams::new_for_touch_conversion()),
+        action_set_name,
+        action_set,
+        context,
+    );
+}
+
 /// Binds a boolean input to a custom binding built from an action reading it.
 fn bind_bool_input(
     output: &ActionPath,
@@ -695,9 +741,14 @@ pub fn handle_sources(
                 };
 
                 if let Some(touch) = touch {
-                    let _ = touch
-                        .try_bind_with_component(path, context, validate_path)
-                        .inspect_err(InvalidActionPath::warn);
+                    bind_touch(
+                        touch,
+                        path,
+                        validate_path,
+                        action_set_name,
+                        action_set,
+                        context,
+                    );
                 }
 
                 if let Some(click) = click {
@@ -735,9 +786,14 @@ pub fn handle_sources(
                 };
 
                 if let Some(touch) = touch {
-                    let _ = touch
-                        .try_bind_with_component(path, context, validate_path)
-                        .inspect_err(InvalidActionPath::warn);
+                    bind_touch(
+                        touch,
+                        path,
+                        validate_path,
+                        action_set_name,
+                        action_set,
+                        context,
+                    );
                 }
 
                 let click_path = path.with_component(DynComponent::Click);
@@ -869,32 +925,15 @@ pub fn handle_sources(
                         .inspect_err(InvalidActionPath::warn);
                 }
 
-                if let Some(touch) = touch
-                    && touch
-                        .try_bind_with_component(path, context, validate_path)
-                        .is_err()
-                {
-                    debug!(
-                        "Falling back to pull for touch on {path} (action {:?})",
-                        touch.output.path
+                if let Some(touch) = touch {
+                    bind_touch(
+                        touch,
+                        path,
+                        validate_path,
+                        action_set_name,
+                        action_set,
+                        context,
                     );
-                    // SteamVR fallbacks "touch" bindings on triggers to "any pull amount" if there's no native capsense
-                    let with_pull = path.with_component(DynComponent::Value);
-                    if let Some(with_pull) = validate_path(with_pull) {
-                        bind_threshold(
-                            &touch.output,
-                            with_pull,
-                            Some(&ClickThresholdParams::new_for_touch_conversion()),
-                            action_set_name,
-                            action_set,
-                            context,
-                        );
-                    } else {
-                        warn!(
-                            "failed to bind trigger pull or touch for action {} - invalid path ({with_pull})",
-                            touch.output.path
-                        );
-                    }
                 }
             }
             ActionBinding::ScalarConstant(data) => {

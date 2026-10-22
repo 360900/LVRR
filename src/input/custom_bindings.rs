@@ -1352,6 +1352,35 @@ mod tests {
     }
 
     #[test]
+    fn grip_touch_from_pull_knuckles() {
+        // Knuckles has no grip touch, only an analog squeeze value. Touch must turn on at
+        // the slightest pull, not at the runtime's click point.
+        let mut f = Fixture::new();
+        let set1 = f.get_action_set_handle(c"/actions/set1");
+        let boolact = f.get_action_handle(c"/actions/set1/in/boolact");
+        let left = f.get_input_source_handle(c"/user/hand/left");
+        f.load_actions(c"actions.json");
+        f.set_interaction_profile::<Knuckles>(LeftHand);
+
+        let squeeze = f.get_action::<f32>(
+            f.get_action_handle(c"/user/hand/left/input/squeeze/value-/actions/set1"),
+        );
+        let mut check = |value, state, changed| {
+            fakexr::set_action_state(squeeze, ActionState::Float(value), LeftHand);
+            f.sync(vr::VRActiveActionSet_t {
+                ulActionSet: set1,
+                ..Default::default()
+            });
+            let s = f.get_bool_state_hand(boolact, left).unwrap();
+            assert!(s.bActive);
+            assert_eq!((s.bState, s.bChanged), (state, changed), "squeeze {value}");
+        };
+        check(0.0, false, false);
+        check(0.02, true, true);
+        check(0.0, false, true);
+    }
+
+    #[test]
     fn grip_touch_from_pull_oculus() {
         let mut f = Fixture::new();
         let set1 = f.get_action_set_handle(c"/actions/set1");
