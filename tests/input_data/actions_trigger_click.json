@@ -1,0 +1,24 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/set1",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/set1/in/fire",
+			"type": "boolean"
+		}
+	],
+	"default_bindings": [
+		{
+			"controller_type": "oculus_touch",
+			"binding_url": "trigger_click.json"
+		},
+		{
+			"controller_type": "knuckles",
+			"binding_url": "trigger_click.json"
+		}
+	]
+}

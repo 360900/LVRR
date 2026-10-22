@@ -1468,6 +1468,58 @@ mod tests {
     }
 
     #[test]
+    fn trigger_click_thresholds() {
+        let mut f = Fixture::new();
+        let set1 = f.get_action_set_handle(c"/actions/set1");
+        let fire = f.get_action_handle(c"/actions/set1/in/fire");
+        let left = f.get_input_source_handle(c"/user/hand/left");
+        f.load_actions(c"actions_trigger_click.json");
+
+        // Touch has no trigger click: the binding's thresholds apply to the value. Without
+        // thresholds the runtime's click point stays.
+        f.verify_threshold_bindings(
+            OculusTouch::profile_path(),
+            c"/actions/set1/in/fire",
+            ["/user/hand/left/input/trigger/value".into()],
+        );
+        f.verify_bindings::<bool>(
+            OculusTouch::profile_path(),
+            c"/actions/set1/in/fire",
+            ["/user/hand/right/input/trigger/value".into()],
+        );
+        // The physical click is kept.
+        f.verify_bindings::<bool>(
+            Knuckles::profile_path(),
+            c"/actions/set1/in/fire",
+            [
+                "/user/hand/left/input/trigger/click".into(),
+                "/user/hand/right/input/trigger/click".into(),
+            ],
+        );
+
+        f.set_interaction_profile::<OculusTouch>(LeftHand);
+        let trigger = f.get_action::<f32>(
+            f.get_action_handle(c"/user/hand/left/input/trigger/value-/actions/set1"),
+        );
+        let mut check = |value, state| {
+            fakexr::set_action_state(trigger, ActionState::Float(value), LeftHand);
+            f.sync(vr::VRActiveActionSet_t {
+                ulActionSet: set1,
+                ..Default::default()
+            });
+            assert_eq!(
+                f.get_bool_state_hand(fire, left).unwrap().bState,
+                state,
+                "{value}"
+            );
+        };
+        check(0.7, false);
+        check(0.76, true);
+        check(0.73, true);
+        check(0.71, false);
+    }
+
+    #[test]
     fn trigger_no_touch_from_pull_oculus() {
         let f = Fixture::new();
 

@@ -907,7 +907,7 @@ pub fn handle_sources(
                 let Some(ValidActionBindingData {
                     path,
                     inputs: TriggerInput { pull, touch, click },
-                    parameters: _,
+                    parameters,
                 }) = data.validate_path()
                 else {
                     continue;
@@ -920,9 +920,31 @@ pub fn handle_sources(
                 }
 
                 if let Some(click) = click {
-                    let _ = click
-                        .try_bind_with_component(path, context, validate_path)
-                        .inspect_err(InvalidActionPath::warn);
+                    let click_path = path.with_component(DynComponent::Click);
+                    let has_thresholds = parameters.is_some_and(|p| {
+                        p.click_activate_threshold.is_some()
+                            || p.click_deactivate_threshold.is_some()
+                    });
+                    match validate_path(click_path) {
+                        // Without a physical click, SteamVR clicks the analog value at the
+                        // binding's thresholds. Physical clicks stay as they are.
+                        Some(
+                            analog @ DynInputPath {
+                                component: Some(DynComponent::Value | DynComponent::Force),
+                                ..
+                            },
+                        ) if has_thresholds => bind_threshold(
+                            &click.output,
+                            analog,
+                            parameters,
+                            action_set_name,
+                            action_set,
+                            context,
+                        ),
+                        Some(click_path) => context
+                            .try_suggest_binding::<bool>(click.output.path.clone(), click_path),
+                        None => InvalidActionPath(click_path, &click.output.path).warn(),
+                    }
                 }
 
                 if let Some(touch) = touch {
