@@ -42,7 +42,16 @@ impl<C: openxr_data::Compositor> Input<C> {
     ) -> Result<(), vr::EVRInputError> {
         match self.loaded_actions_path.get() {
             Some(p) => {
-                assert_eq!(p, manifest_path);
+                if !same_file(p, manifest_path) {
+                    // SteamVR keeps the first manifest too (e.g. NomaiVR loads a second one
+                    // after the game's own).
+                    warn!(
+                        "Action manifest already loaded from {}, ignoring {}",
+                        p.display(),
+                        manifest_path.display()
+                    );
+                    return Err(vr::EVRInputError::MismatchedActionManifest);
+                }
                 if session_data.input_data.actions.get().is_some() {
                     return Ok(());
                 }
@@ -59,9 +68,6 @@ impl<C: openxr_data::Compositor> Input<C> {
                     );
                     return Err(vr::EVRInputError::MismatchedActionManifest);
                 }
-                self.loaded_actions_path
-                    .set(manifest_path.to_path_buf())
-                    .unwrap();
             }
         }
 
@@ -294,8 +300,16 @@ impl<C: openxr_data::Compositor> Input<C> {
             .actions
             .set(super::LoadedActions::Manifest(Box::new(loaded)))
             .unwrap_or_else(|_| unreachable!());
+        // Only remember the path once it loaded, so a failed attempt doesn't block a retry with
+        // the right path.
+        let _ = self.loaded_actions_path.set(manifest_path.to_path_buf());
         Ok(())
     }
+}
+
+/// Whether two paths name the same file, even if spelled differently.
+fn same_file(a: &Path, b: &Path) -> bool {
+    a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
 }
 
 impl<C: openxr_data::Compositor> Input<C> {

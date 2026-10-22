@@ -512,6 +512,48 @@ fn reload_manifest_on_session_restart() {
     assert!(state.bActive);
 }
 
+#[test]
+fn second_manifest_path() {
+    let mut f = Fixture::new();
+    let set1 = f.get_action_set_handle(c"/actions/set1");
+    let boolact = f.get_action_handle(c"/actions/set1/in/boolact");
+    let manifest = |name: &str| {
+        let dir = ACTIONS_JSONS_DIR.to_str().unwrap();
+        std::ffi::CString::new(format!("{dir}{name}")).unwrap()
+    };
+
+    // A failed load doesn't pin its path.
+    assert_eq!(
+        f.input
+            .SetActionManifestPath(manifest("missing.json").as_ptr()),
+        vr::EVRInputError::InvalidParam
+    );
+    f.load_actions(c"actions.json");
+    // The same file, spelled differently.
+    assert_eq!(
+        f.input
+            .SetActionManifestPath(manifest("../input_data/actions.json").as_ptr()),
+        vr::EVRInputError::None
+    );
+    assert_eq!(
+        f.input
+            .SetActionManifestPath(manifest("actions_toggle.json").as_ptr()),
+        vr::EVRInputError::MismatchedActionManifest
+    );
+
+    // The first manifest stays loaded.
+    fakexr::set_action_state(
+        f.get_action::<bool>(boolact),
+        fakexr::ActionState::Bool(true),
+        LeftHand,
+    );
+    f.sync(vr::VRActiveActionSet_t {
+        ulActionSet: set1,
+        ..Default::default()
+    });
+    assert!(f.get_bool_state(boolact).unwrap().bState);
+}
+
 #[track_caller]
 pub fn compare_pose(expected: xr::Posef, actual: xr::Posef) {
     fn float_eq(a: f32, b: f32) -> bool {
