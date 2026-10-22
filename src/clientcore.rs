@@ -118,11 +118,15 @@ fn init_error_code(
 ) -> vr::EVRInitError {
     let background = application_type == vr::EVRApplicationType::Background;
     match error {
-        // The loader found no usable runtime.
-        InitError::EnumeratingExtensionsFailed(_) if background => {
+        // There's no loader, or it found no usable runtime.
+        InitError::LoaderUnavailable(_) | InitError::EnumeratingExtensionsFailed(_)
+            if background =>
+        {
             vr::EVRInitError::Init_NoServerForBackgroundApp
         }
-        InitError::EnumeratingExtensionsFailed(_) => vr::EVRInitError::Init_InstallationNotFound,
+        InitError::LoaderUnavailable(_) | InitError::EnumeratingExtensionsFailed(_) => {
+            vr::EVRInitError::Init_InstallationNotFound
+        }
         // The runtime's service isn't running. SteamVR doesn't start its server for
         // background apps (Proton's helper) either, and says so with this code.
         InitError::InstanceCreationFailed(xr::sys::Result::ERROR_RUNTIME_UNAVAILABLE)
@@ -614,6 +618,16 @@ mod tests {
         use xr::sys::Result as XrResult;
 
         let cases = [
+            (
+                InitError::LoaderUnavailable("libopenxr_loader.so.1: not found".into()),
+                App::Scene,
+                E::Init_InstallationNotFound,
+            ),
+            (
+                InitError::LoaderUnavailable("libopenxr_loader.so.1: not found".into()),
+                App::Background,
+                E::Init_NoServerForBackgroundApp,
+            ),
             (
                 InitError::EnumeratingExtensionsFailed(XrResult::ERROR_RUNTIME_UNAVAILABLE),
                 App::Scene,
