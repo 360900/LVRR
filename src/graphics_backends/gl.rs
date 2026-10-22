@@ -577,14 +577,8 @@ impl GraphicsBackend for GlData {
             name: self.images[image_index],
             target: gl::TEXTURE_2D_ARRAY,
         };
-        self.copy(
-            texture,
-            eye.0 as GLint,
-            color_space,
-            bounds,
-            dst,
-            eye.0 as GLint,
-        )
+        let layer = GLint::from(eye == vr::EVREye::Right);
+        self.copy(texture, layer, color_space, bounds, dst, layer)
     }
 
     fn copy_overlay_to_swapchain(
@@ -1049,26 +1043,26 @@ mod tests {
 
     #[test]
     fn swapchain_formats() {
-        use vr::EColorSpace::*;
+        use vr::EColorSpace as Space;
         for (format, color_space, expected) in [
-            (gl::RGBA8, Auto, gl::SRGB8_ALPHA8),
-            (gl::RGBA8, Gamma, gl::SRGB8_ALPHA8),
-            (gl::RGBA8, Linear, gl::RGBA8),
-            (gl::RGBA, Auto, gl::SRGB8_ALPHA8),
-            (gl::RGBA, Linear, gl::RGBA8),
-            (gl::RGB, Gamma, gl::SRGB8_ALPHA8),
-            (gl::RGB8, Auto, gl::SRGB8_ALPHA8),
-            (gl::RGB8, Linear, gl::RGBA8),
-            (gl::SRGB8, Linear, gl::SRGB8_ALPHA8),
-            (gl::SRGB_ALPHA, Auto, gl::SRGB8_ALPHA8),
-            (gl::SRGB8_ALPHA8, Gamma, gl::SRGB8_ALPHA8),
-            (gl::RGBA16F, Auto, gl::RGBA16F),
-            (gl::RGBA16F, Gamma, gl::SRGB8_ALPHA8),
-            (gl::RGB16F, Linear, gl::RGBA16F),
-            (gl::RGB10_A2, Auto, gl::RGB10_A2),
-            (gl::RGB10_A2, Gamma, gl::SRGB8_ALPHA8),
-            (gl::RGBA16, Gamma, gl::SRGB8_ALPHA8),
-            (gl::RGB565, Gamma, gl::SRGB8_ALPHA8),
+            (gl::RGBA8, Space::Auto, gl::SRGB8_ALPHA8),
+            (gl::RGBA8, Space::Gamma, gl::SRGB8_ALPHA8),
+            (gl::RGBA8, Space::Linear, gl::RGBA8),
+            (gl::RGBA, Space::Auto, gl::SRGB8_ALPHA8),
+            (gl::RGBA, Space::Linear, gl::RGBA8),
+            (gl::RGB, Space::Gamma, gl::SRGB8_ALPHA8),
+            (gl::RGB8, Space::Auto, gl::SRGB8_ALPHA8),
+            (gl::RGB8, Space::Linear, gl::RGBA8),
+            (gl::SRGB8, Space::Linear, gl::SRGB8_ALPHA8),
+            (gl::SRGB_ALPHA, Space::Auto, gl::SRGB8_ALPHA8),
+            (gl::SRGB8_ALPHA8, Space::Gamma, gl::SRGB8_ALPHA8),
+            (gl::RGBA16F, Space::Auto, gl::RGBA16F),
+            (gl::RGBA16F, Space::Gamma, gl::SRGB8_ALPHA8),
+            (gl::RGB16F, Space::Linear, gl::RGBA16F),
+            (gl::RGB10_A2, Space::Auto, gl::RGB10_A2),
+            (gl::RGB10_A2, Space::Gamma, gl::SRGB8_ALPHA8),
+            (gl::RGBA16, Space::Gamma, gl::SRGB8_ALPHA8),
+            (gl::RGB565, Space::Gamma, gl::SRGB8_ALPHA8),
         ] {
             assert_eq!(
                 swapchain_format(format, color_space),
@@ -1080,25 +1074,30 @@ mod tests {
 
     #[test]
     fn copy_methods() {
-        use vr::EColorSpace::*;
+        use vr::EColorSpace as Space;
         let blit = |srgb| CopyMethod::Blit { srgb };
         for (format, color_space, swapchain_format, expected) in [
-            (gl::RGBA8, Auto, gl::SRGB8_ALPHA8, CopyMethod::Copy),
-            (gl::RGBA8, Gamma, gl::SRGB8_ALPHA8, CopyMethod::Copy),
-            (gl::RGBA8, Linear, gl::RGBA8, CopyMethod::Copy),
-            (gl::SRGB8_ALPHA8, Linear, gl::SRGB8_ALPHA8, CopyMethod::Copy),
+            (gl::RGBA8, Space::Auto, gl::SRGB8_ALPHA8, CopyMethod::Copy),
+            (gl::RGBA8, Space::Gamma, gl::SRGB8_ALPHA8, CopyMethod::Copy),
+            (gl::RGBA8, Space::Linear, gl::RGBA8, CopyMethod::Copy),
+            (
+                gl::SRGB8_ALPHA8,
+                Space::Linear,
+                gl::SRGB8_ALPHA8,
+                CopyMethod::Copy,
+            ),
             // Linear data in an sRGB fallback swapchain gets encoded.
-            (gl::RGBA8, Linear, gl::SRGB8_ALPHA8, blit(true)),
-            (gl::RGBA16F, Auto, gl::SRGB8_ALPHA8, blit(true)),
+            (gl::RGBA8, Space::Linear, gl::SRGB8_ALPHA8, blit(true)),
+            (gl::RGBA16F, Space::Auto, gl::SRGB8_ALPHA8, blit(true)),
             // Gamma data in a linear format is passed through.
-            (gl::RGBA, Auto, gl::SRGB8_ALPHA8, blit(false)),
-            (gl::RGB8, Gamma, gl::SRGB8_ALPHA8, blit(false)),
-            (gl::RGB10_A2, Gamma, gl::SRGB8_ALPHA8, blit(false)),
-            (gl::RGBA16F, Gamma, gl::SRGB8_ALPHA8, blit(false)),
+            (gl::RGBA, Space::Auto, gl::SRGB8_ALPHA8, blit(false)),
+            (gl::RGB8, Space::Gamma, gl::SRGB8_ALPHA8, blit(false)),
+            (gl::RGB10_A2, Space::Gamma, gl::SRGB8_ALPHA8, blit(false)),
+            (gl::RGBA16F, Space::Gamma, gl::SRGB8_ALPHA8, blit(false)),
             // Only if the runtime has no sRGB format, nothing can be done about it then.
-            (gl::RGBA8, Auto, gl::RGBA16, blit(false)),
+            (gl::RGBA8, Space::Auto, gl::RGBA16, blit(false)),
             // sRGB data in a linear fallback swapchain gets decoded.
-            (gl::SRGB8_ALPHA8, Auto, gl::RGBA16, blit(true)),
+            (gl::SRGB8_ALPHA8, Space::Auto, gl::RGBA16, blit(true)),
         ] {
             assert_eq!(
                 copy_method(format, color_space, swapchain_format),
