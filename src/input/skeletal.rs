@@ -1,7 +1,7 @@
 #[path = "skeletal_generated.rs"]
 mod generated;
 
-use super::{ActionKey, ActionSetKey, Input, inactive_state};
+use super::{ActionKey, Input, inactive_state};
 use crate::input::TrackedDeviceType;
 use crate::input::devices::HandSkeleton;
 use crate::openxr_data::{self, Hand, SessionData};
@@ -208,30 +208,6 @@ impl<C: openxr_data::Compositor> Input<C> {
 
         finalize_transforms(&mut transforms, space);
         Some(transforms)
-    }
-
-    pub(super) fn record_active_sets(&self, active_sets: &[vr::VRActiveActionSet_t]) {
-        let mut sets = self.active_sets.write().unwrap();
-        sets.clear();
-        let key = |handle| ActionSetKey::from(KeyData::from_ffi(handle));
-        for set in active_sets {
-            let restriction = self.subaction_path_from_handle(set.ulRestrictedToDevice);
-            sets.push((key(set.ulActionSet), restriction.unwrap_or(xr::Path::NULL)));
-            // Like UpdateActionState, activate the secondary set for the other hand.
-            if let Some(restriction) = restriction
-                && set.ulSecondaryActionSet != vr::k_ulInvalidInputValueHandle
-            {
-                let other_hand = if restriction == self.get_subaction_path(Hand::Left) {
-                    Hand::Right
-                } else {
-                    Hand::Left
-                };
-                sets.push((
-                    key(set.ulSecondaryActionSet),
-                    self.get_subaction_path(other_hand),
-                ));
-            }
-        }
     }
 
     /// A skeleton is active while its hand is present and its set was activated for that hand.
@@ -1240,6 +1216,21 @@ mod tests {
         assert_eq!(data(&f), (false, vr::k_ulInvalidInputValueHandle));
         sync(&mut f, left);
         assert_eq!(data(&f), (true, left));
+        // The secondary set of a set restricted to the other hand
+        let set2 = f.get_action_set_handle(c"/actions/set2");
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: set2,
+            ulRestrictedToDevice: right,
+            ulSecondaryActionSet: set,
+            ..Default::default()
+        });
+        assert_eq!(data(&f), (true, left));
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: set2,
+            ..Default::default()
+        });
+        assert_eq!(data(&f), (false, vr::k_ulInvalidInputValueHandle));
+        sync(&mut f, left);
 
         // The controller turns off.
         fakexr::set_interaction_profile(f.raw_session(), LeftHand, openxr::Path::NULL);

@@ -1670,6 +1670,8 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         let set_map = self.set_map.read().unwrap();
         let mut sync_sets = Vec::with_capacity(active_sets.len() + 3);
         let mut priorities = Vec::with_capacity(active_sets.len() + 3);
+        // The sets synced below and their hand, for the skeletal actions
+        let mut activated_sets = Vec::with_capacity(active_sets.len());
 
         {
             tracy_span!("UpdateActionState generate active sets");
@@ -1727,6 +1729,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
                             set,
                             restrict(path, key),
                         ));
+                        activated_sets.push((key, path));
                         // TODO: check if SteamVR actually puts these on the same priority as the primary
                         push_priority(&mut priorities, set, priority);
                     }
@@ -1745,6 +1748,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
                     set,
                     restrict(path, key),
                 ));
+                activated_sets.push((key, path));
                 push_priority(&mut priorities, set, priority);
             }
 
@@ -1789,7 +1793,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
                 return vr::EVRInputError::IPCError;
             }
         }
-        self.record_active_sets(active_sets);
+        *self.active_sets.write().unwrap() = activated_sets;
 
         let hands = [
             (
