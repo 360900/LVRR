@@ -224,12 +224,22 @@ impl OverlayMan {
                 _swapchains: swapchains_guard,
             };
         };
-        let swapchains: &SwapchainMap<G> = swapchains.try_into().unwrap_or_else(|e| {
-            panic!(
-                "Requested layers for API {}, but overlays are using a different API - {e}",
-                std::any::type_name::<G>()
-            )
-        });
+        let swapchains: Result<&SwapchainMap<G>, String> =
+            swapchains.try_into().map_err(|e| e.to_string());
+        let swapchains = match swapchains {
+            Ok(swapchains) => swapchains,
+            Err(e) => {
+                crate::warn_once!(
+                    "Requested layers for API {}, but overlays are using a different API - {}",
+                    std::any::type_name::<G>(),
+                    e
+                );
+                return OverlayLayers {
+                    layers: Vec::new(),
+                    _swapchains: swapchains_guard,
+                };
+            }
+        };
 
         let mut layers = Vec::with_capacity(overlays.len());
         for (key, overlay) in overlays.iter() {
@@ -815,13 +825,28 @@ impl Overlay {
         {
             texture.eColorSpace = self.color_space;
         }
-        let backend = match &self.compositor {
+        #[macros::any_graphics(SupportedBackend)]
+        fn uses_session_api<G: GraphicsBackend>(_: &G, session_data: &SessionData) -> bool
+        where
+            for<'a> &'a GraphicalSession: TryInto<&'a Session<G::Api>>,
+        {
+            session_data.uses_api::<G::Api>()
+        }
+
+        let backend = match self.compositor.take() {
             Some(b) => b,
-            None => self.compositor.insert(
-                SupportedBackend::new(&texture, session_data.session.instance())
-                    .ok_or(vr::EVROverlayError::InvalidTexture)?,
-            ),
+            None => SupportedBackend::new(&texture, session_data.session.instance())
+                .ok_or(vr::EVROverlayError::InvalidTexture)?,
         };
+        // Overlays are drawn into the scene app's frames, so their swapchains are the session's.
+        if !backend.with_any_graphics::<uses_session_api>(session_data) {
+            crate::warn_once!(
+                "Overlay texture of type {:?} doesn't use the session's graphics API",
+                texture.eType
+            );
+            return Err(vr::EVROverlayError::InvalidTexture);
+        }
+        let backend = self.compositor.insert(backend);
 
         #[macros::any_graphics(SupportedBackend)]
         fn create_swapchain_map<G: GraphicsBackend>(_: &G) -> AnySwapchainMap

@@ -3716,6 +3716,51 @@ mod tests {
         assert_eq!(SWAPCHAIN_EXISTED_ON_WAIT.take(), [true]);
     }
 
+    /// Overlays are drawn into the session's frames, so a texture of another graphics API is
+    /// rejected, even for the first overlay.
+    #[test]
+    fn overlay_texture_of_another_api() {
+        use vr::IVROverlay027_Interface;
+
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+        let overlays = f.overlay_man();
+        let mut overlay = 0;
+        assert_eq!(
+            overlays.CreateOverlay(c"key".as_ptr(), c"key".as_ptr(), &mut overlay),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(overlays.ShowOverlay(overlay), vr::EVROverlayError::None);
+
+        // Handles a Vulkan backend can be set up with, which are never used.
+        let mut data = vr::VRVulkanTextureData_t {
+            m_nImage: 1,
+            m_pDevice: std::ptr::dangling_mut(),
+            m_pPhysicalDevice: std::ptr::dangling_mut(),
+            m_pInstance: std::ptr::dangling_mut(),
+            m_pQueue: std::ptr::dangling_mut(),
+            m_nWidth: 16,
+            m_nHeight: 16,
+            m_nFormat: 37,
+            m_nSampleCount: 1,
+            ..Default::default()
+        };
+        let vulkan = texture_of_type(vr::ETextureType::Vulkan, (&raw mut data).cast());
+        assert_eq!(
+            overlays.SetOverlayTexture(overlay, &vulkan),
+            vr::EVROverlayError::InvalidTexture
+        );
+
+        // Neither the overlay nor the session's overlay swapchains were set up for Vulkan.
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(
+            overlays.SetOverlayTexture(overlay, &FakeGraphicsData::texture(&f.vk)),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(fakexr::last_layer_count(f.raw_session()), 1);
+    }
+
     /// Overlays keep their rect across a session restart, but the new session has no swapchain
     /// for them until they get a new texture.
     #[test]

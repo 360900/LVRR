@@ -1400,6 +1400,14 @@ impl SessionData {
             .create_swapchain(info)
     }
 
+    /// Whether the session was created for graphics API `G`.
+    pub fn uses_api<G: xr::Graphics>(&self) -> bool
+    where
+        for<'a> &'a GraphicalSession: TryInto<&'a Session<G>>,
+    {
+        TryInto::<&Session<G>>::try_into(&self.session_graphics).is_ok()
+    }
+
     pub fn check_format<G: GraphicsBackend>(&self, info: &mut xr::SwapchainCreateInfo<G::Api>)
     where
         for<'a> &'a GraphicalSession: TryInto<&'a Session<G::Api>, Error: std::fmt::Display>,
