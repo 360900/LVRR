@@ -126,6 +126,12 @@ thread_local! {
     static DEFAULT_PROFILES: RefCell<[Option<String>; 2]> = const { RefCell::new([None, None]) };
     static EXTRA_EXTENSIONS: RefCell<Vec<&'static [u8]>> = const { RefCell::new(Vec::new()) };
     static REJECTED_PROFILES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    static LOCATE_VIEWS_ERROR: Cell<Option<xr::Result>> = const { Cell::new(None) };
+}
+
+/// Makes xrLocateViews fail with `error` on this thread, or succeed again with `None`.
+pub fn set_locate_views_error(error: Option<xr::Result>) {
+    LOCATE_VIEWS_ERROR.set(error);
 }
 
 /// Advertises the extension `name` (nul terminated, like the `*_EXTENSION_NAME` constants) on
@@ -2134,6 +2140,9 @@ extern "system" fn locate_views(
     views: *mut xr::View,
 ) -> xr::Result {
     let _session = get_handle!(session);
+    if let Some(error) = LOCATE_VIEWS_ERROR.get() {
+        return error;
+    }
     if !state.is_null() {
         unsafe {
             state.write(xr::ViewState {
