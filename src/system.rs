@@ -1656,26 +1656,34 @@ impl vr::IVRSystem009On010 for System {
         );
 
         if ret && !event.is_null() {
-            let event_type = vr::EVREventType(e.eventType);
-
-            // The 0.9.12 VREvent_t (pack(4)) has 16 bytes of data followed by eventAgeSeconds.
-            // Our binding of its data union is built from the current, larger member structs, so
-            // write by offset rather than through its fields. The members' leading fields match.
-            const DATA_SIZE: usize = std::mem::size_of::<vr::vr_0_9_12::VREvent_Reserved_t>();
-            unsafe {
-                (&raw mut (*event).eventType).write(event_type);
-                (&raw mut (*event).trackedDeviceIndex).write(e.trackedDeviceIndex);
-                let data = event
-                    .cast::<u8>()
-                    .add(std::mem::offset_of!(vr::vr_0_9_12::VREvent_t, data));
-                std::ptr::copy_nonoverlapping((&raw const e.data).cast::<u8>(), data, DATA_SIZE);
-                data.add(DATA_SIZE)
-                    .cast::<f32>()
-                    .write_unaligned(e.eventAgeSeconds);
-            }
+            unsafe { Self::write_event_0_9_12(&e, event) };
         }
 
         ret
+    }
+}
+
+impl System {
+    /// Writes `e` in the 0.9.12 layout, which 0.9.14 shares.
+    ///
+    /// # Safety
+    /// `event` must point to a writable 0.9.12 VREvent_t.
+    pub unsafe fn write_event_0_9_12(e: &vr::VREvent_t, event: *mut vr::vr_0_9_12::VREvent_t) {
+        // The 0.9.12 VREvent_t (pack(4)) has 16 bytes of data followed by eventAgeSeconds.
+        // Our binding of its data union is built from the current, larger member structs, so
+        // write by offset rather than through its fields. The members' leading fields match.
+        const DATA_SIZE: usize = std::mem::size_of::<vr::vr_0_9_12::VREvent_Reserved_t>();
+        unsafe {
+            (&raw mut (*event).eventType).write(vr::EVREventType(e.eventType));
+            (&raw mut (*event).trackedDeviceIndex).write(e.trackedDeviceIndex);
+            let data = event
+                .cast::<u8>()
+                .add(std::mem::offset_of!(vr::vr_0_9_12::VREvent_t, data));
+            std::ptr::copy_nonoverlapping((&raw const e.data).cast::<u8>(), data, DATA_SIZE);
+            data.add(DATA_SIZE)
+                .cast::<f32>()
+                .write_unaligned(e.eventAgeSeconds);
+        }
     }
 }
 

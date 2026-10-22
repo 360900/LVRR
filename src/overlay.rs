@@ -2374,22 +2374,34 @@ impl vr::IVROverlay013On014 for OverlayMan {
 impl vr::IVROverlay008On010 for OverlayMan {
     fn PollNextOverlayEvent(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: *mut vr::vr_0_9_14::VREvent_t,
+        handle: vr::VROverlayHandle_t,
+        event: *mut vr::vr_0_9_14::VREvent_t,
     ) -> bool {
-        crate::warn_unimplemented!("PollNextOverlayEvent");
-        false
+        // 0.9.14 events have the 0.9.12 layout.
+        vr::IVROverlay007On008::PollNextOverlayEvent(self, handle, event.cast())
     }
 }
 
 impl vr::IVROverlay007On008 for OverlayMan {
     fn PollNextOverlayEvent(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: *mut vr::vr_0_9_12::VREvent_t,
+        handle: vr::VROverlayHandle_t,
+        event: *mut vr::vr_0_9_12::VREvent_t,
     ) -> bool {
-        crate::warn_unimplemented!("PollNextOverlayEvent");
-        false
+        if event.is_null() {
+            return false;
+        }
+        let mut e = vr::VREvent_t::default();
+        if !<Self as vr::IVROverlay028_Interface>::PollNextOverlayEvent(
+            self,
+            handle,
+            &mut e,
+            std::mem::size_of_val(&e) as u32,
+        ) {
+            return false;
+        }
+        unsafe { System::write_event_0_9_12(&e, event) };
+        true
     }
 }
 
@@ -3340,6 +3352,65 @@ mod tests {
             ..f.texture()
         };
         assert_eq!(copied_color_space(gamma), vr::EColorSpace::Gamma);
+    }
+
+    /// IVROverlay_007 and _008 poll overlay events in the 0.9.12 layout.
+    #[test]
+    fn keyboard_events_for_legacy_overlay_versions() {
+        #[repr(C, packed(4))]
+        struct Event0912 {
+            event_type: u32,
+            device: u32,
+            data: [u32; 4],
+            age: f32,
+            canary: u32,
+        }
+
+        let man = overlay_man();
+        let handle = create(&man, c"key", c"name");
+        assert_eq!(
+            vr::IVROverlay022On024::ShowKeyboardForOverlay(
+                &man,
+                handle,
+                vr::EGamepadTextInputMode::Normal,
+                vr::EGamepadTextInputLineMode::SingleLine,
+                c"desc".as_ptr(),
+                32,
+                std::ptr::null(),
+                false,
+                7,
+            ),
+            vr::EVROverlayError::None
+        );
+
+        let mut event = Event0912 {
+            event_type: 0,
+            device: 1234,
+            data: [u32::MAX; 4],
+            age: -1.0,
+            canary: 0xdeadbeef,
+        };
+        for ty in [
+            vr::EVREventType::KeyboardDone,
+            vr::EVREventType::KeyboardClosed,
+        ] {
+            assert!(vr::IVROverlay008On010::PollNextOverlayEvent(
+                &man,
+                handle,
+                (&raw mut event).cast()
+            ));
+            assert_eq!({ event.event_type }, ty.0);
+            assert_eq!({ event.device }, vr::k_unTrackedDeviceIndex_Hmd);
+            // cNewInput, then the user value.
+            assert_eq!({ event.data }, [0, 0, 7, 0]);
+            assert_eq!({ event.age }, 0.0);
+            assert_eq!({ event.canary }, 0xdeadbeef);
+        }
+        assert!(!vr::IVROverlay007On008::PollNextOverlayEvent(
+            &man,
+            handle,
+            (&raw mut event).cast()
+        ));
     }
 
     #[test]
