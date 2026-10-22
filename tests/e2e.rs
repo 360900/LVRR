@@ -1102,6 +1102,7 @@ fn scene_app() {
         &mut err
     );
     println!("steamvr/supersampleScale: {scale} ({err:?})");
+    assert_eq!((scale, err), (1.0, vr::EVRSettingsError::None));
     let fade = vcall!(
         i.settings,
         IVRSettings_GetBool,
@@ -1110,6 +1111,7 @@ fn scene_app() {
         &mut err
     );
     println!("steamvr/forceFadeOnBadTracking: {fade} ({err:?})");
+    assert!(fade && err == vr::EVRSettingsError::None);
 
     let state = vcall!(i.chaperone, IVRChaperone_GetCalibrationState);
     let (mut x, mut z) = (0.0, 0.0);
