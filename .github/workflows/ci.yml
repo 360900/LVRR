@@ -87,7 +87,13 @@ jobs:
       with:
         fetch-depth: 0
     - name: Set version
-      run: echo "XRIZER_VERSION=$(git describe --tags --always)" >> "$GITHUB_ENV"
+      # actions/checkout only marks the workspace safe in a temporary config.
+      # Without this, git and vergen reject the checkout as owned by another
+      # user and the version comes out empty.
+      run: |
+        git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        v=$(git describe --tags --always)
+        echo "XRIZER_VERSION=$v" >> "$GITHUB_ENV"
     - name: Build
       run: cargo xbuild --release --features static-openxr --verbose
     - name: Build 32-bit

@@ -274,16 +274,27 @@ fn init_logging() {
             })
             .init();
 
-        let version = option_env!("XRIZER_VERSION")
-            .or_else(|| {
-                option_env!("VERGEN_GIT_DESCRIBE").filter(|v| *v != "VERGEN_IDEMPOTENT_OUTPUT")
-            })
-            .unwrap_or(env!("CARGO_PKG_VERSION"));
+        let version = reported_version(
+            option_env!("XRIZER_VERSION"),
+            option_env!("VERGEN_GIT_DESCRIBE"),
+        );
         log::info!("Initializing XRizer version {version}");
         if let Some(err) = startup_err {
             log::warn!("{err}");
         }
     });
+}
+
+/// Empty values count as unset, like in build.rs: rustc inherits XRIZER_VERSION
+/// from cargo's environment even when build.rs ignores it.
+fn reported_version(
+    xrizer_version: Option<&'static str>,
+    git_describe: Option<&'static str>,
+) -> &'static str {
+    xrizer_version
+        .filter(|v| !v.is_empty())
+        .or_else(|| git_describe.filter(|v| !v.is_empty() && *v != "VERGEN_IDEMPOTENT_OUTPUT"))
+        .unwrap_or(env!("CARGO_PKG_VERSION"))
 }
 
 /// # Safety
@@ -369,5 +380,23 @@ mod log_prune_tests {
         assert_eq!(remaining, vec!["unrelated.txt".to_string()]);
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::reported_version;
+
+    #[test]
+    fn empty_version_env_falls_through() {
+        const PKG: &str = env!("CARGO_PKG_VERSION");
+        assert_eq!(reported_version(Some("v2"), Some("v1-1-g0")), "v2");
+        assert_eq!(reported_version(Some(""), Some("v1-1-g0")), "v1-1-g0");
+        assert_eq!(reported_version(Some(""), None), PKG);
+        assert_eq!(reported_version(None, Some("")), PKG);
+        assert_eq!(
+            reported_version(None, Some("VERGEN_IDEMPOTENT_OUTPUT")),
+            PKG
+        );
     }
 }
