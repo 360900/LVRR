@@ -684,20 +684,22 @@ impl<C: Compositor> OpenXrData<C> {
 
     /// The runtime's recommended image size for each eye.
     pub fn recommended_eye_size(&self) -> (u32, u32) {
-        let view = self
-            .instance
-            .enumerate_view_configuration_views(
-                self.system_id,
-                xr::ViewConfigurationType::PRIMARY_STEREO,
-            )
-            .map(|views| views.first().copied());
-        match view {
-            Ok(Some(view)) => (
+        let views = self.instance.enumerate_view_configuration_views(
+            self.system_id,
+            xr::ViewConfigurationType::PRIMARY_STEREO,
+        );
+        match self
+            .check("xrEnumerateViewConfigurationViews", views)
+            .as_deref()
+        {
+            Some([view, ..]) => (
                 view.recommended_image_rect_width,
                 view.recommended_image_rect_height,
             ),
             other => {
-                crate::warn_once!("Couldn't get the recommended eye size: {:?}", other);
+                if other.is_some() {
+                    crate::warn_once!("The runtime reported no views");
+                }
                 // Apps can't handle failure here, and a zero size render target won't do either.
                 (1440, 1600)
             }
