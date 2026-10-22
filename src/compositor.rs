@@ -4548,15 +4548,18 @@ mod tests {
         assert!(rx.try_recv().is_err(), "temporary session was restarted");
     }
 
-    /// A runtime lost while the real session is created must tell the game to quit.
+    /// A real session lost before it becomes ready must tell the game to quit. The game keeps
+    /// running on a temporary session meanwhile. A lost instance can't create that, so the process
+    /// exits then.
     #[test]
     fn session_lost_on_real_session_creation() {
         let f = Fixture::new();
         let system = f.system();
         assert_eq!(f.wait_get_poses(), None);
 
-        fakexr::fail_next_session_creation(xr::sys::Result::ERROR_INSTANCE_LOST);
+        fakexr::lose_next_session();
         assert_eq!(f.submit(vr::EVREye::Left), InvalidTexture);
+        assert!(!f.comp.openxr.session_data.get().is_real_session());
         assert!(f.comp.openxr.is_lost());
         assert_eq!(quit_events(&system), [true]);
         assert_eq!(f.wait_get_poses(), DoNotHaveFocus);

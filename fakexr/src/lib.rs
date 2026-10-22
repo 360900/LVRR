@@ -410,11 +410,19 @@ pub fn lose_instance(instance: xr::Instance) {
 
 thread_local! {
     static SESSION_CREATION_ERROR: Cell<Option<xr::Result>> = const { Cell::new(None) };
+    static LOSE_NEXT_SESSION: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Makes the next xrCreateSession on this thread fail with `error`.
+/// Makes the next xrCreateSession on this thread fail with `error`. ERROR_INSTANCE_LOST loses the
+/// instance, like a runtime that went away.
 pub fn fail_next_session_creation(error: xr::Result) {
     SESSION_CREATION_ERROR.set(Some(error));
+}
+
+/// Loses the next session created on this thread before it becomes ready, like Monado does when
+/// the connection drops right away. The instance survives.
+pub fn lose_next_session() {
+    LOSE_NEXT_SESSION.set(true);
 }
 
 fn is_lost(session: &Weak<Session>) -> bool {
@@ -1230,7 +1238,14 @@ extern "system" fn create_session(
 ) -> xr::Result {
     let instance = get_handle!(instance);
     if let Some(error) = SESSION_CREATION_ERROR.take() {
+        if error == xr::Result::ERROR_INSTANCE_LOST {
+            instance.lost.store(true, Ordering::Relaxed);
+        }
         return error;
+    }
+    // Every call on a lost instance fails from then on.
+    if instance.lost.load(Ordering::Relaxed) {
+        return xr::Result::ERROR_INSTANCE_LOST;
     }
     let info = unsafe { create_info.as_ref().unwrap() };
     let binding = unsafe { (info.next as *const xr::BaseInStructure).as_ref() };
@@ -1289,6 +1304,8 @@ extern "system" fn create_session(
         }
     });
 
+    let lost = LOSE_NEXT_SESSION.take();
+    sess.lost.store(lost, Ordering::Relaxed);
     let tx = sess.event_sender.clone();
     unsafe {
         *session = sess.to_xr();
@@ -1300,7 +1317,11 @@ extern "system" fn create_session(
             ty: xr::EventDataSessionStateChanged::TYPE,
             next: std::ptr::null(),
             session: unsafe { *session },
-            state: xr::SessionState::READY,
+            state: if lost {
+                xr::SessionState::LOSS_PENDING
+            } else {
+                xr::SessionState::READY
+            },
             time: xr::Time::from_nanos(0),
         },
         None,
