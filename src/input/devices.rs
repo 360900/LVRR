@@ -537,6 +537,15 @@ impl TrackedDevice {
         }
     }
 
+    pub fn device_class(&self) -> vr::ETrackedDeviceClass {
+        match self.device_type {
+            TrackedDeviceType::Hmd => vr::ETrackedDeviceClass::HMD,
+            TrackedDeviceType::Controller { .. } => vr::ETrackedDeviceClass::Controller,
+            #[cfg(feature = "monado")]
+            TrackedDeviceType::GenericTracker { .. } => vr::ETrackedDeviceClass::GenericTracker,
+        }
+    }
+
     /// Returns the properties of the interaction profile this device's identity
     /// should be derived from.
     fn get_profile_properties(
@@ -685,6 +694,25 @@ impl TrackedDevice {
         _session_data: &SessionData,
         property: vr::ETrackedDeviceProperty,
     ) -> Option<i32> {
+        match property {
+            vr::ETrackedDeviceProperty::DeviceClass_Int32 => {
+                return Some(self.device_class() as i32);
+            }
+            // Engines like godot_openvr assign hands from this instead of
+            // GetControllerRoleForTrackedDeviceIndex.
+            vr::ETrackedDeviceProperty::ControllerRoleHint_Int32 => {
+                let role = match self.device_type {
+                    TrackedDeviceType::Hmd => vr::ETrackedControllerRole::Invalid,
+                    TrackedDeviceType::Controller { hand, .. } => hand.into(),
+                    // Like SteamVR's trackers, so they never take a hand's role.
+                    #[cfg(feature = "monado")]
+                    TrackedDeviceType::GenericTracker { .. } => vr::ETrackedControllerRole::OptOut,
+                };
+                return Some(role as i32);
+            }
+            _ => {}
+        }
+
         match self.device_type {
             TrackedDeviceType::Controller { .. } => {
                 let data = self
@@ -1014,16 +1042,8 @@ impl<C: openxr_data::Compositor> Input<C> {
     ) -> Option<vr::ETrackedDeviceClass> {
         let session_data = self.openxr.session_data.get();
         let devices = session_data.input_data.devices.read().unwrap();
-        let device = devices.get_device(index)?;
 
-        match device.get_type() {
-            TrackedDeviceType::Hmd => Some(vr::ETrackedDeviceClass::HMD),
-            TrackedDeviceType::Controller { .. } => Some(vr::ETrackedDeviceClass::Controller),
-            #[cfg(feature = "monado")]
-            TrackedDeviceType::GenericTracker { .. } => {
-                Some(vr::ETrackedDeviceClass::GenericTracker)
-            }
-        }
+        devices.get_device(index).map(TrackedDevice::device_class)
     }
 
     pub fn device_index_to_hand(&self, index: vr::TrackedDeviceIndex_t) -> Option<Hand> {
@@ -1144,6 +1164,25 @@ mod tests {
             .get_device_string_tracked_property(3, vr::ETrackedDeviceProperty::SerialNumber_String)
             .unwrap();
         assert_eq!(serial.to_str().unwrap(), "FAKEXR-SERIAL");
+    }
+
+    #[test]
+    fn role_hint_and_device_class() {
+        use vr::ETrackedDeviceProperty::*;
+
+        let f = Fixture::new();
+        let get = |index, prop| f.input.get_device_int_tracked_property(index, prop);
+
+        use vr::ETrackedControllerRole as Role;
+        use vr::ETrackedDeviceClass as Class;
+        for (index, role, class) in [
+            (vr::k_unTrackedDeviceIndex_Hmd, Role::Invalid, Class::HMD),
+            (1, Role::LeftHand, Class::Controller),
+            (2, Role::RightHand, Class::Controller),
+        ] {
+            assert_eq!(get(index, ControllerRoleHint_Int32), Some(role as i32));
+            assert_eq!(get(index, DeviceClass_Int32), Some(class as i32));
+        }
     }
 
     #[test]
