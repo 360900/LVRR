@@ -393,11 +393,12 @@ impl OverlayMan {
         Some(key.data().as_ffi())
     }
 
-    /// We have no keyboard, so report it as done immediately with the existing text unchanged.
-    /// This lets games that wait for the keyboard continue instead of hanging.
+    /// We have no keyboard, so report it as done and closed immediately with the existing text
+    /// unchanged. This lets games that wait for the keyboard continue instead of hanging.
     fn show_keyboard(
         &self,
         overlay: Option<vr::VROverlayHandle_t>,
+        flags: u32,
         existing_text: *const c_char,
         user_value: u64,
     ) -> vr::EVROverlayError {
@@ -409,7 +410,7 @@ impl OverlayMan {
         debug!("no keyboard available, reporting done with existing text {text:?}");
         *self.keyboard_text.lock().unwrap() = text;
 
-        let event = vr::VREvent_t {
+        let done = vr::VREvent_t {
             eventType: vr::EVREventType::KeyboardDone.0,
             trackedDeviceIndex: vr::k_unTrackedDeviceIndex_Hmd,
             eventAgeSeconds: 0.0,
@@ -422,17 +423,27 @@ impl OverlayMan {
             },
         };
 
+        let closed = vr::VREvent_t {
+            eventType: vr::EVREventType::KeyboardClosed as u32,
+            ..done
+        };
+        // Closed follows whatever closed the keyboard; there's no Done key to press if it's hidden.
+        let events = if flags & vr::EKeyboardFlags::HideDoneKey.0 != 0 {
+            &[closed][..]
+        } else {
+            &[done, closed]
+        };
+
         if let Some(handle) = overlay {
             let mut overlays = self.overlays.write().unwrap();
             let Some(overlay) = overlays.get_mut(OverlayKey::from(KeyData::from_ffi(handle)))
             else {
                 return vr::EVROverlayError::UnknownOverlay;
             };
-            overlay.events.push_back(event);
+            overlay.events.extend(events);
         } else {
-            self.system
-                .force(|i| System::new(self.openxr.clone(), i))
-                .push_event(event);
+            let system = self.system.force(|i| System::new(self.openxr.clone(), i));
+            events.iter().for_each(|e| system.push_event(*e));
         }
         vr::EVROverlayError::None
     }
@@ -1276,25 +1287,25 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         handle: vr::VROverlayHandle_t,
         _: vr::EGamepadTextInputMode,
         _: vr::EGamepadTextInputLineMode,
-        _: u32,
+        flags: u32,
         _: *const c_char,
         _: u32,
         existing_text: *const c_char,
         user_value: u64,
     ) -> vr::EVROverlayError {
-        self.show_keyboard(Some(handle), existing_text, user_value)
+        self.show_keyboard(Some(handle), flags, existing_text, user_value)
     }
     fn ShowKeyboard(
         &self,
         _: vr::EGamepadTextInputMode,
         _: vr::EGamepadTextInputLineMode,
-        _: u32,
+        flags: u32,
         _: *const c_char,
         _: u32,
         existing_text: *const c_char,
         user_value: u64,
     ) -> vr::EVROverlayError {
-        self.show_keyboard(None, existing_text, user_value)
+        self.show_keyboard(None, flags, existing_text, user_value)
     }
     fn GetPrimaryDashboardDevice(&self) -> vr::TrackedDeviceIndex_t {
         crate::warn_unimplemented!("GetPrimaryDashboardDevice");
@@ -2626,9 +2637,9 @@ mod tests {
         assert_eq!(rotation(glam::Mat3::ZERO), Quat::IDENTITY);
     }
 
-    fn keyboard_done_event(user_value: u64) -> impl Fn(&vr::VREvent_t) {
+    fn keyboard_event(ty: vr::EVREventType, user_value: u64) -> impl Fn(&vr::VREvent_t) {
         move |event| {
-            assert_eq!(event.eventType, vr::EVREventType::KeyboardDone.0);
+            assert_eq!(event.eventType, ty.0);
             assert_eq!(unsafe { event.data.keyboard.uUserValue }, user_value);
         }
     }
@@ -2651,9 +2662,14 @@ mod tests {
         );
 
         let system = man.system.get().unwrap();
-        let mut event: vr::VREvent_t = unsafe { std::mem::zeroed() };
-        assert!(system.PollNextEvent(&mut event, std::mem::size_of::<vr::VREvent_t>() as u32));
-        keyboard_done_event(1234)(&event);
+        let size = std::mem::size_of::<vr::VREvent_t>() as u32;
+        let poll = || {
+            let mut event: vr::VREvent_t = unsafe { std::mem::zeroed() };
+            system.PollNextEvent(&mut event, size).then_some(event)
+        };
+        keyboard_event(vr::EVREventType::KeyboardDone, 1234)(&poll().unwrap());
+        keyboard_event(vr::EVREventType::KeyboardClosed, 1234)(&poll().unwrap());
+        assert!(poll().is_none());
 
         let mut buf = [0 as c_char; 32];
         let len = man.GetKeyboardText(buf.as_mut_ptr(), buf.len() as u32);
@@ -3022,9 +3038,32 @@ mod tests {
         let size = std::mem::size_of::<vr::VREvent_t>() as u32;
         let mut event: vr::VREvent_t = unsafe { std::mem::zeroed() };
         assert!(!man.PollNextOverlayEvent(other, &mut event, size));
+        for ty in [
+            vr::EVREventType::KeyboardDone,
+            vr::EVREventType::KeyboardClosed,
+        ] {
+            assert!(man.PollNextOverlayEvent(handle, &mut event, size));
+            keyboard_event(ty, 5)(&event);
+            assert_eq!(unsafe { event.data.keyboard.overlayHandle }, handle);
+        }
+        assert!(!man.PollNextOverlayEvent(handle, &mut event, size));
+
+        // Without a Done key, the keyboard can only be closed.
+        assert_eq!(
+            man.ShowKeyboardForOverlay(
+                handle,
+                vr::EGamepadTextInputMode::Normal,
+                vr::EGamepadTextInputLineMode::SingleLine,
+                vr::EKeyboardFlags::HideDoneKey.0,
+                c"desc".as_ptr(),
+                32,
+                std::ptr::null(),
+                6,
+            ),
+            vr::EVROverlayError::None
+        );
         assert!(man.PollNextOverlayEvent(handle, &mut event, size));
-        keyboard_done_event(5)(&event);
-        assert_eq!(unsafe { event.data.keyboard.overlayHandle }, handle);
+        keyboard_event(vr::EVREventType::KeyboardClosed, 6)(&event);
         assert!(!man.PollNextOverlayEvent(handle, &mut event, size));
 
         let mut buf = [1 as c_char; 4];
