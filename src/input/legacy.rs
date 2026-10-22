@@ -997,7 +997,7 @@ mod tests {
 
         fakexr::reject_profile(Knuckles::profile_path());
         let f = Fixture::new();
-        f.input.openxr.restart_session();
+        f.input.openxr.restart_session().unwrap();
         f.input.frame_start_update();
 
         let trigger = |actions: &super::LegacyActions| actions.trigger.as_raw();
@@ -1012,7 +1012,7 @@ mod tests {
 
         fakexr::advertise_extension(xr::sys::EXT_HAND_INTERACTION_EXTENSION_NAME);
         let f = Fixture::new();
-        f.input.openxr.restart_session();
+        f.input.openxr.restart_session().unwrap();
         f.input.frame_start_update();
 
         // The suggestion would outlive legacy input and keep manifest bindings off hands.
