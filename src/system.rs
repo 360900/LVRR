@@ -2487,7 +2487,7 @@ mod tests {
             Some("/interaction_profiles/oculus/touch_controller"),
         );
         let xr =
-            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Scene).unwrap());
         fakexr::set_default_interaction_profile(fakexr::UserPath::RightHand, None);
 
         let injector = Injector::default();

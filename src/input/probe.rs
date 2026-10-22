@@ -56,14 +56,11 @@ pub fn probe_interaction_profiles(
     probed
 }
 
-/// Background and utility apps never render, so they don't need the probe - and a probe session
-/// there could steal focus from the app that does.
+/// Only scene apps render. The others don't need the probe, and since it submits frames, it would
+/// take focus (and the display) from the app that does render. Monado and WiVRn don't give it back
+/// until the probing process exits.
 fn should_probe(app_type: vr::EVRApplicationType, env: Option<bool>) -> bool {
-    env != Some(false)
-        && !matches!(
-            app_type,
-            vr::EVRApplicationType::Background | vr::EVRApplicationType::Utility
-        )
+    env != Some(false) && app_type == vr::EVRApplicationType::Scene
 }
 
 fn probe(
@@ -265,11 +262,11 @@ mod tests {
     #[test]
     fn should_probe_skips_non_rendering_apps() {
         assert!(should_probe(App::Scene, None));
-        assert!(should_probe(App::Overlay, None));
-        assert!(should_probe(App::Other, Some(true)));
-        assert!(!should_probe(App::Background, None));
-        assert!(!should_probe(App::Utility, None));
-        assert!(!should_probe(App::Background, Some(true)));
+        assert!(should_probe(App::Scene, Some(true)));
         assert!(!should_probe(App::Scene, Some(false)));
+        for app_type in [App::Other, App::Overlay, App::Background, App::Utility] {
+            assert!(!should_probe(app_type, None), "{app_type:?}");
+            assert!(!should_probe(app_type, Some(true)), "{app_type:?}");
+        }
     }
 }
