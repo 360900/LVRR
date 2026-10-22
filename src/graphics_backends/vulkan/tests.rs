@@ -857,3 +857,13 @@ fn teardown_after_device_lost() {
     // Drops the temporary session's VulkanData, which waits for its device.
     drop(xr);
 }
+
+#[test]
+fn clear_when_copied_area_shrinks() {
+    let extent = |width, height| vk::Extent2D { width, height };
+    assert!(needs_clear(None, extent(10, 10)));
+    assert!(!needs_clear(Some(extent(10, 10)), extent(10, 10)));
+    assert!(!needs_clear(Some(extent(10, 10)), extent(20, 10)));
+    assert!(needs_clear(Some(extent(10, 10)), extent(9, 10)));
+    assert!(needs_clear(Some(extent(10, 10)), extent(20, 9)));
+}

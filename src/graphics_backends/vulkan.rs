@@ -15,6 +15,8 @@ struct RealSessionData {
     /// One per command buffer, signaled once its last submission has finished.
     fences: Vec<vk::Fence>,
     overlay_pipeline: Option<PipelineData>,
+    /// The extent last copied to each eye of each image, if any.
+    eye_extents: Mutex<Vec<[Option<vk::Extent2D>; 2]>>,
 }
 
 impl RealSessionData {
@@ -165,6 +167,7 @@ impl GraphicsBackend for VulkanData {
             })
             .collect();
 
+        let eye_extents = Mutex::new(vec![[None; 2]; images.len()]);
         if let Some(data) = self.real_data.replace(RealSessionData {
             images,
             format: vk::Format::from_raw(format as _),
@@ -172,6 +175,7 @@ impl GraphicsBackend for VulkanData {
             bufs,
             fences,
             overlay_pipeline: Default::default(),
+            eye_extents,
         }) {
             data.destroy(&self.device);
         }
@@ -227,6 +231,15 @@ impl GraphicsBackend for VulkanData {
 
         let (extent, offset) = texture_extent_from_bounds(texture, bounds);
         log::trace!("{eye:?} extent: {extent:?} | bounds: {bounds:?}");
+        let clear = {
+            let mut eye_extents = data.eye_extents.lock().unwrap();
+            let last = &mut eye_extents[image_index][eye as usize];
+            let new = vk::Extent2D {
+                width: extent.width,
+                height: extent.height,
+            };
+            needs_clear(last.replace(new), new)
+        };
 
         self.record_commands(slot, || unsafe {
             // transition swapchain image to TRANSFER_DST
@@ -255,6 +268,35 @@ impl GraphicsBackend for VulkanData {
                     ..Default::default()
                 }],
             );
+
+            if clear {
+                self.device.cmd_clear_color_image(
+                    buf,
+                    swapchain_image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &vk::ClearColorValue {
+                        float32: [0.0, 0.0, 0.0, 1.0],
+                    },
+                    &[swapchain_res],
+                );
+                self.device.cmd_pipeline_barrier(
+                    buf,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[vk::ImageMemoryBarrier {
+                        src_access_mask: vk::AccessFlags::TRANSFER_WRITE,
+                        dst_access_mask: vk::AccessFlags::TRANSFER_WRITE,
+                        old_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        image: swapchain_image,
+                        subresource_range: swapchain_res,
+                        ..Default::default()
+                    }],
+                );
+            }
 
             // transfer image
             let subresource = vk::ImageSubresourceLayers {
@@ -1029,6 +1071,13 @@ fn overlay_needs_srgb_decode(format: vk::Format, color_space: vr::EColorSpace) -
         | F::BC7_UNORM_BLOCK => color_space != vr::EColorSpace::Linear,
         _ => color_space == vr::EColorSpace::Gamma,
     }
+}
+
+/// Whether an eye's layer of a swapchain image has to be cleared before copying `new` to it.
+/// Runtimes may show the pixels outside of the copied area when reprojecting, which are undefined
+/// in a new image and left over from a larger copy otherwise.
+fn needs_clear(last: Option<vk::Extent2D>, new: vk::Extent2D) -> bool {
+    last.is_none_or(|last| new.width < last.width || new.height < last.height)
 }
 
 fn texture_extent_from_bounds(
