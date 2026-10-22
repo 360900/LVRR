@@ -1,3 +1,5 @@
+use crate::clientcore::{Injected, Injector};
+use crate::system::System;
 use log::debug;
 use openvr as vr;
 use openvr::EVRSettingsError;
@@ -5,7 +7,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::os::raw::c_char;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
 #[derive(Debug)]
 enum Value {
@@ -60,6 +62,15 @@ const fn string(value: &'static CStr) -> Value {
 /// SteamVR's defaults (resources/settings/default.vrsettings) for the keys the OpenVR headers
 /// name. SteamVR reports UnsetSettingHasNoDefault for any other key that wasn't set.
 static DEFAULTS: &[(&str, &str, Value)] = &[
+    // Only the 0.9 and 1.0 headers name these, which IVRSettings_001 and 002 apps still read.
+    // They're what SteamVR reported for a direct mode headset.
+    ("steamvr", "directMode", Bool(true)),
+    ("steamvr", "allowReprojection", Bool(true)),
+    ("steamvr", "allowInterleavedReprojection", Bool(true)),
+    ("steamvr", "allowAsyncReprojection", Bool(true)),
+    ("steamvr", "forceReprojection", Bool(false)),
+    // The world scale override, which is off unless the user sets one.
+    ("steamvr", "worldScale", Float(1.0)),
     ("steamvr", "contrast", Float(0.0)),
     ("steamvr", "requireHmd", Bool(true)),
     ("steamvr", "forcedDriver", string(c"")),
@@ -226,13 +237,27 @@ static DEFAULTS: &[(&str, &str, Value)] = &[
     ("dashboard", "grabHandleAcceleration", Float(1.0)),
 ];
 
-#[derive(Default, macros::InterfaceImpl)]
+fn default_value(section: &str, key: &str) -> Option<&'static Value> {
+    // Per-app render resolution, in percent.
+    static RESOLUTION_SCALE: Value = Float(100.0);
+    if section.starts_with("steam.app.") && key == "resolutionScale" {
+        return Some(&RESOLUTION_SCALE);
+    }
+    DEFAULTS
+        .iter()
+        .find(|(s, k, _)| (*s, *k) == (section, key))
+        .map(|(_, _, value)| value)
+}
+
+/// Values set by the app. Like SteamVR's, they outlive the session, but they aren't saved.
+static VALUES: LazyLock<Mutex<HashMap<(String, String), Value>>> = LazyLock::new(Default::default);
+
+#[derive(macros::InterfaceImpl)]
 #[interface = "IVRSettings"]
 #[versions(003, 002, 001)]
 pub struct Settings {
     vtables: Vtables,
-    /// Values set by the app. Unlike SteamVR, these aren't saved.
-    values: Mutex<HashMap<(String, String), Value>>,
+    system: Injected<System>,
 }
 
 fn key(section: *const c_char, key: *const c_char) -> Option<(String, String)> {
@@ -264,6 +289,47 @@ fn write_string(value: &CStr, out: *mut c_char, out_len: u32) {
 }
 
 impl Settings {
+    pub fn new(injector: &Injector) -> Self {
+        Self {
+            vtables: Default::default(),
+            system: injector.inject(),
+        }
+    }
+
+    /// Settings SteamVR keeps up to date with the headset.
+    fn headset_value(&self, section: &str, key: &str) -> Option<Value> {
+        use vr::IVRSystem026_Interface;
+        const HMD: vr::TrackedDeviceIndex_t = vr::k_unTrackedDeviceIndex_Hmd;
+
+        let system = self.system.get()?;
+        let string = |prop| {
+            let error = std::ptr::null_mut();
+            let len =
+                system.GetStringTrackedDeviceProperty(HMD, prop, std::ptr::null_mut(), 0, error);
+            let mut buf = vec![0; len as usize];
+            system.GetStringTrackedDeviceProperty(HMD, prop, buf.as_mut_ptr(), len, error);
+            let bytes: Vec<u8> = buf.into_iter().map(|c| c as u8).collect();
+            let value = CStr::from_bytes_until_nul(&bytes).ok()?;
+            Some(Str(value.to_owned().into()))
+        };
+        match (section, key) {
+            ("steamvr", "ipd") => {
+                let ipd = system.GetFloatTrackedDeviceProperty(
+                    HMD,
+                    vr::ETrackedDeviceProperty::UserIpdMeters_Float,
+                    std::ptr::null_mut(),
+                );
+                // Before the headset is tracked there's no IPD, so use SteamVR's default.
+                (ipd > 0.0).then_some(Float(ipd))
+            }
+            ("LastKnown", "HMDManufacturer") => {
+                string(vr::ETrackedDeviceProperty::ManufacturerName_String)
+            }
+            ("LastKnown", "HMDModel") => string(vr::ETrackedDeviceProperty::ModelNumber_String),
+            _ => None,
+        }
+    }
+
     fn set(
         &self,
         section: *const c_char,
@@ -276,11 +342,11 @@ impl Settings {
             return;
         };
         debug!("Setting {}/{} to {value:?}", key.0, key.1);
-        self.values.lock().unwrap().insert(key, value);
+        VALUES.lock().unwrap().insert(key, value);
         set_error(error, EVRSettingsError::None);
     }
 
-    /// The value the app set, or else SteamVR's default.
+    /// The value the app set, or else SteamVR's.
     fn get<T>(
         &self,
         section: *const c_char,
@@ -288,13 +354,12 @@ impl Settings {
         convert: impl FnOnce(&Value) -> Option<T>,
     ) -> Option<T> {
         let key = key(section, settings_key)?;
-        let values = self.values.lock().unwrap();
-        let value = values.get(&key).or_else(|| {
-            DEFAULTS
-                .iter()
-                .find(|(s, k, _)| (*s, *k) == (&*key.0, &*key.1))
-                .map(|(_, _, value)| value)
-        });
+        if let Some(value) = VALUES.lock().unwrap().get(&key) {
+            debug!("Getting {}/{}: {value:?}", key.0, key.1);
+            return convert(value);
+        }
+        let headset = self.headset_value(&key.0, &key.1);
+        let value = headset.as_ref().or_else(|| default_value(&key.0, &key.1));
         debug!("Getting {}/{}: {value:?}", key.0, key.1);
         value.and_then(convert)
     }
@@ -319,7 +384,7 @@ impl Settings {
     }
 
     fn remove(&self, mut matches: impl FnMut(&(String, String)) -> bool) {
-        self.values.lock().unwrap().retain(|key, _| !matches(key));
+        VALUES.lock().unwrap().retain(|key, _| !matches(key));
     }
 }
 
@@ -516,7 +581,9 @@ impl vr::IVRSettings001On002 for Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::openxr_data::OpenXrData;
     use std::ffi::CString;
+    use std::sync::Arc;
     use vr::{IVRSettings001On002, IVRSettings003_Interface};
 
     fn get_string(
@@ -540,7 +607,7 @@ mod tests {
 
     #[test]
     fn steamvr_defaults() {
-        let settings = Settings::default();
+        let settings = Settings::new(&Injector::default());
         let mut err = EVRSettingsError::IPCFailed;
 
         let scale = IVRSettings003_Interface::GetFloat(
@@ -598,13 +665,13 @@ mod tests {
 
     #[test]
     fn set_and_remove() {
-        let settings = Settings::default();
+        let settings = Settings::new(&Injector::default());
         let mut err = EVRSettingsError::IPCFailed;
-        let get_scale = |err: &mut EVRSettingsError| {
+        let get_multiplier = |settings: &Settings, err: &mut EVRSettingsError| {
             IVRSettings003_Interface::GetFloat(
-                &settings,
+                settings,
                 c"steamvr".as_ptr(),
-                c"supersampleScale".as_ptr(),
+                c"renderTargetMultiplier".as_ptr(),
                 err,
             )
         };
@@ -612,46 +679,53 @@ mod tests {
         IVRSettings003_Interface::SetFloat(
             &settings,
             c"steamvr".as_ptr(),
-            c"supersampleScale".as_ptr(),
+            c"renderTargetMultiplier".as_ptr(),
             1.5,
             &mut err,
         );
         assert_eq!(err, EVRSettingsError::None);
-        assert_eq!(get_scale(&mut err), 1.5);
+        assert_eq!(get_multiplier(&settings, &mut err), 1.5);
+        // Like SteamVR's, they outlive the interface.
+        let settings = Settings::new(&Injector::default());
+        assert_eq!(get_multiplier(&settings, &mut err), 1.5);
         IVRSettings003_Interface::RemoveKeyInSection(
             &settings,
             c"steamvr".as_ptr(),
-            c"supersampleScale".as_ptr(),
+            c"renderTargetMultiplier".as_ptr(),
             &mut err,
         );
-        assert_eq!(get_scale(&mut err), 1.0);
+        assert_eq!(get_multiplier(&settings, &mut err), 1.0);
 
         IVRSettings003_Interface::SetString(
             &settings,
-            c"my_app".as_ptr(),
+            c"xrizer_set_and_remove".as_ptr(),
             c"name".as_ptr(),
             c"hello".as_ptr(),
             &mut err,
         );
         assert_eq!(
-            get_string(&settings, c"my_app", c"name", 8),
+            get_string(&settings, c"xrizer_set_and_remove", c"name", 8),
             (c"hello".into(), EVRSettingsError::None)
         );
         // Truncated to fit.
         assert_eq!(
-            get_string(&settings, c"my_app", c"name", 3),
+            get_string(&settings, c"xrizer_set_and_remove", c"name", 3),
             (c"he".into(), EVRSettingsError::None)
         );
-        IVRSettings003_Interface::RemoveSection(&settings, c"my_app".as_ptr(), &mut err);
+        IVRSettings003_Interface::RemoveSection(
+            &settings,
+            c"xrizer_set_and_remove".as_ptr(),
+            &mut err,
+        );
         assert_eq!(
-            get_string(&settings, c"my_app", c"name", 8).1,
+            get_string(&settings, c"xrizer_set_and_remove", c"name", 8).1,
             EVRSettingsError::UnsetSettingHasNoDefault
         );
     }
 
     #[test]
     fn v001_falls_back_to_caller_default() {
-        let settings = Settings::default();
+        let settings = Settings::new(&Injector::default());
         let mut err = EVRSettingsError::IPCFailed;
 
         let value = IVRSettings001On002::GetFloat(
@@ -702,18 +776,86 @@ mod tests {
 
         IVRSettings003_Interface::SetInt32(
             &settings,
-            c"steamvr".as_ptr(),
-            c"notASetting".as_ptr(),
+            c"xrizer_v001".as_ptr(),
+            c"value".as_ptr(),
             7,
             &mut err,
         );
         let value = IVRSettings001On002::GetInt32(
             &settings,
-            c"steamvr".as_ptr(),
-            c"notASetting".as_ptr(),
+            c"xrizer_v001".as_ptr(),
+            c"value".as_ptr(),
             3,
             &mut err,
         );
         assert_eq!((value, err), (7, EVRSettingsError::None));
+    }
+
+    #[test]
+    fn keys_games_read() {
+        let settings = Settings::new(&Injector::default());
+        let mut err = EVRSettingsError::IPCFailed;
+        let get_float = |section: &CStr, key: &CStr, err: &mut EVRSettingsError| {
+            IVRSettings003_Interface::GetFloat(&settings, section.as_ptr(), key.as_ptr(), err)
+        };
+
+        // From the 0.9 and 1.0 headers.
+        for key in [
+            c"directMode",
+            c"allowReprojection",
+            c"allowInterleavedReprojection",
+            c"allowAsyncReprojection",
+        ] {
+            let value = IVRSettings003_Interface::GetBool(
+                &settings,
+                c"steamvr".as_ptr(),
+                key.as_ptr(),
+                &mut err,
+            );
+            assert_eq!((value, err), (true, EVRSettingsError::None), "{key:?}");
+        }
+
+        let scale = get_float(c"steamvr", c"worldScale", &mut err);
+        assert_eq!((scale, err), (1.0, EVRSettingsError::None));
+        let scale = get_float(c"steam.app.620", c"resolutionScale", &mut err);
+        assert_eq!((scale, err), (100.0, EVRSettingsError::None));
+        get_float(c"steam.app.620", c"notASetting", &mut err);
+        assert_eq!(err, EVRSettingsError::UnsetSettingHasNoDefault);
+    }
+
+    #[test]
+    fn headset_values() {
+        use vr::IVRSystem026_Interface;
+
+        let xr =
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
+        let system = Arc::new(System::new(xr, &Injector::default()));
+        let settings = Settings::new(&Injector::default());
+        settings.system.set(Arc::downgrade(&system));
+
+        let mut model = [0; 64];
+        system.GetStringTrackedDeviceProperty(
+            vr::k_unTrackedDeviceIndex_Hmd,
+            vr::ETrackedDeviceProperty::ModelNumber_String,
+            model.as_mut_ptr(),
+            model.len() as u32,
+            std::ptr::null_mut(),
+        );
+        let model = unsafe { CStr::from_ptr(model.as_ptr()) };
+        assert!(!model.is_empty());
+        assert_eq!(
+            get_string(&settings, c"LastKnown", c"HMDModel", 64),
+            (model.into(), EVRSettingsError::None)
+        );
+
+        // The fake runtime's eyes are in the same place.
+        let mut err = EVRSettingsError::IPCFailed;
+        let ipd = IVRSettings003_Interface::GetFloat(
+            &settings,
+            c"steamvr".as_ptr(),
+            c"ipd".as_ptr(),
+            &mut err,
+        );
+        assert_eq!((ipd, err), (0.063, EVRSettingsError::None));
     }
 }
