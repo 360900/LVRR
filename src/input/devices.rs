@@ -490,8 +490,13 @@ impl TrackedDevice {
         // Any other value from the app is located like RawAndUncalibrated, so it shares those
         // cache entries rather than adding its own.
         let origin = match origin {
-            vr::ETrackingUniverseOrigin::Seated | vr::ETrackingUniverseOrigin::Standing => origin,
-            _ => vr::ETrackingUniverseOrigin::RawAndUncalibrated,
+            vr::ETrackingUniverseOrigin::Seated
+            | vr::ETrackingUniverseOrigin::Standing
+            | vr::ETrackingUniverseOrigin::RawAndUncalibrated => origin,
+            _ => {
+                crate::warn_once!("Unknown tracking universe {:?}, using raw", origin);
+                vr::ETrackingUniverseOrigin::RawAndUncalibrated
+            }
         };
         let nanos = xr_time.as_nanos();
         let mut pose_cache = self.pose_cache.lock().unwrap();
@@ -1396,6 +1401,22 @@ mod tests {
             hmd.pose_cache.lock().unwrap().recent.len(),
             PoseCache::MAX_RECENT
         );
+    }
+
+    #[test]
+    fn unknown_origins_share_the_raw_pose() {
+        let f = Fixture::new();
+        for origin in [7, 8, u32::MAX] {
+            hmd_height(&f, vr::ETrackingUniverseOrigin(origin), 1);
+        }
+        hmd_height(&f, vr::ETrackingUniverseOrigin::RawAndUncalibrated, 1);
+
+        let data = f.input.openxr.session_data.get();
+        let devices = data.input_data.devices.read().unwrap();
+        let hmd = devices.get_device(vr::k_unTrackedDeviceIndex_Hmd).unwrap();
+        let cache = hmd.pose_cache.lock().unwrap();
+        assert_eq!(cache.recent.len(), 1);
+        assert_eq!(cache.last_valid.len(), 1);
     }
 
     /// The Tip pose, which has a pose transformation on Knuckles.
