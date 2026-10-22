@@ -13,7 +13,7 @@ use glam::{Mat3, Quat, Vec3};
 use log::{debug, error, info, trace, warn};
 use openvr as vr;
 use openxr as xr;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::{CStr, CString};
 use std::sync::{Arc, Mutex};
 
@@ -254,6 +254,7 @@ pub struct System {
     overlay: Injected<OverlayMan>,
     vtables: Vtables,
     views: Mutex<Views>,
+    hidden_area_meshes: Mutex<HashMap<(u32, u32), &'static [vr::HmdVector2_t]>>,
 }
 
 mod log_tags {
@@ -328,6 +329,7 @@ impl System {
             overlay: injector.inject(),
             vtables: Default::default(),
             views: Mutex::default(),
+            hidden_area_meshes: Mutex::default(),
         }
     }
 
@@ -651,6 +653,17 @@ impl vr::IVRSystem026_Interface for System {
 
         trace!("openxr mask: {:#?} {:#?}", mask.indices, mask.vertices);
 
+        // Apps keep the mesh, so don't scale it with made up views.
+        let space = self
+            .openxr
+            .session_data
+            .get()
+            .current_origin_as_reference_space();
+        if self.located_views(space).is_none() {
+            warn!("No views located yet, returning an empty {ty:?} hidden area mesh");
+            return Default::default();
+        }
+
         let [mut left, mut right, mut top, mut bottom] = [0.0; 4];
         self.GetProjectionRaw(eye, &mut left, &mut right, &mut top, &mut bottom);
 
@@ -672,15 +685,35 @@ impl vr::IVRSystem026_Interface for System {
             .collect();
 
         trace!("vertices: {vertices:#?}");
-        let count = vertices.len() / 3;
-        // XXX: what are we supposed to do here? pVertexData is a random pointer and there's no
-        // clear way for the application to deallocate it
-        // fortunately it seems like applications don't call this often, so this leakage isn't a
-        // huge deal.
-        let vertices = Vec::leak(vertices).as_ptr();
+        // For a line loop, the "triangle" count is the vertex count.
+        let count = match ty {
+            vr::EHiddenAreaMeshType::LineLoop => vertices.len(),
+            _ => vertices.len() / 3,
+        };
+        if count == 0 {
+            return Default::default();
+        }
+
+        // Apps never free the mesh, and may still use an old one after asking again. Leak each
+        // distinct mesh once.
+        let mut meshes = self.hidden_area_meshes.lock().unwrap();
+        let bits = |mesh: &[vr::HmdVector2_t]| {
+            mesh.iter()
+                .map(|v| v.v.map(f32::to_bits))
+                .collect::<Vec<_>>()
+        };
+        let key = (eye as u32, ty as u32);
+        let mesh = match meshes.get(&key) {
+            Some(&mesh) if bits(mesh) == bits(&vertices) => mesh,
+            _ => {
+                let mesh: &'static [_] = Vec::leak(vertices);
+                meshes.insert(key, mesh);
+                mesh
+            }
+        };
 
         vr::HiddenAreaMesh_t {
-            pVertexData: vertices,
+            pVertexData: mesh.as_ptr(),
             unTriangleCount: count as u32,
         }
     }
@@ -1568,6 +1601,57 @@ mod tests {
         let system = System::new(xr, &Injector::default());
 
         // fakexr fails every visibility mask request.
+        let mesh = vr::IVRSystem026_Interface::GetHiddenAreaMesh(
+            &system,
+            vr::EVREye::Left,
+            vr::EHiddenAreaMeshType::Standard,
+        );
+        assert!(mesh.pVertexData.is_null());
+        assert_eq!(mesh.unTriangleCount, 0);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // The meshes are leaked on purpose.
+    fn hidden_area_mesh_types() {
+        let xr =
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
+        let system = System::new(xr, &Injector::default());
+        let mesh =
+            |ty| vr::IVRSystem026_Interface::GetHiddenAreaMesh(&system, vr::EVREye::Left, ty);
+        let square = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+            .map(|(x, y)| xr::Vector2f { x, y })
+            .to_vec();
+
+        fakexr::set_visibility_mask(Some((square.clone(), vec![0, 1, 2, 3])));
+        let line_loop = mesh(vr::EHiddenAreaMeshType::LineLoop);
+        assert!(!line_loop.pVertexData.is_null());
+        // One per vertex for a line loop.
+        assert_eq!(line_loop.unTriangleCount, 4);
+
+        fakexr::set_visibility_mask(Some((square, vec![0, 1, 2, 0, 2, 3])));
+        let triangles = mesh(vr::EHiddenAreaMeshType::Standard);
+        assert_eq!(triangles.unTriangleCount, 2);
+        // The same mesh again isn't another allocation.
+        assert_eq!(
+            mesh(vr::EHiddenAreaMeshType::Standard).pVertexData,
+            triangles.pVertexData
+        );
+
+        // Runtimes may not have a mask yet.
+        fakexr::set_visibility_mask(Some((Vec::new(), Vec::new())));
+        let empty = mesh(vr::EHiddenAreaMeshType::Standard);
+        assert!(empty.pVertexData.is_null());
+        assert_eq!(empty.unTriangleCount, 0);
+    }
+
+    #[test]
+    fn hidden_area_mesh_without_views() {
+        let xr =
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
+        let system = System::new(xr, &Injector::default());
+        fakexr::set_locate_views_error(Some(xr::sys::Result::ERROR_RUNTIME_FAILURE));
+        fakexr::set_visibility_mask(Some((vec![xr::Vector2f::default(); 3], vec![0, 1, 2])));
+
         let mesh = vr::IVRSystem026_Interface::GetHiddenAreaMesh(
             &system,
             vr::EVREye::Left,

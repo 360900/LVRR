@@ -127,6 +127,13 @@ thread_local! {
     static EXTRA_EXTENSIONS: RefCell<Vec<&'static [u8]>> = const { RefCell::new(Vec::new()) };
     static REJECTED_PROFILES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     static LOCATE_VIEWS_ERROR: Cell<Option<xr::Result>> = const { Cell::new(None) };
+    static VISIBILITY_MASK: RefCell<Option<(Vec<xr::Vector2f>, Vec<u32>)>> = const { RefCell::new(None) };
+}
+
+/// Sets the vertices and indices xrGetVisibilityMaskKHR returns on this thread. Without one, it
+/// fails.
+pub fn set_visibility_mask(mask: Option<(Vec<xr::Vector2f>, Vec<u32>)>) {
+    VISIBILITY_MASK.set(mask);
 }
 
 /// Makes xrLocateViews fail with `error` on this thread, or succeed again with `None`.
@@ -2119,16 +2126,34 @@ extern "system" fn end_frame(session: xr::Session, info: *const xr::FrameEndInfo
     xr::Result::SUCCESS
 }
 
-/// Always fails, like a runtime that can't provide a mask for the session.
+/// Fails unless a mask was set with [set_visibility_mask], like a runtime that can't provide one.
 extern "system" fn get_visibility_mask_k_h_r(
     session: xr::Session,
     _: xr::ViewConfigurationType,
     _: u32,
     _: xr::VisibilityMaskTypeKHR,
-    _: *mut xr::VisibilityMaskKHR,
+    mask: *mut xr::VisibilityMaskKHR,
 ) -> xr::Result {
     let _session = get_handle!(session);
-    xr::Result::ERROR_RUNTIME_FAILURE
+    let Some((vertices, indices)) = VISIBILITY_MASK.with_borrow(Clone::clone) else {
+        return xr::Result::ERROR_RUNTIME_FAILURE;
+    };
+    let mask = unsafe { mask.as_mut().unwrap() };
+    mask.vertex_count_output = vertices.len() as u32;
+    mask.index_count_output = indices.len() as u32;
+    if mask.vertex_capacity_input == 0 && mask.index_capacity_input == 0 {
+        return xr::Result::SUCCESS;
+    }
+    if (mask.vertex_capacity_input as usize) < vertices.len()
+        || (mask.index_capacity_input as usize) < indices.len()
+    {
+        return xr::Result::ERROR_SIZE_INSUFFICIENT;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(vertices.as_ptr(), mask.vertices, vertices.len());
+        std::ptr::copy_nonoverlapping(indices.as_ptr(), mask.indices, indices.len());
+    }
+    xr::Result::SUCCESS
 }
 
 extern "system" fn locate_views(
