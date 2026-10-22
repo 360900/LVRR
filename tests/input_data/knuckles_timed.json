@@ -23,7 +23,7 @@
 						}
 					},
 					"parameters": {
-						"long_press_delay": "0.05"
+						"long_press_delay": "0.3"
 					}
 				},
 				{

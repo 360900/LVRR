@@ -2237,7 +2237,7 @@ mod tests {
         assert_eq!(states(&mut f), [false; 5]);
         press_a(true);
         assert_eq!(states(&mut f), [true, false, false, false, false]);
-        std::thread::sleep(Duration::from_millis(60));
+        std::thread::sleep(Duration::from_millis(310));
         assert_eq!(states(&mut f), [true, true, true, false, false]);
         press_a(false);
         // Not a single press either.
