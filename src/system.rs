@@ -391,21 +391,14 @@ impl System {
 
 impl vr::IVRSystem026_Interface for System {
     fn GetRecommendedRenderTargetSize(&self, width: *mut u32, height: *mut u32) {
-        let views = self
-            .openxr
-            .instance
-            .enumerate_view_configuration_views(
-                self.openxr.system_id,
-                xr::ViewConfigurationType::PRIMARY_STEREO,
-            )
-            .unwrap();
+        let (eye_width, eye_height) = self.openxr.recommended_eye_size();
 
         if !width.is_null() {
-            unsafe { *width = views[0].recommended_image_rect_width };
+            unsafe { *width = eye_width };
         }
 
         if !height.is_null() {
-            unsafe { *height = views[0].recommended_image_rect_height };
+            unsafe { *height = eye_height };
         }
     }
     fn GetProjectionMatrix(&self, eye: vr::EVREye, near_z: f32, far_z: f32) -> vr::HmdMatrix44_t {

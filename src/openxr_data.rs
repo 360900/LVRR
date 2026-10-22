@@ -682,6 +682,28 @@ impl<C: Compositor> OpenXrData<C> {
         self.instance.now().ok()
     }
 
+    /// The runtime's recommended image size for each eye.
+    pub fn recommended_eye_size(&self) -> (u32, u32) {
+        let view = self
+            .instance
+            .enumerate_view_configuration_views(
+                self.system_id,
+                xr::ViewConfigurationType::PRIMARY_STEREO,
+            )
+            .map(|views| views.first().copied());
+        match view {
+            Ok(Some(view)) => (
+                view.recommended_image_rect_width,
+                view.recommended_image_rect_height,
+            ),
+            other => {
+                crate::warn_once!("Couldn't get the recommended eye size: {:?}", other);
+                // Apps can't handle failure here, and a zero size render target won't do either.
+                (1440, 1600)
+            }
+        }
+    }
+
     pub fn time_from_now(&self, seconds: f32) -> xr::Time {
         offset_time(
             self.now().unwrap_or_else(|| self.display_time.get()),

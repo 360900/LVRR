@@ -1,6 +1,5 @@
 use crate::openxr_data::RealOpenXrData;
 use openvr as vr;
-use openxr as xr;
 use std::sync::Arc;
 
 #[derive(macros::InterfaceImpl)]
@@ -18,28 +17,12 @@ impl ExtendedDisplay {
             openxr,
         }
     }
-
-    /// Recommended size of a single eye.
-    fn eye_size(&self) -> (u32, u32) {
-        let views = self
-            .openxr
-            .instance
-            .enumerate_view_configuration_views(
-                self.openxr.system_id,
-                xr::ViewConfigurationType::PRIMARY_STEREO,
-            )
-            .unwrap();
-        (
-            views[0].recommended_image_rect_width,
-            views[0].recommended_image_rect_height,
-        )
-    }
 }
 
 // There is no real display window, so report a side by side layout of both eyes.
 impl vr::IVRExtendedDisplay001_Interface for ExtendedDisplay {
     fn GetWindowBounds(&self, x: *mut i32, y: *mut i32, width: *mut u32, height: *mut u32) {
-        let (eye_width, eye_height) = self.eye_size();
+        let (eye_width, eye_height) = self.openxr.recommended_eye_size();
         if let Some(x) = unsafe { x.as_mut() } {
             *x = 0;
         }
@@ -62,7 +45,7 @@ impl vr::IVRExtendedDisplay001_Interface for ExtendedDisplay {
         width: *mut u32,
         height: *mut u32,
     ) {
-        let (eye_width, eye_height) = self.eye_size();
+        let (eye_width, eye_height) = self.openxr.recommended_eye_size();
         let eye_x = match eye {
             vr::EVREye::Left => 0,
             vr::EVREye::Right => eye_width,
