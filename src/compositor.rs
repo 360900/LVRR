@@ -2632,18 +2632,20 @@ mod tests {
 
     #[test]
     fn unsupported_texture_types() {
-        use vr::ETextureType::*;
+        use vr::ETextureType as T;
         let f = Fixture::new();
         assert_eq!(f.wait_get_poses(), None);
 
         let mut handle = 0u64;
         for ty in [
-            Invalid,
-            DirectX,
-            IOSurface,
-            DirectX12,
-            DXGISharedHandle,
-            Metal,
+            T::Invalid,
+            T::DirectX,
+            T::IOSurface,
+            T::DirectX12,
+            T::DXGISharedHandle,
+            T::Metal,
+            // Not a texture type the headers know.
+            T(99),
         ] {
             let texture = texture_of_type(ty, (&raw mut handle).cast());
             assert_eq!(
@@ -3028,10 +3030,7 @@ mod tests {
         let mut buf = FrameTimingBuffer::new(full);
         assert!(f.comp.GetFrameTiming(buf.ptr(), 1));
         assert_eq!(buf.pose_valid(), 0);
-        assert_eq!(
-            buf.tracking_result(),
-            vr::ETrackingResult::Uninitialized as u32
-        );
+        assert_eq!(buf.tracking_result(), vr::ETrackingResult::Uninitialized.0);
 
         // An older, smaller struct only has its own bytes written.
         let mut buf = FrameTimingBuffer::new(FRAME_TIMING_MIN_SIZE);
@@ -3911,9 +3910,10 @@ mod tests {
             assert!(close(bottom, fov.angle_up.tan()));
             assert!(close(pose.orientation.w, 1.0));
 
-            let outer = match eye {
-                vr::EVREye::Left => -fov.angle_left,
-                vr::EVREye::Right => fov.angle_right,
+            let outer = if eye == vr::EVREye::Left {
+                -fov.angle_left
+            } else {
+                fov.angle_right
             };
             assert!(close(outer.to_degrees(), 55.0), "{eye:?}: {fov:?}");
             let eye_to_head = system.GetEyeToHeadTransform(eye).m;
