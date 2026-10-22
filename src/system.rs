@@ -562,16 +562,12 @@ impl vr::IVRSystem026_Interface for System {
     }
     fn GetControllerAxisTypeNameFromEnum(
         &self,
-        _: vr::EVRControllerAxisType,
+        axis_type: vr::EVRControllerAxisType,
     ) -> *const std::os::raw::c_char {
-        crate::warn_unimplemented!("GetControllerAxisTypeNameFromEnum");
-        static NAME: &CStr = c"Unknown";
-        NAME.as_ptr()
+        crate::enum_name("k_eControllerAxis_", axis_type)
     }
-    fn GetButtonIdNameFromEnum(&self, _: vr::EVRButtonId) -> *const std::os::raw::c_char {
-        crate::warn_unimplemented!("GetButtonIdNameFromEnum");
-        static NAME: &CStr = c"Unknown";
-        NAME.as_ptr()
+    fn GetButtonIdNameFromEnum(&self, button: vr::EVRButtonId) -> *const std::os::raw::c_char {
+        crate::enum_name("k_EButton_", button)
     }
     fn TriggerHapticPulse(
         &self,
@@ -742,9 +738,8 @@ impl vr::IVRSystem026_Interface for System {
         false
     }
 
-    fn GetEventTypeNameFromEnum(&self, _: vr::EVREventType) -> *const std::os::raw::c_char {
-        crate::warn_unimplemented!("GetEventTypeNameFromEnum");
-        c"Unknown".as_ptr()
+    fn GetEventTypeNameFromEnum(&self, ty: vr::EVREventType) -> *const std::os::raw::c_char {
+        crate::enum_name("VREvent_", ty)
     }
 
     fn PollNextEventWithPoseAndOverlays(
@@ -839,9 +834,9 @@ impl vr::IVRSystem026_Interface for System {
 
     fn GetPropErrorNameFromEnum(
         &self,
-        _: vr::ETrackedPropertyError,
+        error: vr::ETrackedPropertyError,
     ) -> *const std::os::raw::c_char {
-        c"Unknown error".as_ptr()
+        crate::enum_name("TrackedProp_", error)
     }
     fn GetStringTrackedDeviceProperty(
         &self,
@@ -1575,6 +1570,35 @@ mod tests {
             0.0,
             std::ptr::null_mut(),
             0,
+        );
+    }
+
+    #[test]
+    fn enum_names() {
+        let xr =
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
+        let system = System::new(xr, &Injector::default());
+        let name = |ptr| unsafe { CStr::from_ptr(ptr) };
+
+        assert_eq!(
+            name(system.GetButtonIdNameFromEnum(vr::EVRButtonId::DPad_Left)),
+            c"k_EButton_DPad_Left"
+        );
+        assert_eq!(
+            name(system.GetButtonIdNameFromEnum(vr::EVRButtonId::SteamVR_Trigger)),
+            c"k_EButton_Axis1"
+        );
+        assert_eq!(
+            name(system.GetControllerAxisTypeNameFromEnum(vr::EVRControllerAxisType::TrackPad)),
+            c"k_eControllerAxis_TrackPad"
+        );
+        assert_eq!(
+            name(system.GetEventTypeNameFromEnum(vr::EVREventType::ButtonPress)),
+            c"VREvent_ButtonPress"
+        );
+        assert_eq!(
+            name(system.GetPropErrorNameFromEnum(vr::ETrackedPropertyError::BufferTooSmall)),
+            c"TrackedProp_BufferTooSmall"
         );
     }
 

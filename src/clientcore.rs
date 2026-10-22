@@ -214,20 +214,25 @@ impl IVRClientCore003_Interface for ClientCore {
             );
         }
     }
-    fn GetIDForVRInitError(&self, _: vr::EVRInitError) -> *const c_char {
-        std::ptr::null()
+    fn GetIDForVRInitError(&self, error: vr::EVRInitError) -> *const c_char {
+        crate::enum_name("VRInitError_", error)
     }
     fn GetEnglishStringForHmdError(&self, error: vr::EVRInitError) -> *const c_char {
-        let error_string = format!("EVRInitError {error:?}");
-        error!("GetEnglishStringForHmdError({error:?}) called, returning {error_string:?}");
-        // put the error string in a static hashmap so we can return a pointer to it
-        static ERROR_STRINGS: LazyLock<Mutex<HashMap<vr::EVRInitError, CString>>> =
-            LazyLock::new(|| Mutex::new(HashMap::new()));
-        let mut error_strings = ERROR_STRINGS.lock().unwrap();
-        let cstring = error_strings
-            .entry(error)
-            .or_insert_with(|| CString::new(error_string).unwrap());
-        cstring.as_ptr()
+        debug!("GetEnglishStringForHmdError({error:?})");
+        // SteamVR's text for the errors we return; like SteamVR, fall back to the symbol.
+        let text: &CStr = match error {
+            vr::EVRInitError::None => c"No Error (0)",
+            vr::EVRInitError::Init_InstallationNotFound => c"Installation Not Found (100)",
+            vr::EVRInitError::Init_InterfaceNotFound => c"Interface Not Found (105)",
+            vr::EVRInitError::Init_HmdNotFound => c"Hmd Not Found (108)",
+            vr::EVRInitError::Init_NotInitialized => c"Not Initialized (109)",
+            vr::EVRInitError::Init_NoServerForBackgroundApp => {
+                c"Not starting vrserver for background app (121)"
+            }
+            vr::EVRInitError::Init_InvalidApplicationType => c"Invalid Application Type (130)",
+            _ => return self.GetIDForVRInitError(error),
+        };
+        text.as_ptr()
     }
     fn BIsHmdPresent(&self) -> bool {
         true
@@ -479,6 +484,34 @@ mod tests {
         );
         let new = core.openxr.read().unwrap().as_ref().unwrap().clone();
         assert!(!Arc::ptr_eq(&new, &outstanding));
+    }
+
+    #[test]
+    fn init_error_strings() {
+        let core = ClientCore::new(c"IVRClientCore_003").unwrap();
+        let string = |ptr| unsafe { CStr::from_ptr(ptr) };
+
+        let symbol = core.GetIDForVRInitError(vr::EVRInitError::Init_InterfaceNotFound);
+        assert_eq!(string(symbol), c"VRInitError_Init_InterfaceNotFound");
+        // The pointer has to stay valid, so it's the same one every time.
+        assert_eq!(
+            core.GetIDForVRInitError(vr::EVRInitError::Init_InterfaceNotFound),
+            symbol
+        );
+        assert_eq!(
+            string(core.GetIDForVRInitError(vr::EVRInitError::None)),
+            c"VRInitError_None"
+        );
+
+        assert_eq!(
+            string(core.GetEnglishStringForHmdError(vr::EVRInitError::Init_InterfaceNotFound)),
+            c"Interface Not Found (105)"
+        );
+        // SteamVR has no text for this one and returns the symbol.
+        assert_eq!(
+            string(core.GetEnglishStringForHmdError(vr::EVRInitError::Init_VRServiceStartupFailed)),
+            c"VRInitError_Init_VRServiceStartupFailed"
+        );
     }
 
     #[test]

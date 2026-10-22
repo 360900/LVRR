@@ -28,10 +28,10 @@ mod monado;
 
 use clientcore::ClientCore;
 use openvr as vr;
-use std::ffi::{CStr, c_char, c_void};
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::{
-    Arc,
+    Arc, LazyLock, Mutex, OnceLock,
     atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
@@ -106,6 +106,21 @@ macro_rules! atomic_float {
 
 atomic_float!(AtomicF32, f32, AtomicU32);
 atomic_float!(AtomicF64, f64, AtomicU64);
+
+/// The header name of an OpenVR enum value, for the `*NameFromEnum` functions: the bindgen
+/// variant names are the header names minus `prefix`. The returned string is never freed.
+fn enum_name(prefix: &str, value: impl std::fmt::Debug) -> *const c_char {
+    static NAMES: LazyLock<Mutex<HashMap<String, Box<CStr>>>> = LazyLock::new(Default::default);
+
+    let name = format!("{prefix}{value:?}");
+    NAMES
+        .lock()
+        .unwrap()
+        .entry(name)
+        // Boxed, so the pointer stays valid when the map grows.
+        .or_insert_with_key(|name| CString::new(name.as_str()).unwrap().into())
+        .as_ptr()
+}
 
 /// Per-process log files older than this get removed on startup.
 #[cfg(not(test))]

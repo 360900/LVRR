@@ -165,9 +165,9 @@ struct RenderModelData {
 impl vr::IVRRenderModels006_Interface for RenderModels {
     fn GetRenderModelErrorNameFromEnum(
         &self,
-        _: vr::EVRRenderModelError,
+        error: vr::EVRRenderModelError,
     ) -> *const std::ffi::c_char {
-        c"<unknown>".as_ptr()
+        crate::enum_name("VRRenderModelError_", error)
     }
     fn GetRenderModelOriginalPath(
         &self,
@@ -794,6 +794,15 @@ mod tests {
 
         let out = unsafe { CStr::from_ptr(buf.as_ptr()) };
         assert_eq!(out.to_bytes_with_nul(), s.to_bytes_with_nul());
+    }
+
+    #[test]
+    fn error_names() {
+        let rm = RenderModels::default();
+        let name = unsafe {
+            CStr::from_ptr(rm.GetRenderModelErrorNameFromEnum(vr::EVRRenderModelError::InvalidArg))
+        };
+        assert_eq!(name, c"VRRenderModelError_InvalidArg");
     }
 
     #[test]
