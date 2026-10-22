@@ -818,7 +818,7 @@ impl Overlay {
         let backend = match &self.compositor {
             Some(b) => b,
             None => self.compositor.insert(
-                SupportedBackend::new(&texture, self.bounds)
+                SupportedBackend::new(&texture, session_data.session.instance())
                     .ok_or(vr::EVROverlayError::InvalidTexture)?,
             ),
         };

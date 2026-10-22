@@ -146,13 +146,13 @@ impl SupportedBackend {
         }
     }
 
-    pub fn new(texture: &vr::Texture_t, _bounds: vr::VRTextureBounds_t) -> Option<Self> {
+    pub fn new(texture: &vr::Texture_t, instance: &xr::Instance) -> Option<Self> {
         match texture.eType {
             vr::ETextureType::Vulkan => {
                 let vk_texture = unsafe { &*(texture.handle as *const vr::VRVulkanTextureData_t) };
                 Some(Self::Vulkan(VulkanData::new(vk_texture)))
             }
-            vr::ETextureType::OpenGL => GlData::new().map(Self::OpenGL),
+            vr::ETextureType::OpenGL => GlData::new(instance).map(Self::OpenGL),
             #[cfg(not(test))]
             vr::ETextureType::Reserved => Some(Self::Headless(HeadlessData::new())),
             #[cfg(test)]

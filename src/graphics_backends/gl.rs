@@ -4,29 +4,332 @@ use glutin_glx_sys::{
     Success,
     glx::{self, Glx},
 };
-use libc::{dlerror, dlopen, dlsym};
+use libc::{dlopen, dlsym};
 use log::warn;
 use openvr as vr;
 use openxr as xr;
-use std::ffi::{CStr, CString, c_char, c_void};
-use std::sync::{Arc, LazyLock, Once};
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::ptr;
+use std::sync::{LazyLock, Once, OnceLock};
+use xr::sys::Handle as _;
+use xr::sys::platform::{EGLConfig, EGLContext, EGLDisplay, EglGetProcAddressMNDX};
 
-static GLX: LazyLock<Library> = LazyLock::new(|| Library::new(c"libGLX.so.0"));
+/// None if libGLX isn't installed (EGL-only systems).
+static GLX: LazyLock<Option<GlxLib>> = LazyLock::new(|| {
+    let Some(lib) = Library::open(c"libGLX.so.0", 0) else {
+        warn!("libGLX.so.0 not found, GLX contexts won't be detected");
+        return None;
+    };
+    Some(GlxLib(Glx::load_with(|func| {
+        let func = CString::new(func).unwrap();
+        lib.get(&func).unwrap_or(ptr::null())
+    })))
+});
+
+#[derive(Deref)]
+struct GlxLib(Glx);
+// SAFETY: Only holds function pointers.
+unsafe impl Send for GlxLib {}
+unsafe impl Sync for GlxLib {}
+
+const EGL_CONFIG_ID: i32 = 0x3028;
+const EGL_NONE: i32 = 0x3038;
+const EGL_EXTENSIONS: i32 = 0x3055;
+const EGL_CONTEXT_CLIENT_TYPE: i32 = 0x3097;
+const EGL_OPENGL_API: i32 = 0x30A2;
+const EGL_TRUE: u32 = 1;
+
+struct Egl {
+    get_proc_address: EglGetProcAddressMNDX,
+    get_current_display: unsafe extern "C" fn() -> EGLDisplay,
+    get_current_context: unsafe extern "C" fn() -> EGLContext,
+    query_context: unsafe extern "C" fn(EGLDisplay, EGLContext, i32, *mut i32) -> u32,
+    choose_config:
+        unsafe extern "C" fn(EGLDisplay, *const i32, *mut EGLConfig, i32, *mut i32) -> u32,
+    query_string: unsafe extern "C" fn(EGLDisplay, i32) -> *const c_char,
+}
+
+impl Egl {
+    /// The app's libEGL. We don't load it ourselves: without it, no EGL context can be current.
+    fn get() -> Option<&'static Self> {
+        static EGL: OnceLock<Egl> = OnceLock::new();
+        if let Some(egl) = EGL.get() {
+            return Some(egl);
+        }
+        let lib = Library::open(c"libEGL.so.1", libc::RTLD_NOLOAD)?;
+        let egl = unsafe {
+            Self {
+                get_proc_address: lib.get_fn(c"eglGetProcAddress")?,
+                get_current_display: lib.get_fn(c"eglGetCurrentDisplay")?,
+                get_current_context: lib.get_fn(c"eglGetCurrentContext")?,
+                query_context: lib.get_fn(c"eglQueryContext")?,
+                choose_config: lib.get_fn(c"eglChooseConfig")?,
+                query_string: lib.get_fn(c"eglQueryString")?,
+            }
+        };
+        Some(EGL.get_or_init(|| egl))
+    }
+
+    fn current_context(&self) -> EGLContext {
+        unsafe { (self.get_current_context)() }
+    }
+
+    unsafe fn session_info(&self) -> Option<SessionCreateInfo> {
+        unsafe {
+            let display = (self.get_current_display)();
+            let context = self.current_context();
+            let mut client_type = 0;
+            (self.query_context)(display, context, EGL_CONTEXT_CLIENT_TYPE, &mut client_type);
+            // GLES contexts get GLES swapchain images, which we can't handle.
+            if client_type != EGL_OPENGL_API {
+                crate::warn_once!(
+                    "Current EGL context is not a desktop OpenGL context (client type {:#x})",
+                    client_type
+                );
+                return None;
+            }
+
+            Some(SessionCreateInfo::Egl {
+                get_proc_address: self.get_proc_address,
+                display,
+                config: self.config(display, context)?,
+                context,
+            })
+        }
+    }
+
+    /// The runtime creates its own context sharing with the app's, which needs its config.
+    unsafe fn config(&self, display: EGLDisplay, context: EGLContext) -> Option<EGLConfig> {
+        unsafe {
+            let mut id = 0;
+            if (self.query_context)(display, context, EGL_CONFIG_ID, &mut id) == EGL_TRUE && id != 0
+            {
+                let attribs = [EGL_CONFIG_ID, id, EGL_NONE];
+                let mut config = ptr::null_mut();
+                let mut count = 0;
+                if (self.choose_config)(display, attribs.as_ptr(), &mut config, 1, &mut count)
+                    == EGL_TRUE
+                    && count > 0
+                {
+                    return Some(config);
+                }
+            }
+
+            // Contexts created without a config report none.
+            let exts = (self.query_string)(display, EGL_EXTENSIONS);
+            if !exts.is_null() && has_extension(CStr::from_ptr(exts), "EGL_KHR_no_config_context") {
+                Some(ptr::null_mut()) // EGL_NO_CONFIG_KHR
+            } else {
+                crate::warn_once!("Couldn't find the config of the current EGL context");
+                None
+            }
+        }
+    }
+}
+
+fn has_extension(extensions: &CStr, name: &str) -> bool {
+    extensions
+        .to_bytes()
+        .split(|c| *c == b' ')
+        .any(|ext| ext == name.as_bytes())
+}
+
+/// [xr::OpenGL] plus the EGL binding from XR_MNDX_egl_enable, which openxrs lacks. Monado
+/// enumerates OpenGL swapchain images for desktop GL EGL contexts too.
+pub enum GlApi {}
+
+/// The app's GL context, which the runtime shares swapchain images with.
+#[derive(Copy, Clone)]
+pub enum SessionCreateInfo {
+    Xlib {
+        x_display: *mut xr::sys::platform::Display,
+        visualid: u32,
+        glx_fb_config: xr::sys::platform::GLXFBConfig,
+        glx_drawable: xr::sys::platform::GLXDrawable,
+        glx_context: xr::sys::platform::GLXContext,
+    },
+    Egl {
+        get_proc_address: EglGetProcAddressMNDX,
+        display: EGLDisplay,
+        config: EGLConfig,
+        context: EGLContext,
+    },
+}
+// SAFETY: These are handles owned by the app, we never dereference them.
+unsafe impl Send for SessionCreateInfo {}
+unsafe impl Sync for SessionCreateInfo {}
+
+impl SessionCreateInfo {
+    /// Captures the context current on this thread.
+    fn current(instance: &xr::Instance) -> Option<Self> {
+        if let Some(glx) = GLX.as_ref() {
+            let glx_context = unsafe { glx.GetCurrentContext() };
+            if !glx_context.is_null() {
+                return Some(unsafe { xlib_session_info(glx, glx_context) });
+            }
+        }
+
+        let Some(egl) = Egl::get().filter(|egl| !egl.current_context().is_null()) else {
+            crate::warn_once!("No GLX or EGL context is current, can't use OpenGL textures");
+            return None;
+        };
+        if instance.exts().mndx_egl_enable.is_none() {
+            crate::warn_once!(
+                "App uses an EGL context, but the runtime doesn't support XR_MNDX_egl_enable"
+            );
+            return None;
+        }
+        unsafe { egl.session_info() }
+    }
+
+    fn get_proc_address(&self, name: &str) -> *const c_void {
+        let name = CString::new(name).unwrap();
+        match self {
+            Self::Xlib { .. } => GLX.as_ref().map_or(ptr::null(), |glx| unsafe {
+                glx.GetProcAddress(name.as_ptr().cast()).cast()
+            }),
+            Self::Egl {
+                get_proc_address, ..
+            } => unsafe { get_proc_address(name.as_ptr()) }.map_or(ptr::null(), |f| f as _),
+        }
+    }
+}
+
+unsafe fn xlib_session_info(glx: &Glx, glx_context: glx::types::GLXContext) -> SessionCreateInfo {
+    unsafe {
+        let x_display = glx.GetCurrentDisplay();
+        let glx_drawable = glx.GetCurrentDrawable();
+        let fbconfig = get_fbconfig(glx, x_display, glx_context);
+        let visualid = get_visualid(glx, x_display, fbconfig);
+
+        SessionCreateInfo::Xlib {
+            x_display: x_display.cast(),
+            glx_fb_config: fbconfig.map(|p| p.cast_mut()).unwrap_or_else(|| {
+                warn!("No fbconfig found.");
+                1 as _
+            }),
+            visualid: visualid.unwrap_or(1),
+            glx_drawable,
+            glx_context: glx_context.cast_mut(),
+        }
+    }
+}
+
+impl xr::Graphics for GlApi {
+    type Requirements = <xr::OpenGL as xr::Graphics>::Requirements;
+    type SessionCreateInfo = SessionCreateInfo;
+    type Format = u32;
+    type SwapchainImage = u32;
+
+    fn raise_format(x: i64) -> u32 {
+        xr::OpenGL::raise_format(x)
+    }
+
+    fn lower_format(x: u32) -> i64 {
+        xr::OpenGL::lower_format(x)
+    }
+
+    fn requirements(
+        instance: &xr::Instance,
+        system: xr::SystemId,
+    ) -> xr::Result<Self::Requirements> {
+        // Required before creating EGL sessions too.
+        xr::OpenGL::requirements(instance, system)
+    }
+
+    unsafe fn create_session(
+        instance: &xr::Instance,
+        system: xr::SystemId,
+        info: &Self::SessionCreateInfo,
+    ) -> xr::Result<xr::sys::Session> {
+        match *info {
+            SessionCreateInfo::Xlib {
+                x_display,
+                visualid,
+                glx_fb_config,
+                glx_drawable,
+                glx_context,
+            } => unsafe {
+                xr::OpenGL::create_session(
+                    instance,
+                    system,
+                    &xr::opengl::SessionCreateInfo::Xlib {
+                        x_display,
+                        visualid,
+                        glx_fb_config,
+                        glx_drawable,
+                        glx_context,
+                    },
+                )
+            },
+            SessionCreateInfo::Egl {
+                get_proc_address,
+                display,
+                config,
+                context,
+            } => {
+                let binding = xr::sys::GraphicsBindingEGLMNDX {
+                    ty: xr::sys::GraphicsBindingEGLMNDX::TYPE,
+                    next: ptr::null(),
+                    get_proc_address: Some(get_proc_address),
+                    display,
+                    config,
+                    context,
+                };
+                let info = xr::sys::SessionCreateInfo {
+                    ty: xr::sys::SessionCreateInfo::TYPE,
+                    next: (&raw const binding).cast(),
+                    create_flags: Default::default(),
+                    system_id: system,
+                };
+                let mut session = xr::sys::Session::NULL;
+                cvt(unsafe {
+                    (instance.fp().create_session)(instance.as_raw(), &info, &mut session)
+                })?;
+                Ok(session)
+            }
+        }
+    }
+
+    fn enumerate_swapchain_images(swapchain: &xr::Swapchain<Self>) -> xr::Result<Vec<u32>> {
+        let enumerate = swapchain.instance().fp().enumerate_swapchain_images;
+        let mut count = 0;
+        cvt(unsafe { enumerate(swapchain.as_raw(), 0, &mut count, ptr::null_mut()) })?;
+        let mut images = vec![
+            xr::sys::SwapchainImageOpenGLKHR {
+                ty: xr::sys::SwapchainImageOpenGLKHR::TYPE,
+                next: ptr::null_mut(),
+                image: 0,
+            };
+            count as usize
+        ];
+        cvt(unsafe {
+            enumerate(
+                swapchain.as_raw(),
+                count,
+                &mut count,
+                images.as_mut_ptr().cast(),
+            )
+        })?;
+        Ok(images[..count as usize].iter().map(|i| i.image).collect())
+    }
+}
+
+fn cvt(result: xr::sys::Result) -> xr::Result<()> {
+    if result.into_raw() < 0 {
+        Err(result)
+    } else {
+        Ok(())
+    }
+}
 
 pub struct GlData {
-    session_data: Arc<SessionCreateInfo>,
+    session_info: SessionCreateInfo,
     images: Vec<u32>,
     format: u32,
     read_fbo: u32,
     draw_fbo: u32,
 }
-
-#[derive(Deref)]
-struct SessionCreateInfo(xr::opengl::SessionCreateInfo);
-// SAFETY: SessionCreateInfo is only not Send + Sync because of the pointer next field.
-// We don't even use this field so it's fine.
-unsafe impl Send for SessionCreateInfo {}
-unsafe impl Sync for SessionCreateInfo {}
 
 unsafe fn get_fbconfig(
     glx: &Glx,
@@ -72,19 +375,20 @@ unsafe fn get_visualid(
 }
 
 impl GlData {
-    // Returns None if we couldn't get the display.
-    pub(crate) fn new() -> Option<Self> {
-        let glx = Glx::load_with(|func| {
-            let func = unsafe { CString::from_vec_unchecked(func.as_bytes().to_vec()) };
-            GLX.get(&func)
-        });
+    /// Returns None if no usable GL context is current.
+    pub(crate) fn new(instance: &xr::Instance) -> Option<Self> {
+        if instance.exts().khr_opengl_enable.is_none() {
+            crate::warn_once!("Runtime doesn't support XR_KHR_opengl_enable");
+            return None;
+        }
+
+        // Grab the session info on creation - this makes us resilient against session restarts,
+        // which could result in us trying to grab the context from a different thread
+        let session_info = SessionCreateInfo::current(instance)?;
 
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
-            gl::load_with(|f| {
-                let f = unsafe { CString::from_vec_unchecked(f.as_bytes().to_vec()) };
-                unsafe { glx.GetProcAddress(f.as_ptr().cast()) }.cast()
-            });
+            gl::load_with(|f| session_info.get_proc_address(f));
 
             if log::log_enabled!(log::Level::Debug) {
                 unsafe {
@@ -94,43 +398,13 @@ impl GlData {
             }
         });
 
-        // Grab the session info on creation - this makes us resilient against session restarts,
-        // which could result in us trying to grab the context from a different thread
-        let session_info = unsafe {
-            let x_display = glx.GetCurrentDisplay();
-            if x_display.is_null() {
-                warn!("X display is null!");
-                return None;
-            }
-            let glx_context = glx.GetCurrentContext();
-            if glx_context.is_null() {
-                warn!("GLX context was null!");
-                return None;
-            }
-
-            let glx_drawable = glx.GetCurrentDrawable();
-            let fbconfig = get_fbconfig(&glx, x_display, glx_context);
-            let visualid = get_visualid(&glx, x_display, fbconfig);
-
-            xr::opengl::SessionCreateInfo::Xlib {
-                x_display: x_display.cast(),
-                glx_fb_config: fbconfig.map(|p| p.cast_mut()).unwrap_or_else(|| {
-                    warn!("No fbconfig found.");
-                    1 as _
-                }),
-                visualid: visualid.unwrap_or(1),
-                glx_drawable,
-                glx_context: glx_context.cast_mut(),
-            }
-        };
-
         let mut fbos = [0; 2];
         unsafe {
             gl::GenFramebuffers(fbos.len() as i32, fbos.as_mut_ptr());
         }
 
         Some(GlData {
-            session_data: Arc::new(SessionCreateInfo(session_info)),
+            session_info,
             images: Default::default(),
             format: 0,
             read_fbo: fbos[0],
@@ -140,7 +414,7 @@ impl GlData {
 }
 
 impl GraphicsBackend for GlData {
-    type Api = xr::OpenGL;
+    type Api = GlApi;
     type OpenVrTexture = gl::types::GLuint;
     type Format = u32;
     type NiceFormat = u32;
@@ -158,9 +432,7 @@ impl GraphicsBackend for GlData {
     }
 
     fn session_create_info(&self) -> <Self::Api as openxr::Graphics>::SessionCreateInfo {
-        // SAFETY: SessionCreateInfo should be Copy anyway but doesn't work right
-        // https://github.com/Ralith/openxrs/issues/183
-        unsafe { std::ptr::read(&**self.session_data) }
+        self.session_info
     }
 
     #[inline]
@@ -377,35 +649,106 @@ extern "system" fn debug_message(
     log::debug!("(severity: {severity}, id: {id}) {ty} message from {source}: {message:?}");
 }
 
+/// A dlopen handle that is never closed.
 struct Library(*mut c_void);
-unsafe impl Send for Library {}
-unsafe impl Sync for Library {}
 impl Library {
-    fn new(name: &CStr) -> Self {
-        let handle = unsafe { dlopen(name.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
-        if handle.is_null() {
-            let err = unsafe { CStr::from_ptr(dlerror()) };
-            panic!("Failed to load {name:?}: {err:?}");
-        }
-
-        Self(handle)
+    fn open(name: &CStr, flags: c_int) -> Option<Self> {
+        let handle = unsafe { dlopen(name.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL | flags) };
+        (!handle.is_null()).then_some(Self(handle))
     }
 
-    fn get(&self, function: &CStr) -> *const c_void {
-        // clear old error
-        unsafe {
-            dlerror();
+    fn get(&self, symbol: &CStr) -> Option<*const c_void> {
+        let symbol = unsafe { dlsym(self.0, symbol.as_ptr()) };
+        (!symbol.is_null()).then_some(symbol.cast_const())
+    }
+
+    /// # Safety
+    /// `F` must be the function pointer type of `symbol`.
+    unsafe fn get_fn<F: Copy>(&self, symbol: &CStr) -> Option<F> {
+        const { assert!(size_of::<F>() == size_of::<*const c_void>()) };
+        self.get(symbol)
+            .map(|f| unsafe { std::mem::transmute_copy::<*const c_void, F>(&f) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clientcore::Injector;
+    use crate::openxr_data::{self, FrameStream, OpenXrData};
+    use std::sync::Arc;
+
+    /// Restarts sessions with an EGL context.
+    struct EglCompositor;
+    impl vr::InterfaceImpl for EglCompositor {
+        fn get_version(_: &CStr) -> Option<Box<dyn FnOnce(&Arc<Self>) -> *mut c_void>> {
+            None
+        }
+        fn supported_versions() -> &'static [&'static CStr] {
+            &[]
+        }
+    }
+    impl openxr_data::Compositor for EglCompositor {
+        fn get_session_create_info(
+            &self,
+            _: crate::compositor::CompositorSessionData,
+        ) -> openxr_data::SessionCreateInfo {
+            unsafe extern "system" fn get_proc_address(
+                _: *const c_char,
+            ) -> Option<unsafe extern "system" fn()> {
+                None
+            }
+            openxr_data::SessionCreateInfo::from_info::<GlApi>(SessionCreateInfo::Egl {
+                get_proc_address,
+                display: 1 as _,
+                config: ptr::null_mut(),
+                context: 2 as _,
+            })
         }
 
-        let symbol = unsafe { dlsym(self.0, function.as_ptr()) };
-        if symbol.is_null() {
-            let err = unsafe { dlerror() };
-            if !err.is_null() {
-                panic!("Failed to get symbol {function:?}: {:?}", unsafe {
-                    CStr::from_ptr(err)
-                });
-            }
+        fn post_session_restart(
+            &self,
+            _: &openxr_data::SessionData,
+            _: xr::FrameWaiter,
+            _: FrameStream,
+        ) {
         }
-        symbol
+    }
+
+    #[test]
+    fn egl_session() {
+        crate::init_logging();
+        let xr =
+            OpenXrData::<EglCompositor>::new(&Injector::default(), vr::EVRApplicationType::Scene)
+                .unwrap();
+        assert!(xr.enabled_extensions.mndx_egl_enable);
+        let comp = Arc::new(EglCompositor);
+        xr.compositor.set(Arc::downgrade(&comp));
+
+        xr.restart_session();
+        let session = xr.session_data.get();
+        assert!(session.is_real_session());
+        let swapchain = session
+            .create_swapchain::<GlApi>(&xr::SwapchainCreateInfo {
+                create_flags: xr::SwapchainCreateFlags::EMPTY,
+                usage_flags: xr::SwapchainUsageFlags::TRANSFER_DST,
+                format: 0,
+                sample_count: 1,
+                width: 1,
+                height: 1,
+                face_count: 1,
+                array_size: 1,
+                mip_count: 1,
+            })
+            .unwrap();
+        assert_eq!(swapchain.enumerate_images(), Ok(vec![]));
+    }
+
+    #[test]
+    fn egl_extension_list() {
+        let exts = c"EGL_KHR_no_config_context_foo EGL_KHR_no_config_context EGL_EXT_bar";
+        assert!(has_extension(exts, "EGL_KHR_no_config_context"));
+        assert!(!has_extension(exts, "EGL_KHR_no_config"));
+        assert!(!has_extension(c"", "EGL_KHR_no_config_context"));
     }
 }

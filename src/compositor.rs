@@ -202,8 +202,8 @@ impl Compositor {
             crate::warn_once!("OpenGL texture submitted, but the runtime has no OpenGL support");
             return Err(vr::EVRCompositorError::InvalidTexture);
         }
-        let backend =
-            SupportedBackend::new(texture, bounds).ok_or(vr::EVRCompositorError::InvalidTexture)?;
+        let backend = SupportedBackend::new(texture, &self.openxr.instance)
+            .ok_or(vr::EVRCompositorError::InvalidTexture)?;
 
         // Submit and the overlay calls can race to get here. Restarting again would destroy the
         // swapchains created in the first real session.

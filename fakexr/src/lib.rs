@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString, c_char};
 use std::sync::{
     Arc, LazyLock, Mutex, MutexGuard, OnceLock, RwLock, Weak,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, Ordering},
     mpsc,
 };
 
@@ -516,6 +516,7 @@ pub unsafe extern "system" fn get_instance_proc_addr(
                     GetVulkanDeviceExtensionsKHR,
                     GetVulkanGraphicsDeviceKHR,
                     GetVulkanGraphicsRequirementsKHR,
+                    GetOpenGLGraphicsRequirementsKHR,
                     GetSystem,
                     CreateSession,
                     DestroySession,
@@ -600,7 +601,7 @@ extern "system" fn enumerate_instance_extension_properties(
     properties: *mut xr::ExtensionProperties,
 ) -> xr::Result {
     assert!(layer_name.is_null());
-    let fixed: [&[u8]; 11] = [
+    let fixed: [&[u8]; 13] = [
         xr::KHR_VULKAN_ENABLE_EXTENSION_NAME,
         openxr_mndx_xdev_space::XR_MNDX_XDEV_SPACE_EXTENSION_NAME.as_bytes(),
         xr::HTC_VIVE_FOCUS3_CONTROLLER_INTERACTION_EXTENSION_NAME,
@@ -612,6 +613,8 @@ extern "system" fn enumerate_instance_extension_properties(
         xr::EXT_HAND_TRACKING_EXTENSION_NAME,
         xr::EXT_HAND_TRACKING_DATA_SOURCE_EXTENSION_NAME,
         xr::EXT_USER_PRESENCE_EXTENSION_NAME,
+        xr::KHR_OPENGL_ENABLE_EXTENSION_NAME,
+        xr::MNDX_EGL_ENABLE_EXTENSION_NAME,
     ];
     let mut extra = EXTRA_EXTENSIONS.with_borrow(Clone::clone);
     if HEADLESS_SUPPORTED.get() {
@@ -783,7 +786,8 @@ struct Session {
     event_sender: mpsc::Sender<EventDataBuffer>,
     /// Created without a graphics binding (XR_MND_headless).
     headless: bool,
-    vk_device: AtomicU64,
+    /// None for headless and EGL sessions.
+    vk_device: Option<u64>,
     attached_sets: OnceLock<Box<[xr::ActionSet]>>,
     left_hand: HandData,
     right_hand: HandData,
@@ -1191,15 +1195,27 @@ extern "system" fn create_session(
         return error;
     }
     let info = unsafe { create_info.as_ref().unwrap() };
-    let vk = unsafe { (info.next as *const xr::GraphicsBindingVulkanKHR).as_ref() };
-    if let Some(vk) = vk {
-        assert_eq!(vk.ty, xr::GraphicsBindingVulkanKHR::TYPE);
-    }
+    let binding = unsafe { (info.next as *const xr::BaseInStructure).as_ref() };
+    let vk_device = match binding.map(|binding| binding.ty) {
+        None => None,
+        Some(xr::GraphicsBindingVulkanKHR::TYPE) => {
+            let vk = unsafe { &*(info.next as *const xr::GraphicsBindingVulkanKHR) };
+            Some(vk.device as u64)
+        }
+        Some(xr::GraphicsBindingEGLMNDX::TYPE) => {
+            let egl = unsafe { &*(info.next as *const xr::GraphicsBindingEGLMNDX) };
+            if egl.get_proc_address.is_none() || egl.display.is_null() || egl.context.is_null() {
+                return xr::Result::ERROR_VALIDATION_FAILURE;
+            }
+            None
+        }
+        Some(other) => panic!("unsupported graphics binding {other:?}"),
+    };
     let sess = Arc::new(Session {
         instance: Arc::downgrade(&instance),
         event_sender: instance.event_sender.clone(),
-        headless: vk.is_none(),
-        vk_device: vk.map_or(0, |vk| vk.device as u64).into(),
+        headless: binding.is_none(),
+        vk_device,
         attached_sets: OnceLock::new(),
         left_hand: Default::default(),
         right_hand: Default::default(),
@@ -1252,12 +1268,29 @@ extern "system" fn create_session(
     xr::Result::SUCCESS
 }
 
+extern "system" fn get_open_g_l_graphics_requirements_k_h_r(
+    _: xr::Instance,
+    _: xr::SystemId,
+    graphics_requirements: *mut xr::GraphicsRequirementsOpenGLKHR,
+) -> xr::Result {
+    unsafe {
+        *graphics_requirements = xr::GraphicsRequirementsOpenGLKHR {
+            ty: xr::GraphicsRequirementsOpenGLKHR::TYPE,
+            next: std::ptr::null_mut(),
+            min_api_version_supported: xr::Version::new(4, 0, 0),
+            max_api_version_supported: xr::Version::new(4, 6, 0),
+        }
+    };
+    xr::Result::SUCCESS
+}
+
 extern "system" fn destroy_session(session: xr::Session) -> xr::Result {
     let s = get_handle!(session);
     // Our Vulkan device needs to still exist when we destroy the session - a real runtime will use
     // it!
-    let device = s.vk_device.load(Ordering::Relaxed);
-    if !s.headless && !vulkan::Device::validate(device) {
+    if let Some(device) = s.vk_device
+        && !vulkan::Device::validate(device)
+    {
         panic!("Vulkan device invalid ({device})")
     }
     destroy_handle(session);

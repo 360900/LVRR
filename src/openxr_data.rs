@@ -236,6 +236,7 @@ impl<C: Compositor> OpenXrData<C> {
         }
         exts.khr_vulkan_enable = supported_exts.khr_vulkan_enable;
         exts.khr_opengl_enable = supported_exts.khr_opengl_enable;
+        exts.mndx_egl_enable = supported_exts.mndx_egl_enable;
         exts.khr_convert_timespec_time = supported_exts.khr_convert_timespec_time;
         exts.ext_hand_tracking = supported_exts.ext_hand_tracking;
         exts.ext_hand_tracking_data_source = supported_exts.ext_hand_tracking_data_source;
