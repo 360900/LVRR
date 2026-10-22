@@ -115,6 +115,36 @@ impl ProfileData {
         data.data
     }
 
+    /// Looks up the profile data and hand for the first profile whose render model name for a
+    /// hand satisfies `matches`.
+    pub fn for_render_model(matches: impl FnMut(&CStr) -> bool) -> Option<(Self, Hand)> {
+        struct Data<F> {
+            matches: F,
+            data: Option<(ProfileData, Hand)>,
+        }
+        impl<F: FnMut(&CStr) -> bool> RunWithProfile for Data<F> {
+            fn run<P: InteractionProfile>(&mut self) {
+                let names = &P::properties().render_model_name;
+                self.data = [Hand::Left, Hand::Right]
+                    .into_iter()
+                    .find(|&hand| (self.matches)(names.get(hand)))
+                    .map(|hand| (ProfileData::new::<P>(), hand));
+            }
+
+            #[inline]
+            fn keep_running(&self) -> bool {
+                self.data.is_none()
+            }
+        }
+
+        let mut data = Data {
+            matches,
+            data: None,
+        };
+        profiles::run_for_all_profiles(&mut data);
+        data.data
+    }
+
     #[inline]
     pub fn hand_offset(&self, hand: Hand) -> Mat4 {
         (self.get_hand_offset)(hand)

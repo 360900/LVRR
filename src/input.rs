@@ -18,7 +18,7 @@ use skeletal::FingerState;
 use skeletal::HandSkeletonBone;
 use skeletal::SkeletalInputActionData;
 
-use crate::input::devices::ProfileData;
+pub use crate::input::devices::ProfileData;
 use crate::input::profiles::ProfileProperties;
 use crate::{
     AtomicF32,
