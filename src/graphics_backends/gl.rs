@@ -1042,6 +1042,27 @@ mod tests {
         assert_eq!(swapchain.enumerate_images(), Ok(vec![]));
     }
 
+    /// Without a current context (as in tests) or OpenGL support in the runtime, Submit gets
+    /// InvalidTexture on every call instead of a panic.
+    #[test]
+    #[cfg_attr(miri, ignore)] // dlopen
+    fn no_session_without_context() {
+        crate::init_logging();
+        let entry =
+            unsafe { xr::Entry::from_get_instance_proc_addr(fakexr::get_instance_proc_addr, &()) }
+                .unwrap();
+        for khr_opengl_enable in [true, false] {
+            let mut exts = xr::ExtensionSet::default();
+            exts.khr_opengl_enable = khr_opengl_enable;
+            exts.mndx_egl_enable = true;
+            let instance = entry
+                .create_instance(&Default::default(), &exts, &[], &())
+                .unwrap();
+            assert!(GlData::new(&instance).is_none());
+            assert!(GlData::new(&instance).is_none());
+        }
+    }
+
     #[test]
     fn swapchain_formats() {
         use vr::EColorSpace as Space;
