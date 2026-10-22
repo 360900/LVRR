@@ -479,7 +479,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         hand: Hand,
         space: vr::EVRSkeletalTransformSpace,
         pose: vr::EVRSkeletalReferencePose,
-        out_transforms: &mut [vr::VRBoneTransform_t],
+        out_transforms: &mut [vr::VRBoneTransform_t; Count as usize],
     ) -> Result<(), vr::EVRInputError> {
         let mut skeleton = match hand {
             Hand::Left => match pose {
@@ -499,7 +499,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         };
 
         finalize_transforms(&mut skeleton, space);
-        out_transforms.copy_from_slice(&skeleton[0..out_transforms.len()]);
+        *out_transforms = skeleton;
         Ok(())
     }
 }
@@ -779,5 +779,110 @@ impl SkeletalInputActionData {
                 rest_curl,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Count, generated};
+    use crate::input::tests::Fixture;
+    use crate::vr::{self, IVRInput010_Interface};
+
+    const SENTINEL: vr::VRBoneTransform_t = vr::VRBoneTransform_t {
+        position: vr::HmdVector4_t {
+            v: [7.0, 7.0, 7.0, 7.0],
+        },
+        orientation: vr::HmdQuaternionf_t {
+            w: 7.0,
+            x: 7.0,
+            y: 7.0,
+            z: 7.0,
+        },
+    };
+
+    fn is_sentinel(bone: &vr::VRBoneTransform_t) -> bool {
+        bone.position.v == SENTINEL.position.v && bone.orientation.w == SENTINEL.orientation.w
+    }
+
+    #[test]
+    fn bone_arrays_larger_than_the_skeleton() {
+        let f = Fixture::new();
+        f.load_actions(c"actions.json");
+        let skeleton = f.get_action_handle(c"/actions/set1/in/skellyl");
+        f.input.openxr.poll_events();
+        f.input.frame_start_update();
+
+        let mut bones = [SENTINEL; Count as usize + 6];
+        assert_eq!(
+            f.input.GetSkeletalBoneData(
+                skeleton,
+                vr::EVRSkeletalTransformSpace::Parent,
+                vr::EVRSkeletalMotionRange::WithoutController,
+                bones.as_mut_ptr(),
+                bones.len() as u32,
+            ),
+            vr::EVRInputError::None
+        );
+        assert!(!bones[..Count as usize].iter().any(is_sentinel));
+        assert!(bones[Count as usize..].iter().all(is_sentinel));
+
+        let mut bones = [SENTINEL; Count as usize + 6];
+        assert_eq!(
+            f.input.GetSkeletalReferenceTransforms(
+                skeleton,
+                vr::EVRSkeletalTransformSpace::Parent,
+                vr::EVRSkeletalReferencePose::Fist,
+                bones.as_mut_ptr(),
+                bones.len() as u32,
+            ),
+            vr::EVRInputError::None
+        );
+        for (bone, expected) in bones.iter().zip(&generated::left_hand::FIST) {
+            assert_eq!(bone.position.v, expected.position.v);
+        }
+        assert!(bones[Count as usize..].iter().all(is_sentinel));
+    }
+
+    #[test]
+    fn bone_arrays_too_small_or_null() {
+        let f = Fixture::new();
+        f.load_actions(c"actions.json");
+        let skeleton = f.get_action_handle(c"/actions/set1/in/skellyl");
+
+        let mut bones = [SENTINEL; Count as usize - 1];
+        for (array, count, error) in [
+            (
+                bones.as_mut_ptr(),
+                bones.len() as u32,
+                vr::EVRInputError::BufferTooSmall,
+            ),
+            (
+                std::ptr::null_mut(),
+                Count as u32,
+                vr::EVRInputError::InvalidParam,
+            ),
+        ] {
+            assert_eq!(
+                f.input.GetSkeletalBoneData(
+                    skeleton,
+                    vr::EVRSkeletalTransformSpace::Parent,
+                    vr::EVRSkeletalMotionRange::WithoutController,
+                    array,
+                    count,
+                ),
+                error
+            );
+            assert_eq!(
+                f.input.GetSkeletalReferenceTransforms(
+                    skeleton,
+                    vr::EVRSkeletalTransformSpace::Parent,
+                    vr::EVRSkeletalReferencePose::Fist,
+                    array,
+                    count,
+                ),
+                error
+            );
+        }
+        assert!(bones.iter().all(is_sentinel));
     }
 }

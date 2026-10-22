@@ -75,6 +75,25 @@ fn parse_input_path(path: &str) -> (&str, &str, &str, &str) {
     ("", "", "", "")
 }
 
+/// The first [`HandSkeletonBone::Count`] entries of an app's bone array, which may be longer.
+///
+/// # Safety
+/// `array` must be null or valid for `count` entries.
+unsafe fn bone_array<'a>(
+    array: *mut vr::VRBoneTransform_t,
+    count: u32,
+) -> Result<&'a mut [vr::VRBoneTransform_t; HandSkeletonBone::Count as usize], vr::EVRInputError> {
+    if count < HandSkeletonBone::Count as u32 {
+        return Err(vr::EVRInputError::BufferTooSmall);
+    }
+    unsafe {
+        array
+            .cast::<[_; HandSkeletonBone::Count as usize]>()
+            .as_mut()
+    }
+    .ok_or(vr::EVRInputError::InvalidParam)
+}
+
 /// Copy a string into a fixed-size `c_char` buffer with null terminator.
 fn copy_cstr(dst: &mut [c_char], s: &str) {
     let bytes = s.as_bytes();
@@ -1206,11 +1225,9 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         transform_array: *mut vr::VRBoneTransform_t,
         transform_array_count: u32,
     ) -> vr::EVRInputError {
-        if transform_array_count < skeletal::HandSkeletonBone::Count as u32 {
-            return vr::EVRInputError::BufferTooSmall;
-        }
-        let out_transforms = unsafe {
-            std::slice::from_raw_parts_mut(transform_array, transform_array_count as usize)
+        let out_transforms = match unsafe { bone_array(transform_array, transform_array_count) } {
+            Ok(array) => array,
+            Err(e) => return e,
         };
 
         get_action_from_handle!(self, handle, session_data, action);
@@ -1223,7 +1240,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         else {
             return vr::EVRInputError::NoData;
         };
-        out_transforms.copy_from_slice(&transforms[0..out_transforms.len()]);
+        *out_transforms = transforms;
         vr::EVRInputError::None
     }
     fn GetSkeletalTrackingLevel(
@@ -1253,12 +1270,9 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         // As far as I'm aware this is only/mainly used by HL:A
         // For some reason it is required to position the wrist bone at all times, at least when it comes to Quest controllers
 
-        assert_eq!(
-            transform_array_count,
-            skeletal::HandSkeletonBone::Count as u32
-        );
-        let transforms = unsafe {
-            std::slice::from_raw_parts_mut(transform_array, transform_array_count as usize)
+        let transforms = match unsafe { bone_array(transform_array, transform_array_count) } {
+            Ok(array) => array,
+            Err(e) => return e,
         };
 
         get_action_from_handle!(self, handle, session_data, action);
