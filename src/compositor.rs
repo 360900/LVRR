@@ -2905,7 +2905,7 @@ mod tests {
         let waits = || SWAPCHAIN_EXISTED_ON_WAIT.take();
 
         frame();
-        f.comp.openxr.restart_session();
+        f.comp.openxr.restart_session().unwrap();
         // The eye and overlay copies.
         assert_eq!(waits(), [true, true]);
 
