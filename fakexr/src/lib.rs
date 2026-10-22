@@ -243,6 +243,12 @@ pub fn fail_next_session_creation(error: xr::Result) {
     SESSION_CREATION_ERROR.set(Some(error));
 }
 
+fn is_lost(session: &Weak<Session>) -> bool {
+    session
+        .upgrade()
+        .is_some_and(|s| s.lost.load(Ordering::Relaxed))
+}
+
 /// Like get_handle!, but for a session call that fails once the session was lost.
 macro_rules! get_session {
     ($session:expr) => {{
@@ -968,6 +974,7 @@ struct ActionStateData {
 
 struct Swapchain {
     image_acquired: AtomicBool,
+    session: Weak<Session>,
 }
 
 impl_handle!(Instance, xr::Instance);
@@ -1778,6 +1785,9 @@ extern "system" fn locate_space(
     location: *mut xr::SpaceLocation,
 ) -> xr::Result {
     let base_space = get_handle!(base_space);
+    if is_lost(&base_space.session) {
+        return xr::Result::ERROR_SESSION_LOST;
+    }
     assert!(
         !matches!(
             base_space.ty,
@@ -1853,10 +1863,11 @@ extern "system" fn locate_space(
     xr::Result::SUCCESS
 }
 extern "system" fn create_swapchain(
-    _session: xr::Session,
+    session: xr::Session,
     info: *const xr::SwapchainCreateInfo,
     swapchain: *mut xr::Swapchain,
 ) -> xr::Result {
+    let session = get_session!(session);
     let info = unsafe { info.as_ref() }.unwrap();
     if info.width == 0 || info.height == 0 {
         return xr::Result::ERROR_VALIDATION_FAILURE;
@@ -1866,6 +1877,7 @@ extern "system" fn create_swapchain(
     }
     let swap = Arc::new(Swapchain {
         image_acquired: false.into(),
+        session: Arc::downgrade(&session),
     });
     unsafe {
         swapchain.write(swap.to_xr());
@@ -1912,6 +1924,9 @@ extern "system" fn acquire_swapchain_image(
     _index: *mut u32,
 ) -> xr::Result {
     let swapchain = get_handle!(swapchain);
+    if is_lost(&swapchain.session) {
+        return xr::Result::ERROR_SESSION_LOST;
+    }
     swapchain.image_acquired.store(true, Ordering::Relaxed);
     xr::Result::SUCCESS
 }
@@ -1921,6 +1936,9 @@ extern "system" fn wait_swapchain_image(
     _info: *const xr::SwapchainImageWaitInfo,
 ) -> xr::Result {
     let swapchain = get_handle!(swapchain);
+    if is_lost(&swapchain.session) {
+        return xr::Result::ERROR_SESSION_LOST;
+    }
     if !swapchain.image_acquired.load(Ordering::Relaxed) {
         return xr::Result::ERROR_CALL_ORDER_INVALID;
     }
@@ -1932,6 +1950,9 @@ extern "system" fn release_swapchain_image(
     _info: *const xr::SwapchainImageReleaseInfo,
 ) -> xr::Result {
     let swapchain = get_handle!(swapchain);
+    if is_lost(&swapchain.session) {
+        return xr::Result::ERROR_SESSION_LOST;
+    }
     if !swapchain.image_acquired.load(Ordering::Relaxed) {
         return xr::Result::ERROR_CALL_ORDER_INVALID;
     }

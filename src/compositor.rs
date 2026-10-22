@@ -323,6 +323,7 @@ impl openxr_data::Compositor for Compositor {
         #[macros::any_graphics(AnyTempBackendData)]
         fn new_frame_controller<G: GraphicsBackend + 'static>(
             data: TempBackendData<G>,
+            openxr: &OpenXrData<Compositor>,
             session_data: &SessionData,
             waiter: xr::FrameWaiter,
             stream: FrameStream,
@@ -335,6 +336,7 @@ impl openxr_data::Compositor for Compositor {
             G::Format: PartialEq + std::fmt::Debug,
         {
             FrameController::new(
+                openxr,
                 session_data,
                 waiter,
                 stream.try_into().unwrap_or_else(|_| unreachable!()),
@@ -346,6 +348,7 @@ impl openxr_data::Compositor for Compositor {
 
         *session_data.comp_data.0.lock().unwrap() = Some(
             backend_data.with_any_graphics_owned::<new_frame_controller>((
+                &self.openxr,
                 session_data,
                 waiter,
                 stream,
@@ -897,13 +900,18 @@ impl vr::IVRCompositor029_Interface for Compositor {
 
                 session_lock = self.openxr.session_data.get();
                 frame_lock = session_lock.comp_data.0.lock().unwrap();
-                frame_lock.as_mut().unwrap()
+                // Another thread's restart may have gone back to a temporary session meanwhile.
+                let Some(ctrl) = frame_lock.as_mut() else {
+                    return vr::EVRCompositorError::InvalidTexture;
+                };
+                ctrl
             }
         };
 
         #[macros::any_graphics(DynFrameController)]
         fn submit<G: GraphicsBackend + 'static>(
             ctrl: &mut FrameController<G>,
+            openxr: &OpenXrData<Compositor>,
             session_data: &SessionData,
             eye: vr::EVREye,
             texture: &vr::Texture_t,
@@ -918,6 +926,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
             let real_texture =
                 G::get_texture(texture).ok_or(vr::EVRCompositorError::InvalidTexture)?;
             ctrl.submit_impl(
+                openxr,
                 session_data,
                 eye,
                 real_texture,
@@ -928,6 +937,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
         }
 
         if let Err(e) = ctrl.with_any_graphics_mut::<submit>((
+            &self.openxr,
             &session_lock,
             eye,
             texture,
@@ -1336,7 +1346,7 @@ impl<G: GraphicsBackend> FrameController<G> {
         session_data: &SessionData,
         create_info: &mut xr::SwapchainCreateInfo<G::Api>,
         backend: &mut G,
-    ) -> (xr::Swapchain<G::Api>, G::Format)
+    ) -> xr::Result<(xr::Swapchain<G::Api>, G::Format)>
     where
         for<'a> &'a openxr_data::GraphicalSession:
             TryInto<&'a openxr_data::Session<G::Api>, Error: std::fmt::Display>,
@@ -1354,8 +1364,8 @@ impl<G: GraphicsBackend> FrameController<G> {
 
         let swapchain = session_data
             .create_swapchain(create_info)
-            .unwrap_or_else(|err| {
-                panic!(
+            .inspect_err(|err| {
+                debug!(
                     "Failed to create swapchain: {err} (info: {:#?})",
                     [
                         ("create_flags", format!("{:?}", create_info.create_flags)),
@@ -1364,11 +1374,9 @@ impl<G: GraphicsBackend> FrameController<G> {
                         ("sample_count", create_info.sample_count.to_string())
                     ]
                 )
-            });
+            })?;
 
-        let images = swapchain
-            .enumerate_images()
-            .expect("Failed to enumerate swapchain images");
+        let images = swapchain.enumerate_images()?;
 
         let format = G::from_openxr_format(create_info.format);
         backend.store_swapchain_images(images, format);
@@ -1377,10 +1385,11 @@ impl<G: GraphicsBackend> FrameController<G> {
             create_info.width, create_info.height, format
         );
 
-        (swapchain, initial_format)
+        Ok((swapchain, initial_format))
     }
 
     fn new(
+        openxr: &OpenXrData<Compositor>,
         session_data: &SessionData,
         waiter: xr::FrameWaiter,
         stream: xr::FrameStream<G::Api>,
@@ -1392,20 +1401,21 @@ impl<G: GraphicsBackend> FrameController<G> {
             TryInto<&'a openxr_data::Session<G::Api>, Error: std::fmt::Display>,
         G::Format: PartialEq + std::fmt::Debug,
     {
-        let swapchain_data = if let Some(mut info) = create_info {
-            is_valid_swapchain_info(&info).then(|| {
-                let (swapchain, initial_format) =
-                    Self::init_swapchain(session_data, &mut info, &mut backend);
+        // Without a swapchain, the next Submit creates one.
+        let swapchain_data = create_info
+            .filter(is_valid_swapchain_info)
+            .and_then(|mut info| {
+                let (swapchain, initial_format) = openxr.check(
+                    "Creating swapchain",
+                    Self::init_swapchain(session_data, &mut info, &mut backend),
+                )?;
                 let format = G::to_openxr_format(initial_format);
-                SwapchainData {
+                Some(SwapchainData {
                     swapchain,
                     info,
                     initial_format: format,
-                }
-            })
-        } else {
-            None
-        };
+                })
+            });
 
         Self {
             stream,
@@ -1433,7 +1443,7 @@ impl<G: GraphicsBackend> FrameController<G> {
         G::Format: PartialEq + std::fmt::Debug,
     {
         let (swapchain, initial_format) =
-            Self::init_swapchain(session_data, &mut create_info, &mut self.backend);
+            Self::init_swapchain(session_data, &mut create_info, &mut self.backend)?;
         let format = G::to_openxr_format(initial_format);
         self.swapchain_data = Some(SwapchainData {
             swapchain,
@@ -1502,8 +1512,10 @@ impl<G: GraphicsBackend> FrameController<G> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn submit_impl(
         &mut self,
+        openxr: &OpenXrData<Compositor>,
         session_data: &SessionData,
         eye: vr::EVREye,
         texture: G::OpenVrTexture,
@@ -1542,9 +1554,8 @@ impl<G: GraphicsBackend> FrameController<G> {
                     )
                 }) {
                     info!("recreating swapchain (for {eye:?})");
-                    // A lost session is noticed by the next frame call.
                     if let Err(e) = self.recreate_swapchain(session_data, new_info) {
-                        warn!("Failed to recreate swapchain: {e}");
+                        openxr.handle_error("Recreating swapchain", e);
                         return Err(vr::EVRCompositorError::RequestFailed);
                     }
                 }
@@ -1576,9 +1587,7 @@ impl<G: GraphicsBackend> FrameController<G> {
                 && let Some(data) = self.swapchain_data.as_mut()
             {
                 trace!("releasing image");
-                if let Err(e) = data.swapchain.release_image() {
-                    warn!("Failed to release swapchain image: {e}");
-                }
+                openxr.check("Releasing swapchain image", data.swapchain.release_image());
             }
             self.image_acquired = false;
         }
@@ -2769,6 +2778,41 @@ mod tests {
         );
         assert!(poses.iter().chain(&game_poses).all(|p| !p.bPoseIsValid));
         assert_eq!(f.submit(vr::EVREye::Left), DoNotHaveFocus);
+        f.comp.PostPresentHandoff();
+        assert_eq!(f.wait_get_poses(), DoNotHaveFocus);
+        assert_eq!(quit_events(&system), [true]);
+    }
+
+    /// A loss first seen when Submit recreates the swapchain for a resized eye texture.
+    #[test]
+    fn session_lost_on_swapchain_recreation() {
+        let f = Fixture::new();
+        let system = f.system();
+        f.ensure_real_session(false);
+        assert_eq!(f.wait_get_poses(), None);
+
+        fakexr::lose_session(f.raw_session());
+        SWAPCHAIN_WIDTH.set(40);
+        assert_eq!(f.submit(vr::EVREye::Left), RequestFailed);
+        assert!(f.comp.openxr.is_lost());
+        assert_eq!(f.wait_get_poses(), DoNotHaveFocus);
+        assert_eq!(quit_events(&system), [true]);
+    }
+
+    /// A loss first seen when acquiring the swapchain image to begin the frame.
+    #[test]
+    fn session_lost_on_frame_begin() {
+        let f = Fixture::new();
+        let system = f.system();
+        f.comp.SetExplicitTimingMode(
+            vr::EVRCompositorTimingMode::Explicit_ApplicationPerformsPostPresentHandoff,
+        );
+        f.ensure_real_session(true);
+        assert_eq!(f.wait_get_poses(), None);
+
+        fakexr::lose_session(f.raw_session());
+        assert_eq!(f.comp.SubmitExplicitTimingData(), None);
+        assert!(f.comp.openxr.is_lost());
         f.comp.PostPresentHandoff();
         assert_eq!(f.wait_get_poses(), DoNotHaveFocus);
         assert_eq!(quit_events(&system), [true]);
