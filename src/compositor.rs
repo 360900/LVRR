@@ -9,6 +9,7 @@ use crate::{
     tracy_span,
 };
 
+use glam::{Mat3, Quat, Vec3};
 use log::{debug, info, trace, warn};
 use openvr as vr;
 use openxr as xr;
@@ -1042,6 +1043,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
             return vr::EVRCompositorError::InvalidBounds;
         }
 
+        let texture_with_pose = texture.cast::<vr::VRTextureWithPose_t>();
         let Some(texture) = (unsafe { texture.as_ref() }) else {
             return vr::EVRCompositorError::InvalidTexture;
         };
@@ -1082,6 +1084,10 @@ impl vr::IVRCompositor029_Interface for Compositor {
             }
         };
 
+        let render_pose = ((submit_flags & vr::EVRSubmitFlags::TextureWithPose).0 != 0)
+            .then(|| unsafe { &(*texture_with_pose).mDeviceToAbsoluteTracking })
+            .and_then(rigid_pose);
+
         #[macros::any_graphics(DynFrameController)]
         fn submit<G: GraphicsBackend + 'static>(
             ctrl: &mut FrameController<G>,
@@ -1091,22 +1097,21 @@ impl vr::IVRCompositor029_Interface for Compositor {
             texture: &vr::Texture_t,
             bounds: vr::VRTextureBounds_t,
             flags: vr::EVRSubmitFlags,
+            render_pose: Option<xr::Posef>,
         ) -> xr::Result<(), vr::EVRCompositorError>
         where
             for<'d> &'d openxr_data::GraphicalSession:
                 TryInto<&'d openxr_data::Session<G::Api>, Error: std::fmt::Display>,
             G::Format: Eq + std::fmt::Debug,
         {
-            let real_texture =
-                G::get_texture(texture, flags).ok_or(vr::EVRCompositorError::InvalidTexture)?;
             ctrl.submit_impl(
                 openxr,
                 session_data,
                 eye,
-                real_texture,
-                texture.eColorSpace,
+                texture,
                 bounds,
                 flags,
+                render_pose,
             )
         }
 
@@ -1117,6 +1122,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
             texture,
             bounds,
             submit_flags,
+            render_pose,
         )) {
             return e;
         }
@@ -1528,6 +1534,8 @@ impl vr::IVRCompositor009On010 for Compositor {
 struct SubmittedEye {
     extent: xr::Extent2Di,
     flip_vertically: bool,
+    /// The HMD pose the app rendered the eye with, if it passed one.
+    render_pose: Option<xr::Posef>,
 }
 
 struct SwapchainData<G: xr::Graphics> {
@@ -1736,10 +1744,10 @@ impl<G: GraphicsBackend> FrameController<G> {
         openxr: &OpenXrData<Compositor>,
         session_data: &SessionData,
         eye: vr::EVREye,
-        texture: G::OpenVrTexture,
-        color_space: vr::EColorSpace,
+        texture: &vr::Texture_t,
         bounds: vr::VRTextureBounds_t,
         submit_flags: vr::EVRSubmitFlags,
+        render_pose: Option<xr::Posef>,
     ) -> Result<(), vr::EVRCompositorError>
     where
         for<'b> &'b openxr_data::GraphicalSession:
@@ -1749,6 +1757,9 @@ impl<G: GraphicsBackend> FrameController<G> {
         if !matches!(eye, vr::EVREye::Left | vr::EVREye::Right) {
             return Err(vr::EVRCompositorError::IndexOutOfRange);
         }
+        let color_space = texture.eColorSpace;
+        let texture = G::get_texture(texture, submit_flags)
+            .ok_or(vr::EVRCompositorError::InvalidTexture)?;
 
         // No Man's Sky does this.
         if self.eyes_submitted[eye.0 as usize].is_some() {
@@ -1788,6 +1799,7 @@ impl<G: GraphicsBackend> FrameController<G> {
                         submit_flags,
                     ),
                     flip_vertically: bounds.vertically_flipped(),
+                    render_pose,
                 })
             } else {
                 trace!("submitting null this frame");
@@ -1841,28 +1853,38 @@ impl<G: GraphicsBackend> FrameController<G> {
                 .as_ref()
                 .expect("Swapchain data unexpectedly invalid on submit");
 
+            // The eyes relative to the head, to place them at the poses the app rendered with.
+            let eyes_to_head = self
+                .eyes_submitted
+                .iter()
+                .any(|eye| eye.is_some_and(|eye| eye.render_pose.is_some()))
+                .then(|| system.get_views(xr::ReferenceSpaceType::VIEW).views);
             proj_layer_views = views
                 .into_iter()
                 .enumerate()
                 .map(|(eye_index, view)| {
-                    let pose = xr::Posef {
-                        orientation: if flags.contains(xr::ViewStateFlags::ORIENTATION_VALID) {
-                            view.pose.orientation
-                        } else {
-                            xr::Quaternionf::IDENTITY
-                        },
-                        position: if flags.contains(xr::ViewStateFlags::POSITION_VALID) {
-                            view.pose.position
-                        } else {
-                            xr::Vector3f::default()
-                        },
-                    };
-
                     let SubmittedEye {
                         extent,
                         flip_vertically,
+                        render_pose,
                     } = self.eyes_submitted[eye_index]
                         .unwrap_or_else(|| panic!("Eye {eye_index} has not been submitted!"));
+
+                    let pose = match (render_pose, eyes_to_head) {
+                        (Some(head), Some(eyes)) => compose_poses(head, eyes[eye_index].pose),
+                        _ => xr::Posef {
+                            orientation: if flags.contains(xr::ViewStateFlags::ORIENTATION_VALID) {
+                                view.pose.orientation
+                            } else {
+                                xr::Quaternionf::IDENTITY
+                            },
+                            position: if flags.contains(xr::ViewStateFlags::POSITION_VALID) {
+                                view.pose.position
+                            } else {
+                                xr::Vector3f::default()
+                            },
+                        },
+                    };
                     let mut fov = view.fov;
                     if flip_vertically {
                         std::mem::swap(&mut fov.angle_up, &mut fov.angle_down);
@@ -1948,6 +1970,43 @@ impl<G: GraphicsBackend> FrameController<G> {
 
         trace!("frame submitted");
         Ok(proj_layer.is_some())
+    }
+}
+
+/// The pose of a rigid transform matrix, or None if the matrix is not one.
+fn rigid_pose(matrix: &vr::HmdMatrix34_t) -> Option<xr::Posef> {
+    let m = matrix.m;
+    let rotation = Mat3::from_cols(
+        Vec3::from_slice(&m[0][..3]),
+        Vec3::from_slice(&m[1][..3]),
+        Vec3::from_slice(&m[2][..3]),
+    )
+    .transpose();
+    let rigid = m.as_flattened().iter().all(|v| v.is_finite())
+        && (rotation * rotation.transpose()).abs_diff_eq(Mat3::IDENTITY, 1e-3)
+        && rotation.determinant() > 0.0;
+    rigid.then(|| (*matrix).into())
+}
+
+/// `child` relative to `parent`'s space, in the space `parent` is relative to.
+fn compose_poses(parent: xr::Posef, child: xr::Posef) -> xr::Posef {
+    let quat = |q: xr::Quaternionf| Quat::from_xyzw(q.x, q.y, q.z, q.w);
+    let vec = |v: xr::Vector3f| Vec3::new(v.x, v.y, v.z);
+    let rotation = quat(parent.orientation);
+    let orientation = rotation * quat(child.orientation);
+    let position = vec(parent.position) + rotation * vec(child.position);
+    xr::Posef {
+        orientation: xr::Quaternionf {
+            x: orientation.x,
+            y: orientation.y,
+            z: orientation.z,
+            w: orientation.w,
+        },
+        position: xr::Vector3f {
+            x: position.x,
+            y: position.y,
+            z: position.z,
+        },
     }
 }
 
@@ -3564,6 +3623,94 @@ mod tests {
         C29::FadeToColor(&*f.comp, 1000.0, 1.0, 1.0, 1.0, 1.0, false);
         let [r, _, _, a] = color(false);
         assert!(r < 0.01 && a < 0.01, "{r} {a}");
+    }
+
+    fn view(x: f32, fov: xr::Fovf) -> (xr::Posef, xr::Fovf) {
+        let pose = xr::Posef {
+            orientation: xr::Quaternionf::IDENTITY,
+            position: xr::Vector3f { x, y: 0.0, z: 0.0 },
+        };
+        (pose, fov)
+    }
+
+    const FOV: xr::Fovf = xr::Fovf {
+        angle_left: -0.8,
+        angle_right: 0.7,
+        angle_up: 0.75,
+        angle_down: -0.85,
+    };
+
+    /// Runs a frame that submits both eyes with `texture`, returning the submitted layer.
+    fn frame_with_texture(
+        f: &Fixture,
+        texture: *const vr::Texture_t,
+        bounds: Option<vr::VRTextureBounds_t>,
+        flags: vr::EVRSubmitFlags,
+    ) -> fakexr::ProjectionLayer {
+        let bounds = bounds.as_ref().map_or(std::ptr::null(), std::ptr::from_ref);
+        let session = f.comp.openxr.session_data.get().session.as_raw();
+        fakexr::record_projection_layers(session);
+        assert_eq!(f.wait_get_poses(), None);
+        for eye in [vr::EVREye::Left, vr::EVREye::Right] {
+            assert_eq!(f.comp.Submit(eye, texture, bounds, flags), None);
+        }
+        assert_eq!(f.wait_get_poses(), None);
+        fakexr::last_projection_layer(session).expect("no projection layer")
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn submit_texture_with_pose() {
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+        fakexr::set_views(
+            f.comp.openxr.session_data.get().session.as_raw(),
+            [view(-0.03, FOV), view(0.03, FOV)],
+        );
+
+        let mut texture = vr::VRTextureWithPose_t {
+            _base: FakeGraphicsData::texture(&f.vk),
+            mDeviceToAbsoluteTracking: xr::Posef {
+                orientation: xr::Quaternionf::IDENTITY,
+                position: xr::Vector3f {
+                    x: 1.0,
+                    y: 2.0,
+                    z: 3.0,
+                },
+            }
+            .into(),
+        };
+        let positions = |layer: fakexr::ProjectionLayer| {
+            layer.views.map(|(pose, _)| {
+                let p = pose.position;
+                [p.x, p.y, p.z]
+            })
+        };
+
+        let layer = frame_with_texture(
+            &f,
+            std::ptr::from_ref(&texture).cast(),
+            Option::None,
+            vr::EVRSubmitFlags::TextureWithPose,
+        );
+        assert_eq!(positions(layer), [[0.97, 2.0, 3.0], [1.03, 2.0, 3.0]]);
+
+        // Without the flag, or with a matrix that isn't a pose, the predicted views are used.
+        let layer = frame_with_texture(
+            &f,
+            std::ptr::from_ref(&texture).cast(),
+            Option::None,
+            vr::EVRSubmitFlags::Default,
+        );
+        assert_eq!(positions(layer), [[-0.03, 0.0, 0.0], [0.03, 0.0, 0.0]]);
+        texture.mDeviceToAbsoluteTracking = Default::default();
+        let layer = frame_with_texture(
+            &f,
+            std::ptr::from_ref(&texture).cast(),
+            Option::None,
+            vr::EVRSubmitFlags::TextureWithPose,
+        );
+        assert_eq!(positions(layer), [[-0.03, 0.0, 0.0], [0.03, 0.0, 0.0]]);
     }
 
     #[test]
