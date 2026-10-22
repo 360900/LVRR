@@ -253,11 +253,11 @@ impl<C: openxr_data::Compositor> Input<C> {
 
         let (raw, _) = joint_space(session_data, controller, hand);
         let base = raw.as_deref().unwrap_or(session_data.tracking_space());
-        let skeleton = controller.get_hand_skeleton(&self.openxr, base);
+        let data_source = controller.get_hand_data_source(&self.openxr, base);
         let mut levels = self.skeletal_tracking_level.write().unwrap();
         let level = &mut levels[hand as usize - 1];
-        if let Some(skeleton) = skeleton {
-            *level = match skeleton.data_source {
+        if let Some(data_source) = data_source {
+            *level = match data_source {
                 xr::HandTrackingDataSourceEXT::UNOBSTRUCTED => vr::EVRSkeletalTrackingLevel::Full,
                 // Joints derived from a controller, or an unknown source
                 _ => vr::EVRSkeletalTrackingLevel::Partial,

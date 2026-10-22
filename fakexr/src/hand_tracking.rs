@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 thread_local! {
     static SUPPORTED: Cell<bool> = const { Cell::new(false) };
     static CREATED: Cell<usize> = const { Cell::new(0) };
+    static LOCATED: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Active hands and their data source, by session and hand.
@@ -24,6 +25,11 @@ pub fn set_hand_tracking_supported(supported: bool) {
 /// How many hand trackers were created on this thread, successfully or not.
 pub fn hand_trackers_created() -> usize {
     CREATED.get()
+}
+
+/// How many times hand joints were located on this thread.
+pub fn hand_joints_located() -> usize {
+    LOCATED.get()
 }
 
 /// Makes the hand tracked from `source`, or untracked if `None`.
@@ -115,6 +121,7 @@ pub(super) extern "system" fn locate_hand_joints_e_x_t(
     locations: *mut xr::HandJointLocationsEXT,
 ) -> xr::Result {
     let tracker = get_handle!(tracker);
+    LOCATED.set(LOCATED.get() + 1);
     let locations = unsafe { locations.as_mut().unwrap() };
     let source = TRACKED.lock().unwrap().as_ref().and_then(|t| {
         t.get(&(tracker.session.into_raw(), tracker.hand as usize))

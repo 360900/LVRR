@@ -509,6 +509,27 @@ impl TrackedDevice {
         r
     }
 
+    /// The data source of the hand's skeleton, if it's tracked. Unlike the joints, it doesn't
+    /// depend on the base space, so this reuses any skeleton located this frame.
+    pub fn get_hand_data_source(
+        &self,
+        xr_data: &OpenXrData<impl crate::openxr_data::Compositor>,
+        base: &xr::Space,
+    ) -> Option<xr::HandTrackingDataSourceEXT> {
+        if let TrackedDeviceType::Controller { skeleton_cache, .. } = self.get_type() {
+            let skeleton_cache = skeleton_cache.lock().unwrap();
+            if !skeleton_cache.is_empty() {
+                return skeleton_cache
+                    .values()
+                    .flatten()
+                    .next()
+                    .map(|skeleton| skeleton.data_source);
+            }
+        }
+        self.get_hand_skeleton(xr_data, base)
+            .map(|skeleton| skeleton.data_source)
+    }
+
     pub fn clear_pose_cache(&self) {
         self.pose_cache.lock().unwrap().clear();
         if let TrackedDeviceType::Controller { skeleton_cache, .. } = self.get_type() {
@@ -628,11 +649,8 @@ impl TrackedDevice {
         }
 
         if !self.tracked_hand.load(Ordering::Relaxed)
-            && self
-                .get_hand_skeleton(xr_data, session_data.tracking_space())
-                .is_some_and(|skeleton| {
-                    skeleton.data_source == xr::HandTrackingDataSourceEXT::UNOBSTRUCTED
-                })
+            && self.get_hand_data_source(xr_data, session_data.tracking_space())
+                == Some(xr::HandTrackingDataSourceEXT::UNOBSTRUCTED)
         {
             self.tracked_hand.store(true, Ordering::Relaxed);
         }

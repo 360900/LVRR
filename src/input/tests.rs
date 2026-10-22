@@ -2304,24 +2304,36 @@ fn skeletal_tracking_level_follows_hand_tracking() {
         get_level(f)
     };
 
+    let bones = |f: &Fixture| {
+        let mut bones = [vr::VRBoneTransform_t::default(); super::HandSkeletonBone::Count as usize];
+        assert_eq!(
+            f.input.GetSkeletalBoneData(
+                skeleton,
+                vr::EVRSkeletalTransformSpace::Parent,
+                vr::EVRSkeletalMotionRange::WithController,
+                bones.as_mut_ptr(),
+                bones.len() as u32,
+            ),
+            vr::EVRInputError::None
+        );
+    };
+
     // Reported before any bone data was requested.
     f.set_interaction_profile::<SimpleController>(LeftHand);
     fakexr::set_hand_tracked(f.raw_session(), LeftHand, Some(Source::UNOBSTRUCTED));
     assert_eq!(level(&mut f), Full);
+
+    // Joints already located this frame aren't located again.
+    f.input.frame_start_update();
+    bones(&f);
+    let located = fakexr::hand_joints_located();
+    assert_eq!(get_level(&f), Full);
+    assert_eq!(fakexr::hand_joints_located(), located);
+
     fakexr::set_hand_tracked(f.raw_session(), LeftHand, None);
     assert_eq!(level(&mut f), Full);
     // Nor do estimated bones lower it.
-    let mut bones = [vr::VRBoneTransform_t::default(); super::HandSkeletonBone::Count as usize];
-    assert_eq!(
-        f.input.GetSkeletalBoneData(
-            skeleton,
-            vr::EVRSkeletalTransformSpace::Parent,
-            vr::EVRSkeletalMotionRange::WithController,
-            bones.as_mut_ptr(),
-            bones.len() as u32,
-        ),
-        vr::EVRInputError::None
-    );
+    bones(&f);
     assert_eq!(get_level(&f), Full);
 
     // A different device doesn't inherit it.
