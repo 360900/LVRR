@@ -487,6 +487,13 @@ struct ButtonParameters {
     click_threshold: ClickThresholdParams,
 }
 
+impl ButtonParameters {
+    /// None if missing or not a valid duration (negative, NaN or too long).
+    fn long_press_delay(&self) -> Option<Duration> {
+        Duration::try_from_secs_f32(*self.long_press_delay?).ok()
+    }
+}
+
 #[derive(Deserialize, Clone, Copy, Debug)]
 #[serde(rename_all = "lowercase")]
 enum ButtonForceInput {
@@ -639,6 +646,25 @@ fn vector2_inversion_parse() {
     ] {
         let parameters: Vector2Parameters = serde_json::from_str(json).unwrap();
         assert_eq!(parameters.invert, expected, "{json}");
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn long_press_delay_parse() {
+    for (json, expected) in [
+        (r#"{}"#, None),
+        (
+            r#"{"long_press_delay": "0.25"}"#,
+            Some(Duration::from_millis(250)),
+        ),
+        (r#"{"long_press_delay": "-1"}"#, None),
+        (r#"{"long_press_delay": "NaN"}"#, None),
+        (r#"{"long_press_delay": "1e20"}"#, None),
+        (r#"{"long_press_delay": 1e20}"#, None),
+    ] {
+        let parameters: ButtonParameters = serde_json::from_str(json).unwrap();
+        assert_eq!(parameters.long_press_delay(), expected, "{json}");
     }
 }
 
@@ -948,12 +974,8 @@ pub fn handle_sources(
                 // A single press only has to wait when it could turn into something else.
                 let long_delay = long.as_ref().or(held.as_ref()).map(|_| {
                     parameters
-                        .and_then(|p| p.long_press_delay.as_deref().copied())
-                        .filter(|delay| delay.is_finite() && *delay >= 0.0)
-                        .map_or(
-                            TimedPressData::DEFAULT_LONG_PRESS_DELAY,
-                            Duration::from_secs_f32,
-                        )
+                        .and_then(ButtonParameters::long_press_delay)
+                        .unwrap_or(TimedPressData::DEFAULT_LONG_PRESS_DELAY)
                 });
                 let single_waits = double.is_some() || long_delay.is_some();
                 let immediate = [
