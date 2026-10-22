@@ -51,6 +51,8 @@ PRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES=1 VR_OVERRIDE=/path/to/xrizer-edge %com
 
 The active runtime is `active_runtime.json` in `~/.config/openxr/1` or `/etc/xdg/openxr/1`. 32-bit games (e.g. Half-Life 2: VR Mod) need a 32-bit build of the runtime (e.g. `lib32-wivrn-server`) as `active_runtime.i686.json`. WiVRn sets these up while its server runs.
 
+Only the default Monado and WiVRn sockets are imported; expose others with `PRESSURE_VESSEL_FILESYSTEMS_RW`. Don't also set `XR_RUNTIME_JSON`.
+
 Otherwise, set `XR_RUNTIME_JSON` and use `PRESSURE_VESSEL_FILESYSTEMS_RW` to expose the socket. `XR_RUNTIME_JSON` applies to 32-bit games too, so this only works for 64-bit ones. Example for a systemwide Monado install:
 
 ```
