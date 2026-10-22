@@ -568,10 +568,10 @@ pub mod paths {
         }
     }
 
-    /// The path segment of a subpath: its lowercased name unless given explicitly.
+    /// The path segment of a subpath: its snake_case name unless given explicitly.
     macro_rules! subpath_str {
         ($name:ident) => {
-            paste::paste!(stringify!([<$name:lower>]))
+            paste::paste!(stringify!([<$name:snake>]))
         };
         ($name:ident, $path:literal) => {
             $path
@@ -619,10 +619,10 @@ pub mod paths {
         View::<Click, Touch>,
         System::<Click, Touch>,
         Bumper::<Click, Touch>,
-        DPadUp::<Click, Touch>,
-        DPadLeft::<Click, Touch>,
-        DPadDown::<Click, Touch>,
-        DPadRight::<Click, Touch>,
+        DpadUp::<Click, Touch>,
+        DpadLeft::<Click, Touch>,
+        DpadDown::<Click, Touch>,
+        DpadRight::<Click, Touch>,
         Select::<Click>,
         Trigger::<Click, Value, Force, Touch>,
         Squeeze::<Click, Value, Force, Touch>,
@@ -644,10 +644,10 @@ pub mod paths {
                 "b" => Some(Self::B),
                 "x" => Some(Self::X),
                 "y" => Some(Self::Y),
-                "dpad_up" => Some(Self::DPadUp),
-                "dpad_left" => Some(Self::DPadLeft),
-                "dpad_down" => Some(Self::DPadDown),
-                "dpad_right" => Some(Self::DPadRight),
+                "dpad_up" => Some(Self::DpadUp),
+                "dpad_left" => Some(Self::DpadLeft),
+                "dpad_down" => Some(Self::DpadDown),
+                "dpad_right" => Some(Self::DpadRight),
                 "application_menu" | "menu" => Some(Self::Menu),
                 "view" => Some(Self::View),
                 "system" => Some(Self::System),
