@@ -542,11 +542,13 @@ mod tests {
         );
 
         let error = |e| unsafe { CStr::from_ptr(core.GetEnglishStringForHmdError(e)) };
-        assert_eq!(error(vr::EVRInitError(12345)), c"EVRInitError 12345");
+        assert_eq!(error(vr::EVRInitError(12345)), c"Unknown");
         assert_eq!(
             error(vr::EVRInitError::Init_HmdNotFound),
-            c"EVRInitError Init_HmdNotFound"
+            c"Hmd Not Found (108)"
         );
+        let symbol = |e| unsafe { CStr::from_ptr(core.GetIDForVRInitError(e)) };
+        assert_eq!(symbol(vr::EVRInitError(12345)), c"Unknown");
     }
 
     #[test]
@@ -618,44 +620,45 @@ mod tests {
 
     #[test]
     fn init_error_codes() {
-        use vr::{EVRApplicationType::*, EVRInitError::*};
+        use vr::EVRApplicationType as App;
+        use vr::EVRInitError as E;
         use xr::sys::Result as XrResult;
 
         let cases = [
             (
                 InitError::EnumeratingExtensionsFailed(XrResult::ERROR_RUNTIME_UNAVAILABLE),
-                Scene,
-                Init_InstallationNotFound,
+                App::Scene,
+                E::Init_InstallationNotFound,
             ),
             (
                 InitError::EnumeratingExtensionsFailed(XrResult::ERROR_RUNTIME_UNAVAILABLE),
-                Background,
-                Init_NoServerForBackgroundApp,
+                App::Background,
+                E::Init_NoServerForBackgroundApp,
             ),
             (
                 InitError::InstanceCreationFailed(XrResult::ERROR_RUNTIME_UNAVAILABLE),
-                Background,
-                Init_NoServerForBackgroundApp,
+                App::Background,
+                E::Init_NoServerForBackgroundApp,
             ),
             (
                 InitError::InstanceCreationFailed(XrResult::ERROR_RUNTIME_UNAVAILABLE),
-                Scene,
-                Init_VRServiceStartupFailed,
+                App::Scene,
+                E::Init_VRServiceStartupFailed,
             ),
             (
                 InitError::InstanceCreationFailed(XrResult::ERROR_RUNTIME_FAILURE),
-                Background,
-                Init_VRServiceStartupFailed,
+                App::Background,
+                E::Init_VRServiceStartupFailed,
             ),
             (
                 InitError::SystemCreationFailed(XrResult::ERROR_FORM_FACTOR_UNAVAILABLE),
-                Scene,
-                Init_HmdNotFound,
+                App::Scene,
+                E::Init_HmdNotFound,
             ),
             (
                 InitError::SystemCreationFailed(XrResult::ERROR_RUNTIME_FAILURE),
-                Scene,
-                Init_VRServiceStartupFailed,
+                App::Scene,
+                E::Init_VRServiceStartupFailed,
             ),
         ];
         for (error, app_type, expected) in cases {
