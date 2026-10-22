@@ -288,15 +288,29 @@ pub(super) struct Vector2ActionData {
     // Left, right, unrestricted. OpenVR deltas are relative to UpdateActionState,
     // so reads must neither consume deltas nor share history between subactions.
     pub state: Mutex<[vr::InputAnalogActionData_t; 3]>,
+    input_only: bool,
 }
 
 impl Vector2ActionData {
+    /// For actions that only feed custom bindings. Those read the action themselves, so the
+    /// state isn't synced.
+    pub fn input_only() -> Self {
+        Self {
+            input_only: true,
+            ..Default::default()
+        }
+    }
+
     pub fn sync(
         &self,
         direct: &xr::Action<xr::Vector2f>,
         session: &xr::Session<xr::AnyGraphics>,
         hands: [(xr::Path, xr::Path, vr::VRInputValueHandle_t); 2],
     ) {
+        if self.input_only {
+            return;
+        }
+
         fn prefer(
             candidate: &vr::InputAnalogActionData_t,
             best: &vr::InputAnalogActionData_t,

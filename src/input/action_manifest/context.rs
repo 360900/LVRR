@@ -1,7 +1,8 @@
 use super::actions::{LoadedActionDataMap, XrNames};
 use super::bindings::{ActionPath, DpadParameters, DpadSubMode};
 use crate::input::custom_bindings::{
-    BoolBindingData, BoolBindingType, DpadActions, Vector2BindingData, Vector2Transform,
+    BoolBindingData, BoolBindingType, DpadActions, Vector2ActionData, Vector2BindingData,
+    Vector2Transform,
 };
 use crate::input::profiles::{DynInputPath, paths};
 use crate::input::skeletal::SkeletalInputActionData;
@@ -200,7 +201,7 @@ impl InputActionType for xr::Vector2f {
     fn into_data(action: xr::Action<Self>) -> ActionData {
         ActionData::Vector2 {
             action,
-            data: Default::default(),
+            data: Vector2ActionData::input_only(),
         }
     }
     fn from_data(data: &ActionData) -> Option<&xr::Action<Self>> {
