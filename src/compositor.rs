@@ -1733,7 +1733,7 @@ mod tests {
     }
 
     impl FakeGraphicsData {
-        fn texture(data: &Arc<VulkanData>) -> vr::Texture_t {
+        pub fn texture(data: &Arc<VulkanData>) -> vr::Texture_t {
             vr::Texture_t {
                 eType: vr::ETextureType::Reserved,
                 handle: Arc::into_raw(data.clone()) as _,

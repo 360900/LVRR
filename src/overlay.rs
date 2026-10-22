@@ -93,6 +93,20 @@ impl OverlayMan {
 
         self.clear_skybox();
 
+        // Skybox faces come in with V flipped compared to normal overlays.
+        let bounds = vr::VRTextureBounds_t {
+            uMin: 0.0,
+            uMax: 1.0,
+            vMin: 1.0,
+            vMax: 0.0,
+        };
+        // This may restart the session, so it has to happen before taking the overlay locks: the
+        // frame thread takes those while holding the session lock.
+        let Ok(session_data) = self.get_real_session_data(texture, bounds) else {
+            log::warn!("Could not create swapchain for skybox texture; skipping");
+            return Ok(());
+        };
+
         let mut overlays = self.overlays.write().unwrap();
         let mut skybox = self.skybox.write().unwrap();
 
@@ -103,13 +117,7 @@ impl OverlayMan {
         overlay.kind = OverlayKind::Curved { curvature: 1.0 };
         overlay.z_order = SKYBOX_Z_ORDER;
         overlay.scale = (1.0, 1.0);
-        // Skybox faces come in with V flipped compared to normal overlays.
-        overlay.bounds = vr::VRTextureBounds_t {
-            uMin: 0.0,
-            uMax: 1.0,
-            vMin: 1.0,
-            vMax: 0.0,
-        };
+        overlay.bounds = bounds;
         // Wide enough to fill most of the forward view; height derived from
         // texture aspect. Distance is set via the transform below and used as
         // the cylinder radius (see get_layers).
@@ -129,11 +137,7 @@ impl OverlayMan {
             },
         ));
 
-        let res = self
-            .get_real_session_data(texture, overlay.bounds)
-            .and_then(|data| overlay.set_texture(key, data, *texture));
-
-        match res {
+        match overlay.set_texture(key, session_data, *texture) {
             Ok(()) => {
                 skybox.push(key);
                 Ok(())
@@ -148,8 +152,8 @@ impl OverlayMan {
     }
 
     pub fn clear_skybox(&self) {
-        let mut skybox = self.skybox.write().unwrap();
         let mut overlays = self.overlays.write().unwrap();
+        let mut skybox = self.skybox.write().unwrap();
         for key in skybox.drain(..) {
             overlays.remove(key);
         }
@@ -1005,45 +1009,38 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         texture: *const vr::Texture_t,
     ) -> vr::EVROverlayError {
         debug!("setting overlay texture");
-        get_overlay!(self, handle, mut overlay);
+        let bounds = {
+            get_overlay!(self, handle, overlay);
+            overlay.bounds
+        };
         if texture.is_null() {
-            vr::EVROverlayError::InvalidParameter
-        } else {
-            let texture = unsafe { texture.read() };
-            if !self.openxr.session_data.get().is_real_session()
-                && self
-                    .compositor
-                    .get()
-                    .expect("Need to restart session, but compositor hasn't been set up...")
-                    .initialize_real_session(&texture, overlay.bounds)
-                    .is_err()
-            {
-                debug!("cannot set overlay texture when not in a real session");
-                return vr::EVROverlayError::InvalidTexture;
-            }
-            let key = OverlayKey::from(KeyData::from_ffi(handle));
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        let texture = unsafe { texture.read() };
 
-            match self.get_real_session_data(&texture, overlay.bounds) {
-                Err(e) => {
-                    debug!(
-                        "failed to get real session data for overlay texture {:?}: {e:?}",
-                        overlay.name
-                    );
-                    e
-                }
-                Ok(data) => match overlay.set_texture(key, data, texture) {
-                    Err(e) => {
-                        debug!(
-                            "failed to set overlay texture for {:?}: {e:?}",
-                            overlay.name
-                        );
-                        e
-                    }
-                    Ok(_) => {
-                        debug!("set overlay texture for {:?}", overlay.name);
-                        vr::EVROverlayError::None
-                    }
-                },
+        // This may restart the session, so it has to happen before taking the overlay lock: the
+        // frame thread takes that while holding the session lock.
+        let data = match self.get_real_session_data(&texture, bounds) {
+            Ok(data) => data,
+            Err(e) => {
+                debug!("failed to get real session data for overlay texture: {e:?}");
+                return e;
+            }
+        };
+
+        let key = OverlayKey::from(KeyData::from_ffi(handle));
+        get_overlay!(self, handle, mut overlay);
+        match overlay.set_texture(key, data, texture) {
+            Err(e) => {
+                debug!(
+                    "failed to set overlay texture for {:?}: {e:?}",
+                    overlay.name
+                );
+                e
+            }
+            Ok(_) => {
+                debug!("set overlay texture for {:?}", overlay.name);
+                vr::EVROverlayError::None
             }
         }
     }
@@ -1208,16 +1205,12 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         height: u32,
         bytes_per_pixel: u32,
     ) -> vr::EVROverlayError {
+        let session_data = self.openxr.session_data.get();
         get_overlay!(self, handle, mut overlay);
         let key = OverlayKey::from(KeyData::from_ffi(handle));
-        if let Err(error) = overlay.set_raw_texture(
-            key,
-            &self.openxr.session_data.get(),
-            texture,
-            width,
-            height,
-            bytes_per_pixel,
-        ) {
+        if let Err(error) =
+            overlay.set_raw_texture(key, &session_data, texture, width, height, bytes_per_pixel)
+        {
             return error;
         };
         vr::EVROverlayError::None
@@ -2149,6 +2142,56 @@ mod tests {
         let mut small = [1 as c_char; 4];
         man.GetKeyboardText(small.as_mut_ptr(), small.len() as u32);
         assert_eq!(unsafe { CStr::from_ptr(small.as_ptr()) }, c"Adv");
+    }
+
+    #[test]
+    fn skybox_locks_overlays_first() {
+        let man = overlay_man();
+        let overlays = man.overlays.write().unwrap();
+        std::thread::scope(|s| {
+            let clear = s.spawn(|| man.clear_skybox());
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let skybox_free = man.skybox.try_write().is_ok();
+            drop(overlays);
+            clear.join().unwrap();
+            assert!(skybox_free, "skybox locked while waiting for the overlays");
+        });
+    }
+
+    /// The frame thread takes the overlay lock while holding the session lock, so the first
+    /// overlay texture must not move to the real session while holding the overlay lock.
+    #[test]
+    fn overlay_texture_restarts_session_without_overlay_lock() {
+        use crate::compositor::FakeGraphicsData;
+        use crate::graphics_backends::VulkanData;
+
+        let xr =
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
+        let vk = Arc::new(VulkanData::new_temporary(&xr.instance, xr.system_id));
+        let comp = Arc::new(Compositor::new(xr.clone(), &Injector::default()));
+        xr.compositor.set(Arc::downgrade(&comp));
+        let man = Arc::new(OverlayMan::new(xr.clone(), &Injector::default()));
+        man.compositor.set(Arc::downgrade(&comp));
+        let handle = create(&man, c"key", c"name");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let weak = Arc::downgrade(&man);
+        fakexr::on_next_end(xr.session_data.get().session.as_raw(), move || {
+            let man = weak.upgrade().unwrap();
+            tx.send(man.overlays.try_read().is_ok()).unwrap();
+        });
+        assert_eq!(
+            man.SetOverlayTexture(handle, &FakeGraphicsData::texture(&vk)),
+            vr::EVROverlayError::None
+        );
+        let unlocked = rx.try_recv().expect("session was not restarted");
+        assert!(unlocked, "overlay lock held while restarting the session");
+
+        // Session must be dropped before Vulkan data.
+        drop(man);
+        drop(comp);
+        drop(xr);
+        drop(vk);
     }
 
     #[test]

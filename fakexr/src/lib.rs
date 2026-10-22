@@ -182,11 +182,26 @@ pub fn session_frame_state(session: xr::Session) -> FrameState {
     session.frame_state.load()
 }
 
+type Hook = Mutex<Option<Box<dyn FnOnce() + Send>>>;
+
+fn run_hook(hook: &Hook) {
+    let hook = hook.lock().unwrap().take();
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 /// Runs `hook` on the calling thread at the start of the next xrAttachSessionActionSets call on
 /// `session`.
 pub fn on_next_attach(session: xr::Session, hook: impl FnOnce() + Send + 'static) {
     let session = session.to_handle().unwrap();
     *session.attach_hook.lock().unwrap() = Some(Box::new(hook));
+}
+
+/// Runs `hook` on the calling thread at the start of the next xrEndSession call on `session`.
+pub fn on_next_end(session: xr::Session, hook: impl FnOnce() + Send + 'static) {
+    let session = session.to_handle().unwrap();
+    *session.end_hook.lock().unwrap() = Some(Box::new(hook));
 }
 
 macro_rules! fn_unimplemented_impl {
@@ -604,7 +619,8 @@ struct Session {
     frame_state: AtomicCell<FrameState>,
     with_trackers: AtomicBool,
     stage_bounds: AtomicCell<Option<xr::Extent2Df>>,
-    attach_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    attach_hook: Hook,
+    end_hook: Hook,
 }
 
 impl Session {
@@ -968,6 +984,7 @@ extern "system" fn create_session(
         with_trackers: false.into(),
         stage_bounds: None.into(),
         attach_hook: Mutex::default(),
+        end_hook: Mutex::default(),
     });
 
     DEFAULT_PROFILES.with_borrow(|profiles| {
@@ -1370,6 +1387,7 @@ extern "system" fn request_exit_session(session: xr::Session) -> xr::Result {
 
 extern "system" fn end_session(session: xr::Session) -> xr::Result {
     let sess = get_handle!(session);
+    run_hook(&sess.end_hook);
     send_event(
         &sess.event_sender,
         xr::EventDataSessionStateChanged {
@@ -1418,10 +1436,7 @@ extern "system" fn attach_session_action_sets(
     info: *const xr::SessionActionSetsAttachInfo,
 ) -> xr::Result {
     let sesh = get_handle!(session);
-    let hook = sesh.attach_hook.lock().unwrap().take();
-    if let Some(hook) = hook {
-        hook();
-    }
+    run_hook(&sesh.attach_hook);
     let sets =
         unsafe { std::slice::from_raw_parts((*info).action_sets, (*info).count_action_sets as _) };
     if sesh.attached_sets.set(sets.into()).is_ok() {
