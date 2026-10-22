@@ -612,10 +612,7 @@ impl<C: Compositor> OpenXrData<C> {
     /// Time since the most recent vsync and a running vsync count, extrapolated from the last
     /// predicted display time and period. `None` if the current time can't be queried.
     pub fn vsync_timing(&self) -> Option<(Duration, u64)> {
-        if !self.enabled_extensions.khr_convert_timespec_time {
-            return None;
-        }
-        let now = self.instance.now().ok()?;
+        let now = self.now()?;
         vsync_phase(
             now.as_nanos(),
             self.display_time.get().as_nanos(),
@@ -672,13 +669,20 @@ impl<C: Compositor> OpenXrData<C> {
         state
     }
 
-    pub fn time_from_now(&self, seconds: f32) -> xr::Time {
-        match self.instance.now() {
-            Ok(time) => xr::Time::from_nanos(
-                time.as_nanos() + std::time::Duration::from_secs_f32(seconds).as_nanos() as i64,
-            ),
-            _ => self.display_time.get(),
+    /// The current time, if the runtime can convert it (`Instance::now` panics without
+    /// XR_KHR_convert_timespec_time).
+    pub fn now(&self) -> Option<xr::Time> {
+        if !self.enabled_extensions.khr_convert_timespec_time {
+            return None;
         }
+        self.instance.now().ok()
+    }
+
+    pub fn time_from_now(&self, seconds: f32) -> xr::Time {
+        offset_time(
+            self.now().unwrap_or_else(|| self.display_time.get()),
+            seconds,
+        )
     }
 }
 
@@ -739,6 +743,17 @@ impl SessionCreateInfo {
     {
         Self::from(CreateInfo(info))
     }
+}
+
+/// Apps pass negative seconds for past poses, and occasionally garbage.
+fn offset_time(time: xr::Time, seconds: f32) -> xr::Time {
+    let offset = if seconds.is_finite() {
+        // Saturates on overflow.
+        (seconds as f64 * 1e9) as i64
+    } else {
+        0
+    };
+    xr::Time::from_nanos(time.as_nanos().saturating_add(offset))
 }
 
 /// Vsyncs are assumed at `display_time + k * period`. Returns the time since the last one at or
@@ -1146,7 +1161,9 @@ pub use tests::FakeCompositor;
 
 #[cfg(test)]
 mod tests {
-    use super::{FrameStream, GraphicsBackend, OpenXrData, SessionCreateInfo, vsync_phase};
+    use super::{
+        FrameStream, GraphicsBackend, OpenXrData, SessionCreateInfo, offset_time, vsync_phase,
+    };
     use crate::clientcore::Injector;
     use openxr as xr;
     use std::ffi::CStr;
@@ -1219,6 +1236,19 @@ mod tests {
         assert_eq!(vsync_phase(ns(1020), ns(1020), ns(10)), Some((ms(0), 102)));
         assert_eq!(vsync_phase(ns(1029), ns(1020), ns(10)), Some((ms(9), 102)));
         assert_eq!(vsync_phase(ns(1003), ns(1000), 0), None);
+    }
+
+    #[test]
+    fn offset_time_takes_any_seconds() {
+        let offset = |seconds| offset_time(xr::Time::from_nanos(1_000_000_000), seconds).as_nanos();
+        assert_eq!(offset(0.5), 1_500_000_000);
+        // Negative is a time in the past.
+        assert_eq!(offset(-0.25), 750_000_000);
+        assert_eq!(offset(f32::NAN), 1_000_000_000);
+        assert_eq!(offset(f32::INFINITY), 1_000_000_000);
+        assert_eq!(offset(f32::NEG_INFINITY), 1_000_000_000);
+        assert_eq!(offset(f32::MAX), i64::MAX);
+        assert_eq!(offset(f32::MIN), i64::MIN + 1_000_000_000);
     }
 
     #[test]

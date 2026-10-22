@@ -1158,6 +1158,9 @@ impl vr::IVRSystem026_Interface for System {
         pose_array: *mut vr::TrackedDevicePose_t,
         pose_count: u32,
     ) {
+        if pose_array.is_null() || pose_count == 0 {
+            return;
+        }
         self.input
             .force(|_| Input::new(self.openxr.clone()))
             .get_poses(
@@ -1418,6 +1421,30 @@ mod tests {
             output.as_mut_ptr(),
         ));
         assert_eq!(output.map(|c| (c.u, c.v)), [(0.1, 0.2), (0.9, 0.8)]);
+    }
+
+    #[test]
+    fn device_to_absolute_tracking_pose_takes_any_seconds() {
+        // fakexr doesn't have XR_KHR_convert_timespec_time, so this also covers its absence.
+        let xr =
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
+        let system = System::new(xr, &Injector::default());
+
+        for seconds in [0.0, -0.011, f32::NAN, f32::NEG_INFINITY] {
+            let mut poses = [vr::TrackedDevicePose_t::default(); 2];
+            system.GetDeviceToAbsoluteTrackingPose(
+                vr::ETrackingUniverseOrigin::Seated,
+                seconds,
+                poses.as_mut_ptr(),
+                poses.len() as u32,
+            );
+        }
+        system.GetDeviceToAbsoluteTrackingPose(
+            vr::ETrackingUniverseOrigin::Seated,
+            0.0,
+            std::ptr::null_mut(),
+            0,
+        );
     }
 
     #[test]

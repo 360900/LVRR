@@ -1690,3 +1690,27 @@ fn rejected_profile_doesnt_stop_manifest_load() {
         path(OculusTouch::profile_path())
     ));
 }
+
+#[test]
+fn pose_relative_to_now_takes_any_seconds() {
+    // fakexr doesn't have XR_KHR_convert_timespec_time, so this also covers its absence.
+    let f = Fixture::new();
+    f.load_actions(c"actions.json");
+    let pose = f.get_action_handle(c"/actions/set1/in/pose");
+
+    for seconds in [0.0, -0.011, f32::NAN, f32::INFINITY] {
+        let mut data = vr::InputPoseActionData_t::default();
+        assert_eq!(
+            f.input.GetPoseActionDataRelativeToNow(
+                pose,
+                vr::ETrackingUniverseOrigin::Seated,
+                seconds,
+                &mut data,
+                std::mem::size_of_val(&data) as u32,
+                0,
+            ),
+            vr::EVRInputError::None,
+            "{seconds}"
+        );
+    }
+}
