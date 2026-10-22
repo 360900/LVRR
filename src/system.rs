@@ -1117,6 +1117,11 @@ impl vr::IVRSystem026_Interface for System {
 
                 return d.charging;
             }
+            vr::ETrackedDeviceProperty::ContainsProximitySensor_Bool
+                if device_index == vr::k_unTrackedDeviceIndex_Hmd =>
+            {
+                return self.openxr.supports_user_presence;
+            }
             _ => {}
         }
 
@@ -1227,6 +1232,9 @@ impl vr::IVRSystem026_Interface for System {
         device_index: vr::TrackedDeviceIndex_t,
     ) -> vr::EDeviceActivityLevel {
         match device_index {
+            vr::k_unTrackedDeviceIndex_Hmd if !self.openxr.user_present() => {
+                vr::EDeviceActivityLevel::Idle
+            }
             vr::k_unTrackedDeviceIndex_Hmd => vr::EDeviceActivityLevel::UserInteraction,
             x if self
                 .input
@@ -2152,6 +2160,44 @@ mod tests {
         assert!(system.IsInputAvailable());
         assert!(!system.ShouldApplicationPause());
         assert!(next_event(&system).is_none());
+    }
+
+    #[test]
+    fn user_presence() {
+        let (xr, system) = system_with_events();
+        let mut err = vr::ETrackedPropertyError::UnknownProperty;
+        assert!(system.GetBoolTrackedDeviceProperty(
+            vr::k_unTrackedDeviceIndex_Hmd,
+            vr::ETrackedDeviceProperty::ContainsProximitySensor_Bool,
+            &mut err
+        ));
+        assert_eq!(err, vr::ETrackedPropertyError::Success);
+        let activity = || system.GetTrackedDeviceActivityLevel(vr::k_unTrackedDeviceIndex_Hmd);
+        assert_eq!(activity(), vr::EDeviceActivityLevel::UserInteraction);
+
+        // The runtime reports the initial state when the session begins.
+        fakexr::set_user_presence(session(&xr), true);
+        xr.poll_events();
+        assert!(next_event(&system).is_none());
+
+        fakexr::set_user_presence(session(&xr), false);
+        xr.poll_events();
+        let event = next_event(&system).expect("no event");
+        assert_eq!(
+            event.eventType,
+            vr::EVREventType::TrackedDeviceUserInteractionEnded as u32
+        );
+        assert_eq!(event.trackedDeviceIndex, vr::k_unTrackedDeviceIndex_Hmd);
+        assert_eq!(activity(), vr::EDeviceActivityLevel::Idle);
+
+        fakexr::set_user_presence(session(&xr), true);
+        xr.poll_events();
+        let event = next_event(&system).expect("no event");
+        assert_eq!(
+            event.eventType,
+            vr::EVREventType::TrackedDeviceUserInteractionStarted as u32
+        );
+        assert_eq!(activity(), vr::EDeviceActivityLevel::UserInteraction);
     }
 
     #[test]

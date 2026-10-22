@@ -76,6 +76,9 @@ pub struct OpenXrData<C: Compositor> {
     pub max_layer_count: usize,
     /// Runtime errors already logged as warnings, so one that repeats every frame is logged once.
     logged_errors: Mutex<HashSet<(&'static str, i32)>>,
+    /// Whether the runtime tells us when the user puts on or takes off the headset.
+    pub supports_user_presence: bool,
+    user_present: AtomicBool,
     /// Set while the runtime holds the input focus it took from us (e.g. its system menu).
     input_focus_captured: AtomicBool,
     /// Change time of a runtime recenter of LOCAL that hasn't taken effect yet.
@@ -228,6 +231,7 @@ impl<C: Compositor> OpenXrData<C> {
         exts.ext_samsung_odyssey_controller = supported_exts.ext_samsung_odyssey_controller;
         exts.ext_hp_mixed_reality_controller = supported_exts.ext_hp_mixed_reality_controller;
         exts.fb_display_refresh_rate = supported_exts.fb_display_refresh_rate;
+        exts.ext_user_presence = supported_exts.ext_user_presence;
 
         if supported_exts
             .other
@@ -266,6 +270,8 @@ impl<C: Compositor> OpenXrData<C> {
         let system_id = instance
             .system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)
             .map_err(InitError::SystemCreationFailed)?;
+        let supports_user_presence =
+            exts.ext_user_presence && supports_user_presence(&instance, system_id);
 
         let probed_profiles =
             crate::input::probe_interaction_profiles(&instance, system_id, &exts, application_type);
@@ -308,6 +314,8 @@ impl<C: Compositor> OpenXrData<C> {
             session_creation_failed: false.into(),
             max_layer_count,
             logged_errors: Mutex::default(),
+            supports_user_presence,
+            user_present: true.into(),
             input_focus_captured: false.into(),
             pending_recenter: parking_lot::Mutex::new(None),
             input: injector.inject(),
@@ -402,6 +410,23 @@ impl<C: Compositor> OpenXrData<C> {
                         _ => {}
                     }
                 }
+                xr::Event::UserPresenceChangedEXT(event) => {
+                    let present = event.is_user_present();
+                    if is_stale(event.session(), &present) {
+                        continue;
+                    }
+                    info!("User present: {present}");
+                    if self.user_present.swap(present, Ordering::Relaxed) != present {
+                        self.push_event(
+                            if present {
+                                vr::EVREventType::TrackedDeviceUserInteractionStarted
+                            } else {
+                                vr::EVREventType::TrackedDeviceUserInteractionEnded
+                            },
+                            Default::default(),
+                        );
+                    }
+                }
                 _ => {
                     info!("unknown event");
                 }
@@ -446,6 +471,11 @@ impl<C: Compositor> OpenXrData<C> {
     /// Whether the runtime holds the input focus, i.e. the app shouldn't expect input.
     pub fn input_focus_captured(&self) -> bool {
         self.input_focus_captured.load(Ordering::Relaxed)
+    }
+
+    /// Whether the user is wearing the headset. Always true without XR_EXT_user_presence.
+    pub fn user_present(&self) -> bool {
+        self.user_present.load(Ordering::Relaxed)
     }
 
     /// Pushes a system event that isn't about a particular device.
@@ -834,6 +864,28 @@ struct PolledEvents {
 static RECENTER_STANDING: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
     crate::quirks::env_override("XRIZER_RECENTER_STANDING").unwrap_or(false)
 });
+
+fn supports_user_presence(instance: &xr::Instance, system_id: xr::SystemId) -> bool {
+    let mut presence = xr::sys::SystemUserPresencePropertiesEXT {
+        ty: xr::sys::SystemUserPresencePropertiesEXT::TYPE,
+        next: std::ptr::null_mut(),
+        supports_user_presence: false.into(),
+    };
+    let mut properties = xr::sys::SystemProperties {
+        ty: xr::sys::SystemProperties::TYPE,
+        next: (&raw mut presence).cast(),
+        // Zeroed like the openxr crate does for these out structs.
+        ..unsafe { std::mem::zeroed() }
+    };
+    let result = unsafe {
+        (instance.fp().get_system_properties)(instance.as_raw(), system_id, &mut properties)
+    };
+    if result != xr::sys::Result::SUCCESS {
+        warn!("Couldn't query user presence support: {result}");
+        return false;
+    }
+    presence.supports_user_presence.into()
+}
 
 pub struct AtomicXrTime(AtomicI64);
 
