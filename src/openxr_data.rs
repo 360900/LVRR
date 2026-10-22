@@ -806,6 +806,12 @@ impl<C: Compositor> OpenXrData<C> {
         )
     }
 
+    /// Pretends the compositor waited for a frame displayed at `time`.
+    #[cfg(test)]
+    pub fn set_display_time(&self, time: xr::Time) {
+        self.display_time.set(time);
+    }
+
     /// Records the timing of a frame the compositor waited for.
     pub fn set_frame_timing(&self, display_time: xr::Time, display_period_nanos: i64) {
         self.display_time.set(display_time);

@@ -2206,8 +2206,7 @@ fn pose_relative_to_now_in_the_past() {
     // Without XR_KHR_convert_timespec_time (fakexr has none), now is the display time.
     f.input
         .openxr
-        .display_time
-        .set(xr::Time::from_nanos(10_000_000_000));
+        .set_display_time(xr::Time::from_nanos(10_000_000_000));
     let time_from_now = |seconds| f.input.openxr.time_from_now(seconds).as_nanos();
     assert_eq!(time_from_now(-0.25), 9_750_000_000);
     assert_eq!(time_from_now(f32::NAN), 10_000_000_000);
@@ -2229,7 +2228,7 @@ fn digital_action_update_time() {
     };
     let secs = |secs: f64| xr::Time::from_nanos((secs * 1e9) as i64);
     // Without XR_KHR_convert_timespec_time (fakexr has none), this is the closest to now.
-    f.input.openxr.display_time.set(secs(10.0));
+    f.input.openxr.set_display_time(secs(10.0));
 
     fakexr::set_action_state_with_time(action, true.into(), LeftHand, secs(9.75));
     sync(&mut f);
@@ -2319,7 +2318,7 @@ fn analog_action_update_time() {
         })
     };
     let secs = |secs: f64| xr::Time::from_nanos((secs * 1e9) as i64);
-    f.input.openxr.display_time.set(secs(10.0));
+    f.input.openxr.set_display_time(secs(10.0));
 
     fakexr::set_action_state_with_time(
         f.get_action::<f32>(vec1),

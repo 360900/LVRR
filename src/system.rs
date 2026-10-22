@@ -2220,7 +2220,7 @@ mod tests {
                 ..xr::Posef::IDENTITY
             },
         );
-        let change_time = xr::Time::from_nanos(xr.display_time.get().as_nanos() + 1_000_000);
+        let change_time = xr::Time::from_nanos(xr.waited_display_time().as_nanos() + 1_000_000);
         fakexr::reference_space_change_pending(
             session(&xr),
             xr::ReferenceSpaceType::LOCAL,
@@ -2232,7 +2232,7 @@ mod tests {
         assert_eq!(seated(), [0.0, 0.0, 0.0]);
         assert!(next_event(&system).is_none());
 
-        xr.display_time.set(change_time);
+        xr.set_display_time(change_time);
         xr.poll_events();
         assert_eq!(seated(), [1.0, 0.0, 0.0]);
         let event = next_event(&system).expect("no event");
