@@ -32,6 +32,10 @@ struct Gpu {
     pipeline_samples: Vec<vk::SampleCountFlags>,
     push_constants: Vec<(vk::ShaderStageFlags, u32, Vec<u8>)>,
     draws: usize,
+    /// Pending work never finishes, so waits for it time out.
+    hung: bool,
+    /// Fails the next submission of command buffers.
+    fail_submit: bool,
 }
 
 thread_local! {
@@ -292,8 +296,12 @@ unsafe extern "system" fn vkWaitForFences(
     _: vk::Bool32,
     _: u64,
 ) -> vk::Result {
+    let fences = unsafe { slice(fences, count) };
     gpu(|gpu| {
-        for fence in unsafe { slice(fences, count) } {
+        if gpu.hung && fences.iter().any(|f| gpu.pending.contains_key(&f.as_raw())) {
+            return vk::Result::TIMEOUT;
+        }
+        for fence in fences {
             let fence = fence.as_raw();
             let finished = gpu.pending.remove(&fence).is_some() || gpu.signaled.contains(&fence);
             check!(
@@ -303,8 +311,8 @@ unsafe extern "system" fn vkWaitForFences(
             );
             gpu.signaled.insert(fence);
         }
-    });
-    vk::Result::SUCCESS
+        vk::Result::SUCCESS
+    })
 }
 
 unsafe extern "system" fn vkResetFences(
@@ -329,10 +337,15 @@ unsafe extern "system" fn vkQueueSubmit(
     fence: vk::Fence,
 ) -> vk::Result {
     gpu(|gpu| {
+        if count > 0 && std::mem::take(&mut gpu.fail_submit) {
+            return vk::Result::ERROR_OUT_OF_DEVICE_MEMORY;
+        }
         let in_flight = gpu.in_flight();
         let fence = fence.as_raw();
         let signaled = gpu.signaled.contains(&fence);
         check!(gpu, !signaled, "submitted with a signaled fence");
+        // Even an empty submission signals its fence.
+        gpu.pending.entry(fence).or_default();
         for submit in unsafe { slice(submits, count) } {
             for buf in unsafe { slice(submit.p_command_buffers, submit.command_buffer_count) } {
                 let buf = buf.as_raw();
@@ -345,8 +358,8 @@ unsafe extern "system" fn vkQueueSubmit(
                 gpu.pending.entry(fence).or_default().push(buf);
             }
         }
-    });
-    vk::Result::SUCCESS
+        vk::Result::SUCCESS
+    })
 }
 
 unsafe extern "system" fn vkBeginCommandBuffer(
@@ -647,6 +660,38 @@ fn swapchain_recreation_waits_for_pending_copies() {
     copy_eye(&vk, &texture, 1);
     store_images(&mut vk, 3);
     copy_eye(&vk, &texture, 2);
+    finish(vk);
+}
+
+#[test]
+fn copies_are_skipped_while_the_gpu_hangs() {
+    let texture = texture(16, 16);
+    let copies: [fn(&mut VulkanData, &vr::VRVulkanTextureData_t); 2] = [
+        |vk, texture| copy_eye(vk, texture, 0),
+        |vk, texture| {
+            copy_overlay(vk, texture, FULL_BOUNDS, 0);
+        },
+    ];
+    for copy in copies {
+        let mut vk = fake_vulkan();
+        store_images(&mut vk, 1);
+        copy(&mut vk, &texture);
+        gpu(|gpu| gpu.hung = true);
+        copy(&mut vk, &texture);
+        // What the hung copy uses gets leaked rather than freed.
+        drop(vk);
+        gpu(|gpu| assert_eq!(gpu.errors, Vec::<String>::new()));
+    }
+}
+
+#[test]
+fn failed_submit_does_not_block_the_next_copy() {
+    let mut vk = fake_vulkan();
+    store_images(&mut vk, 1);
+    let texture = texture(16, 16);
+    gpu(|gpu| gpu.fail_submit = true);
+    copy_eye(&vk, &texture, 0);
+    copy_eye(&vk, &texture, 0);
     finish(vk);
 }
 

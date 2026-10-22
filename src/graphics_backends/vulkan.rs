@@ -19,7 +19,10 @@ struct RealSessionData {
 
 impl RealSessionData {
     fn destroy(self, device: &ash::Device) {
-        wait_for_fences(device, &self.fences);
+        // Leak rather than free anything a stuck copy may still use.
+        if !wait_for_fences(device, &self.fences) {
+            return;
+        }
         unsafe {
             if let Some(pipeline) = &self.overlay_pipeline {
                 pipeline.destroy(device);
@@ -32,12 +35,17 @@ impl RealSessionData {
     }
 }
 
+/// Far longer than any frame takes, so only a hung or lost GPU hits it.
+const COPY_TIMEOUT_NS: u64 = 1_000_000_000;
+
 /// Waits for our own submissions only: vkQueueWaitIdle and vkDeviceWaitIdle would need the app's
-/// queues to be externally synchronized.
-fn wait_for_fences(device: &ash::Device, fences: &[vk::Fence]) {
-    if let Err(e) = unsafe { device.wait_for_fences(fences, true, u64::MAX) } {
-        warn!("Failed to wait for Vulkan copies to finish: {e}");
+/// queues to be externally synchronized. Returns false if they may still be pending.
+fn wait_for_fences(device: &ash::Device, fences: &[vk::Fence]) -> bool {
+    let result = unsafe { device.wait_for_fences(fences, true, COPY_TIMEOUT_NS) };
+    if let Err(e) = result {
+        crate::warn_once!("Failed to wait for Vulkan copies to finish: {}", e);
     }
+    result.is_ok()
 }
 
 pub struct VulkanData {
@@ -388,7 +396,9 @@ impl GraphicsBackend for VulkanData {
         let data = self.real_data.as_mut().unwrap();
         let buf = data.bufs[image_index];
         // The image's resources can only be replaced once its previous copy has finished.
-        wait_for_fences(&self.device, &data.fences[image_index..=image_index]);
+        if !wait_for_fences(&self.device, &data.fences[image_index..=image_index]) {
+            return xr_extent;
+        }
         let pipeline_data = data.overlay_pipeline.get_or_insert_with(|| {
             PipelineData::new(
                 &self.device,
@@ -556,14 +566,17 @@ impl GraphicsBackend for VulkanData {
     }
 }
 impl VulkanData {
-    /// Records and submits `bufs[idx]` once its previous submission has finished. Failures (e.g. a
-    /// lost device) are only logged: the frame is lost either way, and the app finds out about a
-    /// lost device from its own calls.
+    /// Records and submits `bufs[idx]` once its previous submission has finished, or skips the
+    /// copy if that never happens. Failures (e.g. a lost device) are only logged: the frame is lost
+    /// either way, and the app finds out about a lost device from its own calls.
     pub fn record_commands(&self, idx: usize, cmds: impl FnOnce()) {
         let data = self.real_data.as_ref().unwrap();
         let (buf, fence) = (data.bufs[idx], data.fences[idx]);
-        wait_for_fences(&self.device, &[fence]);
-        let result = unsafe {
+        if !wait_for_fences(&self.device, &[fence]) {
+            return;
+        }
+        // The fence stays signaled up to here, so a failure doesn't block later copies.
+        let recorded = unsafe {
             self.device
                 .begin_command_buffer(
                     buf,
@@ -575,16 +588,20 @@ impl VulkanData {
                     self.device.end_command_buffer(buf)
                 })
                 .and_then(|()| self.device.reset_fences(&[fence]))
-                .and_then(|()| {
-                    self.device.queue_submit(
-                        self.queue,
-                        &[vk::SubmitInfo::default().command_buffers(&[buf])],
-                        fence,
-                    )
-                })
         };
-        if let Err(e) = result {
-            crate::warn_once!("Failed to submit copy commands: {}", e);
+        if let Err(e) = recorded {
+            crate::warn_once!("Failed to record Vulkan copy: {}", e);
+            return;
+        }
+
+        unsafe {
+            let submit = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&buf));
+            if let Err(e) = self.device.queue_submit(self.queue, &[submit], fence) {
+                crate::warn_once!("Failed to submit Vulkan copy: {}", e);
+                // A failed submit leaves the fence unsignaled. An empty one signals it after the
+                // queue's earlier work, so the next copy into this image doesn't wait forever.
+                let _ = self.device.queue_submit(self.queue, &[], fence);
+            }
         }
     }
 
