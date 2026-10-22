@@ -190,6 +190,8 @@ struct PoseCache {
     /// Bounded, since apps that never call WaitGetPoses never clear it, and "now" based queries
     /// like GetDeviceToAbsoluteTrackingPose use a new time on every call.
     recent: VecDeque<(i64, vr::ETrackingUniverseOrigin, vr::TrackedDevicePose_t)>,
+    /// The last valid pose per origin, reported while the device is untracked.
+    last_valid: HashMap<vr::ETrackingUniverseOrigin, vr::HmdMatrix34_t>,
 }
 
 impl PoseCache {
@@ -212,6 +214,10 @@ impl PoseCache {
         origin: vr::ETrackingUniverseOrigin,
         pose: vr::TrackedDevicePose_t,
     ) {
+        if pose.bPoseIsValid {
+            self.last_valid
+                .insert(origin, pose.mDeviceToAbsoluteTracking);
+        }
         if self.recent.len() == Self::MAX_RECENT {
             self.recent.pop_front();
         }
@@ -476,10 +482,10 @@ impl TrackedDevice {
         session_data: &SessionData,
         origin: vr::ETrackingUniverseOrigin,
         pose_type: Option<BoundPoseType>,
-    ) -> Option<vr::TrackedDevicePose_t> {
+    ) -> vr::TrackedDevicePose_t {
         let nanos = xr_time.as_nanos();
         let mut pose_cache = self.pose_cache.lock().unwrap();
-        let pose = if let Some(pose) = pose_cache.get(nanos, origin) {
+        let mut pose = if let Some(pose) = pose_cache.get(nanos, origin) {
             pose
         } else {
             let pose = match self.device_type {
@@ -491,24 +497,36 @@ impl TrackedDevice {
                 TrackedDeviceType::GenericTracker { .. } => {
                     get_generic_tracker_pose(xr_time, session_data, self, origin)
                 }
-            }?;
+            }
+            .unwrap_or_default();
             pose_cache.insert(nanos, origin, pose);
             pose
         };
 
+        // Like SteamVR, a device that loses tracking stays connected, and is reported out of range
+        // at its last known pose.
+        let mut has_pose = pose.bPoseIsValid;
+        pose.bDeviceIsConnected = self.connected || pose.bPoseIsValid;
+        if pose.bDeviceIsConnected && !pose.bPoseIsValid {
+            pose.eTrackingResult = vr::ETrackingResult::Running_OutOfRange;
+            if let Some(last) = pose_cache.last_valid.get(&origin) {
+                pose.mDeviceToAbsoluteTracking = *last;
+                has_pose = true;
+            }
+        }
+        drop(pose_cache);
+
         // The cache holds the raw pose; the profile's pose transformation is
         // applied per call, since different bindings can ask for different
         // pose types (raw, tip, handgrip, ...) in the same frame.
-        Some(match pose_type {
-            Some(p_type) if pose.bPoseIsValid => {
-                let mut pose = pose;
-                pose.mDeviceToAbsoluteTracking = vr::HmdMatrix34_t::from(
-                    self.transform_pose(xr::Posef::from(pose.mDeviceToAbsoluteTracking), p_type),
-                );
-                pose
-            }
-            _ => pose,
-        })
+        if let Some(p_type) = pose_type
+            && has_pose
+        {
+            pose.mDeviceToAbsoluteTracking = vr::HmdMatrix34_t::from(
+                self.transform_pose(xr::Posef::from(pose.mDeviceToAbsoluteTracking), p_type),
+            );
+        }
+        pose
     }
 
     pub fn get_hand_skeleton(
@@ -1144,7 +1162,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         for (i, pose) in poses.iter_mut().enumerate() {
             *pose = devices
                 .get_device(i as u32)
-                .and_then(|device| {
+                .map(|device| {
                     device.get_pose(
                         xr_time,
                         &session_data,
@@ -1186,12 +1204,12 @@ impl<C: openxr_data::Compositor> Input<C> {
         let session_data = self.openxr.session_data.get();
         let devices = session_data.input_data.devices.read().unwrap();
 
-        devices.get_device(index)?.get_pose(
+        Some(devices.get_device(index)?.get_pose(
             xr_time,
             &session_data,
             origin.unwrap_or(session_data.current_origin),
             pose_type,
-        )
+        ))
     }
 
     pub fn is_device_connected(&self, index: vr::TrackedDeviceIndex_t) -> bool {
@@ -1334,6 +1352,79 @@ mod tests {
         assert_eq!(
             hmd.pose_cache.lock().unwrap().recent.len(),
             PoseCache::MAX_RECENT
+        );
+    }
+
+    #[test]
+    fn untracked_controller_stays_connected() {
+        use crate::input::BoundPoseType;
+        use crate::openxr_data::Hand;
+        use vr::ETrackingUniverseOrigin::Seated;
+
+        let mut f = Fixture::new();
+        f.load_actions(c"actions.json");
+        let set1 = f.get_action_set_handle(c"/actions/set1");
+        f.set_interaction_profile::<Knuckles>(fakexr::UserPath::RightHand);
+
+        // Tip has a pose transformation on Knuckles, so the last pose gets it too
+        let pose = |f: &Fixture, hand, nanos| {
+            f.input
+                .get_controller_pose(
+                    hand,
+                    Some(Seated),
+                    xr::Time::from_nanos(nanos),
+                    Some(BoundPoseType::Tip),
+                )
+                .unwrap()
+        };
+
+        // a controller without an interaction profile isn't connected
+        let left = pose(&f, Hand::Left, 1);
+        assert!(!left.bDeviceIsConnected);
+        assert!(!left.bPoseIsValid);
+
+        // the profile is bound after two frames
+        for _ in 0..2 {
+            f.input.openxr.poll_events();
+            f.input.frame_start_update();
+        }
+        fakexr::set_grip(
+            f.raw_session(),
+            fakexr::UserPath::RightHand,
+            xr::Posef {
+                position: xr::Vector3f {
+                    x: 0.1,
+                    y: 0.2,
+                    z: 0.3,
+                },
+                ..xr::Posef::IDENTITY
+            },
+        );
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: set1,
+            ..Default::default()
+        });
+
+        let tracked = pose(&f, Hand::Right, 2);
+        assert!(tracked.bPoseIsValid);
+        assert!(tracked.bDeviceIsConnected);
+        assert_eq!(tracked.eTrackingResult, vr::ETrackingResult::Running_OK);
+
+        // pose actions lose tracking when their set isn't synced
+        let data = f.input.openxr.session_data.get();
+        data.session.sync_actions(&[]).unwrap();
+        drop(data);
+
+        let untracked = pose(&f, Hand::Right, 3);
+        assert!(!untracked.bPoseIsValid);
+        assert!(untracked.bDeviceIsConnected);
+        assert_eq!(
+            untracked.eTrackingResult,
+            vr::ETrackingResult::Running_OutOfRange
+        );
+        assert_eq!(
+            untracked.mDeviceToAbsoluteTracking.m,
+            tracked.mDeviceToAbsoluteTracking.m
         );
     }
 

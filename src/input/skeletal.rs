@@ -57,7 +57,6 @@ impl<C: openxr_data::Compositor> Input<C> {
                 session_data.current_origin,
                 None,
             )
-            .unwrap_or_default()
             .mDeviceToAbsoluteTracking
             .into();
         let (raw, is_synthesised) = joint_space(session_data, controller, hand);

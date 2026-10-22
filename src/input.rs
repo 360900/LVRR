@@ -2386,7 +2386,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                     let pose = hand.and_then(|hand| {
                         devices
                             .get_controller(hand)
-                            .and_then(|d| d.get_pose(xr_time, &data, origin, None))
+                            .map(|d| d.get_pose(xr_time, &data, origin, None))
                     });
                     if let Some(pose) = pose {
                         unsafe {
