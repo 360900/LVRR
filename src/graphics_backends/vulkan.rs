@@ -12,7 +12,32 @@ struct RealSessionData {
     format: vk::Format,
     pool: vk::CommandPool,
     bufs: Vec<vk::CommandBuffer>,
+    /// One per command buffer, signaled once its last submission has finished.
+    fences: Vec<vk::Fence>,
     overlay_pipeline: Option<PipelineData>,
+}
+
+impl RealSessionData {
+    fn destroy(self, device: &ash::Device) {
+        wait_for_fences(device, &self.fences);
+        unsafe {
+            if let Some(pipeline) = &self.overlay_pipeline {
+                pipeline.destroy(device);
+            }
+            for &fence in &self.fences {
+                device.destroy_fence(fence, None);
+            }
+            device.destroy_command_pool(self.pool, None);
+        }
+    }
+}
+
+/// Waits for our own submissions only: vkQueueWaitIdle and vkDeviceWaitIdle would need the app's
+/// queues to be externally synchronized.
+fn wait_for_fences(device: &ash::Device, fences: &[vk::Fence]) {
+    if let Err(e) = unsafe { device.wait_for_fences(fences, true, u64::MAX) } {
+        warn!("Failed to wait for Vulkan copies to finish: {e}");
+    }
 }
 
 pub struct VulkanData {
@@ -27,28 +52,19 @@ pub struct VulkanData {
 
 impl Drop for VulkanData {
     fn drop(&mut self) {
-        // The app's device may already be lost when it shuts down. Destroying objects is still
-        // allowed then.
-        if let Err(e) = unsafe { self.device.device_wait_idle() } {
-            warn!("vkDeviceWaitIdle failed: {e}");
-        }
-        match &self.real_data {
+        match self.real_data.take() {
             // Temporary session - we created these handles, so let's destroy them
             None => unsafe {
+                // The device may already be lost when the app shuts down. Destroying objects is
+                // still allowed then.
+                if let Err(e) = self.device.device_wait_idle() {
+                    warn!("vkDeviceWaitIdle failed: {e}");
+                }
                 self.device.destroy_device(None);
                 self.instance.destroy_instance(None);
             },
-            // Real session - the handles come from the app, only destroy the command pool we created
-            Some(data) => unsafe {
-                self.device.destroy_command_pool(data.pool, None);
-                if let Some(data) = &data.overlay_pipeline {
-                    self.device.destroy_pipeline(data.pipeline, None);
-                    self.device.destroy_pipeline_layout(data.layout, None);
-                    self.device.destroy_render_pass(data.renderpass, None);
-                    self.device.destroy_descriptor_pool(data.pool, None);
-                    self.device.destroy_sampler(data.sampler, None);
-                }
-            },
+            // Real session - the handles come from the app, only destroy what we created
+            Some(data) => data.destroy(&self.device),
         }
     }
 }
@@ -129,17 +145,27 @@ impl GraphicsBackend for VulkanData {
                 )
                 .unwrap()
         };
+        let fences = bufs
+            .iter()
+            .map(|_| unsafe {
+                self.device
+                    .create_fence(
+                        &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
+                        None,
+                    )
+                    .unwrap()
+            })
+            .collect();
 
         if let Some(data) = self.real_data.replace(RealSessionData {
             images,
             format: vk::Format::from_raw(format as _),
             pool,
             bufs,
+            fences,
             overlay_pipeline: Default::default(),
         }) {
-            unsafe {
-                self.device.destroy_command_pool(data.pool, None);
-            }
+            data.destroy(&self.device);
         }
     }
 
@@ -188,12 +214,13 @@ impl GraphicsBackend for VulkanData {
 
         let data = self.real_data.as_ref().unwrap();
         let swapchain_image = data.images[image_index];
-        let buf = data.bufs[2 * image_index + eye.0 as usize];
+        let slot = 2 * image_index + eye.0 as usize;
+        let buf = data.bufs[slot];
 
         let (extent, offset) = texture_extent_from_bounds(texture, bounds);
         log::trace!("{eye:?} extent: {extent:?} | bounds: {bounds:?}");
 
-        self.record_commands(buf, || unsafe {
+        self.record_commands(slot, || unsafe {
             // transition swapchain image to TRANSFER_DST
             let swapchain_res = vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -413,7 +440,7 @@ impl GraphicsBackend for VulkanData {
             )
         }
 
-        self.record_commands(buf, || unsafe {
+        self.record_commands(image_index, || unsafe {
             self.device.cmd_bind_pipeline(
                 buf,
                 vk::PipelineBindPoint::GRAPHICS,
@@ -473,9 +500,13 @@ impl GraphicsBackend for VulkanData {
     }
 }
 impl VulkanData {
-    /// Failures (e.g. a lost device) are only logged: the frame is lost either way, and the app
-    /// finds out about a lost device from its own calls.
-    pub fn record_commands(&self, buf: vk::CommandBuffer, cmds: impl FnOnce()) {
+    /// Records and submits `bufs[idx]` once its previous submission has finished. Failures (e.g. a
+    /// lost device) are only logged: the frame is lost either way, and the app finds out about a
+    /// lost device from its own calls.
+    pub fn record_commands(&self, idx: usize, cmds: impl FnOnce()) {
+        let data = self.real_data.as_ref().unwrap();
+        let (buf, fence) = (data.bufs[idx], data.fences[idx]);
+        wait_for_fences(&self.device, &[fence]);
         let result = unsafe {
             self.device
                 .begin_command_buffer(
@@ -487,11 +518,12 @@ impl VulkanData {
                     cmds();
                     self.device.end_command_buffer(buf)
                 })
+                .and_then(|()| self.device.reset_fences(&[fence]))
                 .and_then(|()| {
                     self.device.queue_submit(
                         self.queue,
                         &[vk::SubmitInfo::default().command_buffers(&[buf])],
-                        vk::Fence::null(),
+                        fence,
                     )
                 })
         };
@@ -613,6 +645,7 @@ struct PipelineData {
     renderpass: vk::RenderPass,
     image_views: Vec<vk::ImageView>,
     image_format: vk::Format,
+    set_layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
     set: vk::DescriptorSet,
     sampler: vk::Sampler,
@@ -859,9 +892,24 @@ impl PipelineData {
             renderpass,
             image_views,
             image_format: target_format,
+            set_layout,
             pool,
             set,
             sampler,
+        }
+    }
+
+    fn destroy(&self, device: &ash::Device) {
+        unsafe {
+            for &view in &self.image_views {
+                device.destroy_image_view(view, None);
+            }
+            device.destroy_pipeline(self.pipeline, None);
+            device.destroy_pipeline_layout(self.layout, None);
+            device.destroy_render_pass(self.renderpass, None);
+            device.destroy_descriptor_pool(self.pool, None);
+            device.destroy_descriptor_set_layout(self.set_layout, None);
+            device.destroy_sampler(self.sampler, None);
         }
     }
 }
@@ -928,16 +976,4 @@ fn new_entry() -> ash::Entry {
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::clientcore::Injector;
-    use crate::openxr_data::RealOpenXrData;
-    use openvr as vr;
-
-    #[test]
-    fn teardown_after_device_lost() {
-        let xr = RealOpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap();
-        fakexr::vulkan::set_device_lost(true);
-        // Drops the temporary session's VulkanData, which waits for its device.
-        drop(xr);
-    }
-}
+mod tests;
