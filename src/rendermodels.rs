@@ -7,14 +7,14 @@ use std::{
     sync::{LazyLock, Mutex},
 };
 
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 use log::{debug, warn};
 use lz4_flex::frame::FrameDecoder;
 use obj::{IndexTuple, ObjData};
 use openvr as vr;
 use openxr as xr;
 
-use crate::input::ProfileData;
+use crate::input::{BoundPoseType, ProfileData};
 use crate::openxr_data::Hand;
 
 // all render models will use this color
@@ -29,7 +29,19 @@ static DEFAULT_COMPONENT: &CStr = c"xrizer_component";
 // of what render model they use: /pose/raw and /pose/tip"
 // Some games (for example, the BigWalkVR mod) mark a controller pose as
 // invalid if GetComponentState fails for these components.
-static POSE_COMPONENTS: &[&CStr] = &[c"tip", c"base", c"handgrip", c"grip"];
+static POSE_COMPONENTS: &[(&CStr, BoundPoseType)] = &[
+    (c"tip", BoundPoseType::Tip),
+    (c"base", BoundPoseType::Base),
+    (c"handgrip", BoundPoseType::Handgrip),
+    (c"grip", BoundPoseType::Grip),
+];
+
+fn pose_component(component_name: &CStr) -> Option<BoundPoseType> {
+    POSE_COMPONENTS
+        .iter()
+        .find(|(name, _)| *name == component_name)
+        .map(|(_, ty)| *ty)
+}
 
 /// Whether GetComponentState and RenderModelHasComponent know this component.
 fn has_component(render_model_name: &CStr, component_name: &CStr) -> bool {
@@ -37,16 +49,31 @@ fn has_component(render_model_name: &CStr, component_name: &CStr) -> bool {
         get_render_model_data(render_model_name).is_some()
     } else {
         // Models without a mesh, like the hand tracking one, still have the pose components.
-        POSE_COMPONENTS.contains(&component_name)
+        pose_component(component_name).is_some()
             && (get_render_model_data(render_model_name).is_some()
                 || profile_for_render_model(render_model_name).is_some())
     }
+}
+
+/// The transform from the raw pose to a pose component: the profile's transform for that pose
+/// type, as for pose actions bound to it.
+fn pose_component_transform(render_model_name: &CStr, ty: BoundPoseType) -> Option<Mat4> {
+    let (profile, hand) = profile_for_render_model(render_model_name)?;
+    profile.pose_transformation(hand, ty)
 }
 
 /// The profile and hand that report this render model name.
 fn profile_for_render_model(render_model_name: &CStr) -> Option<(ProfileData, Hand)> {
     let name = model_name(render_model_name)?;
     ProfileData::for_render_model(|reported| model_name(reported) == Some(name))
+}
+
+fn hmd_matrix(mat: Mat4) -> vr::HmdMatrix34_t {
+    // OpenVR matrices are row major, glam's are column major.
+    let rows = mat.transpose().to_cols_array_2d();
+    vr::HmdMatrix34_t {
+        m: [rows[0], rows[1], rows[2]],
+    }
 }
 
 struct RenderModelObjLz4 {
@@ -286,7 +313,14 @@ impl vr::IVRRenderModels006_Interface for RenderModels {
             return false;
         }
 
-        // all of our models are static and have offsets baked in
+        // Our meshes are static and have their offsets baked in, so only the pose components
+        // aren't at the device's raw pose.
+        if let Some(transform) = pose_component(component_name)
+            .and_then(|ty| pose_component_transform(render_model_name, ty))
+        {
+            state.mTrackingToComponentRenderModel = hmd_matrix(transform);
+            state.mTrackingToComponentLocal = hmd_matrix(transform);
+        }
         state.uProperties =
             (vr::EVRComponentProperty::IsVisible | vr::EVRComponentProperty::IsStatic).0;
 
@@ -1094,7 +1128,7 @@ mod tests {
         let rm = RenderModels::default();
         let some_model = CString::new(*RENDER_MODELS.keys().next().unwrap()).unwrap();
 
-        for component in POSE_COMPONENTS {
+        for (component, _) in POSE_COMPONENTS {
             let mut state = unsafe { std::mem::zeroed::<vr::RenderModel_ComponentState_t>() };
             assert!(
                 rm.GetComponentState(
@@ -1154,6 +1188,45 @@ mod tests {
             assert_eq!(state.mTrackingToComponentLocal.m, ident);
             assert_eq!(state.uProperties, 0);
         }
+    }
+
+    #[test]
+    fn pose_components_use_profile_transforms() {
+        let rm = RenderModels::default();
+        let get_state = |model: &CStr, component: &CStr| {
+            let mut state = unsafe { std::mem::zeroed::<vr::RenderModel_ComponentState_t>() };
+            assert!(rm.GetComponentStateForDevicePath(
+                model.as_ptr(),
+                component.as_ptr(),
+                0,
+                ptr::null(),
+                &mut state,
+            ));
+            assert_eq!(
+                state.mTrackingToComponentRenderModel.m,
+                state.mTrackingToComponentLocal.m
+            );
+            state.mTrackingToComponentLocal.m
+        };
+
+        // Touch tip: -37.4 degrees about X, mirrored offset per hand.
+        let tip = get_state(c"oculus_quest2_controller_right", c"tip");
+        let translation = [tip[0][3], tip[1][3], tip[2][3]];
+        assert_eq!(translation, [-0.016694, -0.02522, 0.024687]);
+        let (sin, cos) = (-37.4_f32).to_radians().sin_cos();
+        assert!((tip[1][1] - cos).abs() < 1e-5, "{tip:?}");
+        assert!((tip[2][1] - sin).abs() < 1e-5, "{tip:?}");
+        let tip = get_state(c"oculus_quest2_controller_left", c"tip");
+        assert_eq!(tip[0][3], 0.016694);
+
+        // The driver prefix doesn't matter.
+        let handgrip = get_state(
+            c"{indexcontroller}valve_controller_knu_1_0_left",
+            c"handgrip",
+        );
+        let index_handgrip = get_state(c"valve_controller_knu_1_0_left", c"handgrip");
+        assert_eq!(handgrip, index_handgrip);
+        assert_ne!(handgrip[2][3], 0.0);
     }
 
     #[test]
