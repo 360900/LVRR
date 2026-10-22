@@ -906,6 +906,20 @@ mod tests {
     }
 
     #[test]
+    fn focus3_bindings() {
+        let (f, _) = legacy_fixture(|actions| actions.a.as_raw());
+        assert_legacy_bindings::<ViveFocus3>(
+            &f,
+            |actions| actions.app_menu.as_raw(),
+            &[
+                "/user/hand/left/input/y/click",
+                "/user/hand/left/input/menu/click",
+                "/user/hand/right/input/b/click",
+            ],
+        );
+    }
+
+    #[test]
     fn index_bindings() {
         let (f, _) = legacy_fixture(|actions| actions.a.as_raw());
         let both = |paths: &[&str]| -> Vec<String> {

@@ -109,13 +109,27 @@ impl InteractionProfile for FrameController {
     }
 
     fn legacy_bindings(c: &super::InputToXrPath<Self>) -> LegacyBindings {
+        // Follows SteamVR's legacy_bindings_frame_controller.json
         LegacyBindings {
             extra: legacy::Bindings {
                 grip_pose: c.pose(),
             },
             app_menu: [
+                c.into::<Left<DPadLeft, Click>, _>(),
                 c.into::<Left<DPadRight, Click>, _>(),
+                c.into::<Left<DPadUp, Click>, _>(),
                 c.into::<Right<B, Click>, _>(),
+                c.into::<Right<X, Click>, _>(),
+                c.into::<Right<Y, Click>, _>(),
+            ]
+            .concat(),
+            app_menu_touch: [
+                c.into::<Left<DPadLeft, Touch>, _>(),
+                c.into::<Left<DPadRight, Touch>, _>(),
+                c.into::<Left<DPadUp, Touch>, _>(),
+                c.into::<Right<B, Touch>, _>(),
+                c.into::<Right<X, Touch>, _>(),
+                c.into::<Right<Y, Touch>, _>(),
             ]
             .concat(),
             a: [
@@ -123,26 +137,34 @@ impl InteractionProfile for FrameController {
                 c.into::<Right<A, Click>, _>(),
             ]
             .concat(),
-            trigger: c.leftright::<Trigger, Value, _, _>(),
-            trigger_click: c.leftright::<Trigger, Click, _, _>(),
-            squeeze: c.leftright::<Squeeze, Value, _, _>(),
-            squeeze_click: c.leftright::<Squeeze, Value, _, _>(),
-            main_xy: c.leftright::<Thumbstick, (), _, _>(),
-            main_xy_click: c.leftright::<Thumbstick, Click, _, _>(),
-            main_xy_touch: c.leftright::<Thumbstick, Touch, _, _>(),
-            trigger_touch: c.leftright::<Trigger, Touch, _, _>(),
-            app_menu_touch: [
-                c.into::<Left<DPadRight, Touch>, _>(),
-                c.into::<Right<B, Touch>, _>(),
-            ]
-            .concat(),
             a_touch: [
                 c.into::<Left<DPadDown, Touch>, _>(),
                 c.into::<Right<A, Touch>, _>(),
             ]
             .concat(),
-            grip_touch: c.leftright::<Squeeze, Touch, _, _>(),
+            // The bumpers act as a fully pulled trigger.
+            trigger: [
+                c.leftright::<Trigger, Value, _, _>(),
+                c.leftright::<Bumper, Click, _, _>(),
+            ]
+            .concat(),
+            trigger_click: [
+                c.leftright::<Trigger, Click, _, _>(),
+                c.leftright::<Bumper, Click, _, _>(),
+            ]
+            .concat(),
+            trigger_touch: [
+                c.leftright::<Trigger, Touch, _, _>(),
+                c.leftright::<Bumper, Touch, _, _>(),
+            ]
+            .concat(),
+            squeeze: c.leftright::<Squeeze, Value, _, _>(),
+            squeeze_click: c.leftright::<Squeeze, Value, _, _>(),
             grip_click: vec![],
+            grip_touch: c.leftright::<Squeeze, Touch, _, _>(),
+            main_xy: c.leftright::<Thumbstick, (), _, _>(),
+            main_xy_click: c.leftright::<Thumbstick, Click, _, _>(),
+            main_xy_touch: c.leftright::<Thumbstick, Touch, _, _>(),
             main_xy_deflect: vec![],
             haptic: c.haptics(),
         }

@@ -94,6 +94,7 @@ impl InteractionProfile for ViveFocus3 {
             trigger_click: c.leftright::<Trigger, Click, _, _>(),
             app_menu: [
                 c.into::<super::Left<Y, Click>, _>(),
+                c.into::<super::Left<Menu, Click>, _>(),
                 c.into::<super::Right<B, Click>, _>(),
             ]
             .concat(),
