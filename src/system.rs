@@ -2056,6 +2056,8 @@ mod tests {
             Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
         let system = Arc::new(System::new(xr.clone(), &Injector::default()));
         xr.system.set(Arc::downgrade(&system));
+        // The first poll sets up input, which reports the headset. The tests look at what follows.
+        while next_event(&system).is_some() {}
         (xr, system)
     }
 
