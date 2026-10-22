@@ -1485,6 +1485,42 @@ fn wrong_struct_sizes() {
 }
 
 #[test]
+fn skeletal_action_data_004_bone_count() {
+    let mut f = Fixture::new();
+    let set1 = f.get_action_set_handle(c"/actions/set1");
+    f.load_actions(c"actions.json");
+    f.set_interaction_profile::<Knuckles>(LeftHand);
+    f.sync(vr::VRActiveActionSet_t {
+        ulActionSet: set1,
+        ..Default::default()
+    });
+
+    // fakexr can't locate relative to the stage.
+    f.input
+        .openxr
+        .set_tracking_space(vr::ETrackingUniverseOrigin::Seated);
+
+    let action = f.get_action_handle(c"/actions/set1/in/SkellyL");
+    let mut data = vr::vr_1_0_17::InputSkeletalActionData_t::default();
+    assert_eq!(
+        vr::IVRInput004_Interface::GetSkeletalActionData(
+            f.input.as_ref(),
+            action,
+            &mut data,
+            std::mem::size_of_val(&data) as u32,
+            vr::k_ulInvalidInputValueHandle,
+        ),
+        vr::EVRInputError::None
+    );
+    assert!(data.bActive);
+    assert_eq!(
+        data.activeOrigin,
+        f.get_input_source_handle(c"/user/hand/left")
+    );
+    assert_eq!(data.boneCount, 31);
+}
+
+#[test]
 fn skeletal_reference_transforms_unknown_pose() {
     let mut f = Fixture::new();
     let set1 = f.get_action_set_handle(c"/actions/set1");

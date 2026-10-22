@@ -47,6 +47,33 @@ pub trait InterfaceImpl: Sync + Send + 'static {
     fn get_version(version: &CStr) -> Option<InterfaceGetter<Self>>;
 }
 
+// C sizes on x86_64 and i686 Linux of the structs whose size apps pass in.
+const _: () = {
+    const fn check<T>(x86_64: usize, i686: usize) {
+        let size = if cfg!(target_pointer_width = "64") {
+            x86_64
+        } else {
+            i686
+        };
+        assert!(size_of::<T>() == size);
+    }
+    check::<InputAnalogActionData_t>(48, 40);
+    check::<InputDigitalActionData_t>(24, 20);
+    check::<InputPoseActionData_t>(96, 92);
+    check::<InputSkeletalActionData_t>(16, 12);
+    check::<vr_1_0_17::InputSkeletalActionData_t>(24, 16);
+    check::<InputBindingInfo_t>(544, 544);
+    check::<InputOriginInfo_t>(144, 140);
+    check::<VRActiveActionSet_t>(32, 32);
+    check::<VRControllerState_t>(60, 60);
+    check::<VREvent_t>(60, 60);
+    check::<Compositor_FrameTiming>(188, 188);
+    check::<vr_1_0_3::Compositor_FrameTiming>(172, 172);
+    check::<vr_0_9_17::Compositor_FrameTiming>(168, 168);
+    check::<vr_0_9_12::Compositor_FrameTiming>(144, 144);
+    check::<Compositor_CumulativeStats>(112, 112);
+};
+
 #[allow(clippy::derivable_impls)]
 impl Default for ETrackingResult {
     fn default() -> Self {

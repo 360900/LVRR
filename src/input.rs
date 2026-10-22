@@ -2156,7 +2156,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput004On005 for Input<C> {
     fn GetSkeletalActionData(
         &self,
         action: vr::VRActionHandle_t,
-        action_data: *mut vr::InputSkeletalActionData_t,
+        action_data: *mut vr::vr_1_0_17::InputSkeletalActionData_t,
         action_data_size: u32,
         restrict_to_device: vr::VRInputValueHandle_t,
     ) -> vr::EVRInputError {
@@ -2165,12 +2165,20 @@ impl<C: openxr_data::Compositor> vr::IVRInput004On005 for Input<C> {
             return vr::EVRInputError::NoData;
         }
 
-        <Self as vr::IVRInput010_Interface>::GetSkeletalActionData(
+        // The newer struct is this one without boneCount.
+        let err = <Self as vr::IVRInput010_Interface>::GetSkeletalActionData(
             self,
             action,
-            action_data,
+            action_data.cast(),
             action_data_size,
-        )
+        );
+        if err == vr::EVRInputError::None
+            && action_data_size as usize
+                >= std::mem::size_of::<vr::vr_1_0_17::InputSkeletalActionData_t>()
+        {
+            unsafe { (&raw mut (*action_data).boneCount).write(HandSkeletonBone::Count as u32) };
+        }
+        err
     }
 
     #[inline]
