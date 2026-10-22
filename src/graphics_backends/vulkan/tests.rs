@@ -224,6 +224,15 @@ unsafe extern "system" fn vkDestroyFramebuffer(
     gpu(|gpu| gpu.destroy(framebuffer.as_raw()));
 }
 
+unsafe extern "system" fn vkDeviceWaitIdle(_: vk::Device) -> vk::Result {
+    gpu(|gpu| gpu.errors.push("waited for the app's whole device".into()));
+    vk::Result::SUCCESS
+}
+
+unsafe extern "system" fn vkDestroyDevice(_: vk::Device, _: *const vk::AllocationCallbacks<'_>) {
+    gpu(|gpu| gpu.errors.push("destroyed the app's device".into()));
+}
+
 unsafe extern "system" fn vkCreateGraphicsPipelines(
     _: vk::Device,
     _: vk::PipelineCache,
@@ -501,6 +510,8 @@ fn proc_addr(name: &CStr) -> *const c_void {
         vkUpdateDescriptorSets,
         vkCreateFramebuffer,
         vkDestroyFramebuffer,
+        vkDeviceWaitIdle,
+        vkDestroyDevice,
         vkCreateGraphicsPipelines,
         vkDestroyPipeline,
         vkCreateFence,
@@ -546,6 +557,7 @@ fn fake_vulkan() -> VulkanData {
         queue: vk::Queue::from_raw(APP_HANDLE),
         queue_family_index: 0,
         real_data: None,
+        owns_device: false,
     }
 }
 
@@ -592,6 +604,12 @@ fn finish(vk: VulkanData) {
         assert_eq!(gpu.errors, Vec::<String>::new());
         assert!(gpu.live.is_empty(), "leaked {:x?}", gpu.live);
     });
+}
+
+#[test]
+fn backend_without_images_keeps_app_device() {
+    // E.g. the backend of a thread that lost the race to set up the real session.
+    finish(fake_vulkan());
 }
 
 #[test]

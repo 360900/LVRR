@@ -48,13 +48,18 @@ pub struct VulkanData {
     pub queue: vk::Queue,
     pub queue_family_index: u32,
     real_data: Option<RealSessionData>,
+    /// Whether we created the instance and device for the temporary session. Otherwise they
+    /// belong to the app, even before any swapchain images are stored.
+    owns_device: bool,
 }
 
 impl Drop for VulkanData {
     fn drop(&mut self) {
-        match self.real_data.take() {
-            // Temporary session - we created these handles, so let's destroy them
-            None => unsafe {
+        if let Some(data) = self.real_data.take() {
+            data.destroy(&self.device);
+        }
+        if self.owns_device {
+            unsafe {
                 // The device may already be lost when the app shuts down. Destroying objects is
                 // still allowed then.
                 if let Err(e) = self.device.device_wait_idle() {
@@ -62,9 +67,7 @@ impl Drop for VulkanData {
                 }
                 self.device.destroy_device(None);
                 self.instance.destroy_instance(None);
-            },
-            // Real session - the handles come from the app, only destroy what we created
-            Some(data) => data.destroy(&self.device),
+            }
         }
     }
 }
@@ -608,6 +611,7 @@ impl VulkanData {
             queue: vk::Queue::from_raw(data.m_pQueue as _),
             queue_family_index: data.m_nQueueFamilyIndex,
             real_data: Default::default(),
+            owns_device: false,
         }
     }
 
@@ -688,6 +692,7 @@ impl VulkanData {
             queue,
             queue_family_index,
             real_data: Default::default(),
+            owns_device: true,
         }
     }
 }
