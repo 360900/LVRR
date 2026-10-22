@@ -14,11 +14,9 @@ use glam::f32::{Quat, Vec3};
 use log::{debug, error, info, warn};
 use openvr as vr;
 use openxr as xr;
+use parking_lot::{RwLock, RwLockReadGuard};
 use std::mem::ManuallyDrop;
-use std::sync::{
-    RwLock,
-    atomic::{AtomicBool, AtomicI64, Ordering},
-};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
 /// How long to wait for the runtime to move the session to a requested state.
@@ -69,7 +67,7 @@ pub struct OpenXrData<C: Compositor> {
 
 impl<C: Compositor> Drop for OpenXrData<C> {
     fn drop(&mut self) {
-        let mut data = unsafe { ManuallyDrop::take(&mut *self.session_data.0.get_mut().unwrap()) };
+        let mut data = unsafe { ManuallyDrop::take(self.session_data.0.get_mut()) };
         self.end_session(&mut data);
     }
 }
@@ -275,7 +273,7 @@ impl<C: Compositor> OpenXrData<C> {
         let data = self.session_data.get();
         if let Some(state) = self.poll_events_impl(&data) {
             drop(data);
-            self.session_data.0.write().unwrap().state = state;
+            self.session_data.0.write().state = state;
         }
     }
 
@@ -335,7 +333,7 @@ impl<C: Compositor> OpenXrData<C> {
     }
 
     pub fn restart_session(&self) {
-        let mut session_guard = self.session_data.0.write().unwrap();
+        let mut session_guard = self.session_data.0.write();
         self.end_session(&mut session_guard);
 
         let origin = session_guard.current_origin;
@@ -368,7 +366,7 @@ impl<C: Compositor> OpenXrData<C> {
     }
 
     pub fn set_tracking_space(&self, space: vr::ETrackingUniverseOrigin) {
-        self.session_data.0.write().unwrap().current_origin = space;
+        self.session_data.0.write().current_origin = space;
     }
 
     pub fn get_tracking_space(&self) -> vr::ETrackingUniverseOrigin {
@@ -384,7 +382,7 @@ impl<C: Compositor> OpenXrData<C> {
     }
 
     pub fn reset_tracking_space(&self, origin: vr::ETrackingUniverseOrigin) {
-        let mut guard = self.session_data.0.write().unwrap();
+        let mut guard = self.session_data.0.write();
         let SessionData {
             session,
             view_space,
@@ -552,10 +550,15 @@ impl AtomicXrTime {
     }
 }
 
+pub type SessionGuard<'a> = RwLockReadGuard<'a, ManuallyDrop<SessionData>>;
+
 pub struct SessionReadGuard(RwLock<ManuallyDrop<SessionData>>);
 impl SessionReadGuard {
-    pub fn get(&self) -> std::sync::RwLockReadGuard<'_, ManuallyDrop<SessionData>> {
-        self.0.read().unwrap()
+    /// Reads are recursive: plenty of paths call this while the same thread already holds a guard.
+    /// A plain read would block behind a writer queued in between, and the writer waits for the
+    /// outer guard, so both threads would hang.
+    pub fn get(&self) -> SessionGuard<'_> {
+        self.0.read_recursive()
     }
 }
 
@@ -981,6 +984,7 @@ mod tests {
     use std::ffi::CStr;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Barrier, Mutex};
+    use std::time::Duration;
 
     pub struct FakeCompositor {
         backend: crate::graphics_backends::VulkanData,
@@ -1086,5 +1090,44 @@ mod tests {
 
         drop(data); // Session must be dropped before Vulkan data.
         drop(comp);
+    }
+
+    /// A thread that reads the session again while it already holds a guard must not block behind
+    /// a writer that queued up in between.
+    #[test]
+    fn nested_read_with_queued_writer() {
+        crate::init_logging();
+        let data = Arc::new(
+            OpenXrData::<FakeCompositor>::new(
+                &Injector::default(),
+                openvr::EVRApplicationType::Other,
+            )
+            .unwrap(),
+        );
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let reader = {
+            let data = data.clone();
+            std::thread::spawn(move || {
+                let outer = data.session_data.get();
+                let writer = {
+                    let data = data.clone();
+                    std::thread::spawn(move || {
+                        data.reset_tracking_space(openvr::ETrackingUniverseOrigin::Seated)
+                    })
+                };
+                // Give the writer time to queue up behind the outer guard.
+                std::thread::sleep(Duration::from_millis(100));
+                drop(data.session_data.get());
+                drop(outer);
+                writer.join().unwrap();
+                done_tx.send(()).unwrap();
+            })
+        };
+
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("nested session read deadlocked against a queued writer");
+        reader.join().unwrap();
     }
 }

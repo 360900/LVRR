@@ -2,7 +2,7 @@ use crate::{
     clientcore::{Injected, Injector},
     compositor::{Compositor, is_usable_swapchain},
     graphics_backends::{GraphicsBackend, SupportedBackend, supported_apis_enum},
-    openxr_data::{GraphicalSession, OpenXrData, Session, SessionData},
+    openxr_data::{GraphicalSession, OpenXrData, Session, SessionData, SessionGuard},
     system::System,
 };
 use glam::{Quat, Vec3, vec3};
@@ -40,7 +40,7 @@ pub struct OverlayMan {
 }
 
 #[derive(derive_more::Deref)]
-struct RealSessionData<'a>(std::sync::RwLockReadGuard<'a, std::mem::ManuallyDrop<SessionData>>);
+struct RealSessionData<'a>(SessionGuard<'a>);
 
 impl OverlayMan {
     pub fn new(openxr: Arc<OpenXrData<Compositor>>, injector: &Injector) -> Self {

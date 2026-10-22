@@ -2817,6 +2817,7 @@ dependencies = [
  "openvr",
  "openxr",
  "openxr_mndx_xdev_space",
+ "parking_lot",
  "paste",
  "seq-macro",
  "serde",
