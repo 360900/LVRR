@@ -595,6 +595,11 @@ impl TrackedDevice {
             .map(|skeleton| skeleton.data_source)
     }
 
+    /// Forgets every pose, including the last valid ones that clear_pose_cache keeps.
+    pub fn forget_poses(&self) {
+        *self.pose_cache.lock().unwrap() = PoseCache::default();
+    }
+
     pub fn clear_pose_cache(&self) {
         self.pose_cache.lock().unwrap().recent.clear();
         if let TrackedDeviceType::Controller { skeleton_cache, .. } = self.get_type() {
@@ -1305,7 +1310,9 @@ impl<C: openxr_data::Compositor> Input<C> {
 #[cfg(test)]
 mod tests {
     use super::{PoseCache, TrackedDeviceType};
-    use crate::input::{profiles::knuckles::Knuckles, tests::Fixture};
+    use crate::input::BoundPoseType;
+    use crate::input::profiles::{knuckles::Knuckles, oculus_touch::OculusTouch};
+    use crate::input::tests::Fixture;
     use crate::openxr_data::Hand;
     use openvr as vr;
     use openxr as xr;
@@ -1391,33 +1398,37 @@ mod tests {
         );
     }
 
-    #[test]
-    fn untracked_controller_stays_connected() {
-        use crate::input::BoundPoseType;
-        use crate::openxr_data::Hand;
+    /// The Tip pose, which has a pose transformation on Knuckles.
+    fn tip_pose(f: &Fixture, hand: Hand, nanos: i64) -> vr::TrackedDevicePose_t {
+        f.input
+            .get_controller_pose(
+                hand,
+                Some(vr::ETrackingUniverseOrigin::Seated),
+                xr::Time::from_nanos(nanos),
+                Some(BoundPoseType::Tip),
+            )
+            .unwrap()
+    }
 
-        let mut f = Fixture::new();
-        f.load_actions(c"actions.json");
+    fn sync_set1(f: &mut Fixture) {
         let set1 = f.get_action_set_handle(c"/actions/set1");
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: set1,
+            ..Default::default()
+        });
+    }
+
+    /// Pose actions lose tracking when their set isn't synced.
+    fn stop_tracking(f: &Fixture) {
+        let data = f.input.openxr.session_data.get();
+        data.session.sync_actions(&[]).unwrap();
+    }
+
+    /// Binds Knuckles to the right hand, locates it at time 1, then stops tracking it. Returns the
+    /// tracked pose.
+    fn lose_right_controller(f: &mut Fixture) -> vr::TrackedDevicePose_t {
+        f.load_actions(c"actions.json");
         f.set_interaction_profile::<Knuckles>(fakexr::UserPath::RightHand);
-
-        // Tip has a pose transformation on Knuckles, so the last pose gets it too
-        let pose = |f: &Fixture, hand, nanos| {
-            f.input
-                .get_controller_pose(
-                    hand,
-                    Some(vr::ETrackingUniverseOrigin::Seated),
-                    xr::Time::from_nanos(nanos),
-                    Some(BoundPoseType::Tip),
-                )
-                .unwrap()
-        };
-
-        // a controller without an interaction profile isn't connected
-        let left = pose(&f, Hand::Left, 1);
-        assert!(!left.bDeviceIsConnected);
-        assert!(!left.bPoseIsValid);
-
         // the profile is bound after two frames
         for _ in 0..2 {
             f.input.openxr.poll_events();
@@ -1435,32 +1446,55 @@ mod tests {
                 ..xr::Posef::IDENTITY
             },
         );
-        f.sync(vr::VRActiveActionSet_t {
-            ulActionSet: set1,
-            ..Default::default()
-        });
+        sync_set1(f);
 
-        let tracked = pose(&f, Hand::Right, 2);
+        let tracked = tip_pose(f, Hand::Right, 1);
         assert!(tracked.bPoseIsValid);
         assert!(tracked.bDeviceIsConnected);
         assert_eq!(tracked.eTrackingResult, vr::ETrackingResult::Running_OK);
 
-        // pose actions lose tracking when their set isn't synced
-        let data = f.input.openxr.session_data.get();
-        data.session.sync_actions(&[]).unwrap();
-        drop(data);
+        stop_tracking(f);
+        tracked
+    }
 
-        let untracked = pose(&f, Hand::Right, 3);
+    #[test]
+    fn untracked_controller_stays_connected() {
+        let mut f = Fixture::new();
+        let tracked = lose_right_controller(&mut f);
+
+        let untracked = tip_pose(&f, Hand::Right, 2);
         assert!(!untracked.bPoseIsValid);
         assert!(untracked.bDeviceIsConnected);
         assert_eq!(
             untracked.eTrackingResult,
             vr::ETrackingResult::Running_OutOfRange
         );
+        // the last pose gets the Tip transformation too
         assert_eq!(
             untracked.mDeviceToAbsoluteTracking.m,
             tracked.mDeviceToAbsoluteTracking.m
         );
+
+        // a controller without an interaction profile isn't connected
+        let left = tip_pose(&f, Hand::Left, 2);
+        assert!(!left.bDeviceIsConnected);
+        assert!(!left.bPoseIsValid);
+    }
+
+    #[test]
+    fn profile_change_forgets_last_pose() {
+        let mut f = Fixture::new();
+        lose_right_controller(&mut f);
+
+        f.set_interaction_profile::<OculusTouch>(fakexr::UserPath::RightHand);
+        sync_set1(&mut f);
+        stop_tracking(&f);
+
+        // the last pose was of another controller, or with another offset
+        let untracked = tip_pose(&f, Hand::Right, 2);
+        assert!(!untracked.bPoseIsValid);
+        assert!(untracked.bDeviceIsConnected);
+        assert_eq!(untracked.mDeviceToAbsoluteTracking.m, [[0.0; 4]; 3]);
     }
 
     #[test]

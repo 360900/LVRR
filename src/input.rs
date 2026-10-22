@@ -2814,6 +2814,9 @@ impl<C: openxr_data::Compositor> Input<C> {
                     // The new device's skeleton may come from elsewhere, or not at all.
                     self.skeletal_tracking_level.write().unwrap()[hand as usize - 1] =
                         vr::EVRSkeletalTrackingLevel::Estimated;
+                    // The last pose is of a controller that's gone, or with the old profile's
+                    // offset.
+                    controller.forget_poses();
                 }
                 controller.profile_path = profile_path;
             }
