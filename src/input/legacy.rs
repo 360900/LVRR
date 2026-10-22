@@ -283,7 +283,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                 events.push_back(super::InputEvent {
                     ty,
                     index: device_index,
-                    data: vr::VREvent_Controller_t { button: id as u32 },
+                    data: vr::VREvent_Controller_t { button: id.0 },
                 });
             };
             for id in LEGACY_BUTTONS {
@@ -734,7 +734,7 @@ mod tests {
         f.input.openxr.poll_events();
         let action = legacy_action(&f, get_action);
         while let Some(event) = next_event(&f) {
-            assert_eq!(event.ty, vr::EVREventType::TrackedDeviceActivated as u32);
+            assert_eq!(event.ty, vr::EVREventType::TrackedDeviceActivated.0);
         }
         (f, action)
     }
@@ -752,9 +752,9 @@ mod tests {
     #[track_caller]
     fn expect_button_event(f: &Fixture, ty: vr::EVREventType, index: u32, id: vr::EVRButtonId) {
         let event = next_event(f).unwrap_or_else(|| panic!("Expected {ty:?} for {id:?}"));
-        assert_eq!(event.ty, ty as u32, "{id:?}");
+        assert_eq!(event.ty, ty.0, "{id:?}");
         assert_eq!(event.index, index, "{id:?}");
-        assert_eq!(unsafe { event.data.controller }.button, id as u32);
+        assert_eq!(unsafe { event.data.controller }.button, id.0);
     }
 
     #[track_caller]
@@ -790,12 +790,12 @@ mod tests {
             );
         };
         let expect_events = |index, active: bool| {
-            use vr::EVREventType::*;
+            use vr::EVREventType as Ev;
             let types: &[vr::EVREventType] = match (touch, active) {
-                (true, true) => &[ButtonTouch],
-                (true, false) => &[ButtonUntouch],
-                (false, true) => &[ButtonTouch, ButtonPress],
-                (false, false) => &[ButtonUnpress, ButtonUntouch],
+                (true, true) => &[Ev::ButtonTouch],
+                (true, false) => &[Ev::ButtonUntouch],
+                (false, true) => &[Ev::ButtonTouch, Ev::ButtonPress],
+                (false, false) => &[Ev::ButtonUnpress, Ev::ButtonUntouch],
             };
             for id in ids {
                 for ty in types {
@@ -1197,14 +1197,14 @@ mod tests {
     #[test]
     fn buttons_held_across_connection_changes() {
         use fakexr::UserPath::*;
-        use vr::EVREventType::*;
+        use vr::EVREventType as Ev;
         let mut f = Fixture::new();
         f.input.openxr.restart_session();
         f.input.frame_start_update();
         let trigger = legacy_action(&f, |actions| actions.trigger_click.as_raw());
         let expect_device_event = |f: &Fixture, ty: vr::EVREventType, index| {
             let event = next_event(f).unwrap_or_else(|| panic!("Expected {ty:?}"));
-            assert_eq!((event.ty, event.index), (ty as u32, index));
+            assert_eq!((event.ty, event.index), (ty.0, index));
         };
 
         // Turned on with the trigger held: the activation comes first.
@@ -1213,10 +1213,10 @@ mod tests {
         f.input.frame_start_update();
         f.input.openxr.poll_events();
         f.input.frame_start_update();
-        expect_device_event(&f, TrackedDeviceActivated, 0);
-        expect_device_event(&f, TrackedDeviceActivated, 1);
-        expect_button_event(&f, ButtonTouch, 1, vr::EVRButtonId::SteamVR_Trigger);
-        expect_button_event(&f, ButtonPress, 1, vr::EVRButtonId::SteamVR_Trigger);
+        expect_device_event(&f, Ev::TrackedDeviceActivated, 0);
+        expect_device_event(&f, Ev::TrackedDeviceActivated, 1);
+        expect_button_event(&f, Ev::ButtonTouch, 1, vr::EVRButtonId::SteamVR_Trigger);
+        expect_button_event(&f, Ev::ButtonPress, 1, vr::EVRButtonId::SteamVR_Trigger);
         expect_no_event(&f);
 
         // Turned off with the trigger held: it is released before the deactivation.
@@ -1224,9 +1224,9 @@ mod tests {
         fakexr::deactivate_action(trigger);
         f.input.frame_start_update();
         f.input.openxr.poll_events();
-        expect_button_event(&f, ButtonUnpress, 1, vr::EVRButtonId::SteamVR_Trigger);
-        expect_button_event(&f, ButtonUntouch, 1, vr::EVRButtonId::SteamVR_Trigger);
-        expect_device_event(&f, TrackedDeviceDeactivated, 1);
+        expect_button_event(&f, Ev::ButtonUnpress, 1, vr::EVRButtonId::SteamVR_Trigger);
+        expect_button_event(&f, Ev::ButtonUntouch, 1, vr::EVRButtonId::SteamVR_Trigger);
+        expect_device_event(&f, Ev::TrackedDeviceDeactivated, 1);
         expect_no_event(&f);
     }
 
@@ -1244,11 +1244,8 @@ mod tests {
         let events: Vec<_> = std::iter::from_fn(|| next_event(&f)).collect();
         assert_eq!(events.len(), super::MAX_QUEUED_EVENTS);
         // The oldest events are dropped, the newest ones kept.
-        assert_eq!(events[0].ty, vr::EVREventType::ButtonUnpress as u32);
-        assert_eq!(
-            events.last().unwrap().ty,
-            vr::EVREventType::ButtonPress as u32
-        );
+        assert_eq!(events[0].ty, vr::EVREventType::ButtonUnpress.0);
+        assert_eq!(events.last().unwrap().ty, vr::EVREventType::ButtonPress.0);
     }
 
     #[test]
