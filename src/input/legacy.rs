@@ -24,6 +24,8 @@ struct HandState {
     state: vr::VRControllerState_t,
     /// Whether the trigger value passed the touch threshold.
     trigger_touched: bool,
+    /// Whether `main_xy_deflect` passed the press threshold.
+    stick_deflected: bool,
 }
 
 impl LegacyState {
@@ -341,6 +343,13 @@ fn read_hand_state(
     // SteamVR's legacy bindings also touch the trigger once it is pulled, which is all
     // controllers without a capacitive trigger can report.
     let trigger_touched = threshold(previous.trigger_touched, trigger, 0.1, 0.05);
+    let deflection = actions
+        .main_xy_deflect
+        .state(session, hand_path)
+        .map_or(0.0, |s| {
+            glam::Vec2::new(s.current_state.x, s.current_state.y).length()
+        });
+    let stick_deflected = threshold(previous.stick_deflected, deflection, 0.8, 0.7);
 
     let mut state = vr::VRControllerState_t::default();
     let mut set_button = |id, pressed: bool, touched: bool| {
@@ -356,7 +365,7 @@ fn read_hand_state(
 
     set_button(
         vr::EVRButtonId::Axis0,
-        bool_state(&actions.main_xy_click),
+        bool_state(&actions.main_xy_click) || stick_deflected,
         bool_state(&actions.main_xy_touch),
     );
     set_button(
@@ -377,7 +386,7 @@ fn read_hand_state(
     let squeeze_click = bool_state(&actions.squeeze_click);
     set_button(
         vr::EVRButtonId::Grip,
-        squeeze_click,
+        squeeze_click || bool_state(&actions.grip_click),
         bool_state(&actions.grip_touch),
     );
     set_button(vr::EVRButtonId::Axis2, squeeze_click, false);
@@ -396,6 +405,7 @@ fn read_hand_state(
     HandState {
         state,
         trigger_touched,
+        stick_deflected,
     }
 }
 
@@ -434,7 +444,10 @@ pub(super) struct Legacy<M: ActionsMarker> {
     pub a_touch: Action<bool, M>,
     pub trigger_click: Action<bool, M>,
     pub trigger_touch: Action<bool, M>,
+    /// Presses k_EButton_Grip and k_EButton_Axis2.
     pub squeeze_click: Action<bool, M>,
+    /// Presses only k_EButton_Grip (the Index A button, as in SteamVR's legacy bindings).
+    pub grip_click: Action<bool, M>,
     /// Touches k_EButton_Grip.
     pub grip_touch: Action<bool, M>,
     pub trigger: Action<f32, M>,
@@ -443,6 +456,9 @@ pub(super) struct Legacy<M: ActionsMarker> {
     pub main_xy: Action<xr::Vector2f, M>,
     pub main_xy_touch: Action<bool, M>,
     pub main_xy_click: Action<bool, M>,
+    /// A stick that also presses Axis0 when pushed far enough, like SteamVR's Index legacy
+    /// binding does for apps written for the Vive trackpad.
+    pub main_xy_deflect: Action<xr::Vector2f, M>,
     pub haptic: Action<xr::Haptic, M>,
     pub extra: M,
 }
@@ -479,12 +495,14 @@ impl LegacyBindings {
             trigger_click,
             trigger_touch,
             squeeze_click,
+            grip_click,
             grip_touch,
             trigger,
             squeeze,
             main_xy,
             main_xy_touch,
             main_xy_click,
+            main_xy_deflect,
             haptic,
         ]
     }
@@ -526,6 +544,9 @@ impl LegacyActionData {
             squeeze_click: set
                 .create_action("grip-click", "Grip Click", &leftright)
                 .unwrap(),
+            grip_click: set
+                .create_action("grip-only-click", "Grip Only Click", &leftright)
+                .unwrap(),
             grip_touch: set
                 .create_action("grip-touch", "Grip Touch", &leftright)
                 .unwrap(),
@@ -537,6 +558,13 @@ impl LegacyActionData {
                 .unwrap(),
             main_xy_touch: set
                 .create_action("main-joystick-touch", "Main Joystick Touch", &leftright)
+                .unwrap(),
+            main_xy_deflect: set
+                .create_action(
+                    "main-joystick-deflect",
+                    "Main Joystick Deflection",
+                    &leftright,
+                )
                 .unwrap(),
             haptic: set.create_action("haptic", "Haptic", &leftright).unwrap(),
             extra: Actions,
@@ -653,7 +681,12 @@ mod tests {
             .instance
             .string_to_path(P::profile_path())
             .unwrap();
-        let mut bindings = fakexr::get_suggested_bindings(legacy_action(f, get_action), profile);
+        let action = legacy_action(f, get_action);
+        if expected.is_empty() {
+            assert!(fakexr::check_no_suggested_bindings(action, profile));
+            return;
+        }
+        let mut bindings = fakexr::get_suggested_bindings(action, profile);
         bindings.sort();
         let mut expected: Vec<_> = expected.iter().map(|s| s.to_string()).collect();
         expected.sort();
@@ -824,6 +857,8 @@ mod tests {
     );
     test_button!(a, vr::EVRButtonId::A, a_touch);
 
+    test_button!(grip_click, vr::EVRButtonId::Grip);
+
     #[test]
     fn button_grip_touch() {
         legacy_input(
@@ -867,6 +902,77 @@ mod tests {
                 "/user/hand/left/input/squeeze/touch",
                 "/user/hand/right/input/squeeze/touch",
             ],
+        );
+    }
+
+    #[test]
+    fn index_bindings() {
+        let (f, _) = legacy_fixture(|actions| actions.a.as_raw());
+        let both = |paths: &[&str]| -> Vec<String> {
+            paths
+                .iter()
+                .flat_map(|p| ["left", "right"].map(|hand| format!("/user/hand/{hand}/input/{p}")))
+                .collect()
+        };
+        let check = |get_action: fn(&super::LegacyActions) -> openxr::sys::Action,
+                     paths: &[&str]| {
+            let expected = both(paths);
+            let expected: Vec<_> = expected.iter().map(String::as_str).collect();
+            assert_legacy_bindings::<Knuckles>(&f, get_action, &expected);
+        };
+
+        check(|a| a.main_xy.as_raw(), &["thumbstick", "trackpad"]);
+        check(
+            |a| a.main_xy_click.as_raw(),
+            &["thumbstick/click", "trackpad/force"],
+        );
+        check(
+            |a| a.main_xy_touch.as_raw(),
+            &["thumbstick/touch", "trackpad/touch"],
+        );
+        check(|a| a.main_xy_deflect.as_raw(), &["thumbstick"]);
+        // A is an extra grip button, and never reported as k_EButton_A.
+        check(|a| a.a.as_raw(), &[]);
+        check(|a| a.a_touch.as_raw(), &[]);
+        check(|a| a.grip_click.as_raw(), &["a/click"]);
+        check(|a| a.grip_touch.as_raw(), &["a/touch", "squeeze/value"]);
+        check(|a| a.squeeze_click.as_raw(), &["squeeze/force"]);
+        check(|a| a.squeeze.as_raw(), &["squeeze/force"]);
+        check(|a| a.app_menu.as_raw(), &["b/click"]);
+        check(|a| a.app_menu_touch.as_raw(), &["b/touch"]);
+    }
+
+    #[test]
+    fn stick_deflection_presses_axis0() {
+        use fakexr::UserPath::*;
+        let (f, stick) = legacy_fixture(|actions| actions.main_xy_deflect.as_raw());
+        let set_stick = |x, y| {
+            fakexr::set_action_state(stick, fakexr::ActionState::Vector2(x, y), LeftHand);
+            f.input.frame_start_update();
+            get_state(&f, 1).ulButtonPressed
+        };
+        let mask = super::button_mask_from_id(vr::EVRButtonId::Axis0);
+
+        assert_eq!(set_stick(0.75, 0.0), 0);
+        // Diagonal, length 0.85
+        assert_eq!(set_stick(0.6, 0.6), mask);
+        expect_button_event(&f, vr::EVREventType::ButtonTouch, 1, vr::EVRButtonId::Axis0);
+        expect_button_event(&f, vr::EVREventType::ButtonPress, 1, vr::EVRButtonId::Axis0);
+        // Stays pressed until the stick drops below the release threshold.
+        assert_eq!(set_stick(0.75, 0.0), mask);
+        expect_no_event(&f);
+        assert_eq!(set_stick(0.65, 0.0), 0);
+        expect_button_event(
+            &f,
+            vr::EVREventType::ButtonUnpress,
+            1,
+            vr::EVRButtonId::Axis0,
+        );
+        expect_button_event(
+            &f,
+            vr::EVREventType::ButtonUntouch,
+            1,
+            vr::EVRButtonId::Axis0,
         );
     }
 

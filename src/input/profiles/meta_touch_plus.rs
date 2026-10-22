@@ -118,6 +118,8 @@ impl InteractionProfile for MetaTouchPlus {
             ]
             .concat(),
             grip_touch: vec![],
+            grip_click: vec![],
+            main_xy_deflect: vec![],
             haptic: c.haptics(),
         }
     }

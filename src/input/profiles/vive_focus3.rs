@@ -111,6 +111,8 @@ impl InteractionProfile for ViveFocus3 {
             app_menu_touch: vec![],
             a_touch: vec![],
             grip_touch: c.leftright::<Squeeze, Touch, _, _>(),
+            grip_click: vec![],
+            main_xy_deflect: vec![],
             haptic: c.haptics(),
         }
     }

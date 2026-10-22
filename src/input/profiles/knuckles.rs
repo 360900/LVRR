@@ -99,23 +99,45 @@ impl InteractionProfile for Knuckles {
     }
 
     fn legacy_bindings(c: &super::InputToXrPath<Self>) -> LegacyBindings {
+        // Follows SteamVR's legacy_bindings_index_controller.json
         LegacyBindings {
             extra: legacy::Bindings {
                 grip_pose: c.pose(),
             },
             app_menu: c.leftright::<B, Click, _, _>(),
-            a: c.leftright::<A, Click, _, _>(),
+            app_menu_touch: c.leftright::<B, Touch, _, _>(),
+            a: vec![],
+            a_touch: vec![],
             trigger: c.leftright::<Trigger, Value, _, _>(),
             trigger_click: c.leftright::<Trigger, Click, _, _>(),
-            squeeze: c.leftright::<Squeeze, Value, _, _>(),
-            squeeze_click: c.leftright::<Squeeze, Value, _, _>(),
-            main_xy: c.leftright::<Thumbstick, (), _, _>(),
-            main_xy_click: c.leftright::<Thumbstick, Click, _, _>(),
-            main_xy_touch: c.leftright::<Thumbstick, Touch, _, _>(),
             trigger_touch: c.leftright::<Trigger, Touch, _, _>(),
-            app_menu_touch: c.leftright::<B, Touch, _, _>(),
-            a_touch: c.leftright::<A, Touch, _, _>(),
-            grip_touch: vec![],
+            // squeeze/value is the capacitive finger curl, which is already high when the
+            // controller is merely held, so the grip is pressed through the force sensor.
+            squeeze: c.leftright::<Squeeze, Force, _, _>(),
+            squeeze_click: c.leftright::<Squeeze, Force, _, _>(),
+            grip_click: c.leftright::<A, Click, _, _>(),
+            grip_touch: [
+                c.leftright::<A, Touch, _, _>(),
+                c.leftright::<Squeeze, Value, _, _>(),
+            ]
+            .concat(),
+            // The stick and the trackpad both drive Axis0.
+            main_xy: [
+                c.leftright::<Thumbstick, (), _, _>(),
+                c.leftright::<Trackpad, (), _, _>(),
+            ]
+            .concat(),
+            main_xy_click: [
+                c.leftright::<Thumbstick, Click, _, _>(),
+                c.leftright::<Trackpad, Force, _, _>(),
+            ]
+            .concat(),
+            main_xy_touch: [
+                c.leftright::<Thumbstick, Touch, _, _>(),
+                c.leftright::<Trackpad, Touch, _, _>(),
+            ]
+            .concat(),
+            main_xy_deflect: c.leftright::<Thumbstick, (), _, _>(),
             haptic: c.haptics(),
         }
     }

@@ -84,6 +84,8 @@ impl InteractionProfile for SimpleController {
             a_touch: vec![],
             trigger_touch: vec![],
             grip_touch: vec![],
+            grip_click: vec![],
+            main_xy_deflect: vec![],
             haptic: c.haptics(),
         }
     }

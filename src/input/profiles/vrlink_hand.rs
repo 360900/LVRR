@@ -79,6 +79,8 @@ impl InteractionProfile for VRLinkHand {
             a_touch: vec![],
             trigger_touch: vec![],
             grip_touch: vec![],
+            grip_click: vec![],
+            main_xy_deflect: vec![],
             // The profile has no haptic output.
             haptic: vec![],
         }

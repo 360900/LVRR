@@ -142,6 +142,8 @@ impl InteractionProfile for FrameController {
             ]
             .concat(),
             grip_touch: c.leftright::<Squeeze, Touch, _, _>(),
+            grip_click: vec![],
+            main_xy_deflect: vec![],
             haptic: c.haptics(),
         }
     }
