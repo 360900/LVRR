@@ -1316,8 +1316,6 @@ mod tests {
 
     #[test]
     fn pose_cache_is_per_origin() {
-        use vr::ETrackingUniverseOrigin::{Seated, Standing};
-
         let f = Fixture::new();
         fakexr::set_reference_space_pose(
             f.raw_session(),
@@ -1332,11 +1330,13 @@ mod tests {
             },
         );
 
-        assert_eq!(hmd_height(&f, Seated, 1), 0.0);
-        assert_eq!(hmd_height(&f, Standing, 1), 1.5);
+        let seated = vr::ETrackingUniverseOrigin::Seated;
+        let standing = vr::ETrackingUniverseOrigin::Standing;
+        assert_eq!(hmd_height(&f, seated, 1), 0.0);
+        assert_eq!(hmd_height(&f, standing, 1), 1.5);
 
-        assert_eq!(hmd_height(&f, Standing, 2), 1.5);
-        assert_eq!(hmd_height(&f, Seated, 2), 0.0);
+        assert_eq!(hmd_height(&f, standing, 2), 1.5);
+        assert_eq!(hmd_height(&f, seated, 2), 0.0);
     }
 
     #[test]
@@ -1360,7 +1360,6 @@ mod tests {
     fn untracked_controller_stays_connected() {
         use crate::input::BoundPoseType;
         use crate::openxr_data::Hand;
-        use vr::ETrackingUniverseOrigin::Seated;
 
         let mut f = Fixture::new();
         f.load_actions(c"actions.json");
@@ -1372,7 +1371,7 @@ mod tests {
             f.input
                 .get_controller_pose(
                     hand,
-                    Some(Seated),
+                    Some(vr::ETrackingUniverseOrigin::Seated),
                     xr::Time::from_nanos(nanos),
                     Some(BoundPoseType::Tip),
                 )
