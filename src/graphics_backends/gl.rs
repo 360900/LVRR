@@ -904,13 +904,13 @@ fn holds_gamma(format: GLenum, color_space: vr::EColorSpace) -> bool {
     }
 }
 
-/// Gamma-encoded 8-bit data goes into an sRGB swapchain, so the runtime doesn't encode it again.
+/// Gamma-encoded data goes into an sRGB swapchain whatever its format, since runtimes treat every
+/// other format as linear and would encode it again.
 fn swapchain_format(format: GLenum, color_space: vr::EColorSpace) -> GLenum {
-    let sized = sized_format(format);
-    if sized == gl::RGBA8 && holds_gamma(format, color_space) {
+    if holds_gamma(format, color_space) {
         gl::SRGB8_ALPHA8
     } else {
-        sized
+        sized_format(format)
     }
 }
 
@@ -1061,9 +1061,12 @@ mod tests {
             (gl::SRGB_ALPHA, Auto, gl::SRGB8_ALPHA8),
             (gl::SRGB8_ALPHA8, Gamma, gl::SRGB8_ALPHA8),
             (gl::RGBA16F, Auto, gl::RGBA16F),
-            (gl::RGBA16F, Gamma, gl::RGBA16F),
+            (gl::RGBA16F, Gamma, gl::SRGB8_ALPHA8),
             (gl::RGB16F, Linear, gl::RGBA16F),
             (gl::RGB10_A2, Auto, gl::RGB10_A2),
+            (gl::RGB10_A2, Gamma, gl::SRGB8_ALPHA8),
+            (gl::RGBA16, Gamma, gl::SRGB8_ALPHA8),
+            (gl::RGB565, Gamma, gl::SRGB8_ALPHA8),
         ] {
             assert_eq!(
                 swapchain_format(format, color_space),
@@ -1088,6 +1091,9 @@ mod tests {
             // Gamma data in a linear format is passed through.
             (gl::RGBA, Auto, gl::SRGB8_ALPHA8, blit(false)),
             (gl::RGB8, Gamma, gl::SRGB8_ALPHA8, blit(false)),
+            (gl::RGB10_A2, Gamma, gl::SRGB8_ALPHA8, blit(false)),
+            (gl::RGBA16F, Gamma, gl::SRGB8_ALPHA8, blit(false)),
+            // Only if the runtime has no sRGB format, nothing can be done about it then.
             (gl::RGBA8, Auto, gl::RGBA16, blit(false)),
             // sRGB data in a linear fallback swapchain gets decoded.
             (gl::SRGB8_ALPHA8, Auto, gl::RGBA16, blit(true)),
