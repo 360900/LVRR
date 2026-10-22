@@ -1172,13 +1172,16 @@ pub fn handle_sources(
                 else {
                     continue;
                 };
+                // Only 1.0 can be reported. Other values (like -1 to reverse) would come out
+                // wrong, which is worse than not binding them.
                 if let Some(on) = parameters.and_then(|p| p.on_x.as_deref().copied())
                     && on != 1.0
                 {
                     warn!(
-                        "{} is set to {on} by {path}, but only 1.0 is supported",
+                        "Ignoring {path} setting {} to {on}, only 1.0 is supported",
                         value.output.path
                     );
+                    continue;
                 }
 
                 // The action is 1 while the input is pressed, like a button.

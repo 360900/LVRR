@@ -13,6 +13,10 @@
 		{
 			"name": "/actions/main/in/repel",
 			"type": "vector1"
+		},
+		{
+			"name": "/actions/main/in/reverse",
+			"type": "vector1"
 		}
 	],
 	"default_bindings": [

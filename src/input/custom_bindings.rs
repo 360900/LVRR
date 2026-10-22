@@ -2407,6 +2407,19 @@ mod tests {
             c"/actions/main/in/alternateuse",
             ["/user/hand/right/input/a/click".into()],
         );
+        // Other constants than 1 can't be reported, so they aren't bound.
+        let reverse = c"/actions/main/in/reverse";
+        let profile = f
+            .input
+            .openxr
+            .instance
+            .string_to_path(OculusTouch::profile_path())
+            .unwrap();
+        assert!(fakexr::check_no_suggested_bindings(
+            f.get_action::<f32>(f.get_action_handle(reverse)),
+            profile
+        ));
+        f.verify_custom_bindings(OculusTouch::profile_path(), reverse, []);
 
         f.set_interaction_profile::<OculusTouch>(LeftHand);
         let trigger = f.get_action::<f32>(
