@@ -3153,9 +3153,10 @@ struct HandSpace {
     /// This is stored as a space so we can locate hand joints relative to it for skeletal data.
     raw: RwLock<Option<xr::Space>>,
 
-    /// Recent (time, position, origin) samples of the raw pose, for synthesizing
-    /// linear velocities from position deltas (see the synthesized_velocity quirk).
-    pose_history: Mutex<std::collections::VecDeque<(i64, glam::Vec3, vr::ETrackingUniverseOrigin)>>,
+    /// Recent (time, position) samples of the raw pose per tracking origin, for synthesizing
+    /// linear velocities from position deltas (see the synthesized_velocity quirk). Kept per
+    /// origin since apps can query several origins in the same frame.
+    pose_history: Mutex<HashMap<vr::ETrackingUniverseOrigin, VecDeque<(i64, glam::Vec3)>>>,
 }
 
 struct SpaceReadGuard<'a>(RwLockReadGuard<'a, Option<xr::Space>>);
@@ -3178,20 +3179,13 @@ impl HandSpace {
         const WINDOW_NS: i64 = 60_000_000; // 60ms
         const MIN_SPAN_NS: i64 = 8_000_000; // don't divide over tiny spans
 
-        let mut history = self.pose_history.lock().unwrap();
-        match history.back() {
-            // several queries per frame share the same predicted time
-            Some(&(t, _, o)) if t == time_ns && o == origin => {}
-            Some(&(_, _, o)) if o != origin => {
-                // origin switched; old samples are in a different space
-                history.clear();
-                history.push_back((time_ns, position, origin));
-            }
-            _ => {
-                history.push_back((time_ns, position, origin));
-            }
+        let mut histories = self.pose_history.lock().unwrap();
+        let history = histories.entry(origin).or_default();
+        // several queries per frame share the same predicted time
+        if history.back().is_none_or(|&(t, _)| t != time_ns) {
+            history.push_back((time_ns, position));
         }
-        while let Some(&(t, ..)) = history.front() {
+        while let Some(&(t, _)) = history.front() {
             if time_ns - t > WINDOW_NS && history.len() > 2 {
                 history.pop_front();
             } else {
@@ -3199,7 +3193,7 @@ impl HandSpace {
             }
         }
 
-        let &(t0, p0, _) = history.front()?;
+        let &(t0, p0) = history.front()?;
         let span = time_ns - t0;
         if span < MIN_SPAN_NS {
             return None;

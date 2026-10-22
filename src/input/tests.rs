@@ -2086,13 +2086,19 @@ fn synthesized_velocity_from_history() {
         .unwrap();
     assert!((v2 - v).length() < 1e-3, "{v2:?}");
 
-    // switching tracking origins invalidates the old samples
-    let after_switch = space.update_history_and_velocity(
+    // samples from another tracking origin are in a different space
+    let other_origin = space.update_history_and_velocity(
         60_000_000,
         Vec3::ZERO,
         vr::ETrackingUniverseOrigin::Seated,
     );
-    assert!(after_switch.is_none());
+    assert!(other_origin.is_none());
+
+    // but querying another origin doesn't discard this origin's samples
+    let v3 = space
+        .update_history_and_velocity(60_000_000, Vec3::new(0.06, 0.0, 0.0), origin)
+        .unwrap();
+    assert!((v3 - Vec3::X).length() < 1e-3, "{v3:?}");
 }
 
 #[test]
