@@ -1098,8 +1098,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
                 drop(frame_lock);
                 drop(session_lock);
 
-                if let Err(e) =
-                    self.initialize_real_session(texture, clamped_bounds, submit_flags)
+                if let Err(e) = self.initialize_real_session(texture, clamped_bounds, submit_flags)
                 {
                     return e;
                 }
@@ -1819,8 +1818,8 @@ impl<G: GraphicsBackend> FrameController<G> {
             return Err(vr::EVRCompositorError::IndexOutOfRange);
         }
         let color_space = texture.eColorSpace;
-        let texture = G::get_texture(texture, submit_flags)
-            .ok_or(vr::EVRCompositorError::InvalidTexture)?;
+        let texture =
+            G::get_texture(texture, submit_flags).ok_or(vr::EVRCompositorError::InvalidTexture)?;
         // The session can only use the device it was set up with, e.g. not one the app recreated.
         if !self.backend.is_texture_on_device(texture) {
             crate::warn_once!("Texture submitted from a different graphics device than before");
