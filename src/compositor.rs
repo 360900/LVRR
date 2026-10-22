@@ -748,15 +748,17 @@ impl vr::IVRCompositor029_Interface for Compositor {
                 "Can't show fades: runtime does not support KHR_composition_layer_color_scale_bias"
             );
         }
+        // Later fades start from the current color, so NaN would stick around.
+        let channel = |c: f32| if c.is_nan() { 0.0 } else { c.clamp(0.0, 1.0) };
         let now = Instant::now();
         let fade = &mut self.fades.lock().unwrap()[bBackground as usize];
         *fade = Fade {
             from: fade.color(now),
             to: vr::HmdColor_t {
-                r: fRed,
-                g: fGreen,
-                b: fBlue,
-                a: fAlpha,
+                r: channel(fRed),
+                g: channel(fGreen),
+                b: channel(fBlue),
+                a: channel(fAlpha),
             },
             start: now,
             seconds: fSeconds,
@@ -3818,6 +3820,12 @@ mod tests {
         C29::FadeToColor(&*f.comp, 1000.0, 1.0, 1.0, 1.0, 1.0, false);
         let [r, _, _, a] = color(false);
         assert!(r < 0.01 && a < 0.01, "{r} {a}");
+
+        // Colors are kept in range, and NaN doesn't carry over into later fades.
+        C29::FadeToColor(&*f.comp, 0.0, f32::NAN, 2.0, -1.0, f32::NAN, false);
+        assert_eq!(color(false), [0.0, 1.0, 0.0, 0.0]);
+        C29::FadeToColor(&*f.comp, 1000.0, 1.0, 1.0, 1.0, 1.0, false);
+        assert!(color(false).iter().all(|c| !c.is_nan()));
     }
 
     fn view(x: f32, fov: xr::Fovf) -> (xr::Posef, xr::Fovf) {
