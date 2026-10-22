@@ -1286,21 +1286,50 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
     }
     fn GetBoneName(
         &self,
-        _: vr::VRActionHandle_t,
-        _: vr::BoneIndex_t,
-        _: *mut c_char,
-        _: u32,
+        action: vr::VRActionHandle_t,
+        bone: vr::BoneIndex_t,
+        name: *mut c_char,
+        name_size: u32,
     ) -> vr::EVRInputError {
-        crate::warn_unimplemented!("GetBoneName");
+        get_action_from_handle!(self, action, session_data, action);
+        let ActionData::Skeleton(hand) = action else {
+            return vr::EVRInputError::WrongType;
+        };
+        let Some(bone_name) = skeletal::bone_name(bone, *hand) else {
+            return vr::EVRInputError::InvalidBoneIndex;
+        };
+        if name.is_null() {
+            return vr::EVRInputError::InvalidParam;
+        }
+        if (name_size as usize) <= bone_name.len() {
+            return vr::EVRInputError::BufferTooSmall;
+        }
+
+        copy_cstr(
+            unsafe { std::slice::from_raw_parts_mut(name, name_size as usize) },
+            &bone_name,
+        );
         vr::EVRInputError::None
     }
     fn GetBoneHierarchy(
         &self,
-        _: vr::VRActionHandle_t,
-        _: *mut vr::BoneIndex_t,
-        _: u32,
+        action: vr::VRActionHandle_t,
+        parents: *mut vr::BoneIndex_t,
+        parent_count: u32,
     ) -> vr::EVRInputError {
-        crate::warn_unimplemented!("GetBoneHierarchy");
+        get_action_from_handle!(self, action, session_data, action);
+        if !matches!(action, ActionData::Skeleton(_)) {
+            return vr::EVRInputError::WrongType;
+        }
+        if parents.is_null() {
+            return vr::EVRInputError::InvalidParam;
+        }
+        if parent_count < HandSkeletonBone::Count as u32 {
+            return vr::EVRInputError::BufferTooSmall;
+        }
+
+        unsafe { std::slice::from_raw_parts_mut(parents, skeletal::BONE_PARENTS.len()) }
+            .copy_from_slice(&skeletal::BONE_PARENTS);
         vr::EVRInputError::None
     }
     fn GetBoneCount(&self, handle: vr::VRActionHandle_t, count: *mut u32) -> vr::EVRInputError {

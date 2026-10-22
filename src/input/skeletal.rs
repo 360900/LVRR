@@ -611,6 +611,57 @@ static AUX_BONES: &[(HandSkeletonBone, xr::HandJoint)] = &[
     (AuxPinkyFinger, xr::HandJoint::LITTLE_DISTAL),
 ];
 
+/// SteamVR's bone names, with `#` standing for the hand ("l" or "r").
+static BONE_NAMES: [&str; Count as usize] = [
+    "Root",
+    "wrist_#",
+    "finger_thumb_0_#",
+    "finger_thumb_1_#",
+    "finger_thumb_2_#",
+    "finger_thumb_#_end",
+    "finger_index_meta_#",
+    "finger_index_0_#",
+    "finger_index_1_#",
+    "finger_index_2_#",
+    "finger_index_#_end",
+    "finger_middle_meta_#",
+    "finger_middle_0_#",
+    "finger_middle_1_#",
+    "finger_middle_2_#",
+    "finger_middle_#_end",
+    "finger_ring_meta_#",
+    "finger_ring_0_#",
+    "finger_ring_1_#",
+    "finger_ring_2_#",
+    "finger_ring_#_end",
+    "finger_pinky_meta_#",
+    "finger_pinky_0_#",
+    "finger_pinky_1_#",
+    "finger_pinky_2_#",
+    "finger_pinky_#_end",
+    "finger_thumb_#_aux",
+    "finger_index_#_aux",
+    "finger_middle_#_aux",
+    "finger_ring_#_aux",
+    "finger_pinky_#_aux",
+];
+
+pub(super) fn bone_name(bone: vr::BoneIndex_t, hand: Hand) -> Option<String> {
+    let side = match hand {
+        Hand::Left => "l",
+        Hand::Right => "r",
+    };
+    let name = BONE_NAMES.get(usize::try_from(bone).ok()?)?;
+    Some(name.replace('#', side))
+}
+
+/// The parent of each bone, -1 for the root. Each finger hangs off the wrist, and the aux bones
+/// off the root.
+pub(super) static BONE_PARENTS: [vr::BoneIndex_t; Count as usize] = [
+    -1, 0, 1, 2, 3, 4, 1, 6, 7, 8, 9, 1, 11, 12, 13, 14, 1, 16, 17, 18, 19, 1, 21, 22, 23, 24, 0,
+    0, 0, 0, 0,
+];
+
 #[derive(Copy, Clone)]
 pub(super) struct FingerState {
     index: f32,
@@ -784,9 +835,10 @@ impl SkeletalInputActionData {
 
 #[cfg(test)]
 mod tests {
-    use super::{Count, generated};
+    use super::{Count, bone_transform_to_glam, finalize_transforms, generated};
     use crate::input::tests::Fixture;
     use crate::vr::{self, IVRInput010_Interface};
+    use glam::Affine3A;
 
     const SENTINEL: vr::VRBoneTransform_t = vr::VRBoneTransform_t {
         position: vr::HmdVector4_t {
@@ -884,5 +936,76 @@ mod tests {
             );
         }
         assert!(bones.iter().all(is_sentinel));
+    }
+
+    #[test]
+    fn bone_hierarchy() {
+        let f = Fixture::new();
+        f.load_actions(c"actions.json");
+        let skeleton = f.get_action_handle(c"/actions/set1/in/skellyr");
+
+        let mut parents = [i32::MAX; Count as usize + 1];
+        assert_eq!(
+            f.input
+                .GetBoneHierarchy(skeleton, parents.as_mut_ptr(), Count as u32 - 1),
+            vr::EVRInputError::BufferTooSmall
+        );
+        assert_eq!(
+            f.input
+                .GetBoneHierarchy(skeleton, parents.as_mut_ptr(), parents.len() as u32),
+            vr::EVRInputError::None
+        );
+        assert_eq!(parents[Count as usize], i32::MAX);
+
+        // Walking the reported parents must give the same model space pose as our own conversion.
+        let parent_space = generated::right_hand::FIST;
+        let mut model_space = parent_space;
+        finalize_transforms(&mut model_space, vr::EVRSkeletalTransformSpace::Model);
+        let to_affine = |bone| {
+            let (pos, rot) = bone_transform_to_glam(bone);
+            Affine3A::from_rotation_translation(rot, pos)
+        };
+        let mut walked = Vec::<Affine3A>::new();
+        for (bone, parent) in parent_space.iter().zip(&parents[..Count as usize]) {
+            let parent = usize::try_from(*parent).map_or(Affine3A::IDENTITY, |p| walked[p]);
+            walked.push(parent * to_affine(*bone));
+        }
+        for (i, (walked, expected)) in walked.iter().zip(model_space).enumerate() {
+            assert!(walked.abs_diff_eq(to_affine(expected), 1e-4), "bone {i}");
+        }
+    }
+
+    #[test]
+    fn bone_names() {
+        let f = Fixture::new();
+        f.load_actions(c"actions.json");
+        let left = f.get_action_handle(c"/actions/set1/in/skellyl");
+        let right = f.get_action_handle(c"/actions/set1/in/skellyr");
+
+        let name = |action, bone, size: usize| {
+            let mut buf = vec![0x7f as std::ffi::c_char; size];
+            let err = f
+                .input
+                .GetBoneName(action, bone, buf.as_mut_ptr(), size as u32);
+            (err == vr::EVRInputError::None)
+                .then(|| unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }.to_owned())
+                .ok_or(err)
+        };
+
+        assert_eq!(name(right, 0, 32), Ok(c"Root".into()));
+        assert_eq!(name(right, 1, 32), Ok(c"wrist_r".into()));
+        assert_eq!(name(left, 5, 32), Ok(c"finger_thumb_l_end".into()));
+        assert_eq!(name(left, 6, 32), Ok(c"finger_index_meta_l".into()));
+        assert_eq!(name(right, 30, 32), Ok(c"finger_pinky_r_aux".into()));
+        assert_eq!(name(right, 1, 8), Ok(c"wrist_r".into()));
+        assert_eq!(name(right, 1, 7), Err(vr::EVRInputError::BufferTooSmall));
+        assert_eq!(
+            name(right, 31, 32),
+            Err(vr::EVRInputError::InvalidBoneIndex)
+        );
+        assert_eq!(
+            name(right, -1, 32),
+            Err(vr::EVRInputError::InvalidBoneIndex)
+        );
     }
 }
