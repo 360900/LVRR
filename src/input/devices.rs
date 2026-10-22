@@ -562,7 +562,7 @@ impl TrackedDevice {
             return skeleton.clone();
         }
 
-        let display_time = xr_data.display_time.get();
+        let display_time = xr_data.get_display_time();
         let r = if xr_data.enabled_extensions.ext_hand_tracking_data_source {
             get_joints_with_data_source(base, hand_tracker.as_ref()?, display_time)
                 .unwrap_or_default()
@@ -1558,7 +1558,7 @@ mod tests {
         let pose2 = f.input.get_device_pose(
             3,
             Some(vr::ETrackingUniverseOrigin::Seated),
-            f.input.openxr.display_time.get(),
+            f.input.openxr.get_display_time(),
             None,
         );
         assert!(pose2.is_some());

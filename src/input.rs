@@ -1768,7 +1768,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             action_data,
             action_data_size,
             restrict_to_device,
-            self.openxr.display_time.get(),
+            self.openxr.get_display_time(),
         )
     }
 

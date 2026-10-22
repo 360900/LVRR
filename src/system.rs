@@ -617,7 +617,7 @@ impl vr::IVRSystem026_Interface for System {
                     .input
                     .get()
                     .unwrap()
-                    .get_controller_pose(hand, Some(origin), self.openxr.display_time.get(), None)
+                    .get_controller_pose(hand, Some(origin), self.openxr.get_display_time(), None)
                     .unwrap_or_default();
             }
             true
@@ -813,7 +813,7 @@ impl vr::IVRSystem026_Interface for System {
                 let index = (&raw const (*event).trackedDeviceIndex).read();
                 pose.write(
                     input
-                        .get_device_pose(index, Some(origin), self.openxr.display_time.get(), None)
+                        .get_device_pose(index, Some(origin), self.openxr.get_display_time(), None)
                         .unwrap_or_default(),
                 );
             }

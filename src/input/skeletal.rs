@@ -52,7 +52,7 @@ impl<C: openxr_data::Compositor> Input<C> {
 
         let grip: xr::Posef = controller
             .get_pose(
-                self.openxr.display_time.get(),
+                self.openxr.get_display_time(),
                 session_data,
                 session_data.current_origin,
                 None,

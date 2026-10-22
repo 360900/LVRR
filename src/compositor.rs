@@ -139,10 +139,7 @@ impl Compositor {
             *self.frame_state.lock().unwrap() = FrameState::Submitted;
             return false;
         };
-        self.openxr.display_time.set(display_time);
-        self.openxr
-            .display_period_nanos
-            .store(display_period, Ordering::Relaxed);
+        self.openxr.set_frame_timing(display_time, display_period);
         true
     }
 
@@ -981,7 +978,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
 
         // Like GetLastPoses, a slot without a device gets an invalid, disconnected pose.
         let pose = input
-            .get_device_pose(device_index, None, self.openxr.display_time.get(), None)
+            .get_device_pose(device_index, None, self.openxr.get_display_time(), None)
             .unwrap_or_default();
 
         for output in [output_pose, output_game_pose] {
@@ -1012,7 +1009,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
             }
             return vr::EVRCompositorError::DoNotHaveFocus;
         }
-        let time = self.openxr.display_time.get();
+        let time = self.openxr.get_display_time();
         // Both arrays are optional and sized independently. Not entirely sure how the game poses
         // are supposed to differ from the render poses, but a lot of games use the game pose array
         // for controller positions.
