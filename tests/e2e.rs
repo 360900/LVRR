@@ -710,7 +710,7 @@ fn scene_app() {
     );
     println!("hmd DeviceClass_Int32: {class} ({err:?})");
     assert_eq!(err, vr::ETrackedPropertyError::Success);
-    assert_eq!(class, vr::ETrackedDeviceClass::HMD as i32);
+    assert_eq!(class, vr::ETrackedDeviceClass::HMD.0 as i32);
     let prox = vcall!(
         sys,
         IVRSystem_GetBoolTrackedDeviceProperty,

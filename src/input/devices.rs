@@ -794,7 +794,7 @@ impl TrackedDevice {
     ) -> Option<i32> {
         match property {
             vr::ETrackedDeviceProperty::DeviceClass_Int32 => {
-                return Some(self.device_class() as i32);
+                return Some(self.device_class().0 as i32);
             }
             // Engines like godot_openvr assign hands from this instead of
             // GetControllerRoleForTrackedDeviceIndex.
@@ -806,7 +806,7 @@ impl TrackedDevice {
                     #[cfg(feature = "monado")]
                     TrackedDeviceType::GenericTracker { .. } => vr::ETrackedControllerRole::OptOut,
                 };
-                return Some(role as i32);
+                return Some(role.0 as i32);
             }
             _ => {}
         }
@@ -1321,11 +1321,11 @@ mod tests {
         let get = |prop| f.input.get_device_int_tracked_property(3, prop);
         assert_eq!(
             get(vr::ETrackedDeviceProperty::ControllerRoleHint_Int32),
-            Some(vr::ETrackedControllerRole::OptOut as i32)
+            Some(vr::ETrackedControllerRole::OptOut.0 as i32)
         );
         assert_eq!(
             get(vr::ETrackedDeviceProperty::DeviceClass_Int32),
-            Some(vr::ETrackedDeviceClass::GenericTracker as i32)
+            Some(vr::ETrackedDeviceClass::GenericTracker.0 as i32)
         );
     }
 
@@ -1379,7 +1379,7 @@ mod tests {
             oculus_touch::OculusTouch, simple_controller::SimpleController,
         };
         use fakexr::UserPath::*;
-        use vr::ETrackedDeviceProperty::*;
+        use vr::ETrackedDeviceProperty as Prop;
         use xr::HandTrackingDataSourceEXT as Source;
         const HAND: Option<&str> = Some("svl_hand_interaction_augmented");
         const GENERIC: Option<&str> = Some("<unknown>");
@@ -1402,8 +1402,14 @@ mod tests {
                 .get_device_string_tracked_property(index, prop)
                 .map(|s| s.into_string().unwrap())
         };
-        let ty = |f: &Fixture, index| get(f, index, ControllerType_String);
-        let hmd = |f: &Fixture| get(f, vr::k_unTrackedDeviceIndex_Hmd, TrackingSystemName_String);
+        let ty = |f: &Fixture, index| get(f, index, Prop::ControllerType_String);
+        let hmd = |f: &Fixture| {
+            get(
+                f,
+                vr::k_unTrackedDeviceIndex_Hmd,
+                Prop::TrackingSystemName_String,
+            )
+        };
 
         // Hands bound to simple_controller, before any real controller showed up.
         f.set_interaction_profile::<SimpleController>(LeftHand);
@@ -1441,7 +1447,7 @@ mod tests {
 
     #[test]
     fn role_hint_and_device_class() {
-        use vr::ETrackedDeviceProperty::*;
+        use vr::ETrackedDeviceProperty as Prop;
 
         let f = Fixture::new();
         let get = |index, prop| f.input.get_device_int_tracked_property(index, prop);
@@ -1453,8 +1459,11 @@ mod tests {
             (1, Role::LeftHand, Class::Controller),
             (2, Role::RightHand, Class::Controller),
         ] {
-            assert_eq!(get(index, ControllerRoleHint_Int32), Some(role as i32));
-            assert_eq!(get(index, DeviceClass_Int32), Some(class as i32));
+            assert_eq!(
+                get(index, Prop::ControllerRoleHint_Int32),
+                Some(role.0 as i32)
+            );
+            assert_eq!(get(index, Prop::DeviceClass_Int32), Some(class.0 as i32));
         }
     }
 
