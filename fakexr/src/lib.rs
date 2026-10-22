@@ -315,8 +315,8 @@ pub fn last_layer_count(session: xr::Session) -> u32 {
     session.last_layer_count.load()
 }
 
-/// The pose and FOV of each view, as returned by xrLocateViews in any space. Until this is called,
-/// the views are untracked and have a zero FOV.
+/// The pose and FOV of each view, as returned by xrLocateViews in any reference space without a
+/// pose offset. Until this is called, the views are untracked and have a zero FOV.
 pub fn set_views(session: xr::Session, views: [(xr::Posef, xr::Fovf); 2]) {
     let session = session.to_handle().unwrap();
     *session.views.lock().unwrap() = Some(views);
@@ -2425,7 +2425,7 @@ extern "system" fn get_visibility_mask_k_h_r(
 
 extern "system" fn locate_views(
     session: xr::Session,
-    _info: *const xr::ViewLocateInfo,
+    info: *const xr::ViewLocateInfo,
     state: *mut xr::ViewState,
     capacity: u32,
     output: *mut u32,
@@ -2435,7 +2435,18 @@ extern "system" fn locate_views(
     if let Some(error) = LOCATE_VIEWS_ERROR.get() {
         return error;
     }
-    let set_views = *session.views.lock().unwrap();
+    let space = get_handle!(unsafe { (*info).space });
+    let mut set_views = *session.views.lock().unwrap();
+    // A reference space with a pose offset sees the views from its moved origin.
+    if let SpaceType::Reference(_) = space.ty
+        && pose_to_mat(space.offset) != Affine3A::IDENTITY
+        && let Some(views) = &mut set_views
+    {
+        let to_space = pose_to_mat(space.offset).inverse();
+        for (pose, _) in views {
+            *pose = mat_to_pose(to_space * pose_to_mat(*pose));
+        }
+    }
     if !state.is_null() {
         let view_state_flags = if set_views.is_some() {
             xr::ViewStateFlags::ORIENTATION_VALID

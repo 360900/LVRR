@@ -1930,6 +1930,8 @@ impl<G: GraphicsBackend> FrameController<G> {
                 .iter()
                 .any(|eye| eye.is_some_and(|eye| eye.render_pose.is_some()))
                 .then(|| system.get_views(xr::ReferenceSpaceType::VIEW).views);
+            // The views were located in another space than the layer's.
+            let views_offset = session_data.reference_space_offset();
             proj_layer_views = views
                 .into_iter()
                 .enumerate()
@@ -1944,18 +1946,26 @@ impl<G: GraphicsBackend> FrameController<G> {
 
                     let pose = match (render_pose, eyes_to_head) {
                         (Some(head), Some(eyes)) => compose_poses(head, eyes[eye_index].pose),
-                        _ => xr::Posef {
-                            orientation: if flags.contains(xr::ViewStateFlags::ORIENTATION_VALID) {
-                                view.pose.orientation
-                            } else {
-                                xr::Quaternionf::IDENTITY
-                            },
-                            position: if flags.contains(xr::ViewStateFlags::POSITION_VALID) {
-                                view.pose.position
-                            } else {
-                                xr::Vector3f::default()
-                            },
-                        },
+                        _ => {
+                            let pose = xr::Posef {
+                                orientation: if flags
+                                    .contains(xr::ViewStateFlags::ORIENTATION_VALID)
+                                {
+                                    view.pose.orientation
+                                } else {
+                                    xr::Quaternionf::IDENTITY
+                                },
+                                position: if flags.contains(xr::ViewStateFlags::POSITION_VALID) {
+                                    view.pose.position
+                                } else {
+                                    xr::Vector3f::default()
+                                },
+                            };
+                            match views_offset {
+                                Some(offset) => compose_poses(offset, pose),
+                                None => pose,
+                            }
+                        }
                     };
                     let mut fov = view.fov;
                     // Bounds outside of the texture were clamped, which leaves out part of the FOV.
@@ -4113,6 +4123,52 @@ mod tests {
             vr::EVRSubmitFlags::TextureWithPose,
         );
         assert_eq!(positions(layer), [[-0.03, 0.0, 0.0], [0.03, 0.0, 0.0]]);
+    }
+
+    /// The raw universe is the stage without the standing zero pose, so the views located in the
+    /// standing universe have to be moved to where the app rendered them.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn raw_universe_views_ignore_standing_zero() {
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+        let session = f.raw_session();
+        fakexr::set_views(session, [view(-0.03, FOV), view(0.03, FOV)]);
+        fakexr::set_reference_space_pose(
+            session,
+            xr::ReferenceSpaceType::VIEW,
+            xr::Posef {
+                position: xr::Vector3f {
+                    x: 0.5,
+                    y: 1.6,
+                    z: 0.0,
+                },
+                ..xr::Posef::IDENTITY
+            },
+        );
+        f.comp
+            .openxr
+            .reset_tracking_space(vr::ETrackingUniverseOrigin::Standing);
+        let positions = || {
+            let layer = frame_with_texture(
+                &f,
+                &FakeGraphicsData::texture(&f.vk),
+                Option::None,
+                vr::EVRSubmitFlags::Default,
+            );
+            layer.views.map(|(pose, _)| {
+                let p = pose.position;
+                [p.x, p.y, p.z].map(|v| (v * 1e4).round() / 1e4)
+            })
+        };
+
+        f.comp
+            .SetTrackingSpace(vr::ETrackingUniverseOrigin::RawAndUncalibrated);
+        assert_eq!(positions(), [[-0.03, 0.0, 0.0], [0.03, 0.0, 0.0]]);
+        // The standing universe is moved by the zero pose.
+        f.comp
+            .SetTrackingSpace(vr::ETrackingUniverseOrigin::Standing);
+        assert_eq!(positions(), [[-0.53, 0.0, 0.0], [-0.47, 0.0, 0.0]]);
     }
 
     #[test]

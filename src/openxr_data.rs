@@ -1573,6 +1573,16 @@ impl SessionData {
         }
     }
 
+    /// Where the origin of [Self::current_origin_as_reference_space]'s space is in
+    /// [Self::tracking_space], if they differ: RawAndUncalibrated is the stage without the standing
+    /// zero pose.
+    pub fn reference_space_offset(&self) -> Option<xr::Posef> {
+        match self.current_origin {
+            vr::ETrackingUniverseOrigin::Seated | vr::ETrackingUniverseOrigin::Standing => None,
+            _ => Some(self.stage_offset),
+        }
+    }
+
     #[inline]
     pub fn current_origin_as_reference_space(&self) -> xr::ReferenceSpaceType {
         match self.current_origin {
