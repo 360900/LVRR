@@ -906,19 +906,16 @@ impl SessionData {
             .map_err(SessionCreationError::SessionCreationFailed)?;
 
         info!("New session created!");
-        let view_space = session
-            .create_reference_space(xr::ReferenceSpaceType::VIEW, xr::Posef::IDENTITY)
-            .unwrap();
-        let [local_space_reference, local_space_adjusted] = std::array::from_fn(|_| {
+        let create_space = |ty| {
             session
-                .create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)
-                .unwrap()
-        });
-        let [stage_space_reference, stage_space_adjusted] = std::array::from_fn(|_| {
-            session
-                .create_reference_space(xr::ReferenceSpaceType::STAGE, xr::Posef::IDENTITY)
-                .unwrap()
-        });
+                .create_reference_space(ty, xr::Posef::IDENTITY)
+                .map_err(SessionCreationError::SessionCreationFailed)
+        };
+        let view_space = create_space(xr::ReferenceSpaceType::VIEW)?;
+        let local_space_reference = create_space(xr::ReferenceSpaceType::LOCAL)?;
+        let local_space_adjusted = create_space(xr::ReferenceSpaceType::LOCAL)?;
+        let stage_space_reference = create_space(xr::ReferenceSpaceType::STAGE)?;
+        let stage_space_adjusted = create_space(xr::ReferenceSpaceType::STAGE)?;
 
         let mut buf = xr::EventDataBuffer::new();
         // No timeout: the runtime may hold the session until the user puts on the headset.
