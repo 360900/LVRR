@@ -541,7 +541,7 @@ impl GraphicsBackend for GlData {
         &self,
         eye: vr::EVREye,
         texture: Self::OpenVrTexture,
-        _color_space: vr::EColorSpace,
+        color_space: vr::EColorSpace,
         bounds: vr::VRTextureBounds_t,
         image_index: usize,
         _submit_flags: vr::EVRSubmitFlags,
@@ -550,7 +550,7 @@ impl GraphicsBackend for GlData {
             name: self.images[image_index],
             target: gl::TEXTURE_2D_ARRAY,
         };
-        self.copy(texture, bounds, dst, eye.0 as i32)
+        self.copy(texture, color_space, bounds, dst, eye.0 as i32)
     }
 
     fn copy_overlay_to_swapchain(
@@ -566,7 +566,7 @@ impl GraphicsBackend for GlData {
             name: self.images[image_index],
             target: gl::TEXTURE_2D,
         };
-        self.copy(texture, bounds, dst, 0)
+        self.copy(texture, vr::EColorSpace::Auto, bounds, dst, 0)
     }
 }
 
@@ -606,11 +606,16 @@ impl GlData {
     fn copy(
         &self,
         texture: GLuint,
+        color_space: vr::EColorSpace,
         bounds: vr::VRTextureBounds_t,
         dst: GlTexture,
         dst_layer: GLint,
     ) -> xr::Extent2Di {
-        let xr::Rect2Di { extent, offset } = texture_rect_from_bounds(texture, bounds);
+        let rect = texture_rect_from_bounds(texture, bounds);
+        let src = GlTexture {
+            name: texture,
+            target: gl::TEXTURE_2D,
+        };
 
         let mut fmt = 0;
         unsafe {
@@ -619,14 +624,14 @@ impl GlData {
             gl::BindTexture(gl::TEXTURE_2D, 0);
         }
 
-        if self.format == fmt as u32 {
-            unsafe {
+        match copy_method(fmt as GLenum, color_space, self.format) {
+            CopyMethod::Copy => unsafe {
                 gl::CopyImageSubData(
-                    texture,
-                    gl::TEXTURE_2D,
+                    src.name,
+                    src.target,
                     0, // level
-                    offset.x,
-                    offset.y,
+                    rect.offset.x,
+                    rect.offset.y,
                     0, // z
                     dst.name,
                     dst.target,
@@ -634,43 +639,94 @@ impl GlData {
                     0, // x
                     0, // y
                     dst_layer,
-                    extent.width,
-                    extent.height,
+                    rect.extent.width,
+                    rect.extent.height,
                     1,
                 );
-            }
-        } else {
-            unsafe {
-                gl::BindFramebuffer(gl::READ_FRAMEBUFFER, self.read_fbo);
-                gl::FramebufferTexture2D(
-                    gl::READ_FRAMEBUFFER,
-                    gl::COLOR_ATTACHMENT0,
-                    gl::TEXTURE_2D,
-                    texture,
-                    0,
-                );
-                gl::BindFramebuffer(gl::DRAW_FRAMEBUFFER, self.draw_fbo);
-                dst.attach(gl::DRAW_FRAMEBUFFER, dst_layer);
-
-                gl::BlitFramebuffer(
-                    offset.x,
-                    offset.y,
-                    offset.x + extent.width,
-                    offset.y + extent.height,
-                    0,
-                    0,
-                    extent.width,
-                    extent.height,
-                    gl::COLOR_BUFFER_BIT,
-                    gl::NEAREST,
-                );
-
-                gl::BindFramebuffer(gl::READ_FRAMEBUFFER, 0);
-                gl::BindFramebuffer(gl::DRAW_FRAMEBUFFER, 0);
-            }
+            },
+            CopyMethod::Blit { srgb } => unsafe { self.blit(src, rect, dst, dst_layer, srgb) },
         }
 
-        extent
+        rect.extent
+    }
+
+    /// Blits `rect` of `src` to the origin of `dst`, with GL_FRAMEBUFFER_SRGB set to `srgb`.
+    /// Leaves the app's framebuffer bindings and state as they were.
+    unsafe fn blit(
+        &self,
+        src: GlTexture,
+        rect: xr::Rect2Di,
+        dst: GlTexture,
+        dst_layer: GLint,
+        srgb: bool,
+    ) {
+        unsafe {
+            let [mut read_fbo, mut draw_fbo] = [0; 2];
+            gl::GetIntegerv(gl::READ_FRAMEBUFFER_BINDING, &mut read_fbo);
+            gl::GetIntegerv(gl::DRAW_FRAMEBUFFER_BINDING, &mut draw_fbo);
+            // Both apply to blits.
+            let framebuffer_srgb = set_enabled(gl::FRAMEBUFFER_SRGB, srgb);
+            let scissor_test = set_enabled(gl::SCISSOR_TEST, false);
+
+            gl::BindFramebuffer(gl::READ_FRAMEBUFFER, self.read_fbo);
+            src.attach(gl::READ_FRAMEBUFFER, 0);
+            gl::BindFramebuffer(gl::DRAW_FRAMEBUFFER, self.draw_fbo);
+            dst.attach(gl::DRAW_FRAMEBUFFER, dst_layer);
+            gl::BlitFramebuffer(
+                rect.offset.x,
+                rect.offset.y,
+                rect.offset.x + rect.extent.width,
+                rect.offset.y + rect.extent.height,
+                0,
+                0,
+                rect.extent.width,
+                rect.extent.height,
+                gl::COLOR_BUFFER_BIT,
+                gl::NEAREST,
+            );
+
+            set_enabled(gl::SCISSOR_TEST, scissor_test);
+            set_enabled(gl::FRAMEBUFFER_SRGB, framebuffer_srgb);
+            gl::BindFramebuffer(gl::READ_FRAMEBUFFER, read_fbo as GLuint);
+            gl::BindFramebuffer(gl::DRAW_FRAMEBUFFER, draw_fbo as GLuint);
+        }
+    }
+}
+
+/// Sets `cap` and returns whether it was enabled before.
+unsafe fn set_enabled(cap: GLenum, enabled: bool) -> bool {
+    unsafe {
+        let was_enabled = gl::IsEnabled(cap) == gl::TRUE;
+        if enabled {
+            gl::Enable(cap);
+        } else {
+            gl::Disable(cap);
+        }
+        was_enabled
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum CopyMethod {
+    /// Raw copy into the same format, or into its sRGB twin when the data is gamma-encoded.
+    Copy,
+    /// Converting blit with GL_FRAMEBUFFER_SRGB set to `srgb`.
+    Blit { srgb: bool },
+}
+
+fn copy_method(
+    format: GLenum,
+    color_space: vr::EColorSpace,
+    swapchain_format: GLenum,
+) -> CopyMethod {
+    let gamma = holds_gamma(format, color_space);
+    if format == swapchain_format
+        || (format == gl::RGBA8 && swapchain_format == gl::SRGB8_ALPHA8 && gamma)
+    {
+        CopyMethod::Copy
+    } else {
+        // Gamma-encoded data in a linear format must not be encoded again.
+        CopyMethod::Blit { srgb: !gamma }
     }
 }
 
@@ -890,6 +946,33 @@ mod tests {
                 swapchain_format(format, color_space),
                 expected,
                 "{format:#x} {color_space:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn copy_methods() {
+        use vr::EColorSpace::*;
+        let blit = |srgb| CopyMethod::Blit { srgb };
+        for (format, color_space, swapchain_format, expected) in [
+            (gl::RGBA8, Auto, gl::SRGB8_ALPHA8, CopyMethod::Copy),
+            (gl::RGBA8, Gamma, gl::SRGB8_ALPHA8, CopyMethod::Copy),
+            (gl::RGBA8, Linear, gl::RGBA8, CopyMethod::Copy),
+            (gl::SRGB8_ALPHA8, Linear, gl::SRGB8_ALPHA8, CopyMethod::Copy),
+            // Linear data in an sRGB fallback swapchain gets encoded.
+            (gl::RGBA8, Linear, gl::SRGB8_ALPHA8, blit(true)),
+            (gl::RGBA16F, Auto, gl::SRGB8_ALPHA8, blit(true)),
+            // Gamma data in a linear format is passed through.
+            (gl::RGBA, Auto, gl::SRGB8_ALPHA8, blit(false)),
+            (gl::RGB8, Gamma, gl::SRGB8_ALPHA8, blit(false)),
+            (gl::RGBA8, Auto, gl::RGBA16, blit(false)),
+            // sRGB data in a linear fallback swapchain gets decoded.
+            (gl::SRGB8_ALPHA8, Auto, gl::RGBA16, blit(true)),
+        ] {
+            assert_eq!(
+                copy_method(format, color_space, swapchain_format),
+                expected,
+                "{format:#x} {color_space:?} {swapchain_format:#x}"
             );
         }
     }
