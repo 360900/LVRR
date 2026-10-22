@@ -161,6 +161,16 @@ pub fn set_default_interaction_profile(hand: UserPath, profile: Option<&str>) {
     });
 }
 
+thread_local! {
+    static GET_SYSTEM_RESULT: Cell<xr::Result> = const { Cell::new(xr::Result::SUCCESS) };
+}
+
+/// Makes xrGetSystem on this thread fail with `result` (e.g. no headset connected), or succeed
+/// again with SUCCESS.
+pub fn set_get_system_result(result: xr::Result) {
+    GET_SYSTEM_RESULT.set(result);
+}
+
 pub fn set_grip(session: xr::Session, path: UserPath, pose: xr::Posef) {
     let session = session.to_handle().unwrap();
     get_hand_data(path, &session).grip_pose.store(pose);
@@ -1347,6 +1357,10 @@ extern "system" fn get_system(
     _: *const xr::SystemGetInfo,
     system_id: *mut xr::SystemId,
 ) -> xr::Result {
+    let result = GET_SYSTEM_RESULT.get();
+    if result != xr::Result::SUCCESS {
+        return result;
+    }
     unsafe { *system_id = xr::SystemId::from_raw(1) };
     xr::Result::SUCCESS
 }

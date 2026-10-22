@@ -8,7 +8,7 @@ use crate::{
     headset_view::HeadsetView,
     input::Input,
     misc_unknown::UnknownInterfaces,
-    openxr_data::{OpenXrData, RealOpenXrData},
+    openxr_data::{InitError, OpenXrData, RealOpenXrData},
     overlay::OverlayMan,
     overlayview::OverlayView,
     rendermodels::RenderModels,
@@ -23,6 +23,7 @@ use openvr::{
 };
 
 use log::{debug, error, info, warn};
+use openxr as xr;
 use serde::Deserialize;
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, hash_map::Entry};
@@ -63,6 +64,34 @@ pub struct ClientCore {
     pub base: OnceLock<Vtable>,
     interface_store: Arc<Mutex<InterfaceStore>>,
     openxr: RwLock<Option<Arc<RealOpenXrData>>>,
+}
+
+/// The error SteamVR reports in the same situation, so apps and Proton can tell a missing
+/// runtime or headset apart from a broken one.
+fn init_error_code(
+    error: &InitError,
+    application_type: vr::EVRApplicationType,
+) -> vr::EVRInitError {
+    let background = application_type == vr::EVRApplicationType::Background;
+    match error {
+        // The loader found no usable runtime.
+        InitError::EnumeratingExtensionsFailed(_) if background => {
+            vr::EVRInitError::Init_NoServerForBackgroundApp
+        }
+        InitError::EnumeratingExtensionsFailed(_) => vr::EVRInitError::Init_InstallationNotFound,
+        // The runtime's service isn't running. SteamVR doesn't start its server for
+        // background apps (Proton's helper) either, and says so with this code.
+        InitError::InstanceCreationFailed(xr::sys::Result::ERROR_RUNTIME_UNAVAILABLE)
+            if background =>
+        {
+            vr::EVRInitError::Init_NoServerForBackgroundApp
+        }
+        InitError::SystemCreationFailed(
+            xr::sys::Result::ERROR_FORM_FACTOR_UNAVAILABLE
+            | xr::sys::Result::ERROR_FORM_FACTOR_UNSUPPORTED,
+        ) => vr::EVRInitError::Init_HmdNotFound,
+        _ => vr::EVRInitError::Init_VRServiceStartupFailed,
+    }
 }
 
 impl ClientCore {
@@ -192,7 +221,7 @@ impl IVRClientCore003_Interface for ClientCore {
             }
             Err(e) => {
                 error!("Creating OpenXR data failed: {e:?}");
-                vr::EVRInitError::Init_VRServiceStartupFailed
+                init_error_code(&e, application_type)
             }
         }
     }
@@ -512,6 +541,65 @@ mod tests {
             string(core.GetEnglishStringForHmdError(vr::EVRInitError::Init_VRServiceStartupFailed)),
             c"VRInitError_Init_VRServiceStartupFailed"
         );
+    }
+
+    #[test]
+    fn init_error_codes() {
+        use vr::{EVRApplicationType::*, EVRInitError::*};
+        use xr::sys::Result as XrResult;
+
+        let cases = [
+            (
+                InitError::EnumeratingExtensionsFailed(XrResult::ERROR_RUNTIME_UNAVAILABLE),
+                Scene,
+                Init_InstallationNotFound,
+            ),
+            (
+                InitError::EnumeratingExtensionsFailed(XrResult::ERROR_RUNTIME_UNAVAILABLE),
+                Background,
+                Init_NoServerForBackgroundApp,
+            ),
+            (
+                InitError::InstanceCreationFailed(XrResult::ERROR_RUNTIME_UNAVAILABLE),
+                Background,
+                Init_NoServerForBackgroundApp,
+            ),
+            (
+                InitError::InstanceCreationFailed(XrResult::ERROR_RUNTIME_UNAVAILABLE),
+                Scene,
+                Init_VRServiceStartupFailed,
+            ),
+            (
+                InitError::InstanceCreationFailed(XrResult::ERROR_RUNTIME_FAILURE),
+                Background,
+                Init_VRServiceStartupFailed,
+            ),
+            (
+                InitError::SystemCreationFailed(XrResult::ERROR_FORM_FACTOR_UNAVAILABLE),
+                Scene,
+                Init_HmdNotFound,
+            ),
+            (
+                InitError::SystemCreationFailed(XrResult::ERROR_RUNTIME_FAILURE),
+                Scene,
+                Init_VRServiceStartupFailed,
+            ),
+        ];
+        for (error, app_type, expected) in cases {
+            assert_eq!(init_error_code(&error, app_type), expected, "{error:?}");
+        }
+    }
+
+    #[test]
+    fn no_headset() {
+        fakexr::set_get_system_result(xr::sys::Result::ERROR_FORM_FACTOR_UNAVAILABLE);
+        let core = ClientCore::new(c"IVRClientCore_003").unwrap();
+        assert_eq!(
+            core.clone()
+                .Init(vr::EVRApplicationType::Scene, std::ptr::null()),
+            vr::EVRInitError::Init_HmdNotFound
+        );
+        fakexr::set_get_system_result(xr::sys::Result::SUCCESS);
     }
 
     #[test]
