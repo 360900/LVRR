@@ -15,10 +15,12 @@ use std::sync::{LazyLock, Mutex, Once, OnceLock, PoisonError};
 use xr::sys::Handle as _;
 use xr::sys::platform::{EGLConfig, EGLContext, EGLDisplay, EglGetProcAddressMNDX};
 
-/// None if libGLX isn't installed (EGL-only systems).
+/// None if GLX isn't installed (EGL-only systems).
 static GLX: LazyLock<Option<GlxLib>> = LazyLock::new(|| {
-    let Some(lib) = Library::open(c"libGLX.so.0", 0) else {
-        warn!("libGLX.so.0 not found, GLX contexts won't be detected");
+    // Without glvnd, GLX is part of libGL.
+    let Some(lib) = Library::open(c"libGLX.so.0", 0).or_else(|| Library::open(c"libGL.so.1", 0))
+    else {
+        warn!("Neither libGLX.so.0 nor libGL.so.1 found, GLX contexts won't be detected");
         return None;
     };
     Some(GlxLib {
@@ -26,7 +28,7 @@ static GLX: LazyLock<Option<GlxLib>> = LazyLock::new(|| {
             let func = CString::new(func).unwrap();
             lib.get(&func).unwrap_or(ptr::null())
         }),
-        // libGLX links libX11.
+        // Both link libX11.
         x_free: unsafe { lib.get_fn(c"XFree") },
     })
 });
