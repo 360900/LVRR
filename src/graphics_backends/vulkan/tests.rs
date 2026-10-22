@@ -606,6 +606,22 @@ fn eye_copy_waits_for_previous_copy() {
 }
 
 #[test]
+fn eye_copy_barrier_covers_the_copy() {
+    let mut vk = fake_vulkan();
+    store_images(&mut vk, 1);
+    copy_eye(&vk, &texture(16, 16), 0);
+    gpu(|gpu| {
+        let to_transfer = &gpu.barriers[0];
+        assert_eq!(
+            to_transfer.new_layout,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL
+        );
+        assert_eq!(to_transfer.dst_access_mask, vk::AccessFlags::TRANSFER_WRITE);
+    });
+    finish(vk);
+}
+
+#[test]
 fn swapchain_recreation_waits_for_pending_copies() {
     let mut vk = fake_vulkan();
     store_images(&mut vk, 2);

@@ -239,7 +239,7 @@ impl GraphicsBackend for VulkanData {
                 &[],
                 &[vk::ImageMemoryBarrier {
                     src_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-                    dst_access_mask: vk::AccessFlags::TRANSFER_READ,
+                    dst_access_mask: vk::AccessFlags::TRANSFER_WRITE,
                     old_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                     new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                     image: swapchain_image,
