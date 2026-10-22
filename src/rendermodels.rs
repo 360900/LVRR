@@ -64,8 +64,24 @@ fn pose_component_transform(render_model_name: &CStr, ty: BoundPoseType) -> Opti
 
 /// The profile and hand that report this render model name.
 fn profile_for_render_model(render_model_name: &CStr) -> Option<(ProfileData, Hand)> {
-    let name = model_name(render_model_name)?;
+    profile_for_model(model_name(render_model_name)?)
+}
+
+fn profile_for_model(name: &str) -> Option<(ProfileData, Hand)> {
     ProfileData::for_render_model(|reported| model_name(reported) == Some(name))
+}
+
+/// A fallback mesh was made for the raw pose of the profile it belongs to, so it has to be moved
+/// to the raw pose of the profile reporting `render_model_name`.
+fn fallback_mesh_transform(render_model_name: &CStr) -> Option<Mat4> {
+    let name = model_name(render_model_name)?;
+    if RENDER_MODELS.contains_key(name) {
+        return None;
+    }
+    let (profile, hand) = profile_for_model(name)?;
+    let (mesh_profile, mesh_hand) = profile_for_model(fallback_model(name)?)?;
+    // Raw poses are the grip pose times the profile's hand offset.
+    Some(profile.hand_offset(hand).inverse() * mesh_profile.hand_offset(mesh_hand))
 }
 
 fn hmd_matrix(mat: Mat4) -> vr::HmdMatrix34_t {
@@ -548,13 +564,16 @@ impl vr::IVRRenderModels006_Interface for RenderModels {
             return vr::EVRRenderModelError::InvalidArg;
         };
 
-        let model_data = match OwnedRenderModel::load(render_model_name, bytes) {
+        let mut model_data = match OwnedRenderModel::load(render_model_name, bytes) {
             Ok(m) => m,
             Err(e) => {
                 warn!("failed to load rendermodel {render_model_name:?}: {e:?}");
                 return e;
             }
         };
+        if let Some(transform) = fallback_mesh_transform(render_model_name) {
+            model_data.transform(transform);
+        }
 
         let render_model_box = model_data.to_render_model_t();
         let ptr = Box::into_raw(render_model_box);
@@ -774,6 +793,15 @@ impl OwnedRenderModel {
             verts: verts.into_boxed_slice(),
             indices: indices.into_boxed_slice(),
         })
+    }
+
+    fn transform(&mut self, transform: Mat4) {
+        for vert in &mut self.verts {
+            let position = Vec3::from_array(vert.vPosition.v);
+            vert.vPosition.v = transform.transform_point3(position).to_array();
+            let normal = Vec3::from_array(vert.vNormal.v);
+            vert.vNormal.v = transform.transform_vector3(normal).to_array();
+        }
     }
 
     fn to_render_model_t(&self) -> Box<vr::RenderModel_t> {
@@ -1266,6 +1294,37 @@ mod tests {
             vr::EVRRenderModelError::None
         );
         rm.FreeRenderModel(model);
+    }
+
+    #[test]
+    fn fallback_mesh_sits_at_the_grip() {
+        let rm = RenderModels::default();
+        let load = |name: &CStr| {
+            let mut model: *mut vr::RenderModel_t = ptr::null_mut();
+            assert_eq!(
+                rm.LoadRenderModel_Async(name.as_ptr(), &mut model),
+                vr::EVRRenderModelError::None
+            );
+            let verts = unsafe {
+                std::slice::from_raw_parts((*model).rVertexData, (*model).unVertexCount as usize)
+            }
+            .iter()
+            .map(|v| Vec3::from_array(v.vPosition.v))
+            .collect::<Vec<_>>();
+            rm.FreeRenderModel(model);
+            verts
+        };
+
+        let wmr = c"C:\\Users\\steamuser\\AppData\\Local\\Microsoft/Windows/OpenVR\\controller_1642_1118_1\\controller.obj";
+        let (profile, hand) = profile_for_render_model(wmr).unwrap();
+        // Simple controllers' raw pose is the grip, where the generic mesh is drawn for them.
+        let generic = load(c"generic_controller");
+        let at_wmr_raw = load(wmr);
+        assert_eq!(generic.len(), at_wmr_raw.len());
+        for (generic, at_raw) in generic.iter().zip(at_wmr_raw) {
+            let at_grip = profile.hand_offset(hand).transform_point3(at_raw);
+            assert!(at_grip.abs_diff_eq(*generic, 1e-5), "{at_grip} {generic}");
+        }
     }
 
     #[test]
