@@ -67,7 +67,9 @@ jobs:
       - uses: docker/build-push-action@v7
         with:
           file: ${{ env.UBUNTU_DOCKERFILE }}
-          push: true
+          # PRs only check that the image builds. :latest is what main and
+          # releases build in.
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ needs.check-should-build-container.outputs.container-path }}-ubuntu:latest
           labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           cache-from: type=gha
