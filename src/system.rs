@@ -1501,26 +1501,20 @@ impl vr::IVRSystem009On010 for System {
         if ret && !event.is_null() {
             let event_type = vr::EVREventType(e.eventType);
 
+            // The 0.9.12 VREvent_t (pack(4)) has 16 bytes of data followed by eventAgeSeconds.
+            // Our binding of its data union is built from the current, larger member structs, so
+            // write by offset rather than through its fields. The members' leading fields match.
+            const DATA_SIZE: usize = std::mem::size_of::<vr::vr_0_9_12::VREvent_Reserved_t>();
             unsafe {
                 (&raw mut (*event).eventType).write(event_type);
                 (&raw mut (*event).trackedDeviceIndex).write(e.trackedDeviceIndex);
-                match event_type {
-                    vr::EVREventType::ButtonPress
-                    | vr::EVREventType::ButtonUnpress
-                    | vr::EVREventType::ButtonTouch
-                    | vr::EVREventType::ButtonUntouch => {
-                        (&raw mut (*event).data.controller).write(e.data.controller);
-                    }
-                    vr::EVREventType::Quit => {
-                        (&raw mut (*event).data.process.pid).write(e.data.process.pid);
-                        (&raw mut (*event).data.process.oldPid).write(e.data.process.oldPid);
-                        (&raw mut (*event).data.process.bForced).write(e.data.process.bForced);
-                    }
-                    other => {
-                        error!("Unhandled event type data for 0.9.12: {other:?}");
-                        return false;
-                    }
-                }
+                let data = event
+                    .cast::<u8>()
+                    .add(std::mem::offset_of!(vr::vr_0_9_12::VREvent_t, data));
+                std::ptr::copy_nonoverlapping((&raw const e.data).cast::<u8>(), data, DATA_SIZE);
+                data.add(DATA_SIZE)
+                    .cast::<f32>()
+                    .write_unaligned(e.eventAgeSeconds);
             }
         }
 
@@ -2067,6 +2061,46 @@ mod tests {
         assert_eq!(event.eventType, vr::EVREventType::Quit as u32);
         assert_eq!(event.trackedDeviceIndex, vr::k_unTrackedDeviceIndexInvalid);
         assert!(!pose.bPoseIsValid);
+    }
+
+    /// IVRSystem_009's event struct is 28 bytes, with eventAgeSeconds right after 16 bytes of
+    /// data.
+    #[test]
+    fn poll_event_0_9_12() {
+        #[repr(C)]
+        struct Event0912 {
+            event_type: u32,
+            device: u32,
+            data: [u32; 4],
+            age: f32,
+            canary: u32,
+        }
+
+        let xr =
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
+        let input = Arc::new(Input::new(xr.clone()));
+        let system = System::new(xr, &Injector::default());
+        system.input.set(Arc::downgrade(&input));
+
+        let mut event = Event0912 {
+            event_type: 0,
+            device: 1234,
+            data: [u32::MAX; 4],
+            age: -1.0,
+            canary: 0xdeadbeef,
+        };
+        assert!(vr::IVRSystem009On011::PollNextEvent(
+            &system,
+            (&raw mut event).cast()
+        ));
+        assert_eq!(
+            event.event_type,
+            vr::EVREventType::TrackedDeviceActivated as u32
+        );
+        assert_eq!(event.device, vr::k_unTrackedDeviceIndex_Hmd);
+        assert_eq!(event.data, [0; 4]);
+        assert_eq!(event.age, 0.0);
+        assert_eq!(event.canary, 0xdeadbeef);
     }
 
     #[test]
