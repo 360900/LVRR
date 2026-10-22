@@ -315,10 +315,11 @@ pub fn last_layer_count(session: xr::Session) -> u32 {
     session.last_layer_count.load()
 }
 
-/// The pose and FOV of each view, as returned by xrLocateViews in any space.
+/// The pose and FOV of each view, as returned by xrLocateViews in any space. Until this is called,
+/// the views are untracked and have a zero FOV.
 pub fn set_views(session: xr::Session, views: [(xr::Posef, xr::Fovf); 2]) {
     let session = session.to_handle().unwrap();
-    *session.views.lock().unwrap() = views;
+    *session.views.lock().unwrap() = Some(views);
 }
 
 /// The projection layer submitted by an xrEndFrame call.
@@ -841,7 +842,7 @@ struct Session {
     lost: AtomicBool,
     last_frame_layers: Mutex<Vec<xr::StructureType>>,
     record_projection_layers: AtomicBool,
-    views: Mutex<[(xr::Posef, xr::Fovf); 2]>,
+    views: Mutex<Option<[(xr::Posef, xr::Fovf); 2]>>,
     last_projection_layer: Mutex<Option<ProjectionLayer>>,
 }
 
@@ -2413,12 +2414,21 @@ extern "system" fn locate_views(
     if let Some(error) = LOCATE_VIEWS_ERROR.get() {
         return error;
     }
+    let set_views = *session.views.lock().unwrap();
     if !state.is_null() {
+        let view_state_flags = if set_views.is_some() {
+            xr::ViewStateFlags::ORIENTATION_VALID
+                | xr::ViewStateFlags::POSITION_VALID
+                | xr::ViewStateFlags::ORIENTATION_TRACKED
+                | xr::ViewStateFlags::POSITION_TRACKED
+        } else {
+            xr::ViewStateFlags::EMPTY
+        };
         unsafe {
             state.write(xr::ViewState {
                 ty: xr::ViewState::TYPE,
                 next: std::ptr::null_mut(),
-                view_state_flags: xr::ViewStateFlags::EMPTY,
+                view_state_flags,
             });
         }
     }
@@ -2433,7 +2443,7 @@ extern "system" fn locate_views(
             return xr::Result::ERROR_SIZE_INSUFFICIENT;
         }
         let views = unsafe { std::slice::from_raw_parts_mut(views, capacity as usize) };
-        for (view, (pose, fov)) in views.iter_mut().zip(*session.views.lock().unwrap()) {
+        for (view, (pose, fov)) in views.iter_mut().zip(set_views.unwrap_or_default()) {
             *view = xr::View {
                 ty: xr::View::TYPE,
                 next: std::ptr::null_mut(),
