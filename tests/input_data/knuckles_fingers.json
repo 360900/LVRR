@@ -1,0 +1,80 @@
+{
+	"bindings": {
+		"/actions/hands": {
+			"sources": [
+				{
+					"mode": "trigger",
+					"path": "/user/hand/left/input/finger/index",
+					"inputs": {
+						"pull": {
+							"output": "/actions/hands/in/indexcurl"
+						}
+					}
+				},
+				{
+					"mode": "trigger",
+					"path": "/user/hand/right/input/finger/index",
+					"inputs": {
+						"pull": {
+							"output": "/actions/hands/in/indexcurl"
+						}
+					}
+				},
+				{
+					"mode": "trigger",
+					"path": "/user/hand/left/input/finger/middle",
+					"inputs": {
+						"pull": {
+							"output": "/actions/hands/in/middlecurl"
+						}
+					}
+				},
+				{
+					"mode": "trigger",
+					"path": "/user/hand/right/input/finger/middle",
+					"inputs": {
+						"pull": {
+							"output": "/actions/hands/in/middlecurl"
+						}
+					}
+				},
+				{
+					"mode": "trigger",
+					"path": "/user/hand/left/input/finger/ring",
+					"inputs": {
+						"pull": {
+							"output": "/actions/hands/in/ringcurl"
+						}
+					}
+				},
+				{
+					"mode": "trigger",
+					"path": "/user/hand/right/input/finger/ring",
+					"inputs": {
+						"pull": {
+							"output": "/actions/hands/in/ringcurl"
+						}
+					}
+				},
+				{
+					"mode": "trigger",
+					"path": "/user/hand/left/input/finger/pinky",
+					"inputs": {
+						"pull": {
+							"output": "/actions/hands/in/pinkycurl"
+						}
+					}
+				},
+				{
+					"mode": "trigger",
+					"path": "/user/hand/right/input/finger/pinky",
+					"inputs": {
+						"pull": {
+							"output": "/actions/hands/in/pinkycurl"
+						}
+					}
+				}
+			]
+		}
+	}
+}

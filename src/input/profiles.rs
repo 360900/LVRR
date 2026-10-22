@@ -496,9 +496,18 @@ impl std::str::FromStr for DynInputPath {
         verify_next!("input");
 
         let subpath_str = split.next();
-        let subpath = subpath_str
-            .and_then(paths::DynSubpath::from_openvr_str)
-            .ok_or_else(|| format!("invalid subpath {subpath_str:?}"))?;
+        let subpath = match subpath_str {
+            // Index finger curls have no OpenXR input. They follow the trigger and grip values,
+            // which finger curl is estimated from anyway.
+            Some("finger") => match split.next() {
+                Some("index") => paths::DynSubpath::Trigger,
+                Some("middle" | "ring" | "pinky") => paths::DynSubpath::Squeeze,
+                other => return Err(format!("invalid finger {other:?}")),
+            },
+            _ => subpath_str
+                .and_then(paths::DynSubpath::from_openvr_str)
+                .ok_or_else(|| format!("invalid subpath {subpath_str:?}"))?,
+        };
 
         let component = split.next();
         let component = component

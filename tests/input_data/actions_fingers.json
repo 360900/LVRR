@@ -1,0 +1,32 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/hands",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/hands/in/indexcurl",
+			"type": "vector1"
+		},
+		{
+			"name": "/actions/hands/in/middlecurl",
+			"type": "vector1"
+		},
+		{
+			"name": "/actions/hands/in/ringcurl",
+			"type": "vector1"
+		},
+		{
+			"name": "/actions/hands/in/pinkycurl",
+			"type": "vector1"
+		}
+	],
+	"default_bindings": [
+		{
+			"controller_type": "knuckles",
+			"binding_url": "knuckles_fingers.json"
+		}
+	]
+}

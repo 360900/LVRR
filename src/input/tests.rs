@@ -658,6 +658,35 @@ fn lenient_bindings() {
     assert!(bound.right.is_some());
 }
 
+#[test]
+fn index_finger_curls() {
+    let f = Fixture::new();
+    f.load_actions(c"actions_fingers.json");
+    let path = Knuckles::profile_path();
+    f.verify_bindings::<f32>(
+        path,
+        c"/actions/hands/in/indexcurl",
+        [
+            "/user/hand/left/input/trigger/value".into(),
+            "/user/hand/right/input/trigger/value".into(),
+        ],
+    );
+    for action in [
+        c"/actions/hands/in/middlecurl",
+        c"/actions/hands/in/ringcurl",
+        c"/actions/hands/in/pinkycurl",
+    ] {
+        f.verify_bindings::<f32>(
+            path,
+            action,
+            [
+                "/user/hand/left/input/squeeze/value".into(),
+                "/user/hand/right/input/squeeze/value".into(),
+            ],
+        );
+    }
+}
+
 #[track_caller]
 pub fn compare_pose(expected: xr::Posef, actual: xr::Posef) {
     fn float_eq(a: f32, b: f32) -> bool {
