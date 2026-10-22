@@ -1410,7 +1410,13 @@ pub fn handle_chord_bindings(
                         "west" => DpadDirection::West,
                         _ => DpadDirection::Center,
                     };
-                    // Directions count without a click or touch, like a plain stick push.
+                    // Directions count without a click or touch, like a plain stick push. The
+                    // center is where an untouched input rests though, so it needs a click.
+                    let click =
+                        matches!(direction, DpadDirection::Center).then(|| DpadParameters {
+                            sub_mode: DpadSubMode::Click,
+                            ..Default::default()
+                        });
                     validate_path(path)
                         .and_then(|parent| {
                             context.get_dpad_actions(
@@ -1418,9 +1424,10 @@ pub fn handle_chord_bindings(
                                 parent,
                                 action_set_name,
                                 action_set,
-                                None,
+                                click.as_ref(),
                             )
                         })
+                        .filter(|actions| click.is_none() || actions.click_or_touch.is_some())
                         .map(|actions| BoolBindingType::Dpad(DpadData::new(actions, direction)))
                 }
                 other => {

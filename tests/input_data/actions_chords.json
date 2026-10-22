@@ -15,6 +15,10 @@
 			"type": "boolean"
 		},
 		{
+			"name": "/actions/main/in/recenter",
+			"type": "boolean"
+		},
+		{
 			"name": "/actions/main/in/sit",
 			"type": "boolean"
 		},

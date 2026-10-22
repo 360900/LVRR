@@ -40,6 +40,19 @@
 					]
 				},
 				{
+					"output": "/actions/main/in/recenter",
+					"inputs": [
+						[
+							"/user/hand/right/input/grip",
+							"click"
+						],
+						[
+							"/user/hand/right/input/thumbstick",
+							"center"
+						]
+					]
+				},
+				{
 					"output": "/actions/main/in/sit",
 					"inputs": []
 				},

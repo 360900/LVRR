@@ -2255,9 +2255,10 @@ mod tests {
             ulActionSet: f.get_action_set_handle(c"/actions/main"),
             ..Default::default()
         };
-        let [dodge, facepiece, sit, bad, grab] = [
+        let [dodge, facepiece, recenter, sit, bad, grab] = [
             c"/actions/main/in/dodge",
             c"/actions/main/in/facepiece",
+            c"/actions/main/in/recenter",
             c"/actions/main/in/sit",
             c"/actions/main/in/bad",
             c"/actions/main/in/grab",
@@ -2276,10 +2277,14 @@ mod tests {
         let right_a = f.get_action::<f32>(input(c"/user/hand/right/input/a/click-/actions/main"));
         let right_stick =
             f.get_action::<xr::Vector2f>(input(c"/user/hand/right/input/thumbstick-/actions/main"));
+        let right_stick_click = f.get_action::<f32>(input(
+            c"/user/hand/right/input/thumbstick/click-/actions/main",
+        ));
         for (action, state) in [
             (left_grip, ActionState::Float(0.0)),
             (right_grip, ActionState::Float(0.0)),
             (right_a, ActionState::Float(0.0)),
+            (right_stick_click, ActionState::Float(0.0)),
         ] {
             fakexr::set_action_state(action, state, LeftHand);
             fakexr::set_action_state(action, state, RightHand);
@@ -2311,6 +2316,11 @@ mod tests {
         check(&mut f, facepiece, idle);
         fakexr::set_action_state(right_stick, ActionState::Vector2(0.0, -0.8), RightHand);
         check(&mut f, facepiece, idle.set_state().set_changed());
+        // The center needs a click, or a resting stick would complete the chord.
+        fakexr::set_action_state(right_stick, ActionState::Vector2(0.0, 0.0), RightHand);
+        check(&mut f, recenter, idle);
+        fakexr::set_action_state(right_stick_click, ActionState::Float(1.0), RightHand);
+        check(&mut f, recenter, idle.set_state().set_changed());
 
         // Chords without inputs or with unknown ones are skipped.
         for handle in [sit, bad] {
