@@ -337,9 +337,10 @@ impl GraphicsBackend for VulkanData {
                     &[copy],
                 );
             } else if data.format != game_format {
-                let end_img_offset = vk::Offset3D {
-                    x: extent.width as _,
-                    y: extent.height as _,
+                // Blits take the corners of each region instead of an extent.
+                let end = |offset: vk::Offset3D| vk::Offset3D {
+                    x: offset.x + extent.width as i32,
+                    y: offset.y + extent.height as i32,
                     z: 1,
                 };
                 self.device.cmd_blit_image(
@@ -350,9 +351,9 @@ impl GraphicsBackend for VulkanData {
                     vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                     &[vk::ImageBlit {
                         src_subresource: copy.src_subresource,
-                        src_offsets: [copy.src_offset, end_img_offset],
+                        src_offsets: [copy.src_offset, end(copy.src_offset)],
                         dst_subresource: copy.dst_subresource,
-                        dst_offsets: [copy.dst_offset, end_img_offset],
+                        dst_offsets: [copy.dst_offset, end(copy.dst_offset)],
                     }],
                     vk::Filter::NEAREST,
                 );
