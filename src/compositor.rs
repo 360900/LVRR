@@ -812,7 +812,8 @@ impl vr::IVRCompositor029_Interface for Compositor {
 
         trace!("presenting frame");
         let system = self.system.force(|i| System::new(self.openxr.clone(), i));
-        let display_time = self.openxr.get_display_time();
+        // Even if the frame took long enough for get_display_time to use the current time.
+        let display_time = self.openxr.waited_display_time();
         let overlays = self.overlays.get();
 
         let result = ctrl.with_any_graphics_mut::<end_frame>((

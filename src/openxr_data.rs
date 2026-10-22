@@ -56,12 +56,10 @@ pub struct OpenXrData<C: Compositor> {
     pub instance: xr::Instance,
     pub system_id: xr::SystemId,
     pub session_data: SessionReadGuard,
-    /// Only meaningful once the compositor waits for frames - read it through
+    /// Only meaningful while the compositor waits for frames - read it through
     /// [Self::get_display_time].
     display_time: AtomicXrTime,
     pub display_period_nanos: AtomicI64,
-    /// Set once the compositor waited for a frame, so `display_time` follows the frame loop.
-    frame_loop_started: AtomicBool,
     pub enabled_extensions: xr::ExtensionSet,
     /// The interaction profiles that were bound when we probed at init - see
     /// [crate::input::probe_interaction_profiles].
@@ -315,20 +313,13 @@ impl<C: Compositor> OpenXrData<C> {
             .system_properties(system_id)
             .map_or(16, |p| p.graphics_properties.max_layer_count as usize);
 
-        let display_time = if exts.khr_convert_timespec_time {
-            instance.now().map(|t| t.as_nanos()).unwrap_or(1i64)
-        } else {
-            1i64
-        };
-
         Ok(Self {
             _entry: entry,
             instance,
             system_id,
             session_data,
-            display_time: AtomicXrTime(display_time.into()), // This will get replaced on the first WaitGetPoses
+            display_time: AtomicXrTime(1.into()), // This will get replaced on the first WaitGetPoses
             display_period_nanos: 11111111.into(), // This will get replaced on the first WaitGetPoses
-            frame_loop_started: false.into(),
             enabled_extensions: exts,
             probed_profiles,
             application_type,
@@ -789,15 +780,24 @@ impl<C: Compositor> OpenXrData<C> {
         self.session_data.get().current_origin
     }
 
-    /// The time poses for the current frame are predicted for. Nothing advances the display time
-    /// before the compositor waits for frames, which non-rendering (e.g. headless) apps never get
-    /// to, so until then this is the current time.
+    /// The time poses for the current frame are predicted for. Only the compositor's frame loop
+    /// advances the display time, which non-rendering (e.g. headless) apps never run and others
+    /// pause (e.g. while loading), so without a recent frame this is the current time.
     pub fn get_display_time(&self) -> xr::Time {
-        if !self.frame_loop_started.load(Ordering::Relaxed)
-            && let Some(now) = self.now()
-        {
-            return now;
+        let display_time = self.display_time.get();
+        match self.now() {
+            Some(now)
+                if now.as_nanos() - display_time.as_nanos()
+                    > FRAME_LOOP_TIMEOUT.as_nanos() as i64 =>
+            {
+                now
+            }
+            _ => display_time,
         }
+    }
+
+    /// The predicted display time of the last frame the compositor waited for.
+    pub fn waited_display_time(&self) -> xr::Time {
         self.display_time.get()
     }
 
@@ -806,7 +806,6 @@ impl<C: Compositor> OpenXrData<C> {
         self.display_time.set(display_time);
         self.display_period_nanos
             .store(display_period_nanos, Ordering::Relaxed);
-        self.frame_loop_started.store(true, Ordering::Relaxed);
     }
 
     pub fn reset_tracking_space(&self, origin: vr::ETrackingUniverseOrigin) {
@@ -1701,9 +1700,9 @@ mod tests {
         assert_eq!(vsync_phase(ns(1003), ns(1000), 0), None);
     }
 
-    /// Nothing advances the display time before the compositor waits for frames, which headless
-    /// apps never do, so poses must be predicted for the current time rather than the time the
-    /// app initialized at.
+    /// Nothing advances the display time while the compositor doesn't wait for frames, which
+    /// headless apps never do, so poses must be predicted for the current time rather than the
+    /// time the app initialized at or last waited for a frame.
     #[test]
     fn display_time_advances_without_frame_loop() {
         crate::init_logging();
@@ -1720,10 +1719,18 @@ mod tests {
             let second = data.get_display_time().as_nanos();
             assert!(second > first, "{app_type:?}: display time did not advance");
 
-            // Once frames are waited for, the frame loop drives it.
-            let frame_time = xr::Time::from_nanos(first);
+            // While frames are waited for, the frame loop drives it...
+            let frame_time = xr::Time::from_nanos(second + 1_000_000);
             data.set_frame_timing(frame_time, 1);
             assert_eq!(data.get_display_time(), frame_time);
+
+            // ...until the app stops waiting for them.
+            let paused = second - 2 * super::FRAME_LOOP_TIMEOUT.as_nanos() as i64;
+            data.set_frame_timing(xr::Time::from_nanos(paused), 1);
+            assert!(
+                data.get_display_time().as_nanos() >= second,
+                "{app_type:?}: display time stuck at the last frame"
+            );
         }
         fakexr::set_headless_supported(false);
     }
