@@ -2346,6 +2346,49 @@ mod tests {
         f.check_frame_state(fakexr::FrameState::Ended);
     }
 
+    /// Overlays keep their rect across a session restart, but the new session has no swapchain
+    /// for them until they get a new texture.
+    #[test]
+    fn overlay_without_swapchain_after_restart() {
+        use crate::overlay::OverlayMan;
+        use vr::IVROverlay027_Interface;
+
+        let f = Fixture::new();
+        let overlays = Arc::new(OverlayMan::new(f.comp.openxr.clone(), &Injector::default()));
+        f.comp.overlays.set(Arc::downgrade(&overlays));
+        overlays.compositor.set(Arc::downgrade(&f.comp));
+
+        let create = |key: &CStr| {
+            let mut overlay = 0;
+            assert_eq!(
+                overlays.CreateOverlay(key.as_ptr(), key.as_ptr(), &mut overlay),
+                vr::EVROverlayError::None
+            );
+            assert_eq!(overlays.ShowOverlay(overlay), vr::EVROverlayError::None);
+            overlay
+        };
+        let set_texture = |overlay| {
+            assert_eq!(
+                overlays.SetOverlayTexture(overlay, &FakeGraphicsData::texture(&f.vk)),
+                vr::EVROverlayError::None
+            );
+        };
+        let first = create(c"first");
+        let second = create(c"second");
+
+        assert_eq!(f.wait_get_poses(), None);
+        set_texture(first);
+        set_texture(second);
+        f.comp.PostPresentHandoff();
+
+        f.comp.openxr.restart_session();
+        assert_eq!(f.wait_get_poses(), None);
+        set_texture(first);
+        f.check_frame_state(fakexr::FrameState::Begun);
+        f.comp.PostPresentHandoff();
+        f.check_frame_state(fakexr::FrameState::Ended);
+    }
+
     #[test]
     fn compositor_stub_queries() {
         use vr::IVRCompositor029_Interface as C29;

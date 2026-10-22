@@ -194,7 +194,10 @@ impl OverlayMan {
                 continue;
             };
 
-            let SwapchainData { swapchain, .. } = swapchains.get(key).unwrap();
+            // The rect can outlive the swapchain across a session restart.
+            let Some(SwapchainData { swapchain, .. }) = swapchains.get(key) else {
+                continue;
+            };
             let space = session.get_space_for_origin(
                 overlay
                     .transform
