@@ -584,7 +584,7 @@ impl GraphicsBackend for GlData {
     fn copy_overlay_to_swapchain(
         &mut self,
         texture: Self::OpenVrTexture,
-        _color_space: vr::EColorSpace,
+        color_space: vr::EColorSpace,
         bounds: openvr::VRTextureBounds_t,
         image_index: usize,
     ) -> openxr::Extent2Di {
@@ -594,7 +594,7 @@ impl GraphicsBackend for GlData {
             name: self.images[image_index],
             target: gl::TEXTURE_2D,
         };
-        self.copy(texture, 0, vr::EColorSpace::Auto, bounds, dst, 0)
+        self.copy(texture, 0, color_space, bounds, dst, 0)
     }
 }
 
