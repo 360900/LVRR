@@ -2459,7 +2459,7 @@ mod tests {
         let mut activated = [false; 3];
         assert!(
             poll_until(&mut |event| {
-                if event.eventType == vr::EVREventType::TrackedDeviceActivated as u32 {
+                if event.eventType == vr::EVREventType::TrackedDeviceActivated.0 {
                     activated[event.trackedDeviceIndex as usize] = true;
                 }
                 activated[1] && activated[2]
@@ -2481,7 +2481,7 @@ mod tests {
 
         xr.session_data.get().session.request_exit().unwrap();
         assert!(
-            poll_until(&mut |event| event.eventType == vr::EVREventType::Quit as u32),
+            poll_until(&mut |event| event.eventType == vr::EVREventType::Quit.0),
             "Quit never arrived"
         );
     }
@@ -2489,7 +2489,7 @@ mod tests {
     #[test]
     fn sorted_tracked_device_indices_of_class() {
         use fakexr::UserPath::*;
-        use vr::ETrackedDeviceClass::*;
+        use vr::ETrackedDeviceClass as Class;
         crate::init_logging();
         fakexr::set_headless_supported(true);
         for hand in [LeftHand, RightHand] {
@@ -2529,8 +2529,8 @@ mod tests {
             );
             indices
         };
-        assert_eq!(sorted(HMD, hmd), [hmd]);
-        assert!(sorted(Controller, hmd).is_empty());
+        assert_eq!(sorted(Class::HMD, hmd), [hmd]);
+        assert!(sorted(Class::Controller, hmd).is_empty());
 
         // Bind the controllers and put them to the left and right of the HMD.
         input.frame_start_update();
@@ -2544,10 +2544,10 @@ mod tests {
         fakexr::set_grip(session, RightHand, grip(0.5, xr::Quaternionf::IDENTITY));
         input.frame_start_update();
 
-        assert_eq!(sorted(Controller, hmd), [2, 1]);
-        assert_eq!(sorted(Controller, absolute), [2, 1]);
-        assert_eq!(sorted(HMD, absolute), [hmd]);
-        assert!(sorted(GenericTracker, hmd).is_empty());
+        assert_eq!(sorted(Class::Controller, hmd), [2, 1]);
+        assert_eq!(sorted(Class::Controller, absolute), [2, 1]);
+        assert_eq!(sorted(Class::HMD, absolute), [hmd]);
+        assert!(sorted(Class::GenericTracker, hmd).is_empty());
 
         // Turned around, the left controller has the right one on its left.
         let turned = xr::Quaternionf {
@@ -2558,12 +2558,12 @@ mod tests {
         };
         fakexr::set_grip(session, LeftHand, grip(-0.5, turned));
         input.frame_start_update();
-        assert_eq!(sorted(Controller, 1), [1, 2]);
+        assert_eq!(sorted(Class::Controller, 1), [1, 2]);
 
         // Too small an array gets the first devices and the full count.
         let mut first = u32::MAX;
         assert_eq!(
-            system.GetSortedTrackedDeviceIndicesOfClass(Controller, &mut first, 1, hmd),
+            system.GetSortedTrackedDeviceIndicesOfClass(Class::Controller, &mut first, 1, hmd),
             2
         );
         assert_eq!(first, 2);
@@ -2592,7 +2592,7 @@ mod tests {
         let mut got_quit = || {
             let mut quit = false;
             while system.PollNextEvent(&mut event, size) {
-                quit |= event.eventType == vr::EVREventType::Quit as u32;
+                quit |= event.eventType == vr::EVREventType::Quit.0;
             }
             quit
         };
