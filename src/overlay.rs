@@ -5,7 +5,7 @@ use crate::{
     openxr_data::{GraphicalSession, OpenXrData, Session, SessionData, SessionGuard},
     system::System,
 };
-use glam::{Quat, Vec3, vec3};
+use glam::{Mat3, Quat, Vec3, vec3};
 use log::{debug, trace};
 use openvr as vr;
 use openxr as xr;
@@ -567,12 +567,35 @@ impl OverlaySessionData {
     }
 }
 
-/// The X and Y scale of an overlay transform: the lengths of its basis vectors. The diagonal alone
-/// would shrink rotated overlays.
-fn transform_scale(transform: &vr::HmdMatrix34_t) -> (f32, f32) {
+/// Splits an overlay transform into its pose and the X and Y scale of its basis, which a pose can't
+/// hold. The scale is the length of the basis vectors: the diagonal alone would shrink rotated
+/// overlays.
+fn decompose_transform(transform: &vr::HmdMatrix34_t) -> (xr::Posef, (f32, f32)) {
     let m = &transform.m;
-    let column = |c: usize| Vec3::new(m[0][c], m[1][c], m[2][c]).length();
-    (column(0), column(1))
+    let column = |c: usize| Vec3::new(m[0][c], m[1][c], m[2][c]);
+    let (x, y) = (column(0), column(1));
+    // The rotation has to come from an orthonormal basis, or scale skews it. A degenerate basis
+    // (such as a zero scale) has no rotation, and its overlay no area.
+    let rotation = x
+        .try_normalize()
+        .and_then(|x| Some((x, (y - x * x.dot(y)).try_normalize()?)))
+        .map_or(Quat::IDENTITY, |(x, y)| {
+            Quat::from_mat3(&Mat3::from_cols(x, y, x.cross(y))).normalize()
+        });
+    let pose = xr::Posef {
+        position: xr::Vector3f {
+            x: m[0][3],
+            y: m[1][3],
+            z: m[2][3],
+        },
+        orientation: xr::Quaternionf {
+            x: rotation.x,
+            y: rotation.y,
+            z: rotation.z,
+            w: rotation.w,
+        },
+    };
+    (pose, (x.length(), y.length()))
 }
 
 enum OverlayKind {
@@ -1530,21 +1553,7 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         if transform.is_null() {
             vr::EVROverlayError::InvalidParameter
         } else {
-            let transform = unsafe { transform.read() };
-            // Preserve the scale before decomposing to a pose which discards it.
-            let scale = transform_scale(&transform);
-            let xr_transform: xr::Posef = transform.into();
-            let o = xr_transform.orientation;
-            let q = Quat::from_xyzw(o.x, o.y, o.z, o.w).normalize();
-            let transform = xr::Posef {
-                position: xr_transform.position,
-                orientation: xr::Quaternionf {
-                    x: q.x,
-                    y: q.y,
-                    z: q.z,
-                    w: q.w,
-                },
-            };
+            let (transform, scale) = decompose_transform(unsafe { &*transform });
             overlay.scale = scale;
             overlay.transform = Some((origin, transform.into()));
             debug!(
@@ -2193,9 +2202,35 @@ mod tests {
         let transform = vr::HmdMatrix34_t {
             m: std::array::from_fn(|r| [c[0][r], c[1][r], c[2][r], 1.0]),
         };
-        let (x, y) = transform_scale(&transform);
+        let (_, (x, y)) = decompose_transform(&transform);
         assert!((x - 2.0).abs() < 1e-5, "{x}");
         assert!((y - 0.5).abs() < 1e-5, "{y}");
+    }
+
+    #[test]
+    fn scale_does_not_change_rotation() {
+        let matrix = |m: glam::Mat3| {
+            let c = m.to_cols_array_2d();
+            vr::HmdMatrix34_t {
+                m: std::array::from_fn(|r| [c[0][r], c[1][r], c[2][r], 1.0]),
+            }
+        };
+        let rotation = |m| {
+            let (xr::Posef { orientation: o, .. }, _) = decompose_transform(&matrix(m));
+            Quat::from_xyzw(o.x, o.y, o.z, o.w)
+        };
+
+        let yaw = Quat::from_rotation_y(90f32.to_radians());
+        let scaled =
+            glam::Mat3::from_quat(yaw) * glam::Mat3::from_diagonal(Vec3::new(2.0, 0.5, 3.0));
+        assert!(
+            rotation(scaled).angle_between(yaw) < 1e-4,
+            "{}",
+            rotation(scaled)
+        );
+
+        // A zero scale is used to hide overlays; it must still give a valid rotation.
+        assert_eq!(rotation(glam::Mat3::ZERO), Quat::IDENTITY);
     }
 
     fn keyboard_done_event(user_value: u64) -> impl Fn(&vr::VREvent_t) {
