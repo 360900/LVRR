@@ -251,12 +251,10 @@ impl OverlayMan {
                         (session.get_space_for_origin(origin), transform.pose)
                     }
                     // The view space keeps head-locked overlays in place without any latency.
-                    TransformKind::TrackedDeviceRelative(vr::k_unTrackedDeviceIndex_Hmd)
-                    | TransformKind::TrackedComponent(vr::k_unTrackedDeviceIndex_Hmd, _) => {
+                    TransformKind::TrackedDeviceRelative(vr::k_unTrackedDeviceIndex_Hmd) => {
                         (&session.view_space, transform.pose)
                     }
-                    TransformKind::TrackedDeviceRelative(device)
-                    | TransformKind::TrackedComponent(device, _) => {
+                    TransformKind::TrackedDeviceRelative(device) => {
                         // Not drawn while its device isn't tracked.
                         let Some(device_pose) = input
                             .as_ref()
@@ -273,6 +271,7 @@ impl OverlayMan {
                             ),
                         )
                     }
+                    TransformKind::TrackedComponent(..) => continue,
                 },
             };
 
@@ -726,8 +725,8 @@ enum OverlayKind {
 enum TransformKind {
     Absolute(vr::ETrackingUniverseOrigin),
     TrackedDeviceRelative(vr::TrackedDeviceIndex_t),
-    /// We have no render model components to draw on, so these are attached to their device. All
-    /// of our components sit at the device's origin anyway.
+    /// SteamVR draws these on the device's render model, and only while it draws the device itself,
+    /// which it doesn't for a scene app. We never draw devices, so these aren't drawn either.
     TrackedComponent(vr::TrackedDeviceIndex_t, CString),
 }
 
@@ -2587,16 +2586,21 @@ mod tests {
         assert_eq!(layer.space, view_space);
         assert_eq!((layer.pose.position.y, layer.pose.position.z), (-0.2, -1.0));
         assert_eq!(layer.size.width, 2.0);
+    }
 
-        assert_eq!(
-            f.man.SetOverlayTransformTrackedDeviceComponent(
-                handle,
-                vr::k_unTrackedDeviceIndex_Hmd,
-                c"tip".as_ptr()
-            ),
-            vr::EVROverlayError::None
-        );
-        assert_eq!(quad().space, view_space);
+    #[test]
+    fn component_overlay_is_not_drawn() {
+        let f = RealSessionFixture::new();
+        let handle = f.textured_overlay(c"key");
+        assert_eq!(f.layers(false).len(), 1);
+        for device in [vr::k_unTrackedDeviceIndex_Hmd, 1] {
+            assert_eq!(
+                f.man
+                    .SetOverlayTransformTrackedDeviceComponent(handle, device, c"tip".as_ptr()),
+                vr::EVROverlayError::None
+            );
+            assert_eq!(f.layers(false).len(), 0);
+        }
     }
 
     #[test]
