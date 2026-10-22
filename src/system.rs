@@ -38,18 +38,12 @@ struct ViewDataViewSpace {
 impl ViewData {
     /// Stand-in for views the runtime never located: a typical IPD and a 90 degree FOV.
     fn fallback() -> Self {
-        use std::f32::consts::FRAC_PI_4;
         let view = |x| xr::View {
             pose: xr::Posef {
                 orientation: xr::Quaternionf::IDENTITY,
                 position: xr::Vector3f { x, y: 0.0, z: 0.0 },
             },
-            fov: xr::Fovf {
-                angle_left: -FRAC_PI_4,
-                angle_right: FRAC_PI_4,
-                angle_up: FRAC_PI_4,
-                angle_down: -FRAC_PI_4,
-            },
+            fov: FALLBACK_FOV,
         };
         Self {
             flags: xr::ViewStateFlags::EMPTY,
@@ -87,12 +81,15 @@ impl ViewCache {
         session: &SessionData,
         display_time: xr::Time,
         ty: xr::ReferenceSpaceType,
+        last_valid_fovs: &mut [Option<xr::Fovf>; 2],
     ) -> xr::Result<ViewData> {
         let view = match self.view {
             Some(view) => view,
-            None => *self
-                .view
-                .insert(Self::get_views_view_space(session, display_time)?),
+            None => *self.view.insert(Self::get_views_view_space(
+                session,
+                display_time,
+                last_valid_fovs,
+            )?),
         };
         let cached = match ty {
             xr::ReferenceSpaceType::VIEW => return Ok(view.data),
@@ -103,14 +100,14 @@ impl ViewCache {
         if let Some(data) = *cached {
             return Ok(data);
         }
-        let data =
-            Self::get_views_other_space(session, display_time, ty, view.original_orientations)?;
+        let data = Self::get_views_other_space(session, display_time, ty, &view)?;
         Ok(*cached.insert(data))
     }
 
     fn get_views_view_space(
         session: &SessionData,
         display_time: xr::Time,
+        last_valid_fovs: &mut [Option<xr::Fovf>; 2],
     ) -> xr::Result<ViewDataViewSpace> {
         let (flags, views) = session.session.locate_views(
             xr::ViewConfigurationType::PRIMARY_STEREO,
@@ -118,6 +115,18 @@ impl ViewCache {
             session.get_space_from_type(xr::ReferenceSpaceType::VIEW),
         )?;
         let mut views = stereo_views(views)?;
+
+        for (view, last_valid_fov) in views.iter_mut().zip(last_valid_fovs) {
+            if is_valid_fov(&view.fov) {
+                *last_valid_fov = Some(view.fov);
+            } else {
+                crate::warn_once!(
+                    "Runtime reported an invalid FOV ({:?}), using the last valid one",
+                    view.fov
+                );
+                view.fov = last_valid_fov.unwrap_or(FALLBACK_FOV);
+            }
+        }
 
         // Canted-view handling.
         //
@@ -168,7 +177,7 @@ impl ViewCache {
         session: &SessionData,
         display_time: xr::Time,
         ty: xr::ReferenceSpaceType,
-        view_data_orientations_inverse: [Quat; 2],
+        view_space: &ViewDataViewSpace,
     ) -> xr::Result<ViewData> {
         let (flags, views) = session.session.locate_views(
             xr::ViewConfigurationType::PRIMARY_STEREO,
@@ -177,16 +186,14 @@ impl ViewCache {
         )?;
         let mut views = stereo_views(views)?;
 
-        for (
-            xr::View {
-                pose: xr::Posef {
-                    orientation: rot, ..
-                },
-                ..
-            },
-            view_rot,
-        ) in views.iter_mut().zip(view_data_orientations_inverse)
+        for ((view, view_rot), view_space_view) in views
+            .iter_mut()
+            .zip(view_space.original_orientations)
+            .zip(&view_space.data.views)
         {
+            // The FOV doesn't depend on the space, and was already checked.
+            view.fov = view_space_view.fov;
+            let rot = &mut view.pose.orientation;
             let quat = Quat::from_xyzw(rot.x, rot.y, rot.z, rot.w);
             // rotate the inverse of the view space view rotation by this space's
             // view orientation to remove the canting from the displays in this space
@@ -210,6 +217,8 @@ struct Views {
     /// The last views located in each space, for when locating fails.
     last: ViewCache,
     failing: bool,
+    /// The last usable FOV the runtime reported for each view.
+    last_valid_fovs: [Option<xr::Fovf>; 2],
 }
 
 impl Views {
@@ -223,12 +232,13 @@ impl Views {
         if openxr.is_lost() {
             return self.last.cached(ty);
         }
+        let fovs = &mut self.last_valid_fovs;
         let result = self
             .frame
-            .get_views(session, openxr.get_display_time(), ty)
+            .get_views(session, openxr.get_display_time(), ty, fovs)
             .or_else(|e| match openxr.now() {
                 // Before the first frame the display time can be long gone.
-                Some(now) => self.frame.get_views(session, now, ty),
+                Some(now) => self.frame.get_views(session, now, ty, fovs),
                 None => Err(e),
             });
         match result {
@@ -254,6 +264,29 @@ impl Views {
             }
         }
     }
+}
+
+/// Used until the runtime reports a valid FOV, or locates the views at all.
+const FALLBACK_FOV: xr::Fovf = xr::Fovf {
+    angle_left: -std::f32::consts::FRAC_PI_4,
+    angle_right: std::f32::consts::FRAC_PI_4,
+    angle_up: std::f32::consts::FRAC_PI_4,
+    angle_down: -std::f32::consts::FRAC_PI_4,
+};
+
+/// Zero, inverted or non-finite FOVs give games NaN projections.
+fn is_valid_fov(fov: &xr::Fovf) -> bool {
+    let angles = [
+        fov.angle_left,
+        fov.angle_right,
+        fov.angle_up,
+        fov.angle_down,
+    ];
+    angles
+        .iter()
+        .all(|angle| angle.abs() < std::f32::consts::FRAC_PI_2)
+        && fov.angle_left < fov.angle_right
+        && fov.angle_down < fov.angle_up
 }
 
 #[derive(macros::InterfaceImpl)]
@@ -1627,6 +1660,53 @@ mod tests {
             output.as_mut_ptr(),
         ));
         assert_eq!(output.map(|c| (c.u, c.v)), [(0.1, 0.2), (0.9, 0.8)]);
+    }
+
+    fn projection_raw(system: &System, eye: vr::EVREye) -> [f32; 4] {
+        let [mut left, mut right, mut top, mut bottom] = [0.0; 4];
+        system.GetProjectionRaw(eye, &mut left, &mut right, &mut top, &mut bottom);
+        [left, right, top, bottom]
+    }
+
+    #[test]
+    fn invalid_fov_falls_back() {
+        let xr =
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
+        let system = System::new(xr.clone(), &Injector::default());
+        let session = xr.session_data.get().session.as_raw();
+
+        // fakexr reports a zero FOV until views are set.
+        assert_eq!(
+            projection_raw(&system, vr::EVREye::Left),
+            [-1.0, 1.0, -1.0, 1.0]
+        );
+        let matrix = system.GetProjectionMatrix(vr::EVREye::Left, 0.1, 100.0);
+        assert!(matrix.m.as_flattened().iter().all(|v| v.is_finite()));
+
+        let pose = xr::Posef::IDENTITY;
+        let fov = xr::Fovf {
+            angle_left: -0.5,
+            angle_right: 0.4,
+            angle_up: 0.3,
+            angle_down: -0.6,
+        };
+        let expected = [-0.5f32.tan(), 0.4f32.tan(), -0.6f32.tan(), 0.3f32.tan()];
+        fakexr::set_views(session, [(pose, fov); 2]);
+        system.reset_views();
+        assert_eq!(projection_raw(&system, vr::EVREye::Right), expected);
+
+        // The last valid FOV is kept.
+        for fov in [
+            xr::Fovf::default(),
+            xr::Fovf {
+                angle_left: f32::NAN,
+                ..fov
+            },
+        ] {
+            fakexr::set_views(session, [(pose, fov); 2]);
+            system.reset_views();
+            assert_eq!(projection_raw(&system, vr::EVREye::Right), expected);
+        }
     }
 
     #[test]
