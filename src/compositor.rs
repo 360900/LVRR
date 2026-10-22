@@ -3385,7 +3385,15 @@ mod tests {
             f.comp.openxr.session_data.get().session.as_raw(),
             move || tx.send(()).unwrap(),
         );
+        // Nothing blocks in xrWaitFrame, so the app is paced instead.
+        let period = std::time::Duration::from_millis(20);
+        f.comp
+            .openxr
+            .display_period_nanos
+            .store(period.as_nanos() as i64, Ordering::Relaxed);
+        let start = Instant::now();
         assert_eq!(f.wait_get_poses(), None);
+        assert!(start.elapsed() >= period / 2);
         f.check_frame_state(fakexr::FrameState::Waited);
         assert!(rx.try_recv().is_err(), "frame was ended in WaitGetPoses");
 
@@ -4343,6 +4351,39 @@ mod tests {
         f.comp.PostPresentHandoff();
         assert_eq!(f.wait_get_poses(), DoNotHaveFocus);
         assert_eq!(quit_events(&system), [true]);
+    }
+
+    /// xrWaitFrame fails on a lost session, so WaitGetPoses has to keep a game that ignores Quit
+    /// from spinning, even though it runs a frame loop.
+    #[test]
+    fn wait_get_poses_paces_after_session_loss() {
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+        fakexr::lose_session(f.raw_session());
+        assert_eq!(f.wait_get_poses(), DoNotHaveFocus);
+        assert!(f.comp.openxr.is_lost());
+        assert!(
+            f.comp
+                .openxr
+                .session_data
+                .get()
+                .comp_data
+                .0
+                .lock()
+                .unwrap()
+                .is_some()
+        );
+
+        let period = std::time::Duration::from_millis(20);
+        f.comp
+            .openxr
+            .display_period_nanos
+            .store(period.as_nanos() as i64, Ordering::Relaxed);
+        let start = Instant::now();
+        for _ in 0..3 {
+            assert_eq!(f.wait_get_poses(), DoNotHaveFocus);
+        }
+        assert!(start.elapsed() >= 2 * period);
     }
 
     /// A loss first seen when Submit recreates the swapchain for a resized eye texture.
