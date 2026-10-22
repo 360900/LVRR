@@ -1081,16 +1081,20 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         name: *const c_char,
         handle: *mut vr::VROverlayHandle_t,
     ) -> vr::EVROverlayError {
+        if key.is_null() || name.is_null() || handle.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
         let key = unsafe { CStr::from_ptr(key) };
         let name = unsafe { CStr::from_ptr(name) };
 
-        if handle.is_null() {
-            return vr::EVROverlayError::InvalidParameter;
-        }
-
         let mut overlays = self.overlays.write().unwrap();
-        let ret_key = overlays.insert(Overlay::new(key.into(), name.into()));
         let mut key_to_overlay = self.key_to_overlay.write().unwrap();
+        if key_to_overlay.contains_key(key) {
+            debug!("overlay key {key:?} is already in use");
+            unsafe { handle.write(vr::k_ulOverlayHandleInvalid) };
+            return vr::EVROverlayError::KeyInUse;
+        }
+        let ret_key = overlays.insert(Overlay::new(key.into(), name.into()));
         key_to_overlay.insert(key.into(), ret_key);
 
         unsafe {
@@ -1116,7 +1120,7 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         key: *const c_char,
         handle: *mut vr::VROverlayHandle_t,
     ) -> vr::EVROverlayError {
-        if handle.is_null() {
+        if key.is_null() || handle.is_null() {
             return vr::EVROverlayError::InvalidParameter;
         }
         let key = unsafe { CStr::from_ptr(key) };
@@ -1338,6 +1342,9 @@ impl vr::IVROverlay028_Interface for OverlayMan {
             let thumbnail_key = CString::from_vec_with_nul(concatenation).unwrap();
 
             result = self.CreateOverlay(thumbnail_key.as_ptr(), name, thumbnail_handle);
+            if result != vr::EVROverlayError::None {
+                self.DestroyOverlay(unsafe { handle.read() });
+            }
         }
         result
     }
@@ -2295,6 +2302,41 @@ mod tests {
             man.GetOverlayFlags(handle + 1, &mut flags),
             vr::EVROverlayError::UnknownOverlay
         );
+    }
+
+    #[test]
+    fn overlay_key_in_use() {
+        let man = overlay_man();
+        let find = |key: &CStr| {
+            let mut handle = 0;
+            (man.FindOverlay(key.as_ptr(), &mut handle), handle)
+        };
+        let first = create(&man, c"key", c"name");
+        let mut handle = 0;
+        assert_eq!(
+            man.CreateOverlay(c"key".as_ptr(), c"other".as_ptr(), &mut handle),
+            vr::EVROverlayError::KeyInUse
+        );
+        assert_eq!(handle, vr::k_ulOverlayHandleInvalid);
+        assert_eq!(find(c"key"), (vr::EVROverlayError::None, first));
+
+        assert_eq!(man.DestroyOverlay(first), vr::EVROverlayError::None);
+        assert_eq!(find(c"key").0, vr::EVROverlayError::UnknownOverlay);
+        create(&man, c"key", c"name");
+
+        // A dashboard overlay whose thumbnail can't be created isn't left behind.
+        create(&man, c"dash.thumbnail", c"name");
+        let (mut main, mut thumbnail) = (0, 0);
+        assert_eq!(
+            man.CreateDashboardOverlay(
+                c"dash".as_ptr(),
+                c"name".as_ptr(),
+                &mut main,
+                &mut thumbnail
+            ),
+            vr::EVROverlayError::KeyInUse
+        );
+        assert_eq!(find(c"dash").0, vr::EVROverlayError::UnknownOverlay);
     }
 
     #[test]
