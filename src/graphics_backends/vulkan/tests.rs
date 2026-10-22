@@ -30,6 +30,7 @@ struct Gpu {
     scissors: Vec<vk::Rect2D>,
     descriptor_layouts: Vec<vk::ImageLayout>,
     pipeline_samples: Vec<vk::SampleCountFlags>,
+    push_constants: Vec<(vk::ShaderStageFlags, u32, Vec<u8>)>,
     draws: usize,
 }
 
@@ -404,11 +405,13 @@ unsafe extern "system" fn vkCmdBindDescriptorSets(
 unsafe extern "system" fn vkCmdPushConstants(
     _: vk::CommandBuffer,
     _: vk::PipelineLayout,
-    _: vk::ShaderStageFlags,
-    _: u32,
-    _: u32,
-    _: *const c_void,
+    stages: vk::ShaderStageFlags,
+    offset: u32,
+    size: u32,
+    values: *const c_void,
 ) {
+    let values = unsafe { slice(values.cast::<u8>(), size) }.to_vec();
+    gpu(|gpu| gpu.push_constants.push((stages, offset, values)));
 }
 
 unsafe extern "system" fn vkCmdBeginRenderPass(
@@ -579,7 +582,7 @@ fn copy_overlay(
     bounds: vr::VRTextureBounds_t,
     image_index: usize,
 ) -> xr::Extent2Di {
-    vk.copy_overlay_to_swapchain(texture, bounds, image_index)
+    vk.copy_overlay_to_swapchain(texture, vr::EColorSpace::Auto, bounds, image_index)
 }
 
 /// Drops the backend and checks that it used and freed everything correctly.
@@ -696,6 +699,53 @@ fn multisampled_overlay_is_cleared() {
         assert_eq!(gpu.render_areas.len(), 1);
         assert_eq!(gpu.draws, 0);
         assert!(gpu.barriers.is_empty());
+    });
+    finish(vk);
+}
+
+#[test]
+fn overlay_decodes_srgb_only_for_gamma_encoded_unorm() {
+    use vk::Format as F;
+    use vr::EColorSpace as C;
+    for (format, color_space, decode) in [
+        (F::R8G8B8A8_UNORM, C::Auto, true),
+        (F::B8G8R8A8_UNORM, C::Gamma, true),
+        (F::R8G8B8A8_UNORM, C::Linear, false),
+        // Sampling these already decodes.
+        (F::R8G8B8A8_SRGB, C::Auto, false),
+        (F::B8G8R8A8_SRGB, C::Gamma, false),
+        // Auto means linear for formats without _SRGB variants.
+        (F::R16G16B16A16_SFLOAT, C::Auto, false),
+        (F::R16G16B16A16_SFLOAT, C::Gamma, true),
+    ] {
+        assert_eq!(
+            overlay_needs_srgb_decode(format, color_space),
+            decode,
+            "{format:?} {color_space:?}"
+        );
+    }
+}
+
+#[test]
+fn overlay_shader_decodes_unorm_textures() {
+    let mut vk = fake_vulkan();
+    store_images(&mut vk, 2);
+    let unorm = vr::VRVulkanTextureData_t {
+        m_nFormat: vk::Format::R8G8B8A8_UNORM.as_raw() as u32,
+        ..texture(16, 16)
+    };
+    vk.copy_overlay_to_swapchain(&unorm, vr::EColorSpace::Auto, FULL_BOUNDS, 0);
+    vk.copy_overlay_to_swapchain(&texture(16, 16), vr::EColorSpace::Auto, FULL_BOUNDS, 1);
+    vk.copy_overlay_to_swapchain(&unorm, vr::EColorSpace::Linear, FULL_BOUNDS, 0);
+    gpu(|gpu| {
+        let pushed: Vec<_> = gpu
+            .push_constants
+            .iter()
+            .filter(|(stages, ..)| *stages == vk::ShaderStageFlags::FRAGMENT)
+            .map(|(_, offset, values)| (*offset, values.clone()))
+            .collect();
+        let flag = |decode: u32| (16, decode.to_ne_bytes().to_vec());
+        assert_eq!(pushed, [flag(1), flag(0), flag(0)]);
     });
     finish(vk);
 }

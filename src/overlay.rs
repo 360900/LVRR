@@ -889,8 +889,12 @@ impl Overlay {
             let mut copy = || {
                 let idx = swapchain.acquire_image()?;
                 swapchain.wait_image(xr::Duration::INFINITE)?;
-                let extent =
-                    backend.copy_overlay_to_swapchain(b_texture, texture_bounds, idx as usize);
+                let extent = backend.copy_overlay_to_swapchain(
+                    b_texture,
+                    texture.eColorSpace,
+                    texture_bounds,
+                    idx as usize,
+                );
                 swapchain.release_image()?;
                 Ok(extent)
             };

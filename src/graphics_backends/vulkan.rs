@@ -352,6 +352,7 @@ impl GraphicsBackend for VulkanData {
     fn copy_overlay_to_swapchain(
         &mut self,
         texture: *const vr::VRVulkanTextureData_t,
+        color_space: vr::EColorSpace,
         bounds: vr::VRTextureBounds_t,
         image_index: usize,
     ) -> xr::Extent2Di {
@@ -454,6 +455,8 @@ impl GraphicsBackend for VulkanData {
         let OverlaySlot {
             set, framebuffer, ..
         } = *slot;
+        let decode_srgb =
+            overlay_needs_srgb_decode(vk::Format::from_raw(texture.m_nFormat as _), color_space);
         let clear = [vk::ClearValue::default()];
         let render_pass_info = vk::RenderPassBeginInfo::default()
             .render_pass(renderpass)
@@ -524,6 +527,13 @@ impl GraphicsBackend for VulkanData {
                 vk::ShaderStageFlags::VERTEX,
                 0,
                 pc.align_to().1,
+            );
+            device.cmd_push_constants(
+                buf,
+                layout,
+                vk::ShaderStageFlags::FRAGMENT,
+                DECODE_SRGB_OFFSET,
+                &u32::from(decode_srgb).to_ne_bytes(),
             );
             device.cmd_begin_render_pass(buf, &render_pass_info, vk::SubpassContents::INLINE);
             device.cmd_draw(buf, 4, 1, 0, 0);
@@ -693,6 +703,9 @@ struct OverlaySlot {
     framebuffer: vk::Framebuffer,
 }
 
+/// The fragment shader's push constant follows the vertex shader's texture bounds.
+const DECODE_SRGB_OFFSET: u32 = std::mem::size_of::<[f32; 4]>() as u32;
+
 struct PipelineData {
     pipeline: vk::Pipeline,
     layout: vk::PipelineLayout,
@@ -823,17 +836,24 @@ impl PipelineData {
                 .unwrap()
         };
 
-        let texture_coordinates_pc = vk::PushConstantRange {
-            stage_flags: vk::ShaderStageFlags::VERTEX,
-            offset: 0,
-            size: std::mem::size_of::<[f32; 4]>() as u32,
-        };
+        let push_constants = [
+            vk::PushConstantRange {
+                stage_flags: vk::ShaderStageFlags::VERTEX,
+                offset: 0,
+                size: DECODE_SRGB_OFFSET,
+            },
+            vk::PushConstantRange {
+                stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                offset: DECODE_SRGB_OFFSET,
+                size: std::mem::size_of::<u32>() as u32,
+            },
+        ];
         let pipeline_layout = unsafe {
             device
                 .create_pipeline_layout(
                     &vk::PipelineLayoutCreateInfo::default()
                         .set_layouts(std::slice::from_ref(&set_layout))
-                        .push_constant_ranges(&[texture_coordinates_pc]),
+                        .push_constant_ranges(&push_constants),
                     None,
                 )
                 .unwrap()
@@ -980,6 +1000,32 @@ fn get_colorspace_corrected_format(format: vk::Format, color_space: vr::EColorSp
                 format
             }
         },
+    }
+}
+
+/// Whether the overlay shader has to decode sRGB to output linear colour.
+fn overlay_needs_srgb_decode(format: vk::Format, color_space: vr::EColorSpace) -> bool {
+    use vk::Format as F;
+    match format {
+        // Sampling these already decodes.
+        F::R8G8B8A8_SRGB
+        | F::B8G8R8A8_SRGB
+        | F::A8B8G8R8_SRGB_PACK32
+        | F::BC1_RGB_SRGB_BLOCK
+        | F::BC1_RGBA_SRGB_BLOCK
+        | F::BC2_SRGB_BLOCK
+        | F::BC3_SRGB_BLOCK
+        | F::BC7_SRGB_BLOCK => false,
+        // ColorSpace_Auto treats formats with _SRGB variants as gamma encoded.
+        F::R8G8B8A8_UNORM
+        | F::B8G8R8A8_UNORM
+        | F::A8B8G8R8_UNORM_PACK32
+        | F::BC1_RGB_UNORM_BLOCK
+        | F::BC1_RGBA_UNORM_BLOCK
+        | F::BC2_UNORM_BLOCK
+        | F::BC3_UNORM_BLOCK
+        | F::BC7_UNORM_BLOCK => color_space != vr::EColorSpace::Linear,
+        _ => color_space == vr::EColorSpace::Gamma,
     }
 }
 

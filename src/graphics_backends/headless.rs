@@ -104,6 +104,7 @@ impl GraphicsBackend for HeadlessData {
     fn copy_overlay_to_swapchain(
         &mut self,
         _texture: Self::OpenVrTexture,
+        _color_space: vr::EColorSpace,
         _bounds: openvr::VRTextureBounds_t,
         _image_index: usize,
     ) -> openxr::Extent2Di {

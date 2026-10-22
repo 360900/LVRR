@@ -69,6 +69,7 @@ pub trait GraphicsBackend: Into<SupportedBackend> {
     fn copy_overlay_to_swapchain(
         &mut self,
         texture: Self::OpenVrTexture,
+        color_space: vr::EColorSpace,
         bounds: vr::VRTextureBounds_t,
         image_index: usize,
     ) -> xr::Extent2Di;

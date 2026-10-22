@@ -1,13 +1,15 @@
 #version 450
 layout(set = 0, binding = 0) uniform sampler2D overlay;
+layout(push_constant, std430) uniform pc {
+    layout(offset = 16) uint decodeSrgb;
+};
 layout(location = 0) in vec2 texCoord;
 layout(location = 0) out vec4 color;
 
-// Manually decode sRGB. The game texture is UNORM but its bytes are
-// sRGB-encoded (typical for game backbuffers). Sampling a UNORM view returns
-// the raw byte value which the hardware treats as linear. We convert here so
-// the sRGB swapchain attachment re-encodes it correctly, giving a lossless
-// round-trip through the compositor.
+// The output must be linear: runtimes decode sRGB swapchains and treat UNORM
+// ones as linear. Sampling an _SRGB texture already decodes it, but UNORM
+// textures usually hold sRGB-encoded bytes (typical for game backbuffers), so
+// the backend asks for a manual decode for those.
 vec3 srgb_to_linear(vec3 c) {
     bvec3 cutoff = lessThan(c, vec3(0.04045));
     vec3 lo = c / vec3(12.92);
@@ -17,5 +19,5 @@ vec3 srgb_to_linear(vec3 c) {
 
 void main() {
     vec4 sampled = texture(overlay, texCoord);
-    color = vec4(srgb_to_linear(sampled.rgb), sampled.a);
+    color = decodeSrgb != 0u ? vec4(srgb_to_linear(sampled.rgb), sampled.a) : sampled;
 }
