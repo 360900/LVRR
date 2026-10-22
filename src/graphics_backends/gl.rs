@@ -20,14 +20,22 @@ static GLX: LazyLock<Option<GlxLib>> = LazyLock::new(|| {
         warn!("libGLX.so.0 not found, GLX contexts won't be detected");
         return None;
     };
-    Some(GlxLib(Glx::load_with(|func| {
-        let func = CString::new(func).unwrap();
-        lib.get(&func).unwrap_or(ptr::null())
-    })))
+    Some(GlxLib {
+        glx: Glx::load_with(|func| {
+            let func = CString::new(func).unwrap();
+            lib.get(&func).unwrap_or(ptr::null())
+        }),
+        // libGLX links libX11.
+        x_free: unsafe { lib.get_fn(c"XFree") },
+    })
 });
 
 #[derive(Deref)]
-struct GlxLib(Glx);
+struct GlxLib {
+    #[deref]
+    glx: Glx,
+    x_free: Option<unsafe extern "C" fn(*mut c_void) -> c_int>,
+}
 // SAFETY: Only holds function pointers.
 unsafe impl Send for GlxLib {}
 unsafe impl Sync for GlxLib {}
@@ -195,7 +203,10 @@ impl SessionCreateInfo {
     }
 }
 
-unsafe fn xlib_session_info(glx: &Glx, glx_context: glx::types::GLXContext) -> SessionCreateInfo {
+unsafe fn xlib_session_info(
+    glx: &GlxLib,
+    glx_context: glx::types::GLXContext,
+) -> SessionCreateInfo {
     unsafe {
         let x_display = glx.GetCurrentDisplay();
         let glx_drawable = glx.GetCurrentDrawable();
@@ -332,7 +343,7 @@ pub struct GlData {
 }
 
 unsafe fn get_fbconfig(
-    glx: &Glx,
+    glx: &GlxLib,
     display: *mut glx::types::Display,
     glx_context: glx::types::GLXContext,
 ) -> Option<glx::types::GLXFBConfig> {
@@ -354,7 +365,15 @@ unsafe fn get_fbconfig(
         let attrs = [glx::FBCONFIG_ID, config_id as _, glx::NONE];
         let mut items = 0;
         let cfgs = glx.ChooseFBConfig(display, screen, attrs.as_ptr() as _, &mut items);
-        (!cfgs.is_null() && items >= 0).then(|| std::slice::from_raw_parts(cfgs, items as usize)[0])
+        if cfgs.is_null() {
+            return None;
+        }
+        // The configs belong to the display, only the array is ours.
+        let cfg = (items > 0).then(|| *cfgs);
+        if let Some(x_free) = glx.x_free {
+            x_free(cfgs.cast());
+        }
+        cfg
     }
 }
 
@@ -364,12 +383,13 @@ unsafe fn get_visualid(
     cfg: Option<glx::types::GLXFBConfig>,
 ) -> Option<u32> {
     unsafe {
-        let visual = glx.GetVisualFromFBConfig(display, cfg?);
-        if visual.is_null() {
+        let mut visualid = 0;
+        let ret = glx.GetFBConfigAttrib(display, cfg?, glx::VISUAL_ID as _, &mut visualid);
+        if ret != Success as i32 || visualid == 0 {
             warn!("No visual available from fbconfig.");
             None
         } else {
-            Some((&raw const (*visual).visualid).read() as u32)
+            Some(visualid as u32)
         }
     }
 }
