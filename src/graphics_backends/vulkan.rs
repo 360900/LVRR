@@ -127,11 +127,8 @@ impl GraphicsBackend for VulkanData {
     }
 
     fn get_texture(texture: &vr::Texture_t, _: vr::EVRSubmitFlags) -> Option<Self::OpenVrTexture> {
-        if !texture.handle.is_null() {
-            Some(texture.handle.cast())
-        } else {
-            None
-        }
+        (texture.eType == vr::ETextureType::Vulkan && !texture.handle.is_null())
+            .then_some(texture.handle.cast())
     }
     fn store_swapchain_images(&mut self, images: Vec<u64>, format: Self::Format) {
         let images: Vec<vk::Image> = images.into_iter().map(vk::Image::from_raw).collect();

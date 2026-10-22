@@ -910,6 +910,14 @@ impl vr::IVRCompositor029_Interface for Compositor {
             return vr::EVRCompositorError::InvalidTexture;
         };
 
+        if !SupportedBackend::is_texture_type_supported(texture.eType) {
+            crate::warn_once!(
+                "Unsupported texture type submitted: {:?} (under Proton, the texture could not be translated to Vulkan)",
+                texture.eType
+            );
+            return vr::EVRCompositorError::InvalidTexture;
+        }
+
         if !self.focused.is_completed() || self.openxr.is_lost() {
             return vr::EVRCompositorError::DoNotHaveFocus;
         }
@@ -1887,9 +1895,10 @@ mod tests {
 
         fn get_texture(
             texture: &openvr::Texture_t,
-            flags: openvr::EVRSubmitFlags,
+            _: openvr::EVRSubmitFlags,
         ) -> Option<Self::OpenVrTexture> {
-            VulkanData::get_texture(texture, flags)
+            (texture.eType == vr::ETextureType::Reserved && !texture.handle.is_null())
+                .then_some(texture.handle.cast())
         }
 
         fn raw_swapchain_info_for_texture(
@@ -2213,6 +2222,110 @@ mod tests {
             ),
             InvalidBounds
         );
+    }
+
+    fn texture_of_type(ty: vr::ETextureType, handle: *mut std::ffi::c_void) -> vr::Texture_t {
+        vr::Texture_t {
+            eType: ty,
+            handle,
+            eColorSpace: vr::EColorSpace::Auto,
+        }
+    }
+
+    #[test]
+    fn unsupported_texture_types() {
+        use vr::ETextureType::*;
+        let f = Fixture::new();
+        assert_eq!(f.wait_get_poses(), None);
+
+        let mut handle = 0u64;
+        for ty in [
+            Invalid,
+            DirectX,
+            IOSurface,
+            DirectX12,
+            DXGISharedHandle,
+            Metal,
+        ] {
+            let texture = texture_of_type(ty, (&raw mut handle).cast());
+            assert_eq!(
+                f.comp.Submit(
+                    vr::EVREye::Left,
+                    &texture,
+                    std::ptr::null(),
+                    vr::EVRSubmitFlags::Default
+                ),
+                InvalidTexture,
+                "{ty:?}"
+            );
+        }
+        assert!(!f.comp.openxr.session_data.get().is_real_session());
+    }
+
+    #[test]
+    fn invalid_vulkan_textures() {
+        let f = Fixture::new();
+        assert_eq!(f.wait_get_poses(), None);
+
+        let mut data = vr::VRVulkanTextureData_t::default();
+        for handle in [std::ptr::null_mut(), (&raw mut data).cast()] {
+            let texture = texture_of_type(vr::ETextureType::Vulkan, handle);
+            assert_eq!(
+                f.comp.Submit(
+                    vr::EVREye::Left,
+                    &texture,
+                    std::ptr::null(),
+                    vr::EVRSubmitFlags::Default
+                ),
+                InvalidTexture
+            );
+        }
+        assert!(!f.comp.openxr.session_data.get().is_real_session());
+    }
+
+    /// A texture of another type than the session's backend must not be reinterpreted.
+    #[test]
+    fn texture_type_mismatch() {
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+
+        let mut data = vr::VRVulkanTextureData_t::default();
+        let texture = texture_of_type(vr::ETextureType::Vulkan, (&raw mut data).cast());
+        assert_eq!(
+            f.comp.Submit(
+                vr::EVREye::Left,
+                &texture,
+                std::ptr::null(),
+                vr::EVRSubmitFlags::Default
+            ),
+            InvalidTexture
+        );
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+    }
+
+    #[test]
+    fn overlay_invalid_texture_before_real_session() {
+        use vr::IVROverlay027_Interface;
+
+        let f = Fixture::new();
+        let overlays = f.overlay_man();
+        let mut overlay = 0;
+        assert_eq!(
+            overlays.CreateOverlay(c"key".as_ptr(), c"key".as_ptr(), &mut overlay),
+            vr::EVROverlayError::None
+        );
+
+        let mut handle = 0u64;
+        for texture in [
+            texture_of_type(vr::ETextureType::DirectX12, (&raw mut handle).cast()),
+            texture_of_type(vr::ETextureType::Vulkan, std::ptr::null_mut()),
+        ] {
+            assert_eq!(
+                overlays.SetOverlayTexture(overlay, &texture),
+                vr::EVROverlayError::InvalidTexture
+            );
+        }
+        assert!(!f.comp.openxr.session_data.get().is_real_session());
     }
 
     #[test]

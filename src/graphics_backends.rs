@@ -156,20 +156,26 @@ impl SupportedBackend {
         }
     }
 
+    /// Returns None for texture types we don't support and for textures without a handle.
     pub fn new(texture: &vr::Texture_t, instance: &xr::Instance) -> Option<Self> {
+        if texture.handle.is_null() {
+            return None;
+        }
         match texture.eType {
             vr::ETextureType::Vulkan => {
                 let vk_texture = unsafe { &*(texture.handle as *const vr::VRVulkanTextureData_t) };
-                Some(Self::Vulkan(VulkanData::new(vk_texture)))
+                let handles_set = !vk_texture.m_pInstance.is_null()
+                    && !vk_texture.m_pPhysicalDevice.is_null()
+                    && !vk_texture.m_pDevice.is_null()
+                    && !vk_texture.m_pQueue.is_null();
+                handles_set.then(|| Self::Vulkan(VulkanData::new(vk_texture)))
             }
             vr::ETextureType::OpenGL => GlData::new(instance).map(Self::OpenGL),
-            #[cfg(not(test))]
-            vr::ETextureType::Reserved => Some(Self::Headless(HeadlessData::new())),
             #[cfg(test)]
             vr::ETextureType::Reserved => Some(Self::Fake(
                 crate::compositor::FakeGraphicsData::new(texture),
             )),
-            other => panic!("Unsupported texture type: {other:?}"),
+            _ => None,
         }
     }
 }

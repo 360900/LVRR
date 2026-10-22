@@ -15,16 +15,6 @@ struct SessionCreateInfo(xr::headless::SessionCreateInfo);
 unsafe impl Send for SessionCreateInfo {}
 unsafe impl Sync for SessionCreateInfo {}
 
-#[cfg(not(test))]
-impl HeadlessData {
-    pub(crate) fn new() -> Self {
-        let session_info = xr::headless::SessionCreateInfo {};
-        HeadlessData {
-            session_data: Arc::new(SessionCreateInfo(session_info)),
-        }
-    }
-}
-
 impl GraphicsBackend for HeadlessData {
     type Api = xr::Headless;
     type OpenVrTexture = *const vr::VRVulkanTextureData_t;
