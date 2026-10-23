@@ -141,7 +141,9 @@ pub fn set_visibility_mask(mask: Option<(Vec<xr::Vector2f>, Vec<u32>)>) {
     VISIBILITY_MASK.set(mask);
 }
 
-/// Makes xrLocateViews fail with `error` on this thread, or succeed again with `None`.
+/// Makes xrLocateViews fail with `error` on this thread, or succeed again with `None`. With
+/// `SUCCESS`, it returns the view count and nothing else, like Monado when it can't locate the
+/// headset.
 pub fn set_locate_views_error(error: Option<xr::Result>) {
     LOCATE_VIEWS_ERROR.set(error);
 }
@@ -2483,6 +2485,11 @@ extern "system" fn locate_views(
     views: *mut xr::View,
 ) -> xr::Result {
     let session = get_session!(session);
+    if !output.is_null() {
+        unsafe {
+            output.write(2);
+        }
+    }
     if let Some(error) = LOCATE_VIEWS_ERROR.get() {
         return error;
     }
@@ -2518,11 +2525,6 @@ extern "system" fn locate_views(
         }
     }
 
-    if !output.is_null() {
-        unsafe {
-            output.write(2);
-        }
-    }
     if capacity > 0 {
         if capacity < 2 {
             return xr::Result::ERROR_SIZE_INSUFFICIENT;

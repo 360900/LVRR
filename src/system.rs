@@ -60,12 +60,71 @@ struct ViewCache {
     stage: Option<ViewData>,
 }
 
-/// PRIMARY_STEREO always has two views, but a runtime getting that wrong shouldn't panic.
-fn stereo_views(views: Vec<xr::View>) -> xr::Result<[xr::View; 2]> {
-    views.try_into().map_err(|v: Vec<_>| {
-        crate::warn_once!("Expected 2 views, got {}", v.len());
-        xr::sys::Result::ERROR_RUNTIME_FAILURE
-    })
+/// Locates the PRIMARY_STEREO views in `space`. Monado returns success without writing the views
+/// or their flags when it can't locate the headset, so they start out zeroed: no valid pose and
+/// an invalid FOV rather than whatever was in memory.
+fn locate_views(
+    session: &SessionData,
+    display_time: xr::Time,
+    space: &xr::Space,
+) -> xr::Result<(xr::ViewStateFlags, [xr::View; 2])> {
+    let session = &session.session;
+    let info = xr::sys::ViewLocateInfo {
+        ty: xr::sys::ViewLocateInfo::TYPE,
+        next: std::ptr::null(),
+        view_configuration_type: xr::ViewConfigurationType::PRIMARY_STEREO,
+        display_time,
+        space: space.as_raw(),
+    };
+    let mut state = xr::sys::ViewState {
+        ty: xr::sys::ViewState::TYPE,
+        next: std::ptr::null_mut(),
+        view_state_flags: xr::ViewStateFlags::EMPTY,
+    };
+    let mut views = [xr::sys::View {
+        ty: xr::sys::View::TYPE,
+        next: std::ptr::null_mut(),
+        pose: Default::default(),
+        fov: Default::default(),
+    }; 2];
+    let mut count = 0;
+    let result = unsafe {
+        (session.instance().fp().locate_views)(
+            session.as_raw(),
+            &info,
+            &mut state,
+            views.len() as u32,
+            &mut count,
+            views.as_mut_ptr(),
+        )
+    };
+    if result.into_raw() < 0 {
+        return Err(result);
+    }
+    // PRIMARY_STEREO always has two views, but a runtime getting that wrong shouldn't panic.
+    if count != 2 {
+        crate::warn_once!("Expected 2 views, got {}", count);
+        return Err(xr::sys::Result::ERROR_RUNTIME_FAILURE);
+    }
+
+    // Like openxr's locate_views, leave out what isn't valid.
+    let flags = state.view_state_flags;
+    let views = views.map(|view| xr::View {
+        pose: xr::Posef {
+            orientation: if flags.contains(xr::ViewStateFlags::ORIENTATION_VALID) {
+                view.pose.orientation
+            } else {
+                Default::default()
+            },
+            position: if flags.contains(xr::ViewStateFlags::POSITION_VALID) {
+                view.pose.position
+            } else {
+                Default::default()
+            },
+        },
+        fov: view.fov,
+    });
+    Ok((flags, views))
 }
 
 impl ViewCache {
@@ -110,12 +169,11 @@ impl ViewCache {
         display_time: xr::Time,
         last_valid_fovs: &mut [Option<xr::Fovf>; 2],
     ) -> xr::Result<ViewDataViewSpace> {
-        let (flags, views) = session.session.locate_views(
-            xr::ViewConfigurationType::PRIMARY_STEREO,
+        let (flags, mut views) = locate_views(
+            session,
             display_time,
             session.get_space_from_type(xr::ReferenceSpaceType::VIEW),
         )?;
-        let mut views = stereo_views(views)?;
 
         for (view, last_valid_fov) in views.iter_mut().zip(last_valid_fovs) {
             if is_valid_fov(&view.fov) {
@@ -155,13 +213,23 @@ impl ViewCache {
                 .iter_mut()
                 .map(|view| {
                     let o = &mut view.pose.orientation;
-                    let canting = if flags.contains(xr::ViewStateFlags::ORIENTATION_VALID) {
+                    let mut canting = if flags.contains(xr::ViewStateFlags::ORIENTATION_VALID) {
                         Quat::from_xyzw(o.x, o.y, o.z, o.w)
                     } else {
                         Quat::IDENTITY
                     };
                     *o = xr::Quaternionf::IDENTITY;
-                    view.fov = parallel_fov(view.fov, canting);
+                    let fov = parallel_fov(view.fov, canting);
+                    if is_valid_fov(&fov) {
+                        view.fov = fov;
+                    } else {
+                        // Only a broken orientation gets here. Leave it out, with the FOV as is.
+                        crate::warn_once!(
+                            "Couldn't make a view with orientation {:?} parallel, ignoring it",
+                            canting
+                        );
+                        canting = Quat::IDENTITY;
+                    }
                     canting
                 })
                 .collect::<Vec<_>>()
@@ -181,12 +249,8 @@ impl ViewCache {
         ty: xr::ReferenceSpaceType,
         view_space: &ViewDataViewSpace,
     ) -> xr::Result<ViewData> {
-        let (flags, views) = session.session.locate_views(
-            xr::ViewConfigurationType::PRIMARY_STEREO,
-            display_time,
-            session.get_space_from_type(ty),
-        )?;
-        let mut views = stereo_views(views)?;
+        let (flags, mut views) =
+            locate_views(session, display_time, session.get_space_from_type(ty))?;
 
         for ((view, canting), view_space_view) in views
             .iter_mut()
@@ -1797,6 +1861,47 @@ mod tests {
             system.reset_views();
             assert_eq!(projection_raw(&system, vr::EVREye::Right), expected);
         }
+    }
+
+    /// Monado returns success without writing the views when it can't locate the headset, and a
+    /// broken orientation can't be made parallel. Neither replaces the last valid FOV.
+    #[test]
+    fn unlocated_views_keep_valid_fov() {
+        let xr =
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
+        let system = System::new(xr.clone(), &Injector::default());
+        let session = xr.session_data.get().session.as_raw();
+        let pose = xr::Posef::IDENTITY;
+        let fov = xr::Fovf {
+            angle_left: -0.5,
+            angle_right: 0.4,
+            angle_up: 0.3,
+            angle_down: -0.6,
+        };
+        let expected = [-0.5f32.tan(), 0.4f32.tan(), -0.6f32.tan(), 0.3f32.tan()];
+        fakexr::set_views(session, [(pose, fov); 2]);
+        system.reset_views();
+        assert_eq!(projection_raw(&system, vr::EVREye::Left), expected);
+
+        fakexr::set_locate_views_error(Some(xr::sys::Result::SUCCESS));
+        system.reset_views();
+        let views = system.located_views(xr::ReferenceSpaceType::VIEW).unwrap();
+        assert_eq!(views.flags, xr::ViewStateFlags::EMPTY);
+        assert_eq!(projection_raw(&system, vr::EVREye::Left), expected);
+        fakexr::set_locate_views_error(None);
+
+        let broken = xr::Posef {
+            orientation: xr::Quaternionf {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                w: 0.0,
+            },
+            ..pose
+        };
+        fakexr::set_views(session, [(broken, fov); 2]);
+        system.reset_views();
+        assert_eq!(projection_raw(&system, vr::EVREye::Left), expected);
     }
 
     #[test]
