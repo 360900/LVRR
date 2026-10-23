@@ -1659,6 +1659,9 @@ fn empty_manifest() {
 }
 
 #[test]
+// A thread blocking on a parking_lot lock trips Miri: parking_lot_core 0.9 passes a reference
+// where the futex syscall takes a pointer.
+#[cfg_attr(miri, ignore)]
 fn load_actions_race() {
     let mut f = Fixture::new();
     f.input.openxr.restart_session().unwrap(); // get to real session

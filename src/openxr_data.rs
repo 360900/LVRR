@@ -1805,6 +1805,9 @@ mod tests {
     }
 
     #[test]
+    // A thread blocking on a parking_lot lock trips Miri: parking_lot_core 0.9 passes a reference
+    // where the futex syscall takes a pointer.
+    #[cfg_attr(miri, ignore)]
     fn session_restart_contended() {
         crate::init_logging();
         let data = Arc::new(
@@ -1846,6 +1849,9 @@ mod tests {
     /// A thread that reads the session again while it already holds a guard must not block behind
     /// a writer that queued up in between.
     #[test]
+    // A thread blocking on a parking_lot lock trips Miri: parking_lot_core 0.9 passes a reference
+    // where the futex syscall takes a pointer.
+    #[cfg_attr(miri, ignore)]
     fn nested_read_with_queued_writer() {
         crate::init_logging();
         let data = Arc::new(
