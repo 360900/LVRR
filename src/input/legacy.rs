@@ -1055,6 +1055,29 @@ mod tests {
     }
 
     #[test]
+    fn axes() {
+        use fakexr::{ActionState, UserPath::*};
+        let (f, main_xy) = legacy_fixture(|actions| actions.main_xy.as_raw());
+        let trigger = legacy_action(&f, |actions| actions.trigger.as_raw());
+        let squeeze = legacy_action(&f, |actions| actions.squeeze.as_raw());
+        fakexr::set_action_state(main_xy, ActionState::Vector2(0.3, -0.6), LeftHand);
+        fakexr::set_action_state(trigger, ActionState::Float(0.4), LeftHand);
+        fakexr::set_action_state(squeeze, ActionState::Float(0.8), LeftHand);
+        f.input.frame_start_update();
+
+        let axes = |index| {
+            // Copy the field out, since references to packed fields are undefined.
+            let axes = { get_state(&f, index).rAxis };
+            axes.map(|axis| (axis.x, axis.y))
+        };
+        assert_eq!(
+            axes(1),
+            [(0.3, -0.6), (0.4, 0.0), (0.8, 0.0), (0.0, 0.0), (0.0, 0.0)]
+        );
+        assert_eq!(axes(2), [(0.0, 0.0); 5]);
+    }
+
+    #[test]
     fn trigger_value_touches_trigger() {
         use fakexr::UserPath::*;
         let (f, trigger) = legacy_fixture(|actions| actions.trigger.as_raw());
