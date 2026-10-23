@@ -133,9 +133,11 @@ fn convert_input(
 ) -> Option<DynSubpath> {
     use DynSubpath::*;
     let hand = input.hand;
+    // Without face buttons (the Frame's left hand), the d-pad stands in for them, like in
+    // SteamVR's legacy bindings.
     let (lower_face, upper_face) = match hand {
-        Hand::Left => ([X, A], [Y, B]),
-        Hand::Right => ([A, X], [B, Y]),
+        Hand::Left => ([X, A, DpadDown], [Y, B, DpadUp]),
+        Hand::Right => ([A, X, DpadDown], [B, Y, DpadUp]),
     };
     let candidates = match input.subpath {
         axis if axis == source.main_axis() => vec![Thumbstick, Trackpad],
@@ -144,7 +146,7 @@ fn convert_input(
         Trackpad => vec![],
         A | X => lower_face.to_vec(),
         B | Y => upper_face.to_vec(),
-        Menu => [Menu]
+        Menu => [Menu, View]
             .into_iter()
             .chain(
                 upper_face
@@ -194,5 +196,37 @@ mod tests {
         assert_eq!(convert(A, Hand::Right, &knuckles, &[]), Some(A));
         // Touch has no second axis for the Index trackpad.
         assert_eq!(convert(Trackpad, Hand::Right, &knuckles, &[]), None);
+    }
+
+    #[test]
+    fn frame_controller_left_hand() {
+        use crate::input::profiles::frame_controller::FrameController;
+        use DynSubpath::*;
+        let convert = |subpath, hand, source: &ControllerType| {
+            let input = DynInputPath {
+                hand,
+                subpath,
+                component: None,
+            };
+            convert_input(
+                input,
+                source,
+                &[],
+                &super::super::has_input::<FrameController>,
+            )
+        };
+        let touch = ControllerType::OculusTouch;
+        // The left hand has a d-pad and a view button instead of face buttons and a menu.
+        assert_eq!(convert(X, Hand::Left, &touch), Some(DpadDown));
+        assert_eq!(convert(Y, Hand::Left, &touch), Some(DpadUp));
+        assert_eq!(convert(Menu, Hand::Left, &touch), Some(View));
+        assert_eq!(convert(A, Hand::Right, &touch), Some(A));
+        assert_eq!(convert(B, Hand::Right, &touch), Some(B));
+        let knuckles = ControllerType::Knuckles;
+        assert_eq!(convert(A, Hand::Left, &knuckles), Some(DpadDown));
+        assert_eq!(convert(B, Hand::Left, &knuckles), Some(DpadUp));
+        let vive = ControllerType::ViveController;
+        assert_eq!(convert(Menu, Hand::Right, &vive), Some(Menu));
+        assert_eq!(convert(Trackpad, Hand::Left, &vive), Some(Thumbstick));
     }
 }

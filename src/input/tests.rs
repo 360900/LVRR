@@ -1,8 +1,8 @@
 use super::{
     ActionData, Input, InteractionProfile,
     profiles::{
-        knuckles::Knuckles, oculus_touch::OculusTouch, simple_controller::SimpleController,
-        vive_controller::ViveWands,
+        frame_controller::FrameController, knuckles::Knuckles, oculus_touch::OculusTouch,
+        simple_controller::SimpleController, vive_controller::ViveWands,
     },
 };
 use crate::{
@@ -761,6 +761,11 @@ fn menu_bindings_converted_in_every_set() {
             OculusTouch::profile_path(),
             action,
             both("menu/click", "b/click"),
+        );
+        f.verify_bindings::<bool>(
+            FrameController::profile_path(),
+            action,
+            both("view/click", "menu/click"),
         );
     }
     f.verify_custom_bindings(
