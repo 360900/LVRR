@@ -2197,6 +2197,9 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         input_source_path: *const c_char,
         handle: *mut vr::VRInputValueHandle_t,
     ) -> vr::EVRInputError {
+        if input_source_path.is_null() {
+            return vr::EVRInputError::InvalidParam;
+        }
         let path = unsafe { CStr::from_ptr(input_source_path) };
 
         let ret = {
@@ -2225,6 +2228,9 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         action_name: *const c_char,
         handle: *mut vr::VRActionHandle_t,
     ) -> vr::EVRInputError {
+        if action_name.is_null() {
+            return vr::EVRInputError::InvalidParam;
+        }
         let name = unsafe { CStr::from_ptr(action_name) }
             .to_string_lossy()
             .to_lowercase();
@@ -2252,6 +2258,9 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         action_set_name: *const c_char,
         handle: *mut vr::VRActionSetHandle_t,
     ) -> vr::EVRInputError {
+        if action_set_name.is_null() {
+            return vr::EVRInputError::InvalidParam;
+        }
         let name = unsafe { CStr::from_ptr(action_set_name) }
             .to_string_lossy()
             .to_lowercase();

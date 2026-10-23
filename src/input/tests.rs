@@ -413,6 +413,24 @@ fn unknown_handles() {
 }
 
 #[test]
+fn null_names() {
+    let f = Fixture::new();
+    let mut handle = 0;
+    assert_eq!(
+        f.input.GetActionHandle(std::ptr::null(), &mut handle),
+        vr::EVRInputError::InvalidParam
+    );
+    assert_eq!(
+        f.input.GetActionSetHandle(std::ptr::null(), &mut handle),
+        vr::EVRInputError::InvalidParam
+    );
+    assert_eq!(
+        f.input.GetInputSourceHandle(std::ptr::null(), &mut handle),
+        vr::EVRInputError::InvalidParam
+    );
+}
+
+#[test]
 fn dominant_hand() {
     use vr::ETrackedControllerRole as Role;
     let f = Fixture::new();

@@ -2167,6 +2167,9 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         handle: vr::VROverlayHandle_t,
         name: *const c_char,
     ) -> vr::EVROverlayError {
+        if name.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
         get_overlay!(self, handle, mut overlay);
         overlay.set_name(unsafe { CStr::from_ptr(name).to_owned() });
         vr::EVROverlayError::None
@@ -2603,6 +2606,13 @@ mod tests {
         let len = man.GetOverlayName(handle + 1, buf.as_mut_ptr(), buf.len() as u32, &mut error);
         assert_eq!(len, 0);
         assert_eq!(error, vr::EVROverlayError::UnknownOverlay);
+
+        assert_eq!(
+            man.SetOverlayName(handle, std::ptr::null()),
+            vr::EVROverlayError::InvalidParameter
+        );
+        man.GetOverlayName(handle, buf.as_mut_ptr(), buf.len() as u32, &mut error);
+        assert_eq!(unsafe { CStr::from_ptr(buf.as_ptr()) }, c"Some Name");
     }
 
     #[test]
