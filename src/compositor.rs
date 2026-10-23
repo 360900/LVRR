@@ -2080,6 +2080,9 @@ impl<G: GraphicsBackend> FrameController<G> {
         if let Some(l) = proj_layer.as_ref() {
             layers.push(l);
         }
+        session_data
+            .overlay_data
+            .destroy_retired(|| self.backend.is_context_current());
         let overlay_layers;
         if let Some(overlay_man) = overlays {
             // Like SteamVR, show the skybox while the app isn't showing anything itself.
@@ -4928,6 +4931,55 @@ mod tests {
         assert_eq!(f.submit(vr::EVREye::Right), None);
         assert_eq!(f.wait_get_poses(), None);
         assert_eq!(update(), vr::EVRInputError::None);
+    }
+
+    /// Like the session's, overlay swapchains destroyed without the context current wait for a
+    /// frame that has it.
+    #[test]
+    fn overlay_swapchains_wait_for_context() {
+        use vr::IVROverlay027_Interface;
+
+        let f = Fixture::new();
+        let overlays = f.overlay_man();
+        f.ensure_real_session(false);
+        let mut overlay = 0;
+        assert_eq!(
+            overlays.CreateOverlay(c"key".as_ptr(), c"name".as_ptr(), &mut overlay),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(
+            overlays.SetOverlayTexture(overlay, &FakeGraphicsData::texture(&f.vk)),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(
+            overlays.set_skybox(&[FakeGraphicsData::texture(&f.vk)]),
+            Ok(())
+        );
+        let retired = || {
+            f.comp
+                .openxr
+                .session_data
+                .get()
+                .overlay_data
+                .retired_count()
+        };
+        let frame = || {
+            assert_eq!(f.wait_get_poses(), None);
+            assert_eq!(f.submit(vr::EVREye::Left), None);
+            assert_eq!(f.submit(vr::EVREye::Right), None);
+            assert_eq!(f.wait_get_poses(), None);
+        };
+
+        CONTEXT_CURRENT.set(false);
+        assert_eq!(overlays.DestroyOverlay(overlay), vr::EVROverlayError::None);
+        overlays.clear_skybox();
+        assert_eq!(retired(), 2);
+        frame();
+        assert_eq!(retired(), 2);
+
+        CONTEXT_CURRENT.set(true);
+        frame();
+        assert_eq!(retired(), 0);
     }
 
     /// Shuts down a real session, returning whether the runtime destroyed it.

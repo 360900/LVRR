@@ -119,6 +119,7 @@ impl OverlayMan {
             log::warn!("Could not create swapchain for skybox texture; skipping");
             return Ok(());
         };
+        let context_current = session_data.comp_data.is_context_current();
 
         let mut overlays = self.overlays.write().unwrap();
         let mut skybox = self.skybox.write().unwrap();
@@ -172,7 +173,7 @@ impl OverlayMan {
             {
                 for key in keys {
                     overlays.remove(key);
-                    session_data.overlay_data.remove(key);
+                    session_data.overlay_data.remove(key, context_current);
                 }
                 log::warn!("Could not create swapchain for skybox texture; skipping");
                 // Don't fail the game — just silently drop the skybox request.
@@ -199,11 +200,12 @@ impl OverlayMan {
 
     pub fn clear_skybox(&self) {
         let session = self.openxr.session_data.get();
+        let context_current = session.comp_data.is_context_current();
         let mut overlays = self.overlays.write().unwrap();
         let mut skybox = self.skybox.write().unwrap();
         for key in skybox.drain(..) {
             overlays.remove(key);
-            session.overlay_data.remove(key);
+            session.overlay_data.remove(key, context_current);
         }
     }
 
@@ -641,19 +643,50 @@ supported_apis_enum!(pub(crate) enum AnySwapchainMap: SwapchainMap);
 #[derive(Default)]
 pub struct OverlaySessionData {
     swapchains: Mutex<Option<AnySwapchainMap>>,
+    /// Swapchains of removed overlays, kept until the session's graphics context is current.
+    retired: Mutex<Vec<Box<dyn Send>>>,
 }
 
 impl OverlaySessionData {
     /// Destroys an overlay's swapchain. The lock makes this wait for a frame still using it, and
     /// dropping the overlay's backend before makes it wait for the backend's copies into it.
-    fn remove(&self, key: OverlayKey) {
+    ///
+    /// GL runtimes make the app's context current to destroy a swapchain, which fails while the
+    /// app has it current on another thread. Without `context_current`, the swapchain is kept
+    /// for [Self::destroy_retired].
+    fn remove(&self, key: OverlayKey, context_current: bool) {
         #[macros::any_graphics(AnySwapchainMap)]
-        fn remove<G: xr::Graphics>(map: &mut SwapchainMap<G>, key: OverlayKey) {
-            map.remove(key);
+        fn remove<G: xr::Graphics>(
+            map: &mut SwapchainMap<G>,
+            key: OverlayKey,
+        ) -> Option<Box<dyn Send>>
+        where
+            SwapchainData<G>: Send + 'static,
+        {
+            map.remove(key).map(|data| Box::new(data) as Box<dyn Send>)
         }
 
-        if let Some(map) = self.swapchains.lock().unwrap().as_mut() {
-            map.with_any_graphics_mut::<remove>(key);
+        let Some(swapchain) = self
+            .swapchains
+            .lock()
+            .unwrap()
+            .as_mut()
+            .and_then(|map| map.with_any_graphics_mut::<remove>(key))
+        else {
+            return;
+        };
+        if !context_current {
+            debug!("graphics context isn't current, keeping overlay swapchain for later");
+            self.retired.lock().unwrap().push(swapchain);
+        }
+    }
+
+    /// Destroys the swapchains [Self::remove] kept, if there are any and `context_current` says
+    /// the session's graphics context is current.
+    pub fn destroy_retired(&self, context_current: impl FnOnce() -> bool) {
+        let mut retired = self.retired.lock().unwrap();
+        if !retired.is_empty() && context_current() {
+            retired.clear();
         }
     }
 }
@@ -674,6 +707,10 @@ impl OverlaySessionData {
         swapchains
             .as_ref()
             .map_or(0, |map| map.with_any_graphics::<len>(()))
+    }
+
+    pub fn retired_count(&self) -> usize {
+        self.retired.lock().unwrap().len()
     }
 }
 
@@ -2156,13 +2193,14 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         let key = OverlayKey::from(KeyData::from_ffi(handle));
 
         let session = self.openxr.session_data.get();
+        let context_current = session.comp_data.is_context_current();
         let mut overlays = self.overlays.write().unwrap();
         if let Some(overlay) = overlays.remove(key) {
             let mut map = self.key_to_overlay.write().unwrap();
             map.remove(&overlay.key);
             // Dropping the backend waits for its copies into the swapchain.
             drop(overlay);
-            session.overlay_data.remove(key);
+            session.overlay_data.remove(key, context_current);
         }
         vr::EVROverlayError::None
     }
