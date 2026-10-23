@@ -109,7 +109,10 @@ pub fn convert(
             match convert_input(*input, source, &taken, &target_has) {
                 Some(subpath) => {
                     input.subpath = subpath;
-                    taken.push((input.hand, subpath));
+                    // Every menu binding on a hand goes to the same button, wherever it is.
+                    if !menu {
+                        taken.push((input.hand, subpath));
+                    }
                 }
                 None => {
                     *path = MaybeInputPath::Invalid {

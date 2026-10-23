@@ -1,0 +1,32 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/main",
+			"usage": "leftright"
+		},
+		{
+			"name": "/actions/menu",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/main/in/pause",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/menu/in/back",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/menu/in/reset",
+			"type": "boolean"
+		}
+	],
+	"default_bindings": [
+		{
+			"controller_type": "vive_controller",
+			"binding_url": "vive_only_menus.json"
+		}
+	]
+}

@@ -744,6 +744,33 @@ fn bindings_converted_for_unlisted_controllers() {
 }
 
 #[test]
+fn menu_bindings_converted_in_every_set() {
+    let f = Fixture::new();
+    // Two sets and a chord use the same menu buttons.
+    f.load_actions(c"actions_vive_only_menus.json");
+
+    let both = |left: &str, right: &str| {
+        [
+            format!("/user/hand/left/input/{left}"),
+            format!("/user/hand/right/input/{right}"),
+        ]
+    };
+    for action in [c"/actions/main/in/pause", c"/actions/menu/in/back"] {
+        f.verify_bindings::<bool>(Knuckles::profile_path(), action, both("b/click", "b/click"));
+        f.verify_bindings::<bool>(
+            OculusTouch::profile_path(),
+            action,
+            both("menu/click", "b/click"),
+        );
+    }
+    f.verify_custom_bindings(
+        Knuckles::profile_path(),
+        c"/actions/menu/in/reset",
+        both("b/click", "b/click"),
+    );
+}
+
+#[test]
 fn controllers_tracked_without_bindings() {
     let f = Fixture::new();
     f.load_actions(c"actions_no_bindings.json");
