@@ -30,15 +30,17 @@ pub struct CompositorSessionData {
 }
 
 impl CompositorSessionData {
-    /// See [GraphicsBackend::is_context_current].
-    pub fn is_context_current(&mut self) -> bool {
+    /// See [GraphicsBackend::is_context_current]. True without a frame controller. Don't call it
+    /// while holding the overlay locks, which the frame thread takes while holding the frame
+    /// controller.
+    pub fn is_context_current(&self) -> bool {
         #[macros::any_graphics(DynFrameController)]
         fn is_current<G: GraphicsBackend>(ctrl: &FrameController<G>) -> bool {
             ctrl.backend.is_context_current()
         }
 
         self.ctrl
-            .get_mut()
+            .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
             .is_none_or(|ctrl| ctrl.with_any_graphics::<is_current>(()))
@@ -383,6 +385,11 @@ impl Compositor {
 
         if !self.focused.is_completed() || self.openxr.is_lost() {
             return vr::EVRCompositorError::DoNotHaveFocus;
+        }
+
+        // The session restart for an action manifest may have been left for this thread.
+        if let Some(input) = self.input.get() {
+            input.load_pending_manifest();
         }
 
         let mut session_lock = self.openxr.session_data.get();
@@ -4867,6 +4874,60 @@ mod tests {
         ) {
             assert_ne!(event.eventType, vr::EVREventType::Quit.0);
         }
+    }
+
+    /// GL runtimes make the app's context current to destroy the session's swapchains, which
+    /// fails while it's current on another thread. An action manifest set there restarts the
+    /// session on the next Submit instead.
+    #[test]
+    fn action_manifest_restart_waits_for_context() {
+        use crate::input::Input;
+        use vr::IVRInput010_Interface;
+
+        let f = Fixture::new();
+        let xr = f.comp.openxr.clone();
+        let input = Arc::new(Input::new(xr.clone()));
+        xr.input.set(Arc::downgrade(&input));
+        f.comp.input.set(Arc::downgrade(&input));
+        f.ensure_real_session(false);
+        input.frame_start_update(); // attach legacy actions
+        let session = f.raw_session();
+
+        let mut set = 0;
+        assert_eq!(
+            input.GetActionSetHandle(c"/actions/set1".as_ptr(), &mut set),
+            vr::EVRInputError::None
+        );
+        let update = || {
+            let mut active = vr::VRActiveActionSet_t {
+                ulActionSet: set,
+                ..Default::default()
+            };
+            input.UpdateActionState(&mut active, std::mem::size_of_val(&active) as u32, 1)
+        };
+
+        CONTEXT_CURRENT.set(false);
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/input_data/actions.json\0"
+        );
+        assert_eq!(
+            input.SetActionManifestPath(path.as_ptr() as _),
+            vr::EVRInputError::None
+        );
+        assert_eq!(f.raw_session(), session);
+        assert_eq!(update(), vr::EVRInputError::InvalidParam);
+
+        // Only Submit is sure to be called on the thread the app renders on.
+        CONTEXT_CURRENT.set(true);
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(f.raw_session(), session);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_ne!(f.raw_session(), session);
+        assert!(!fakexr::session_exists(session));
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(update(), vr::EVRInputError::None);
     }
 
     /// Shuts down a real session, returning whether the runtime destroyed it.

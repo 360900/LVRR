@@ -353,7 +353,7 @@ fn has_input<P: InteractionProfile>(hand: Hand, subpath: DynSubpath) -> bool {
 }
 
 /// Whether two paths name the same file, even if spelled differently.
-fn same_file(a: &Path, b: &Path) -> bool {
+pub(super) fn same_file(a: &Path, b: &Path) -> bool {
     a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
 }
 

@@ -35,7 +35,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::mem::ManuallyDrop;
 use std::ops::Deref;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -114,6 +114,8 @@ pub struct Input<C: openxr_data::Compositor> {
     action_map: RwLock<SlotMap<ActionKey, Action>>,
     set_map: RwLock<SlotMap<ActionSetKey, String>>,
     loaded_actions_path: OnceLock<PathBuf>,
+    /// An action manifest left for [Input::load_pending_manifest].
+    pending_manifest: Mutex<Option<PathBuf>>,
     legacy_state: legacy::LegacyState,
     /// See [Input::current_skeletal_tracking_level], the only writer besides profile changes.
     skeletal_tracking_level: RwLock<[vr::EVRSkeletalTrackingLevel; 2]>,
@@ -203,6 +205,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             action_map: Default::default(),
             set_map: Default::default(),
             loaded_actions_path: OnceLock::new(),
+            pending_manifest: Mutex::default(),
             left_hand_key,
             right_hand_key,
             legacy_state: Default::default(),
@@ -2276,13 +2279,25 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             return vr::EVRInputError::InvalidParam;
         }
         let path = unsafe { CStr::from_ptr(path) }.to_string_lossy();
-        let path = std::path::Path::new(&*path);
+        let path = Path::new(&*path);
         info!("loading action manifest from {path:?}");
+        self.set_action_manifest(path, true)
+    }
+}
 
+impl<C: openxr_data::Compositor> Input<C> {
+    /// Loads the action manifest at `path`. With `defer`, a session restart that can't happen on
+    /// this thread is left for [Self::load_pending_manifest].
+    fn set_action_manifest(&self, path: &Path, defer: bool) -> vr::EVRInputError {
         let _setup = self.action_setup.lock().unwrap();
         // We need to restart the session if the legacy actions have already been attached.
         let mut data = self.openxr.session_data.get();
         if data.input_data.get_legacy_actions().is_some() {
+            // GL runtimes make the app's context current to destroy the session's swapchains,
+            // which fails while the app has it current on another thread.
+            if defer && !data.comp_data.is_context_current() {
+                return self.defer_action_manifest(path);
+            }
             drop(data);
             // After a failed creation we're on a fresh temporary session, which can still load it.
             if self.openxr.restart_session() == Err(RestartError::Exiting) {
@@ -2296,9 +2311,42 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             Err(e) => e,
         }
     }
-}
 
-impl<C: openxr_data::Compositor> Input<C> {
+    fn defer_action_manifest(&self, path: &Path) -> vr::EVRInputError {
+        let mut pending = self.pending_manifest.lock().unwrap();
+        match &*pending {
+            // SteamVR keeps the first manifest.
+            Some(first) if !action_manifest::same_file(first, path) => {
+                warn!(
+                    "Action manifest {} is already being loaded, ignoring {}",
+                    first.display(),
+                    path.display()
+                );
+                vr::EVRInputError::MismatchedActionManifest
+            }
+            _ => {
+                info!("Graphics context isn't current, loading the action manifest on Submit");
+                *pending = Some(path.to_owned());
+                vr::EVRInputError::None
+            }
+        }
+    }
+
+    /// Loads the action manifest SetActionManifestPath couldn't, on the thread the app submits
+    /// frames on, which has its graphics context current.
+    pub fn load_pending_manifest(&self) {
+        let Some(path) = self.pending_manifest.lock().unwrap().take() else {
+            return;
+        };
+        let result = self.set_action_manifest(&path, false);
+        if result != vr::EVRInputError::None {
+            warn!(
+                "Couldn't load action manifest {}: {result:?}",
+                path.display()
+            );
+        }
+    }
+
     fn get_pose_action_data(
         &self,
         action: vr::VRActionHandle_t,
