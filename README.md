@@ -75,7 +75,7 @@ If a launcher strips `RUST_LOG`, put the same filter string in a file named `log
 
 `XRIZER_ADDITIONAL_BINDINGS` - `;` separated list of controller types to load bindings for in addition to the ones the game lists, e.g. `knuckles;oculus_touch`. Each is read from the custom bindings directory, or `bindings_<controller_type>.json` next to the game's action manifest.
 
-`XRIZER_PRESERVE_VIEW_CANTING` - `1` keeps per-eye view rotations from canted-display headsets (e.g. Pimax) instead of flattening them to parallel views. Fixes FOV on those headsets, may confuse games that assume parallel views.
+`XRIZER_PRESERVE_VIEW_CANTING` - `1` keeps per-eye view rotations from canted-display headsets (e.g. Pimax, Bigscreen Beyond) instead of flattening them to parallel views with a widened FOV. Saves rendering the wider FOV, may confuse games that assume parallel views.
 
 `XRIZER_MAX_TRACKERS` - Max number of generic trackers to expose. Requires a runtime with `XR_MNDX_xdev_space` (Monado, WiVRn). Trackers appear as Vive Trackers, which can confuse some games' controller detection. `0` hides them. Set automatically for games known to need it.
 
