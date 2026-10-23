@@ -10,19 +10,24 @@ use crate::{
 };
 
 use glam::{Mat3, Quat, Vec3};
-use log::{debug, info, trace, warn};
+use log::{debug, info, trace};
 use openvr as vr;
 use openxr as xr;
 use std::mem::offset_of;
 use std::sync::{
-    Arc, Mutex, Once, PoisonError,
+    Arc, Mutex, Once, PoisonError, TryLockError,
     atomic::{AtomicBool, AtomicU32, Ordering},
 };
 use std::time::Instant;
 use std::{ffi::c_char, ops::Deref};
 
 #[derive(Default)]
-pub struct CompositorSessionData(Mutex<Option<DynFrameController>>);
+pub struct CompositorSessionData {
+    ctrl: Mutex<Option<DynFrameController>>,
+    /// Apart from the frame controller, so waiting for the next frame doesn't keep the app from
+    /// submitting and handing off the current one.
+    waiter: Mutex<Option<xr::FrameWaiter>>,
+}
 
 impl CompositorSessionData {
     /// See [GraphicsBackend::is_context_current].
@@ -32,7 +37,7 @@ impl CompositorSessionData {
             ctrl.backend.is_context_current()
         }
 
-        self.0
+        self.ctrl
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
@@ -101,29 +106,16 @@ impl Fade {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum FrameState {
-    Waited,
-    Begun,
-    Submitted,
-}
-
-impl FrameState {
-    fn advance_to(&mut self, new: Self) -> bool {
-        let old = *self;
-        let allowed: bool = match old {
-            Self::Waited => new == Self::Begun,
-            Self::Begun => new != Self::Begun,
-            Self::Submitted => new == Self::Waited,
-        };
-        if allowed {
-            *self = new;
-            trace!("advanced frame state from {old:?} to {new:?}");
-        } else {
-            warn!("Tried to advance frame state from {old:?} to {new:?}, which is not allowed");
-        }
-        allowed
-    }
+/// The frames between xrWaitFrame and xrEndFrame. The next frame can be waited for while the
+/// current one is still begun, which apps handing off frames themselves rely on. Without a frame
+/// controller (on the temporary session), the calls are only recorded here, so the real session
+/// can catch up on them.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+struct FrameState {
+    /// A frame was waited for, but not begun yet.
+    waited: bool,
+    /// A frame was begun, but not ended yet.
+    begun: bool,
 }
 
 struct FrameMetrics {
@@ -164,73 +156,96 @@ impl Compositor {
                 target_frame_times: 0.0.into(),
             },
             timing_mode: vr::EVRCompositorTimingMode::Implicit.into(),
-            frame_state: FrameState::Submitted.into(),
+            frame_state: Mutex::default(),
             submitted: false.into(),
             focused: Once::new(),
             fades: Mutex::default(),
         }
     }
 
-    /// Returns false if xrWaitFrame didn't block and won't, so the caller has to pace the app.
+    /// Waits for the next frame, unless one is waited for already. Returns false if xrWaitFrame
+    /// didn't block and won't, so the caller has to pace the app.
     fn maybe_wait_frame(&self, session_data: &SessionData) -> bool {
         tracy_span!();
         if self.openxr.is_lost() {
             return false;
         }
-        let mut frame_lock = { session_data.comp_data.0.lock().unwrap() };
-        {
-            let mut state = self.frame_state.lock().unwrap();
-            // The waited frame failed to begin. Waiting again before it was begun would block
-            // forever.
-            if *state == FrameState::Waited {
-                return false;
+        // Another thread already waiting gets the next frame, which this one waits for too.
+        let waiter = &session_data.comp_data.waiter;
+        let (mut waiter, blocked) = match waiter.try_lock() {
+            Ok(waiter) => (waiter, false),
+            Err(TryLockError::Poisoned(e)) => (e.into_inner(), false),
+            Err(TryLockError::WouldBlock) => {
+                (waiter.lock().unwrap_or_else(PoisonError::into_inner), true)
             }
-            state.advance_to(FrameState::Waited);
+        };
+        // A frame that failed to begin is still waited. Waiting again before it was begun would
+        // block forever.
+        if self.frame_state.lock().unwrap().waited {
+            return blocked;
         }
-        let Some(ctrl) = frame_lock.as_mut() else {
-            debug!("no frame controller - not starting frame");
+        let Some(waiter) = waiter.as_mut() else {
+            debug!("no frame controller - not waiting for frame");
+            self.frame_state.lock().unwrap().waited = true;
             // The temporary session is replaced on the first Submit, unless that can't happen.
             return self.openxr.restart_blocked().is_none();
         };
 
-        #[macros::any_graphics(DynFrameController)]
-        fn wait_frame<G: GraphicsBackend + 'static>(
-            ctrl: &mut FrameController<G>,
-        ) -> xr::Result<(xr::Time, i64, u32)> {
-            ctrl.wait_frame()
-        }
-
-        let Some((display_time, display_period, dropped)) = self.openxr.check(
-            "Waiting for frame",
-            ctrl.with_any_graphics_mut::<wait_frame>(()),
-        ) else {
-            // No frame was waited, so the next WaitGetPoses waits again.
-            *self.frame_state.lock().unwrap() = FrameState::Submitted;
+        let frame = {
+            tracy_span!("wait frame");
+            waiter.wait()
+        };
+        // No frame was waited, so the next WaitGetPoses waits again.
+        let Some(frame) = self.openxr.check("Waiting for frame", frame) else {
             return false;
         };
+
+        #[macros::any_graphics(DynFrameController)]
+        fn frame_waited<G: GraphicsBackend + 'static>(
+            ctrl: &mut FrameController<G>,
+            frame: xr::FrameState,
+        ) -> u32 {
+            ctrl.frame_waited(frame)
+        }
+
+        let dropped = session_data
+            .comp_data
+            .ctrl
+            .lock()
+            .unwrap()
+            .as_mut()
+            .map_or(0, |ctrl| ctrl.with_any_graphics_mut::<frame_waited>(frame));
+        // Set while still holding the waiter, so no other thread waits again in between.
+        self.frame_state.lock().unwrap().waited = true;
         self.metrics.last_dropped.store(dropped, Ordering::Relaxed);
         self.metrics.dropped.fetch_add(dropped, Ordering::Relaxed);
-        self.openxr.set_frame_timing(display_time, display_period);
+        self.openxr.set_frame_timing(
+            frame.predicted_display_time,
+            frame.predicted_display_period.as_nanos(),
+        );
         true
     }
 
+    /// Begins the waited frame. A frame that is still begun is never discarded for it.
     fn maybe_begin_frame(&self, session_data: &SessionData) {
         tracy_span!();
         if self.openxr.is_lost() {
             return;
         }
-        let mut frame_lock = { session_data.comp_data.0.lock().unwrap() };
-        if !self
-            .frame_state
-            .lock()
-            .unwrap()
-            .advance_to(FrameState::Begun)
-        {
-            debug!("not starting frame - already begun or submitted");
+        // Held across the whole call, like when ending a frame, so begun can't change meanwhile.
+        let mut frame_lock = session_data.comp_data.ctrl.lock().unwrap();
+        let state = *self.frame_state.lock().unwrap();
+        if !state.waited || state.begun {
+            debug!("not starting frame - none waited, or the last one wasn't ended ({state:?})");
             return;
+        }
+        let begun = FrameState {
+            waited: false,
+            begun: true,
         };
         let Some(ctrl) = frame_lock.as_mut() else {
             debug!("no frame controller - not starting frame");
+            *self.frame_state.lock().unwrap() = begun;
             return;
         };
 
@@ -241,16 +256,10 @@ impl Compositor {
             ctrl.begin_frame()
         }
 
-        if self
-            .openxr
-            .check(
-                "Beginning frame",
-                ctrl.with_any_graphics_mut::<begin_frame>(()),
-            )
-            .is_none()
-        {
-            // The frame is still waited, so the next WaitGetPoses tries to begin it again.
-            *self.frame_state.lock().unwrap() = FrameState::Waited;
+        let result = ctrl.with_any_graphics_mut::<begin_frame>(());
+        // Otherwise the frame is still waited, so the next WaitGetPoses tries to begin it again.
+        if self.openxr.check("Beginning frame", result).is_some() {
+            *self.frame_state.lock().unwrap() = begun;
         }
     }
 
@@ -285,7 +294,7 @@ impl Compositor {
             .session_data
             .get()
             .comp_data
-            .0
+            .ctrl
             .lock()
             .unwrap()
             .is_some()
@@ -377,7 +386,7 @@ impl Compositor {
         }
 
         let mut session_lock = self.openxr.session_data.get();
-        let mut frame_lock = session_lock.comp_data.0.lock().unwrap();
+        let mut frame_lock = session_lock.comp_data.ctrl.lock().unwrap();
 
         let ctrl = match frame_lock.as_mut() {
             Some(ctrl) => ctrl,
@@ -392,7 +401,7 @@ impl Compositor {
                 info!("Received game texture, restarted session with new data");
 
                 session_lock = self.openxr.session_data.get();
-                frame_lock = session_lock.comp_data.0.lock().unwrap();
+                frame_lock = session_lock.comp_data.ctrl.lock().unwrap();
                 // Another thread's restart may have gone back to a temporary session meanwhile.
                 let Some(ctrl) = frame_lock.as_mut() else {
                     return vr::EVRCompositorError::InvalidTexture;
@@ -496,7 +505,7 @@ impl openxr_data::Compositor for Compositor {
                     }
                     .into()
                 }
-                data.0
+                data.ctrl
                     .lock()
                     .unwrap()
                     .take()
@@ -527,7 +536,6 @@ impl openxr_data::Compositor for Compositor {
             data: TempBackendData<G>,
             openxr: &OpenXrData<Compositor>,
             session_data: &SessionData,
-            waiter: xr::FrameWaiter,
             stream: FrameStream,
         ) -> DynFrameController
         where
@@ -540,7 +548,6 @@ impl openxr_data::Compositor for Compositor {
             FrameController::new(
                 openxr,
                 session_data,
-                waiter,
                 stream.try_into().unwrap_or_else(|_| unreachable!()),
                 data.backend,
                 data.swapchain_create_info,
@@ -548,31 +555,23 @@ impl openxr_data::Compositor for Compositor {
             .into()
         }
 
-        *session_data.comp_data.0.lock().unwrap() = Some(
+        *session_data.comp_data.ctrl.lock().unwrap() = Some(
             backend_data.with_any_graphics_owned::<new_frame_controller>((
                 &self.openxr,
                 session_data,
-                waiter,
                 stream,
             )),
         );
+        *session_data.comp_data.waiter.lock().unwrap() = Some(waiter);
 
-        let old_state = std::mem::replace(
-            &mut *self.frame_state.lock().unwrap(),
-            FrameState::Submitted,
-        );
-
+        // A frame waited for after the begun one can't be waited for before beginning that.
+        let old_state = std::mem::take(&mut *self.frame_state.lock().unwrap());
         trace!("returning to {old_state:?} frame state");
-        match old_state {
-            FrameState::Submitted => {}
-            FrameState::Waited => {
-                self.maybe_wait_frame(session_data);
-            }
-            FrameState::Begun => {
-                if self.maybe_wait_frame(session_data) {
-                    self.maybe_begin_frame(session_data);
-                }
-            }
+        if (old_state.waited || old_state.begun)
+            && self.maybe_wait_frame(session_data)
+            && old_state.begun
+        {
+            self.maybe_begin_frame(session_data);
         }
     }
 }
@@ -649,6 +648,14 @@ impl vr::IVRCompositor029_Interface for Compositor {
         }
 
         let session_data = self.openxr.session_data.get();
+        let state = *self.frame_state.lock().unwrap();
+        if state.begun && state.waited {
+            // The app didn't hand off its last frame, which beginning this one would discard.
+            self.PostPresentHandoff();
+        } else if !state.waited && !state.begun {
+            // WaitGetPoses ran before the last frame was begun, so it couldn't wait for this one.
+            self.maybe_wait_frame(&session_data);
+        }
         self.maybe_begin_frame(&session_data);
         vr::EVRCompositorError::None
     }
@@ -749,7 +756,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
             .session_data
             .get()
             .comp_data
-            .0
+            .ctrl
             .lock()
             .unwrap()
             .iter_mut()
@@ -843,7 +850,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
             .session_data
             .get()
             .comp_data
-            .0
+            .ctrl
             .lock()
             .unwrap()
             .iter_mut()
@@ -1061,25 +1068,27 @@ impl vr::IVRCompositor029_Interface for Compositor {
         }
         let session_data = self.openxr.session_data.get();
         // A frame handed off without being begun only shows overlays, as long as no eyes were
-        // submitted. Otherwise the app already waited for its next frame before handing this one
-        // off, and that frame must not be ended empty.
+        // submitted. Eyes submitted without a begun frame mean the app has yet to begin the waited
+        // frame with SubmitExplicitTimingData, which would find it taken otherwise.
         let submitted = self.submitted.swap(false, Ordering::Relaxed);
-        if !submitted && *self.frame_state.lock().unwrap() == FrameState::Waited {
+        let state = *self.frame_state.lock().unwrap();
+        if !submitted && state.waited && !state.begun {
             self.maybe_begin_frame(&session_data);
         }
-        let mut frame_lock = session_data.comp_data.0.lock().unwrap();
+        let mut frame_lock = session_data.comp_data.ctrl.lock().unwrap();
+        if !self.frame_state.lock().unwrap().begun {
+            return;
+        }
         let Some(ctrl) = frame_lock.as_mut() else {
             debug!("no frame controller - not presenting frame");
+            self.frame_state.lock().unwrap().begun = false;
             return;
         };
 
-        if *self.frame_state.lock().unwrap() != FrameState::Begun {
-            return;
-        }
-
         trace!("presenting frame");
         let system = self.system.force(|i| System::new(self.openxr.clone(), i));
-        // Even if the frame took long enough for get_display_time to use the current time.
+        // Only used if the frame's own display time is unknown, even if the frame took long enough
+        // for get_display_time to use the current time.
         let display_time = self.openxr.waited_display_time();
         let overlays = self.overlays.get();
         let fade = self
@@ -1099,11 +1108,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
         ));
         // A frame that failed to end is discarded by the next xrBeginFrame.
         let submitted = self.openxr.check("Ending frame", result).unwrap_or(false);
-
-        self.frame_state
-            .lock()
-            .unwrap()
-            .advance_to(FrameState::Submitted);
+        self.frame_state.lock().unwrap().begun = false;
 
         if submitted {
             self.metrics.submits.fetch_add(1, Ordering::Relaxed);
@@ -1263,15 +1268,17 @@ impl vr::IVRCompositor029_Interface for Compositor {
             let timing_mode = *self.timing_mode.lock().unwrap();
             let app_handoff = timing_mode
                 == vr::EVRCompositorTimingMode::Explicit_ApplicationPerformsPostPresentHandoff;
-            if !app_handoff && *self.frame_state.lock().unwrap() == FrameState::Begun {
+            if !app_handoff && self.frame_state.lock().unwrap().begun {
                 self.PostPresentHandoff();
             }
 
-            let waited = *self.frame_state.lock().unwrap() == FrameState::Waited;
+            let waited = self.frame_state.lock().unwrap().waited;
             let paced = if waited && app_handoff {
                 // OpenVR promises not to use the app's queue here in this mode, which beginning or
                 // ending a frame may do, and another xrWaitFrame would block until the waited
                 // frame is begun. Return poses for the waited frame again, paced like a wait below.
+                // A frame the app is still rendering doesn't keep the next one from being waited
+                // for, though.
                 false
             } else {
                 if waited {
@@ -1281,7 +1288,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
                     // Normal games that submit each frame don't end up in Waited
                     // state here, so this is transparent to them.
                     self.maybe_begin_frame(&session_data);
-                    if *self.frame_state.lock().unwrap() == FrameState::Begun {
+                    if self.frame_state.lock().unwrap().begun {
                         self.PostPresentHandoff();
                     }
                 }
@@ -1292,7 +1299,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
                 }
                 paced
             };
-            (paced, session_data.comp_data.0.lock().unwrap().is_some())
+            (paced, session_data.comp_data.ctrl.lock().unwrap().is_some())
         };
         if !paced || !frame_loop {
             // Nothing blocked in xrWaitFrame: before the first Submit, in apps that don't render,
@@ -1628,16 +1635,21 @@ struct FrameController<G: GraphicsBackend> {
     /// into the swapchain.
     backend: G,
     stream: xr::FrameStream<G::Api>,
-    waiter: xr::FrameWaiter,
     swapchain_data: Option<SwapchainData<G::Api>>,
     image_index: usize,
     image_acquired: bool,
+    /// Whether the begun frame is shown.
     should_render: bool,
     app_suspend_render: bool,
     app_fade_grid: bool,
     eyes_submitted: [Option<SubmittedEye>; 2],
     submitting_null: bool,
+    /// The predicted display time of the last frame waited for.
     last_display_time: Option<xr::Time>,
+    /// The frame waited for but not begun yet, which may come after the begun one.
+    waited_frame: Option<xr::FrameState>,
+    /// The predicted display time of the begun frame.
+    display_time: Option<xr::Time>,
 }
 supported_backends_enum!(enum DynFrameController: FrameController);
 
@@ -1691,7 +1703,6 @@ impl<G: GraphicsBackend> FrameController<G> {
     fn new(
         openxr: &OpenXrData<Compositor>,
         session_data: &SessionData,
-        waiter: xr::FrameWaiter,
         stream: xr::FrameStream<G::Api>,
         mut backend: G,
         create_info: Option<xr::SwapchainCreateInfo<G::Api>>,
@@ -1719,7 +1730,6 @@ impl<G: GraphicsBackend> FrameController<G> {
 
         Self {
             stream,
-            waiter,
             swapchain_data,
             image_index: 0,
             image_acquired: false,
@@ -1729,6 +1739,8 @@ impl<G: GraphicsBackend> FrameController<G> {
             eyes_submitted: Default::default(),
             submitting_null: false,
             last_display_time: None,
+            waited_frame: None,
+            display_time: None,
             backend,
         }
     }
@@ -1776,20 +1788,14 @@ impl<G: GraphicsBackend> FrameController<G> {
         Ok(())
     }
 
-    /// Returns the predicted display time and period, and the vsyncs missed since the last frame.
-    fn wait_frame(&mut self) -> xr::Result<(xr::Time, i64, u32)> {
-        let frame_state = {
-            tracy_span!("wait frame");
-            self.waiter.wait()?
-        };
-        self.should_render = frame_state.should_render && !self.app_suspend_render;
-        let display_time = frame_state.predicted_display_time;
-        let period = frame_state.predicted_display_period.as_nanos();
-        let missed = self
-            .last_display_time
+    /// Keeps `frame` for when it's begun. Returns the vsyncs missed since the last frame.
+    fn frame_waited(&mut self, frame: xr::FrameState) -> u32 {
+        let display_time = frame.predicted_display_time;
+        let period = frame.predicted_display_period.as_nanos();
+        self.waited_frame = Some(frame);
+        self.last_display_time
             .replace(display_time)
-            .map_or(0, |last| missed_vsyncs(last, display_time, period));
-        Ok((display_time, period, missed))
+            .map_or(0, |last| missed_vsyncs(last, display_time, period))
     }
 
     fn begin_frame(&mut self) -> xr::Result<()> {
@@ -1811,6 +1817,9 @@ impl<G: GraphicsBackend> FrameController<G> {
             tracy_span!("begin frame");
             self.stream.begin()?;
         }
+        let frame = self.waited_frame.take();
+        self.should_render = frame.is_some_and(|f| f.should_render) && !self.app_suspend_render;
+        self.display_time = frame.map(|f| f.predicted_display_time);
         self.eyes_submitted = [None; 2];
         self.submitting_null = false;
         trace!("frame begin");
@@ -1923,6 +1932,7 @@ impl<G: GraphicsBackend> FrameController<G> {
     }
 
     /// Returns whether the frame had app content. `fade` is blended over the app content.
+    /// `display_time` is only used if the frame's own is unknown.
     fn end_frame(
         &mut self,
         session_data: &SessionData,
@@ -1936,14 +1946,18 @@ impl<G: GraphicsBackend> FrameController<G> {
         for<'b> &'b crate::overlay::AnySwapchainMap:
             TryInto<&'b crate::overlay::SwapchainMap<G::Api>, Error: std::fmt::Display>,
     {
+        // The next frame may have been waited for already.
+        let display_time = self.display_time.take().unwrap_or(display_time);
         let mut proj_layer_views = Vec::new();
 
         if self.should_render
             && !self.submitting_null
             && self.eyes_submitted.iter().all(|eye| eye.is_some())
             // Without located views there's no FOV to show the image with.
-            && let Some(crate::system::ViewData { flags, views }) =
-                system.located_views(session_data.current_origin_as_reference_space())
+            && let Some(crate::system::ViewData { flags, views }) = system.located_views_at(
+                session_data.current_origin_as_reference_space(),
+                display_time,
+            )
         {
             let swapchain_data = self
                 .swapchain_data
@@ -2471,7 +2485,7 @@ mod tests {
             }
 
             let data = self.comp.openxr.session_data.get();
-            let lock = data.comp_data.0.lock().unwrap();
+            let lock = data.comp_data.ctrl.lock().unwrap();
             let DynFrameController::Fake(ctrl) = lock.as_ref().unwrap() else {
                 panic!("Frame controller was not set up or not faked!");
             };
@@ -2545,7 +2559,15 @@ mod tests {
             assert_eq!(f.wait_get_poses(), None);
             assert_eq!(f.submit(vr::EVREye::Left), IsNotSceneApplication);
             assert_eq!(xr.session_data.get().session.as_raw(), session);
-            assert!(xr.session_data.get().comp_data.0.lock().unwrap().is_none());
+            assert!(
+                xr.session_data
+                    .get()
+                    .comp_data
+                    .ctrl
+                    .lock()
+                    .unwrap()
+                    .is_none()
+            );
         }
     }
 
@@ -2967,7 +2989,7 @@ mod tests {
 
         let get_swapchain_width = || {
             let data = f.comp.openxr.session_data.get();
-            let lock = data.comp_data.0.lock().unwrap();
+            let lock = data.comp_data.ctrl.lock().unwrap();
             let DynFrameController::Fake(ctrl) = lock.as_ref().unwrap() else {
                 panic!("Frame controller was not set up or not faked!");
             };
@@ -3213,7 +3235,7 @@ mod tests {
             assert_eq!(f.submit(vr::EVREye::Right), None);
 
             let data = f.comp.openxr.session_data.get();
-            let lock = data.comp_data.0.lock().unwrap();
+            let lock = data.comp_data.ctrl.lock().unwrap();
             let DynFrameController::Fake(ctrl) = lock.as_ref().unwrap() else {
                 panic!("Frame controller was not set up or not faked!");
             };
@@ -3256,7 +3278,7 @@ mod tests {
         assert_eq!(f.wait_get_poses(), None);
         {
             let data = f.comp.openxr.session_data.get();
-            let lock = data.comp_data.0.lock().unwrap();
+            let lock = data.comp_data.ctrl.lock().unwrap();
             let DynFrameController::Fake(ctrl) = lock.as_ref().unwrap() else {
                 panic!("Frame controller was not set up or not faked!");
             };
@@ -3270,7 +3292,7 @@ mod tests {
         assert_eq!(f.wait_get_poses(), None);
         {
             let data = f.comp.openxr.session_data.get();
-            let lock = data.comp_data.0.lock().unwrap();
+            let lock = data.comp_data.ctrl.lock().unwrap();
             let DynFrameController::Fake(ctrl) = lock.as_ref().unwrap() else {
                 panic!("Frame controller was not set up or not faked!");
             };
@@ -3284,7 +3306,7 @@ mod tests {
         assert_eq!(f.wait_get_poses(), None);
         {
             let data = f.comp.openxr.session_data.get();
-            let lock = data.comp_data.0.lock().unwrap();
+            let lock = data.comp_data.ctrl.lock().unwrap();
             let DynFrameController::Fake(ctrl) = lock.as_ref().unwrap() else {
                 panic!("Frame controller was not set up or not faked!");
             };
@@ -3311,7 +3333,7 @@ mod tests {
             SWAPCHAIN_HEIGHT.set(10);
 
             let data = f.comp.openxr.session_data.get();
-            let lock = data.comp_data.0.lock().unwrap();
+            let lock = data.comp_data.ctrl.lock().unwrap();
             let DynFrameController::Fake(ctrl) = lock.as_ref().unwrap() else {
                 panic!("Frame controller was not set up or not faked!");
             };
@@ -3367,7 +3389,7 @@ mod tests {
         assert_eq!(f.submit(vr::EVREye::Left), None);
         assert_eq!(f.submit(vr::EVREye::Right), None);
         let data = f.comp.openxr.session_data.get();
-        let lock = data.comp_data.0.lock().unwrap();
+        let lock = data.comp_data.ctrl.lock().unwrap();
         let DynFrameController::Fake(ctrl) = lock.as_ref().unwrap() else {
             panic!("Frame controller was not set up or not faked!");
         };
@@ -3462,6 +3484,9 @@ mod tests {
         f.comp.SetExplicitTimingMode(
             vr::EVRCompositorTimingMode::Explicit_ApplicationPerformsPostPresentHandoff,
         );
+        // The frame WaitGetPoses began before.
+        f.comp.PostPresentHandoff();
+        f.check_frame_state(fakexr::FrameState::Ended);
 
         for _ in 0..2 {
             assert_eq!(f.wait_get_poses(), None);
@@ -3470,16 +3495,128 @@ mod tests {
             f.check_frame_state(fakexr::FrameState::Ended);
         }
 
-        // A frame the app submitted to but handed off only after waiting for the next one isn't
-        // replaced with an empty one.
-        assert_eq!(f.wait_get_poses(), None);
-        assert_eq!(f.comp.SubmitExplicitTimingData(), None);
+        // Eyes submitted before the waited frame was begun don't make it end empty.
         assert_eq!(f.submit(vr::EVREye::Left), None);
         assert_eq!(f.submit(vr::EVREye::Right), None);
         assert_eq!(f.wait_get_poses(), None);
         f.check_frame_state(fakexr::FrameState::Waited);
         f.comp.PostPresentHandoff();
         f.check_frame_state(fakexr::FrameState::Waited);
+        assert_eq!(f.comp.SubmitExplicitTimingData(), None);
+        f.check_frame_state(fakexr::FrameState::Begun);
+    }
+
+    /// Apps handing off frames themselves may wait for the next frame on another thread before
+    /// handing off the current one, which still has to be shown, like it was rendered.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn explicit_timing_wait_before_handoff() {
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+        let session = f.raw_session();
+        fakexr::set_views(session, [view(-0.03, FOV), view(0.03, FOV)]);
+        fakexr::record_projection_layers(session);
+        f.comp.SetExplicitTimingMode(
+            vr::EVRCompositorTimingMode::Explicit_ApplicationPerformsPostPresentHandoff,
+        );
+        // The frame WaitGetPoses began before.
+        f.comp.PostPresentHandoff();
+
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(f.comp.SubmitExplicitTimingData(), None);
+        let frame = f.comp.openxr.waited_display_time();
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+
+        // Waiting doesn't keep the render thread from submitting and handing off meanwhile.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let comp = f.comp.clone();
+        fakexr::on_next_wait_frame(session, move || {
+            let session_data = comp.openxr.session_data.get();
+            let ctrl_free = session_data.comp_data.ctrl.try_lock().is_ok();
+            let state_free = comp.frame_state.try_lock().is_ok();
+            tx.send(ctrl_free && state_free).unwrap();
+        });
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(rx.try_recv(), Ok(true));
+        let next_frame = f.comp.openxr.waited_display_time();
+        assert_ne!(next_frame, frame);
+        f.check_frame_state(fakexr::FrameState::Waited);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        fakexr::on_next_end_frame(session, move || tx.send(()).unwrap());
+        f.comp.PostPresentHandoff();
+        assert!(rx.try_recv().is_ok(), "frame was not ended");
+        assert_eq!(fakexr::last_frame_display_time(session), frame);
+        assert_eq!(fakexr::last_views_time(session), frame);
+        assert!(fakexr::last_projection_layer(session).is_some());
+
+        assert_eq!(f.comp.SubmitExplicitTimingData(), None);
+        f.check_frame_state(fakexr::FrameState::Begun);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        f.comp.PostPresentHandoff();
+        f.check_frame_state(fakexr::FrameState::Ended);
+        assert_eq!(fakexr::last_frame_display_time(session), next_frame);
+        assert!(fakexr::last_projection_layer(session).is_some());
+        assert_eq!(fakexr::discarded_frames(session), 0);
+    }
+
+    /// WaitGetPoses for the next frame can also come before the render thread begins the current
+    /// one, so it can't wait for the next frame yet. SubmitExplicitTimingData does then.
+    #[test]
+    fn explicit_timing_wait_before_begin() {
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+        let session = f.raw_session();
+        f.comp.SetExplicitTimingMode(
+            vr::EVRCompositorTimingMode::Explicit_ApplicationPerformsPostPresentHandoff,
+        );
+        f.comp.PostPresentHandoff();
+
+        assert_eq!(f.wait_get_poses(), None);
+        let frame = f.comp.openxr.waited_display_time();
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(f.comp.SubmitExplicitTimingData(), None);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        f.comp.PostPresentHandoff();
+        f.check_frame_state(fakexr::FrameState::Ended);
+        assert_eq!(fakexr::last_frame_display_time(session), frame);
+
+        assert_eq!(f.comp.SubmitExplicitTimingData(), None);
+        f.check_frame_state(fakexr::FrameState::Begun);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        f.comp.PostPresentHandoff();
+        f.check_frame_state(fakexr::FrameState::Ended);
+        assert!(fakexr::last_frame_display_time(session).as_nanos() > frame.as_nanos());
+        assert_eq!(fakexr::discarded_frames(session), 0);
+    }
+
+    /// An app that doesn't hand off a frame gets it ended before the next one begins, rather than
+    /// discarded.
+    #[test]
+    fn explicit_timing_frame_not_handed_off() {
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+        let session = f.raw_session();
+        f.comp.SetExplicitTimingMode(
+            vr::EVRCompositorTimingMode::Explicit_ApplicationPerformsPostPresentHandoff,
+        );
+        f.comp.PostPresentHandoff();
+
+        for _ in 0..3 {
+            assert_eq!(f.wait_get_poses(), None);
+            let (tx, rx) = std::sync::mpsc::channel();
+            fakexr::on_next_end_frame(session, move || tx.send(()).unwrap());
+            assert_eq!(f.comp.SubmitExplicitTimingData(), None);
+            f.check_frame_state(fakexr::FrameState::Begun);
+            assert_eq!(f.submit(vr::EVREye::Left), None);
+            assert_eq!(f.submit(vr::EVREye::Right), None);
+            let _ = rx.try_recv();
+        }
+        assert_eq!(fakexr::discarded_frames(session), 0);
     }
 
     /// The runtime ending the frame keeps flushing frames the app never submitted.
@@ -3744,7 +3881,7 @@ mod tests {
 
         frame();
         let session_data = f.comp.openxr.session_data.get();
-        let ctrl = session_data.comp_data.0.lock().unwrap().take();
+        let ctrl = session_data.comp_data.ctrl.lock().unwrap().take();
         drop(ctrl);
         assert_eq!(waits(), [true]);
     }
@@ -4470,7 +4607,7 @@ mod tests {
                 .session_data
                 .get()
                 .comp_data
-                .0
+                .ctrl
                 .lock()
                 .unwrap()
                 .is_some()

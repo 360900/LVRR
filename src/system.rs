@@ -276,6 +276,25 @@ impl Views {
             }
         }
     }
+
+    /// The views for a frame displayed at `time` rather than the current one, which aren't
+    /// cached. Falls back to the current frame's views.
+    fn get_at(
+        &mut self,
+        session: &SessionData,
+        openxr: &RealOpenXrData,
+        ty: xr::ReferenceSpaceType,
+        time: xr::Time,
+    ) -> Option<ViewData> {
+        if !openxr.is_lost() {
+            let mut cache = ViewCache::default();
+            match cache.get_views(session, time, ty, &mut self.last_valid_fovs) {
+                Ok(data) => return Some(data),
+                Err(e) => openxr.handle_error("xrLocateViews", e),
+            }
+        }
+        self.get(session, openxr, ty)
+    }
 }
 
 /// Used until the runtime reports a valid FOV, or locates the views at all.
@@ -457,6 +476,18 @@ impl System {
         let session = self.openxr.session_data.get();
         let mut views = self.views.lock().unwrap();
         views.get(&session, &self.openxr, ty)
+    }
+
+    /// Like [Self::located_views], for the frame displayed at `time`. That is an earlier frame
+    /// than the current one when the app waited for the next frame before handing this one off.
+    pub fn located_views_at(&self, ty: xr::ReferenceSpaceType, time: xr::Time) -> Option<ViewData> {
+        if time == self.openxr.waited_display_time() {
+            return self.located_views(ty);
+        }
+        tracy_span!();
+        let session = self.openxr.session_data.get();
+        let mut views = self.views.lock().unwrap();
+        views.get_at(&session, &self.openxr, ty, time)
     }
 
     /// Like [Self::located_views], with made up views if there are none - apps can't handle
