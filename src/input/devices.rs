@@ -1662,6 +1662,66 @@ mod tests {
     }
 
     #[test]
+    fn hand_tracked_pose_is_per_origin() {
+        use std::sync::atomic::Ordering;
+
+        fakexr::set_hand_tracking_supported(true);
+        let f = Fixture::new();
+        fakexr::set_reference_space_pose(
+            f.raw_session(),
+            xr::ReferenceSpaceType::STAGE,
+            xr::Posef {
+                position: xr::Vector3f {
+                    x: 0.0,
+                    y: -1.5,
+                    z: 0.0,
+                },
+                ..xr::Posef::IDENTITY
+            },
+        );
+        // A hand without a controller, so its pose is synthesised from the joints.
+        fakexr::set_hand_tracked(
+            f.raw_session(),
+            fakexr::UserPath::LeftHand,
+            Some(xr::HandTrackingDataSourceEXT::UNOBSTRUCTED),
+        );
+
+        let pose = |origin| {
+            let pose = f
+                .input
+                .get_controller_pose(Hand::Left, Some(origin), xr::Time::from_nanos(1), None)
+                .unwrap();
+            assert!(pose.bPoseIsValid, "{origin:?}");
+            assert!(pose.bDeviceIsConnected, "{origin:?}");
+            pose.mDeviceToAbsoluteTracking.m
+        };
+        let seated = pose(vr::ETrackingUniverseOrigin::Seated);
+        let standing = pose(vr::ETrackingUniverseOrigin::Standing);
+
+        let session = f.input.openxr.session_data.get();
+        let devices = session.input_data.devices.read().unwrap();
+        let TrackedDeviceType::Controller {
+            pose_is_synthesised,
+            ..
+        } = devices.get_controller(Hand::Left).unwrap().get_type()
+        else {
+            unreachable!()
+        };
+        assert!(pose_is_synthesised.load(Ordering::Relaxed));
+
+        // Each origin is located in its own space: only the stage offset tells them apart.
+        for (row, (seated, standing)) in seated.iter().zip(standing).enumerate() {
+            for (col, (seated, standing)) in seated.iter().zip(standing).enumerate() {
+                let offset = if (row, col) == (1, 3) { 1.5 } else { 0.0 };
+                assert!(
+                    (standing - seated - offset).abs() < 1e-5,
+                    "[{row}][{col}]: seated {seated}, standing {standing}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn tracked_hands_report_hand_identity() {
         use crate::input::profiles::{
             oculus_touch::OculusTouch, simple_controller::SimpleController,
