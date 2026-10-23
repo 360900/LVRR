@@ -17,6 +17,7 @@ use openxr as xr;
 use slotmap::{SecondaryMap, SlotMap};
 use std::collections::{HashMap, HashSet};
 use std::env::current_dir;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 fn action_map_to_secondary<T>(
@@ -352,6 +353,22 @@ fn has_input<P: InteractionProfile>(hand: Hand, subpath: DynSubpath) -> bool {
         })
 }
 
+/// An environment variable, or in tests the value [TEST_ENV] gives it on this thread, since the
+/// process environment is shared by the tests running alongside.
+fn env_var(name: &str) -> Option<OsString> {
+    #[cfg(test)]
+    if let Some(value) = TEST_ENV.with_borrow(|env| env.get(name).cloned()) {
+        return Some(value);
+    }
+    std::env::var_os(name)
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static TEST_ENV: std::cell::RefCell<HashMap<&'static str, OsString>> =
+        Default::default();
+}
+
 /// Whether two paths name the same file, even if spelled differently.
 pub(super) fn same_file(a: &Path, b: &Path) -> bool {
     a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
@@ -364,12 +381,14 @@ impl<C: openxr_data::Compositor> Input<C> {
         bindings: Vec<actions::DefaultBindings>,
         context: &mut context::BindingsLoadContext,
     ) {
-        let custom_bindings_dir = std::env::var_os("XRIZER_CUSTOM_BINDINGS_DIR")
+        let custom_bindings_dir = env_var("XRIZER_CUSTOM_BINDINGS_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| current_dir().unwrap_or_default().join("xrizer"));
 
         let mut bindings = bindings;
-        if let Ok(additional_bindings) = std::env::var("XRIZER_ADDITIONAL_BINDINGS") {
+        if let Some(additional_bindings) =
+            env_var("XRIZER_ADDITIONAL_BINDINGS").and_then(|value| value.into_string().ok())
+        {
             // additional_bindings is a semicolon-separated list of controller_type names.
             bindings.extend(additional_bindings.split(';').map(|s| {
                 let controller_type: actions::ControllerType = s.parse().unwrap();

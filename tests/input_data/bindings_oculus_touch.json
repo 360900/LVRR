@@ -1,0 +1,17 @@
+{
+	"bindings": {
+		"/actions/main": {
+			"sources": [
+				{
+					"mode": "button",
+					"path": "/user/hand/left/input/x",
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/boolact"
+						}
+					}
+				}
+			]
+		}
+	}
+}

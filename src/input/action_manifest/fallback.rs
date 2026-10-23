@@ -229,4 +229,45 @@ mod tests {
         assert_eq!(convert(Menu, Hand::Right, &vive), Some(Menu));
         assert_eq!(convert(Trackpad, Hand::Left, &vive), Some(Thumbstick));
     }
+
+    #[test]
+    fn trackpad_controllers() {
+        use crate::input::profiles::{
+            vive_controller::ViveWands, wmr::ms_motion_controller::HolographicController,
+        };
+        use DynSubpath::*;
+        let convert = |subpath, hand, source: &ControllerType, target_has: &dyn Fn(_, _) -> _| {
+            let input = DynInputPath {
+                hand,
+                subpath,
+                component: None,
+            };
+            convert_input(input, source, &[], &target_has)
+        };
+        let vive = &super::super::has_input::<ViveWands>;
+        let wmr = &super::super::has_input::<HolographicController>;
+        let touch = ControllerType::OculusTouch;
+        // The stick moves to the Vive trackpad, and the face buttons have nowhere to go.
+        assert_eq!(
+            convert(Thumbstick, Hand::Left, &touch, vive),
+            Some(Trackpad)
+        );
+        assert_eq!(convert(X, Hand::Left, &touch, vive), None);
+        assert_eq!(convert(Menu, Hand::Left, &touch, vive), Some(Menu));
+        assert_eq!(convert(Squeeze, Hand::Right, &touch, vive), Some(Squeeze));
+        assert_eq!(convert(Trigger, Hand::Right, &touch, vive), Some(Trigger));
+        // WMR controllers have both axes.
+        let knuckles = ControllerType::Knuckles;
+        assert_eq!(
+            convert(Thumbstick, Hand::Right, &knuckles, wmr),
+            Some(Thumbstick)
+        );
+        assert_eq!(
+            convert(Trackpad, Hand::Right, &knuckles, wmr),
+            Some(Trackpad)
+        );
+        assert_eq!(convert(B, Hand::Right, &knuckles, wmr), None);
+        let vive = ControllerType::ViveController;
+        assert_eq!(convert(Trackpad, Hand::Left, &vive, wmr), Some(Thumbstick));
+    }
 }

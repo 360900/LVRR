@@ -775,6 +775,65 @@ fn menu_bindings_converted_in_every_set() {
     );
 }
 
+/// Sets an environment variable for the action manifests this thread loads.
+fn set_test_env(name: &'static str, value: &str) {
+    super::action_manifest::TEST_ENV.with_borrow_mut(|env| env.insert(name, value.into()));
+}
+
+#[test]
+fn custom_bindings_for_unlisted_controllers() {
+    set_test_env(
+        "XRIZER_CUSTOM_BINDINGS_DIR",
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/input_data/custom_bindings"
+        ),
+    );
+    let f = Fixture::new();
+    f.load_actions(c"actions_vive_only.json");
+
+    // The custom bindings rather than converted ones.
+    f.verify_bindings::<bool>(
+        Knuckles::profile_path(),
+        c"/actions/main/in/boolact",
+        ["/user/hand/left/input/a/click".into()],
+    );
+    // Controllers without them are still converted.
+    f.verify_bindings::<bool>(
+        OculusTouch::profile_path(),
+        c"/actions/main/in/boolact",
+        [
+            "/user/hand/left/input/menu/click".into(),
+            "/user/hand/right/input/b/click".into(),
+            "/user/hand/right/input/trigger/value".into(),
+        ],
+    );
+}
+
+#[test]
+fn additional_bindings() {
+    set_test_env("XRIZER_ADDITIONAL_BINDINGS", "oculus_touch;vive_controller");
+    let f = Fixture::new();
+    f.load_actions(c"actions_vive_only.json");
+
+    // From bindings_oculus_touch.json next to the manifest, rather than converted.
+    f.verify_bindings::<bool>(
+        OculusTouch::profile_path(),
+        c"/actions/main/in/boolact",
+        ["/user/hand/left/input/x/click".into()],
+    );
+    // The game's own bindings win over bindings_vive_controller.json.
+    f.verify_bindings::<bool>(
+        ViveWands::profile_path(),
+        c"/actions/main/in/boolact",
+        [
+            "/user/hand/left/input/menu/click".into(),
+            "/user/hand/right/input/menu/click".into(),
+            "/user/hand/right/input/trigger/click".into(),
+        ],
+    );
+}
+
 #[test]
 fn controllers_tracked_without_bindings() {
     let f = Fixture::new();
