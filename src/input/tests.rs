@@ -431,6 +431,34 @@ fn null_names() {
 }
 
 #[test]
+fn concurrent_lookups_share_handles() {
+    const THREADS: usize = 4;
+    let f = Fixture::new();
+    for i in 0..50 {
+        let set = std::ffi::CString::new(format!("/actions/set{i}")).unwrap();
+        let action = std::ffi::CString::new(format!("/actions/set{i}/in/action")).unwrap();
+        let source = std::ffi::CString::new(format!("/user/hand/left/input/thing{i}")).unwrap();
+        let barrier = Barrier::new(THREADS);
+        let handles: Vec<_> = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        (
+                            f.get_action_set_handle(&set),
+                            f.get_action_handle(&action),
+                            f.get_input_source_handle(&source),
+                        )
+                    })
+                })
+                .collect();
+            threads.into_iter().map(|t| t.join().unwrap()).collect()
+        });
+        assert!(handles.iter().all(|h| *h == handles[0]), "{handles:?}");
+    }
+}
+
+#[test]
 fn dominant_hand() {
     use vr::ETrackedControllerRole as Role;
     let f = Fixture::new();

@@ -171,6 +171,25 @@ impl<T> Drop for WriteOnDrop<T> {
     }
 }
 
+/// The key of the value in `map` that `matches`, inserting `new()` if there is none.
+fn find_or_insert<K: Key, V>(
+    map: &RwLock<SlotMap<K, V>>,
+    matches: impl Fn(&V) -> bool,
+    new: impl FnOnce() -> V,
+) -> K {
+    let find = |map: &SlotMap<K, V>| {
+        map.iter()
+            .find(|(_, value)| matches(value))
+            .map(|(key, _)| key)
+    };
+    if let Some(key) = find(&map.read().unwrap()) {
+        return key;
+    }
+    let mut map = map.write().unwrap();
+    // Another thread may have inserted it while no lock was held.
+    find(&map).unwrap_or_else(|| map.insert(new()))
+}
+
 /// For `action.state(..).unwrap_or_else(inactive_state)`: an action whose state can't be read,
 /// e.g. because the runtime lost the session, reads as inactive.
 fn inactive_state<T: xr::ActionInput + Default>(error: xr::sys::Result) -> xr::ActionState<T> {
@@ -265,27 +284,14 @@ impl<C: openxr_data::Compositor> Input<C> {
 
     /// Get or create a handle for a specific input source path
     /// (e.g., `/user/hand/right/input/trigger/click`).
-    fn get_or_create_input_source_handle(&self, path_str: &str) -> u64 {
-        let c_path = CString::new(path_str).unwrap();
-        {
-            let guard = self.input_source_map.read().unwrap();
-            if let Some((key, _)) = guard
-                .iter()
-                .find(|(_, src)| src.as_c_str() == c_path.as_c_str())
-            {
-                return key.data().as_ffi();
-            }
-        }
-        let mut guard = self.input_source_map.write().unwrap();
-        if let Some((key, _)) = guard
-            .iter()
-            .find(|(_, src)| src.as_c_str() == c_path.as_c_str())
-        {
-            key.data().as_ffi()
-        } else {
-            let key = guard.insert(c_path);
-            key.data().as_ffi()
-        }
+    fn get_or_create_input_source_handle(&self, path: &CStr) -> u64 {
+        find_or_insert(
+            &self.input_source_map,
+            |src| src.as_c_str() == path,
+            || path.into(),
+        )
+        .data()
+        .as_ffi()
     }
 
     /// Collect all action keys that share the same input suffix across
@@ -1480,7 +1486,9 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
                     ] {
                         if idx < origin_out_count as usize {
                             let handle = match path_opt {
-                                Some(path_str) => self.get_or_create_input_source_handle(path_str),
+                                Some(path_str) => self.get_or_create_input_source_handle(
+                                    &CString::new(path_str.as_str()).unwrap(),
+                                ),
                                 None => hand_key.data().as_ffi(),
                             };
                             out[idx] = handle;
@@ -2202,18 +2210,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         }
         let path = unsafe { CStr::from_ptr(input_source_path) };
 
-        let ret = {
-            let guard = self.input_source_map.read().unwrap();
-            match guard.iter().find(|(_, src)| src.as_c_str() == path) {
-                Some((key, _)) => key.data().as_ffi(),
-                None => {
-                    drop(guard);
-                    let mut guard = self.input_source_map.write().unwrap();
-                    let key = guard.insert(path.into());
-                    key.data().as_ffi()
-                }
-            }
-        };
+        let ret = self.get_or_create_input_source_handle(path);
         if let Some(handle) = unsafe { handle.as_mut() } {
             debug!("requested handle for path {path:?}: {ret}");
             *handle = ret;
@@ -2234,16 +2231,13 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         let name = unsafe { CStr::from_ptr(action_name) }
             .to_string_lossy()
             .to_lowercase();
-        let guard = self.action_map.read().unwrap();
-        let val = match guard.iter().find(|(_, action)| action.path == name) {
-            Some((key, _)) => key.data().as_ffi(),
-            None => {
-                drop(guard);
-                let mut guard = self.action_map.write().unwrap();
-                let key = guard.insert(Action { path: name });
-                key.data().as_ffi()
-            }
-        };
+        let val = find_or_insert(
+            &self.action_map,
+            |action| action.path == name,
+            || Action { path: name.clone() },
+        )
+        .data()
+        .as_ffi();
 
         if let Some(handle) = unsafe { handle.as_mut() } {
             *handle = val;
@@ -2264,16 +2258,9 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         let name = unsafe { CStr::from_ptr(action_set_name) }
             .to_string_lossy()
             .to_lowercase();
-        let guard = self.set_map.read().unwrap();
-        let val = match guard.iter().find(|(_, set)| **set == name) {
-            Some((key, _)) => key.data().as_ffi(),
-            None => {
-                drop(guard);
-                let mut guard = self.set_map.write().unwrap();
-                let key = guard.insert(name);
-                key.data().as_ffi()
-            }
-        };
+        let val = find_or_insert(&self.set_map, |set| *set == name, || name.clone())
+            .data()
+            .as_ffi();
 
         if let Some(handle) = unsafe { handle.as_mut() } {
             *handle = val;
