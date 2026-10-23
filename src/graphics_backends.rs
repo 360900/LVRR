@@ -42,6 +42,12 @@ pub trait GraphicsBackend: Into<SupportedBackend> {
         true
     }
 
+    /// Layer `index` of an array texture, for SubmitWithArrayIndex. None if there is no such
+    /// layer. Textures without layers only have layer 0, which is shown like with Submit.
+    fn array_layer(&self, texture: Self::OpenVrTexture, index: u32) -> Option<Self::OpenVrTexture> {
+        (index == 0).then_some(texture)
+    }
+
     /// Backend implementation for swapchain_info_for_texture. Callers should
     /// use swapchain_info_for_texture instead, which fixes up invalid values
     /// games are known to submit.

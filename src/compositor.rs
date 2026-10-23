@@ -326,6 +326,129 @@ impl Compositor {
             restart_error(e)
         })
     }
+
+    /// Submit, with the layer of an array texture to show for SubmitWithArrayIndex.
+    fn submit_texture(
+        &self,
+        eye: vr::EVREye,
+        texture: *const vr::Texture_t,
+        array_index: Option<u32>,
+        bounds: *const vr::VRTextureBounds_t,
+        submit_flags: vr::EVRSubmitFlags,
+    ) -> vr::EVRCompositorError {
+        if !self.openxr.can_render() {
+            crate::warn_once!(
+                "{:?} application tried to submit a frame",
+                self.openxr.application_type
+            );
+            return vr::EVRCompositorError::IsNotSceneApplication;
+        }
+
+        let bounds = unsafe { bounds.as_ref() }
+            .copied()
+            .unwrap_or(vr::VRTextureBounds_t {
+                uMin: 0.0,
+                vMin: 0.0,
+                uMax: 1.0,
+                vMax: 1.0,
+            });
+
+        // Superhot passes crazy bounds on startup, and GMod VRMod passes bounds slightly outside
+        // the texture.
+        let Some(clamped_bounds) = bounds.clamped() else {
+            return vr::EVRCompositorError::InvalidBounds;
+        };
+
+        let texture_with_pose = texture.cast::<vr::VRTextureWithPose_t>();
+        let Some(texture) = (unsafe { texture.as_ref() }) else {
+            return vr::EVRCompositorError::InvalidTexture;
+        };
+
+        if !SupportedBackend::is_texture_type_supported(texture.eType) {
+            crate::warn_once!(
+                "Unsupported texture type submitted: {:?} (under Proton, the texture could not be translated to Vulkan)",
+                texture.eType
+            );
+            return vr::EVRCompositorError::InvalidTexture;
+        }
+
+        if !self.focused.is_completed() || self.openxr.is_lost() {
+            return vr::EVRCompositorError::DoNotHaveFocus;
+        }
+
+        let mut session_lock = self.openxr.session_data.get();
+        let mut frame_lock = session_lock.comp_data.0.lock().unwrap();
+
+        let ctrl = match frame_lock.as_mut() {
+            Some(ctrl) => ctrl,
+            None => {
+                drop(frame_lock);
+                drop(session_lock);
+
+                if let Err(e) = self.initialize_real_session(texture, clamped_bounds, submit_flags)
+                {
+                    return e;
+                }
+                info!("Received game texture, restarted session with new data");
+
+                session_lock = self.openxr.session_data.get();
+                frame_lock = session_lock.comp_data.0.lock().unwrap();
+                // Another thread's restart may have gone back to a temporary session meanwhile.
+                let Some(ctrl) = frame_lock.as_mut() else {
+                    return vr::EVRCompositorError::InvalidTexture;
+                };
+                ctrl
+            }
+        };
+
+        let render_pose = ((submit_flags & vr::EVRSubmitFlags::TextureWithPose).0 != 0)
+            .then(|| unsafe { &(*texture_with_pose).mDeviceToAbsoluteTracking })
+            .and_then(rigid_pose);
+
+        #[macros::any_graphics(DynFrameController)]
+        fn submit<G: GraphicsBackend + 'static>(
+            ctrl: &mut FrameController<G>,
+            openxr: &OpenXrData<Compositor>,
+            session_data: &SessionData,
+            eye: vr::EVREye,
+            texture: &vr::Texture_t,
+            array_index: Option<u32>,
+            bounds: vr::VRTextureBounds_t,
+            flags: vr::EVRSubmitFlags,
+            render_pose: Option<xr::Posef>,
+        ) -> xr::Result<(), vr::EVRCompositorError>
+        where
+            for<'d> &'d openxr_data::GraphicalSession:
+                TryInto<&'d openxr_data::Session<G::Api>, Error: std::fmt::Display>,
+            G::Format: Eq + std::fmt::Debug,
+        {
+            ctrl.submit_impl(
+                openxr,
+                session_data,
+                eye,
+                texture,
+                array_index,
+                bounds,
+                flags,
+                render_pose,
+            )
+        }
+
+        if let Err(e) = ctrl.with_any_graphics_mut::<submit>((
+            &self.openxr,
+            &session_lock,
+            eye,
+            texture,
+            array_index,
+            bounds,
+            submit_flags,
+            render_pose,
+        )) {
+            return e;
+        }
+        self.submitted.store(true, Ordering::Relaxed);
+        vr::EVRCompositorError::None
+    }
 }
 
 fn fill_vk_extensions_buffer(extensions: String, buffer: *mut c_char, buffer_size: u32) -> u32 {
@@ -1012,11 +1135,14 @@ impl vr::IVRCompositor029_Interface for Compositor {
             return vr::EVRCompositorError::InvalidTexture;
         };
         if texture.eType != vr::ETextureType::Vulkan {
-            // Only Vulkan textures can say which layer to use.
-            return match unTextureArrayIndex {
-                0 => self.Submit(eEye, pTexture, pBounds, nSubmitFlags),
-                _ => vr::EVRCompositorError::InvalidTexture,
-            };
+            // The backend picks the layer, e.g. of an OpenGL array texture.
+            return self.submit_texture(
+                eEye,
+                pTexture,
+                Some(unTextureArrayIndex),
+                pBounds,
+                nSubmitFlags,
+            );
         }
         if texture.handle.is_null() {
             return vr::EVRCompositorError::InvalidTexture;
@@ -1049,115 +1175,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
         bounds: *const vr::VRTextureBounds_t,
         submit_flags: vr::EVRSubmitFlags,
     ) -> vr::EVRCompositorError {
-        if !self.openxr.can_render() {
-            crate::warn_once!(
-                "{:?} application tried to submit a frame",
-                self.openxr.application_type
-            );
-            return vr::EVRCompositorError::IsNotSceneApplication;
-        }
-
-        let bounds = unsafe { bounds.as_ref() }
-            .copied()
-            .unwrap_or(vr::VRTextureBounds_t {
-                uMin: 0.0,
-                vMin: 0.0,
-                uMax: 1.0,
-                vMax: 1.0,
-            });
-
-        // Superhot passes crazy bounds on startup, and GMod VRMod passes bounds slightly outside
-        // the texture.
-        let Some(clamped_bounds) = bounds.clamped() else {
-            return vr::EVRCompositorError::InvalidBounds;
-        };
-
-        let texture_with_pose = texture.cast::<vr::VRTextureWithPose_t>();
-        let Some(texture) = (unsafe { texture.as_ref() }) else {
-            return vr::EVRCompositorError::InvalidTexture;
-        };
-
-        if !SupportedBackend::is_texture_type_supported(texture.eType) {
-            crate::warn_once!(
-                "Unsupported texture type submitted: {:?} (under Proton, the texture could not be translated to Vulkan)",
-                texture.eType
-            );
-            return vr::EVRCompositorError::InvalidTexture;
-        }
-
-        if !self.focused.is_completed() || self.openxr.is_lost() {
-            return vr::EVRCompositorError::DoNotHaveFocus;
-        }
-
-        let mut session_lock = self.openxr.session_data.get();
-        let mut frame_lock = session_lock.comp_data.0.lock().unwrap();
-
-        let ctrl = match frame_lock.as_mut() {
-            Some(ctrl) => ctrl,
-            None => {
-                drop(frame_lock);
-                drop(session_lock);
-
-                if let Err(e) = self.initialize_real_session(texture, clamped_bounds, submit_flags)
-                {
-                    return e;
-                }
-                info!("Received game texture, restarted session with new data");
-
-                session_lock = self.openxr.session_data.get();
-                frame_lock = session_lock.comp_data.0.lock().unwrap();
-                // Another thread's restart may have gone back to a temporary session meanwhile.
-                let Some(ctrl) = frame_lock.as_mut() else {
-                    return vr::EVRCompositorError::InvalidTexture;
-                };
-                ctrl
-            }
-        };
-
-        let render_pose = ((submit_flags & vr::EVRSubmitFlags::TextureWithPose).0 != 0)
-            .then(|| unsafe { &(*texture_with_pose).mDeviceToAbsoluteTracking })
-            .and_then(rigid_pose);
-
-        #[macros::any_graphics(DynFrameController)]
-        fn submit<G: GraphicsBackend + 'static>(
-            ctrl: &mut FrameController<G>,
-            openxr: &OpenXrData<Compositor>,
-            session_data: &SessionData,
-            eye: vr::EVREye,
-            texture: &vr::Texture_t,
-            bounds: vr::VRTextureBounds_t,
-            flags: vr::EVRSubmitFlags,
-            render_pose: Option<xr::Posef>,
-        ) -> xr::Result<(), vr::EVRCompositorError>
-        where
-            for<'d> &'d openxr_data::GraphicalSession:
-                TryInto<&'d openxr_data::Session<G::Api>, Error: std::fmt::Display>,
-            G::Format: Eq + std::fmt::Debug,
-        {
-            ctrl.submit_impl(
-                openxr,
-                session_data,
-                eye,
-                texture,
-                bounds,
-                flags,
-                render_pose,
-            )
-        }
-
-        if let Err(e) = ctrl.with_any_graphics_mut::<submit>((
-            &self.openxr,
-            &session_lock,
-            eye,
-            texture,
-            bounds,
-            submit_flags,
-            render_pose,
-        )) {
-            return e;
-        }
-        self.submitted.store(true, Ordering::Relaxed);
-        vr::EVRCompositorError::None
+        self.submit_texture(eye, texture, None, bounds, submit_flags)
     }
 
     fn GetLastPoseForTrackedDeviceIndex(
@@ -1807,6 +1825,7 @@ impl<G: GraphicsBackend> FrameController<G> {
         session_data: &SessionData,
         eye: vr::EVREye,
         texture: &vr::Texture_t,
+        array_index: Option<u32>,
         requested_bounds: vr::VRTextureBounds_t,
         submit_flags: vr::EVRSubmitFlags,
         render_pose: Option<xr::Posef>,
@@ -1827,6 +1846,13 @@ impl<G: GraphicsBackend> FrameController<G> {
             crate::warn_once!("Texture submitted from a different graphics device than before");
             return Err(vr::EVRCompositorError::TextureIsOnWrongDevice);
         }
+        let texture = match array_index {
+            Some(index) => self
+                .backend
+                .array_layer(texture, index)
+                .ok_or(vr::EVRCompositorError::InvalidTexture)?,
+            None => texture,
+        };
         let bounds = requested_bounds
             .clamped()
             .ok_or(vr::EVRCompositorError::InvalidBounds)?;
@@ -2196,6 +2222,8 @@ mod tests {
         /// Whether its swapchain still existed each time a backend waited for its copies.
         static SWAPCHAIN_EXISTED_ON_WAIT: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
         static CONTEXT_CURRENT: Cell<bool> = const { Cell::new(true) };
+        /// The layer the last SubmitWithArrayIndex asked for.
+        static ARRAY_LAYER: Cell<Option<u32>> = const { Cell::new(Option::None) };
     }
 
     pub enum FakeApi {}
@@ -2273,6 +2301,16 @@ mod tests {
 
         fn is_texture_on_device(&self, texture: Self::OpenVrTexture) -> bool {
             std::ptr::eq(texture.cast(), Arc::as_ptr(&self.vk))
+        }
+
+        /// Fake textures have a layer per eye.
+        fn array_layer(
+            &self,
+            texture: Self::OpenVrTexture,
+            index: u32,
+        ) -> Option<Self::OpenVrTexture> {
+            ARRAY_LAYER.set(Some(index));
+            (index < 2).then_some(texture)
         }
 
         fn raw_swapchain_info_for_texture(
@@ -4193,9 +4231,17 @@ mod tests {
             submit(vr::EVREye::Left, std::ptr::null(), 0),
             InvalidTexture
         );
-        // Only Vulkan textures have layers.
-        assert_eq!(submit(vr::EVREye::Left, &texture, 1), InvalidTexture);
-        assert_eq!(submit(vr::EVREye::Left, &texture, 0), None);
+        // The backend picks the layer of other textures, like OpenGL array textures.
+        assert_eq!(submit(vr::EVREye::Left, &texture, 2), InvalidTexture);
+        assert_eq!(ARRAY_LAYER.take(), Some(2));
+        assert_eq!(submit(vr::EVREye::Left, &texture, 1), None);
+        assert_eq!(ARRAY_LAYER.take(), Some(1));
+        assert_eq!(submit(vr::EVREye::Right, &texture, 0), None);
+        assert_eq!(ARRAY_LAYER.take(), Some(0));
+        // Plain Submit doesn't ask for a layer.
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(ARRAY_LAYER.take(), Option::None);
         let vulkan = texture_of_type(vr::ETextureType::Vulkan, std::ptr::null_mut());
         assert_eq!(submit(vr::EVREye::Right, &vulkan, 1), InvalidTexture);
     }

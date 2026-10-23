@@ -529,6 +529,20 @@ impl GraphicsBackend for GlData {
         Some(GlTexture {
             name: texture.handle as usize as GLuint,
             target,
+            layer: None,
+        })
+    }
+
+    fn array_layer(&self, texture: GlTexture, index: u32) -> Option<GlTexture> {
+        if texture.target != gl::TEXTURE_2D_ARRAY {
+            return (index == 0).then_some(texture);
+        }
+        let layer = GLint::try_from(index)
+            .ok()
+            .filter(|&layer| layer < texture.info().layers)?;
+        Some(GlTexture {
+            layer: Some(layer),
+            ..texture
         })
     }
 
@@ -579,9 +593,18 @@ impl GraphicsBackend for GlData {
         let dst = GlTexture {
             name: self.images[image_index],
             target: gl::TEXTURE_2D_ARRAY,
+            layer: None,
         };
         let layer = GLint::from(eye == vr::EVREye::Right);
-        self.copy(texture, layer, color_space, bounds, dst, layer)
+        let info = texture.info();
+        let rect = info.rect(bounds);
+        // Plain Submit has no layer index, so assume stereo array textures have a layer per eye.
+        // Not verified against SteamVR.
+        let src_layer = texture
+            .layer
+            .unwrap_or(if layer < info.layers { layer } else { 0 });
+        unsafe { self.copy(texture, src_layer, &info, rect, color_space, dst, layer) };
+        rect.extent
     }
 
     fn copy_overlay_to_swapchain(
@@ -596,8 +619,22 @@ impl GraphicsBackend for GlData {
         let dst = GlTexture {
             name: self.images[image_index],
             target: gl::TEXTURE_2D,
+            layer: None,
         };
-        self.copy(texture, 0, color_space, bounds, dst, 0)
+        let info = texture.info();
+        let rect = info.rect(bounds);
+        unsafe {
+            self.copy(
+                texture,
+                texture.layer.unwrap_or(0),
+                &info,
+                rect,
+                color_space,
+                dst,
+                0,
+            )
+        };
+        rect.extent
     }
 }
 
@@ -606,6 +643,8 @@ impl GraphicsBackend for GlData {
 pub struct GlTexture {
     name: GLuint,
     target: GLenum,
+    /// The layer of an array texture SubmitWithArrayIndex asked for.
+    layer: Option<GLint>,
 }
 
 struct TextureInfo {
@@ -715,25 +754,23 @@ impl GlTexture {
 }
 
 impl GlData {
-    /// Copies `src` (layer `eye` if it's an array) into layer `dst_layer` of the swapchain
-    /// image `dst`.
-    fn copy(
+    /// Copies `rect` of layer `src_layer` of `src`, described by `info`, to the origin of layer
+    /// `dst_layer` of the swapchain image `dst`.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn copy(
         &self,
         src: GlTexture,
-        eye: GLint,
+        src_layer: GLint,
+        info: &TextureInfo,
+        rect: xr::Rect2Di,
         color_space: vr::EColorSpace,
-        bounds: vr::VRTextureBounds_t,
         dst: GlTexture,
         dst_layer: GLint,
-    ) -> xr::Extent2Di {
-        let info = src.info();
-        let rect = info.rect(bounds);
+    ) {
         let (src, src_layer) = if info.samples > 0 {
-            (unsafe { self.resolve(src, &info) }, 0)
+            (unsafe { self.resolve(src, info) }, 0)
         } else {
-            // Plain Submit has no layer index, so assume stereo array textures have a layer per
-            // eye. Not verified against SteamVR.
-            (src, if eye < info.layers { eye } else { 0 })
+            (src, src_layer)
         };
 
         match copy_method(info.format, color_space, self.format) {
@@ -760,8 +797,6 @@ impl GlData {
                 self.blit(src, src_layer, rect, dst, dst_layer, srgb)
             },
         }
-
-        rect.extent
     }
 
     /// Resolves a multisampled renderbuffer into a single-sample one with the same size and
@@ -775,6 +810,7 @@ impl GlData {
             let dst = GlTexture {
                 name: resolved.renderbuffer,
                 target: gl::RENDERBUFFER,
+                layer: None,
             };
             if (resolved.width, resolved.height, resolved.format)
                 != (info.width, info.height, info.format)
