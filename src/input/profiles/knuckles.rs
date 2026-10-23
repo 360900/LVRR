@@ -121,6 +121,7 @@ impl InteractionProfile for Knuckles {
             squeeze: c.leftright::<Squeeze, Force, _, _>(),
             squeeze_click: c.leftright::<Squeeze, Force, _, _>(),
             grip_click: c.leftright::<A, Click, _, _>(),
+            axis2_touch: vec![],
             grip_touch: [
                 c.leftright::<A, Touch, _, _>(),
                 c.leftright::<Squeeze, Value, _, _>(),

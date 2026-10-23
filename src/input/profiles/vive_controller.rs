@@ -106,6 +106,7 @@ impl InteractionProfile for ViveWands {
             app_menu_touch: vec![],
             a_touch: vec![],
             trigger_touch: vec![],
+            axis2_touch: vec![],
             grip_touch: vec![],
             grip_click: vec![],
             main_xy_deflect: vec![],

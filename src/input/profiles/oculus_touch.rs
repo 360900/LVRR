@@ -115,6 +115,7 @@ impl InteractionProfile for OculusTouch {
                 c.into::<Right<A, Touch>, _>(),
             ]
             .concat(),
+            axis2_touch: vec![],
             grip_touch: vec![],
             grip_click: vec![],
             main_xy_deflect: vec![],

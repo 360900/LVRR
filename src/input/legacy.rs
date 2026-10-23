@@ -408,7 +408,11 @@ fn read_hand_state(
         squeeze_click || bool_state(&actions.grip_click) || grip_pressed,
         bool_state(&actions.grip_touch),
     );
-    set_button(vr::EVRButtonId::Axis2, squeeze_click, false);
+    set_button(
+        vr::EVRButtonId::Axis2,
+        squeeze_click,
+        bool_state(&actions.axis2_touch),
+    );
 
     let main_xy = actions
         .main_xy
@@ -471,6 +475,8 @@ pub(super) struct Legacy<M: ActionsMarker> {
     pub grip_click: Action<bool, M>,
     /// Touches k_EButton_Grip.
     pub grip_touch: Action<bool, M>,
+    /// Touches k_EButton_Axis2 (the Focus 3 grip, as in SteamVR's legacy bindings).
+    pub axis2_touch: Action<bool, M>,
     pub trigger: Action<f32, M>,
     pub squeeze: Action<f32, M>,
     // This can be a stick or a trackpad, so we'll just call it "xy"
@@ -518,6 +524,7 @@ impl LegacyBindings {
             squeeze_click,
             grip_click,
             grip_touch,
+            axis2_touch,
             trigger,
             squeeze,
             main_xy,
@@ -570,6 +577,9 @@ impl LegacyActionData {
                 .unwrap(),
             grip_touch: set
                 .create_action("grip-touch", "Grip Touch", &leftright)
+                .unwrap(),
+            axis2_touch: set
+                .create_action("axis2-touch", "Axis 2 Touch", &leftright)
                 .unwrap(),
             main_xy: set
                 .create_action("main-joystick", "Main Joystick/Trackpad", &leftright)
@@ -896,6 +906,15 @@ mod tests {
     }
 
     #[test]
+    fn button_axis2_touch() {
+        legacy_input(
+            |actions| actions.axis2_touch.as_raw(),
+            &[vr::EVRButtonId::Axis2],
+            true,
+        );
+    }
+
+    #[test]
     fn touch_bindings() {
         let (f, _) = legacy_fixture(|actions| actions.a.as_raw());
         assert_legacy_bindings::<OculusTouch>(
@@ -922,14 +941,23 @@ mod tests {
                 "/user/hand/right/input/b/touch",
             ],
         );
-        assert_legacy_bindings::<ViveFocus3>(
-            &f,
-            |actions| actions.grip_touch.as_raw(),
-            &[
-                "/user/hand/left/input/squeeze/touch",
-                "/user/hand/right/input/squeeze/touch",
-            ],
-        );
+        // Like SteamVR's, the Focus 3 grip touches Axis2 as well.
+        for action in [
+            |actions: &super::LegacyActions| actions.grip_touch.as_raw(),
+            |actions: &super::LegacyActions| actions.axis2_touch.as_raw(),
+        ] {
+            assert_legacy_bindings::<ViveFocus3>(
+                &f,
+                action,
+                &[
+                    "/user/hand/left/input/squeeze/touch",
+                    "/user/hand/right/input/squeeze/touch",
+                ],
+            );
+        }
+        // Others hide it.
+        assert_legacy_bindings::<Knuckles>(&f, |actions| actions.axis2_touch.as_raw(), &[]);
+        assert_legacy_bindings::<FrameController>(&f, |actions| actions.axis2_touch.as_raw(), &[]);
     }
 
     #[test]

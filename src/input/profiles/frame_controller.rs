@@ -164,6 +164,7 @@ impl InteractionProfile for FrameController {
             squeeze: c.leftright::<Squeeze, Value, _, _>(),
             squeeze_click: c.leftright::<Squeeze, Value, _, _>(),
             grip_click: vec![],
+            axis2_touch: vec![],
             grip_touch: c.leftright::<Squeeze, Touch, _, _>(),
             main_xy: c.leftright::<Thumbstick, (), _, _>(),
             main_xy_click: c.leftright::<Thumbstick, Click, _, _>(),
