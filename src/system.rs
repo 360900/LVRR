@@ -2115,6 +2115,61 @@ mod tests {
         assert_eq!(empty.unTriangleCount, 0);
     }
 
+    /// Mask vertices are moved from the canted views to the parallel ones, and scaled to their
+    /// projection.
+    #[test]
+    #[cfg_attr(miri, ignore)] // The meshes are leaked on purpose.
+    fn hidden_area_mesh_vertices() {
+        let xr =
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
+        let system = System::new(xr.clone(), &Injector::default());
+        let session = xr.session_data.get().session.as_raw();
+        let fov = xr::Fovf {
+            angle_left: -std::f32::consts::FRAC_PI_4,
+            angle_right: std::f32::consts::FRAC_PI_4,
+            angle_up: std::f32::consts::FRAC_PI_4,
+            angle_down: -std::f32::consts::FRAC_PI_4,
+        };
+        let view = |yaw: f32, x| {
+            let q = Quat::from_rotation_y(yaw.to_radians());
+            let pose = xr::Posef {
+                orientation: xr::Quaternionf {
+                    x: q.x,
+                    y: q.y,
+                    z: q.z,
+                    w: q.w,
+                },
+                position: xr::Vector3f { x, y: 0.0, z: 0.0 },
+            };
+            (pose, fov)
+        };
+        // The left and right edges of the views' FOV, halfway up.
+        let edges = [(-1.0, 0.0), (1.0, 0.0), (0.0, 1.0)]
+            .map(|(x, y)| xr::Vector2f { x, y })
+            .to_vec();
+        fakexr::set_visibility_mask(Some((edges, vec![0, 1, 2])));
+
+        // Parallel views, then views turned outwards.
+        for yaw in [0.0, 10.0] {
+            fakexr::set_views(session, [view(yaw, -0.03), view(-yaw, 0.03)]);
+            system.reset_views();
+            for eye in [vr::EVREye::Left, vr::EVREye::Right] {
+                let mesh = vr::IVRSystem026_Interface::GetHiddenAreaMesh(
+                    &system,
+                    eye,
+                    vr::EHiddenAreaMeshType::Standard,
+                );
+                assert_eq!(mesh.unTriangleCount, 1);
+                let vertices = unsafe { std::slice::from_raw_parts(mesh.pVertexData, 3) };
+                let x = [vertices[0].v[0], vertices[1].v[0]];
+                assert!(
+                    x[0].abs() < 1e-5 && (x[1] - 1.0).abs() < 1e-5,
+                    "{yaw} degrees, {eye:?}: {x:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn hidden_area_mesh_without_views() {
         let xr =
