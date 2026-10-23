@@ -20,5 +20,6 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
 	&& rustup target add i686-unknown-linux-gnu \
 	&& rustup toolchain install nightly \
 	&& rustup +nightly component add miri \
-	&& cargo +nightly miri setup
+	&& cargo +nightly miri setup \
+	&& curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C /cargo/bin
 ENV PATH="/cargo/bin:$PATH"
