@@ -917,7 +917,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
             m_nNumFramePresents: metrics.index.load(Ordering::Relaxed).wrapping_add(dropped),
             m_nNumDroppedFrames: dropped,
             m_nNumFrameSubmits: metrics.submits.load(Ordering::Relaxed),
-            m_flSumTargetFrameTimes: metrics.target_frame_times.load(),
+            m_flSumTargetFrameTimes: vr::vrshared_double(metrics.target_frame_times.load()),
             ..Default::default()
         };
         // Older versions of the struct are smaller.
@@ -4526,8 +4526,8 @@ mod tests {
         assert_eq!(buf.stats.m_nNumFramePresents, 4);
         assert_eq!(buf.stats.m_nNumDroppedFrames, 0);
         assert_eq!(buf.stats.m_nNumFrameSubmits, 2);
-        assert!(buf.stats.m_flSumTargetFrameTimes > 0.0);
-        assert_eq!(buf.stats.m_flSumCompositorCPUTimeMS, 0.0);
+        assert!(buf.stats.m_flSumTargetFrameTimes.0 > 0.0);
+        assert_eq!(buf.stats.m_flSumCompositorCPUTimeMS.0, 0.0);
         assert_eq!(buf.canary, u64::MAX);
 
         // an older, smaller struct only has its own bytes written

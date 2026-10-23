@@ -2,7 +2,7 @@ use bindgen::callbacks::ParseCallbacks;
 
 use prettyplease::unparse;
 use proc_macro2::TokenStream;
-use quote::{ToTokens, format_ident};
+use quote::{ToTokens, format_ident, quote};
 use regex::Regex;
 use std::collections::{HashMap, hash_map::Entry};
 use std::fs::File;
@@ -55,6 +55,11 @@ static RUST_ENUM_FIELDS: &[(&str, &str)] = &[("RenderModel_TextureMap_t", "forma
 
 static BITFIELD_ENUMS: &[&str] = &["EVRSubmitFlags", "EVRComponentProperty", "EKeyboardFlags"];
 
+// On Linux the headers declare these aligned(8), so structs using them have the same layout in 32
+// and 64 bit processes. Bindgen drops the alignment of typedefs, which leaves them 4 byte aligned
+// on i686, so they're blocklisted and replaced by the newtypes in process_and_versionify_types.
+static VRSHARED_TYPES: &[&str] = &["vrshared_double", "vrshared_uint64_t"];
+
 #[derive(Debug)]
 struct Callbacks;
 
@@ -67,6 +72,17 @@ impl ParseCallbacks for Callbacks {
             }
             _ => Vec::new(),
         }
+    }
+
+    // The VRSHARED_TYPES newtypes derive everything bindgen derives for the structs using them.
+    fn blocklisted_type_implements_trait(
+        &self,
+        name: &str,
+        _derive_trait: bindgen::callbacks::DeriveTrait,
+    ) -> Option<bindgen::callbacks::ImplementsTrait> {
+        VRSHARED_TYPES
+            .contains(&name)
+            .then_some(bindgen::callbacks::ImplementsTrait::Yes)
     }
 
     // All of the enums have an annoying prefix that is just the name
@@ -221,6 +237,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
         .allowlist_item("vr.*::EKeyboardFlags")
         .allowlist_item("Vk.*")
         .blocklist_function("vr.*::VR_.*")
+        .blocklist_type(format!("vr.*::({})", VRSHARED_TYPES.join("|")))
         .derive_default(true)
         .no_default("vr.*::IVR.*")
         .default_enum_style(bindgen::EnumVariation::NewType {
@@ -1116,6 +1133,18 @@ fn process_and_versionify_types(tokens: TokenStream) -> String {
     });
     let vr_uses: syn::UseTree = parse_quote! { {#(#item_names),*} };
 
+    // Replace the blocklisted VRSHARED_TYPES.
+    let vrshared_types = quote! {
+        /// `double` that is 8 byte aligned on i686 too, like the typedef in the headers.
+        #[repr(C, align(8))]
+        #[derive(Debug, Default, Copy, Clone, PartialEq, PartialOrd)]
+        pub struct vrshared_double(pub f64);
+        /// `uint64_t` that is 8 byte aligned on i686 too, like the typedef in the headers.
+        #[repr(C, align(8))]
+        #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        pub struct vrshared_uint64_t(pub u64);
+    };
+
     let attrs = root_mod.attrs;
     let m: syn::ItemMod = parse_quote! {
         #(#attrs)*
@@ -1130,6 +1159,7 @@ fn process_and_versionify_types(tokens: TokenStream) -> String {
             #(#outer_items)*
             pub mod vr {
                 use super::#vr_uses;
+                #vrshared_types
                 #(#unversioned)*
                 #(#versioned)*
             }
