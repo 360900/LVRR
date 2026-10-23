@@ -603,7 +603,19 @@ impl GraphicsBackend for GlData {
         let src_layer = texture
             .layer
             .unwrap_or(if layer < info.layers { layer } else { 0 });
-        unsafe { self.copy(texture, src_layer, &info, rect, color_space, dst, layer) };
+        // A flipped image is flipped back by the projection layer's FOV.
+        unsafe {
+            self.copy(
+                texture,
+                src_layer,
+                &info,
+                rect,
+                color_space,
+                dst,
+                layer,
+                Mirror::default(),
+            )
+        };
         rect.extent
     }
 
@@ -623,6 +635,8 @@ impl GraphicsBackend for GlData {
         };
         let info = texture.info();
         let rect = info.rect(bounds);
+        // Overlay layers can't flip the image, so flipped bounds are applied here.
+        let mirror = Mirror::from_bounds(bounds);
         unsafe {
             self.copy(
                 texture,
@@ -632,6 +646,7 @@ impl GraphicsBackend for GlData {
                 color_space,
                 dst,
                 0,
+                mirror,
             )
         };
         rect.extent
@@ -645,6 +660,38 @@ pub struct GlTexture {
     target: GLenum,
     /// The layer of an array texture SubmitWithArrayIndex asked for.
     layer: Option<GLint>,
+}
+
+/// The axes a copy mirrors, which bounds with min > max ask for.
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+struct Mirror {
+    horizontal: bool,
+    vertical: bool,
+}
+
+impl Mirror {
+    fn from_bounds(bounds: vr::VRTextureBounds_t) -> Self {
+        Self {
+            horizontal: bounds.uMin > bounds.uMax,
+            vertical: bounds.vMin > bounds.vMax,
+        }
+    }
+
+    /// The corners of the area a blit of `extent` covers at the destination's origin:
+    /// [x0, y0, x1, y1]. A corner past its opposite one mirrors that axis.
+    fn blit_corners(self, extent: xr::Extent2Di) -> [GLint; 4] {
+        let (x0, x1) = if self.horizontal {
+            (extent.width, 0)
+        } else {
+            (0, extent.width)
+        };
+        let (y0, y1) = if self.vertical {
+            (extent.height, 0)
+        } else {
+            (0, extent.height)
+        };
+        [x0, y0, x1, y1]
+    }
 }
 
 struct TextureInfo {
@@ -766,6 +813,7 @@ impl GlData {
         color_space: vr::EColorSpace,
         dst: GlTexture,
         dst_layer: GLint,
+        mirror: Mirror,
     ) {
         let (src, src_layer) = if info.samples > 0 {
             (unsafe { self.resolve(src, info) }, 0)
@@ -774,6 +822,10 @@ impl GlData {
         };
 
         match copy_method(info.format, color_space, self.format) {
+            // Only blits can mirror. Without GL_FRAMEBUFFER_SRGB they don't convert either.
+            CopyMethod::Copy if mirror != Mirror::default() => unsafe {
+                self.blit(src, src_layer, rect, dst, dst_layer, false, mirror)
+            },
             CopyMethod::Copy => unsafe {
                 gl::CopyImageSubData(
                     src.name,
@@ -794,7 +846,7 @@ impl GlData {
                 );
             },
             CopyMethod::Blit { srgb } => unsafe {
-                self.blit(src, src_layer, rect, dst, dst_layer, srgb)
+                self.blit(src, src_layer, rect, dst, dst_layer, srgb, mirror)
             },
         }
     }
@@ -831,13 +883,14 @@ impl GlData {
                     height: info.height,
                 },
             };
-            self.blit(src, 0, rect, dst, 0, true);
+            self.blit(src, 0, rect, dst, 0, true, Mirror::default());
             dst
         }
     }
 
     /// Blits `rect` of `src` to the origin of `dst`, with GL_FRAMEBUFFER_SRGB set to `srgb`.
     /// Leaves the app's framebuffer bindings and state as they were.
+    #[allow(clippy::too_many_arguments)]
     unsafe fn blit(
         &self,
         src: GlTexture,
@@ -846,6 +899,7 @@ impl GlData {
         dst: GlTexture,
         dst_layer: GLint,
         srgb: bool,
+        mirror: Mirror,
     ) {
         unsafe {
             let [mut read_fbo, mut draw_fbo] = [0; 2];
@@ -859,15 +913,16 @@ impl GlData {
             src.attach(gl::READ_FRAMEBUFFER, src_layer);
             gl::BindFramebuffer(gl::DRAW_FRAMEBUFFER, self.draw_fbo);
             dst.attach(gl::DRAW_FRAMEBUFFER, dst_layer);
+            let [x0, y0, x1, y1] = mirror.blit_corners(rect.extent);
             gl::BlitFramebuffer(
                 rect.offset.x,
                 rect.offset.y,
                 rect.offset.x + rect.extent.width,
                 rect.offset.y + rect.extent.height,
-                0,
-                0,
-                rect.extent.width,
-                rect.extent.height,
+                x0,
+                y0,
+                x1,
+                y1,
                 gl::COLOR_BUFFER_BIT,
                 gl::NEAREST,
             );
@@ -1184,6 +1239,30 @@ mod tests {
             get(Flags::GlRenderBuffer | Flags::LensDistortionAlreadyApplied).target,
             gl::RENDERBUFFER
         );
+    }
+
+    #[test]
+    fn overlay_copies_mirror_flipped_bounds() {
+        let bounds = |u_min, v_min, u_max, v_max| vr::VRTextureBounds_t {
+            uMin: u_min,
+            vMin: v_min,
+            uMax: u_max,
+            vMax: v_max,
+        };
+        let extent = xr::Extent2Di {
+            width: 4,
+            height: 2,
+        };
+        let corners = |b| Mirror::from_bounds(b).blit_corners(extent);
+        assert_eq!(
+            Mirror::from_bounds(bounds(0.0, 0.0, 1.0, 1.0)),
+            Mirror::default()
+        );
+        assert_eq!(corners(bounds(0.0, 0.0, 1.0, 1.0)), [0, 0, 4, 2]);
+        // Like the skybox.
+        assert_eq!(corners(bounds(0.0, 1.0, 1.0, 0.0)), [0, 2, 4, 0]);
+        assert_eq!(corners(bounds(1.0, 0.0, 0.0, 1.0)), [4, 0, 0, 2]);
+        assert_eq!(corners(bounds(0.75, 1.0, 0.25, 0.5)), [4, 2, 0, 0]);
     }
 
     #[test]
