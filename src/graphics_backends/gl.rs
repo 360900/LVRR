@@ -420,6 +420,8 @@ pub struct GlData {
     read_fbo: u32,
     draw_fbo: u32,
     resolved: Mutex<Resolved>,
+    /// The extent last copied to each eye's layer of each swapchain image.
+    eye_extents: Mutex<Vec<[Option<xr::Extent2Di>; 2]>>,
 }
 
 /// Single-sample copy of a multisampled renderbuffer, see [GlData::resolve].
@@ -467,6 +469,7 @@ impl GlData {
             read_fbo: fbos[0],
             draw_fbo: fbos[1],
             resolved: Default::default(),
+            eye_extents: Default::default(),
         })
     }
 }
@@ -552,6 +555,7 @@ impl GraphicsBackend for GlData {
         images: Vec<<Self::Api as xr::Graphics>::SwapchainImage>,
         format: Self::Format,
     ) {
+        *self.eye_extents.get_mut().unwrap() = vec![[None; 2]; images.len()];
         self.images = images;
         self.format = format;
     }
@@ -598,6 +602,14 @@ impl GraphicsBackend for GlData {
         let layer = GLint::from(eye == vr::EVREye::Right);
         let info = texture.info();
         let rect = info.rect(bounds);
+
+        let mut eye_extents = self.eye_extents.lock().unwrap();
+        let last = &mut eye_extents[image_index][layer as usize];
+        if needs_clear(*last, rect.extent) {
+            unsafe { self.clear(dst, layer) };
+        }
+        *last = Some(rect.extent);
+
         // Plain Submit has no layer index, so assume stereo array textures have a layer per eye.
         // Not verified against SteamVR.
         let src_layer = texture
@@ -692,6 +704,13 @@ impl Mirror {
         };
         [x0, y0, x1, y1]
     }
+}
+
+/// Whether an eye's layer of a swapchain image has to be cleared before copying `new` to it.
+/// Runtimes may show the pixels outside of the copied area when reprojecting, which are undefined
+/// in a new image and left over from a larger copy otherwise.
+fn needs_clear(last: Option<xr::Extent2Di>, new: xr::Extent2Di) -> bool {
+    last.is_none_or(|last| new.width < last.width || new.height < last.height)
 }
 
 struct TextureInfo {
@@ -848,6 +867,32 @@ impl GlData {
             CopyMethod::Blit { srgb } => unsafe {
                 self.blit(src, src_layer, rect, dst, dst_layer, srgb, mirror)
             },
+        }
+    }
+
+    /// Clears layer `layer` of `dst` to opaque black. Leaves the app's framebuffer binding and
+    /// state as they were.
+    unsafe fn clear(&self, dst: GlTexture, layer: GLint) {
+        unsafe {
+            let mut draw_fbo = 0;
+            gl::GetIntegerv(gl::DRAW_FRAMEBUFFER_BINDING, &mut draw_fbo);
+            // All of these apply to clears.
+            let scissor_test = set_enabled(gl::SCISSOR_TEST, false);
+            let rasterizer_discard = set_enabled(gl::RASTERIZER_DISCARD, false);
+            let mut color_mask = [gl::TRUE; 4];
+            gl::GetBooleani_v(gl::COLOR_WRITEMASK, 0, color_mask.as_mut_ptr());
+            gl::ColorMaski(0, gl::TRUE, gl::TRUE, gl::TRUE, gl::TRUE);
+
+            gl::BindFramebuffer(gl::DRAW_FRAMEBUFFER, self.draw_fbo);
+            dst.attach(gl::DRAW_FRAMEBUFFER, layer);
+            // Unlike glClear, this leaves the app's clear color alone.
+            gl::ClearBufferfv(gl::COLOR, 0, [0.0, 0.0, 0.0, 1.0].as_ptr());
+
+            let [r, g, b, a] = color_mask;
+            gl::ColorMaski(0, r, g, b, a);
+            set_enabled(gl::RASTERIZER_DISCARD, rasterizer_discard);
+            set_enabled(gl::SCISSOR_TEST, scissor_test);
+            gl::BindFramebuffer(gl::DRAW_FRAMEBUFFER, draw_fbo as GLuint);
         }
     }
 
@@ -1263,6 +1308,17 @@ mod tests {
         assert_eq!(corners(bounds(0.0, 1.0, 1.0, 0.0)), [0, 2, 4, 0]);
         assert_eq!(corners(bounds(1.0, 0.0, 0.0, 1.0)), [4, 0, 0, 2]);
         assert_eq!(corners(bounds(0.75, 1.0, 0.25, 0.5)), [4, 2, 0, 0]);
+    }
+
+    /// An eye's layer is cleared on its first copy, and when the copy shrinks in either direction.
+    #[test]
+    fn eye_layers_cleared_when_copies_shrink() {
+        let extent = |width, height| xr::Extent2Di { width, height };
+        assert!(needs_clear(None, extent(10, 10)));
+        assert!(!needs_clear(Some(extent(10, 10)), extent(10, 10)));
+        assert!(!needs_clear(Some(extent(10, 10)), extent(12, 10)));
+        assert!(needs_clear(Some(extent(10, 10)), extent(9, 10)));
+        assert!(needs_clear(Some(extent(10, 10)), extent(12, 9)));
     }
 
     #[test]
