@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::{
     collections::{HashMap, VecDeque},
     ops::Deref,
+    ptr::NonNull,
 };
 
 // OpenVR overlays are allowed to use ≥ 0
@@ -527,7 +528,17 @@ impl<'a, G: xr::Graphics> Deref for OverlayLayers<'a, G> {
 pub struct OverlayLayer<'a, G: xr::Graphics> {
     /// Only ever None during next_chain_insert
     layer: Option<OverlayLayerInner<'a, G>>,
-    color_bias_khr: Option<Box<xr::sys::CompositionLayerColorScaleBiasKHR>>,
+    /// In the layer's next chain, freed on drop. Not a Box: moving a Box asserts unique access to
+    /// its contents, which would invalidate the chain's pointer to it.
+    color_bias_khr: Option<NonNull<xr::sys::CompositionLayerColorScaleBiasKHR>>,
+}
+
+impl<G: xr::Graphics> Drop for OverlayLayer<'_, G> {
+    fn drop(&mut self) {
+        if let Some(payload) = self.color_bias_khr.take() {
+            drop(unsafe { Box::from_raw(payload.as_ptr()) });
+        }
+    }
 }
 
 impl<G: xr::Graphics> OverlayLayer<'_, G> {
@@ -542,7 +553,7 @@ impl<G: xr::Graphics> OverlayLayer<'_, G> {
         // premultiplied colors have to be scaled along with the alpha.
         let rgb = if premultiplied { alpha } else { 1.0 };
         self.color_bias_khr = {
-            let mut payload = Box::new(xr::sys::CompositionLayerColorScaleBiasKHR {
+            let payload = Box::new(xr::sys::CompositionLayerColorScaleBiasKHR {
                 ty: xr::StructureType::COMPOSITION_LAYER_COLOR_SCALE_BIAS_KHR,
                 next: std::ptr::null(),
                 color_bias: Default::default(),
@@ -554,8 +565,8 @@ impl<G: xr::Graphics> OverlayLayer<'_, G> {
                 },
             });
 
-            let payload_ptr = payload.as_mut() as *mut _ as *mut xr::sys::BaseInStructure;
-            unsafe { self.next_chain_insert(payload_ptr) };
+            let payload = NonNull::from(Box::leak(payload));
+            unsafe { self.next_chain_insert(payload.as_ptr().cast()) };
 
             Some(payload)
         };
@@ -3009,16 +3020,15 @@ mod tests {
             self.man
                 .get_layers::<Api>(&session, render_skybox)
                 .iter()
-                .map(|layer| {
-                    let color_scale = layer.color_bias_khr.as_ref().map(|c| c.color_scale);
-                    match layer.layer.as_ref().unwrap() {
-                        OverlayLayerInner::Quad(l) => TestLayer::Quad(*l.as_raw(), color_scale),
-                        OverlayLayerInner::Cylinder(l) => {
-                            TestLayer::Cylinder(*l.as_raw(), color_scale)
-                        }
-                        OverlayLayerInner::Equirect2(l) => {
-                            TestLayer::Equirect2(*l.as_raw(), color_scale)
-                        }
+                .map(|layer| match layer.layer.as_ref().unwrap() {
+                    OverlayLayerInner::Quad(l) => {
+                        TestLayer::Quad(*l.as_raw(), chain_color_scale(l.as_raw().next))
+                    }
+                    OverlayLayerInner::Cylinder(l) => {
+                        TestLayer::Cylinder(*l.as_raw(), chain_color_scale(l.as_raw().next))
+                    }
+                    OverlayLayerInner::Equirect2(l) => {
+                        TestLayer::Equirect2(*l.as_raw(), chain_color_scale(l.as_raw().next))
                     }
                 })
                 .collect()
@@ -3035,6 +3045,23 @@ mod tests {
             });
             rx
         }
+    }
+
+    /// Reads the color scale through the layer's next chain, like the runtime does.
+    fn chain_color_scale(next: *const c_void) -> Option<xr::Color4f> {
+        let mut next = next.cast::<xr::sys::BaseInStructure>();
+        while !next.is_null() {
+            let xr::sys::BaseInStructure {
+                ty,
+                next: following,
+            } = unsafe { *next };
+            if ty == xr::sys::CompositionLayerColorScaleBiasKHR::TYPE {
+                let bias = next.cast::<xr::sys::CompositionLayerColorScaleBiasKHR>();
+                return Some(unsafe { (*bias).color_scale });
+            }
+            next = following;
+        }
+        None
     }
 
     /// The parts of an overlay layer the tests look at, along with its color scale.
