@@ -1429,6 +1429,8 @@ mod tests {
         rm.FreeRenderModel(garbage_pointer);
     }
 
+    // Parses every embedded model, which takes 15 minutes under miri and touches no unsafe code.
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn embedded_models_parse_and_have_reasonable_geometry() {
         for (name, asset) in RENDER_MODELS.iter() {
