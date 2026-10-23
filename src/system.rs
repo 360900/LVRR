@@ -2985,6 +2985,8 @@ mod tests {
 
     /// While the app runs a frame loop, events are left to WaitGetPoses.
     #[test]
+    // Depends on wall clock time between frames, which is far longer under miri.
+    #[cfg_attr(miri, ignore)]
     fn no_pumping_during_frame_loop() {
         use crate::compositor::Compositor;
         use vr::IVRCompositor028_Interface;
@@ -2995,8 +2997,8 @@ mod tests {
         xr.compositor.set(Arc::downgrade(&comp));
         let system = Arc::new(System::new(xr.clone(), &Injector::default()));
         xr.system.set(Arc::downgrade(&system));
-        // Created up front to keep the first PollNextEvent short: Miri's clock advances with the
-        // code it runs, and the poll has to land within the frame loop timeout.
+        // Created up front to keep the first PollNextEvent short, as it has to land within the
+        // frame loop timeout.
         let input = Arc::new(Input::new(xr.clone()));
         system.input.set(Arc::downgrade(&input));
         xr.input.set(Arc::downgrade(&input));
