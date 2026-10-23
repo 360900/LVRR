@@ -733,19 +733,16 @@ impl vr::IVRSystem026_Interface for System {
             return false;
         };
 
-        if self.GetControllerState(device_index, state, state_size) {
-            unsafe {
-                *pose.as_mut().unwrap() = self
-                    .input
-                    .get()
-                    .unwrap()
-                    .get_controller_pose(hand, Some(origin), self.openxr.get_display_time(), None)
-                    .unwrap_or_default();
-            }
-            true
-        } else {
-            false
+        if !self.GetControllerState(device_index, state, state_size) {
+            return false;
         }
+        // The pose is optional.
+        if let Some(pose) = unsafe { pose.as_mut() } {
+            *pose = input
+                .get_controller_pose(hand, Some(origin), self.openxr.get_display_time(), None)
+                .unwrap_or_default();
+        }
+        true
     }
     fn GetControllerState(
         &self,
@@ -2704,6 +2701,43 @@ mod tests {
             poll_until(&mut |event| event.eventType == vr::EVREventType::Quit.0),
             "Quit never arrived"
         );
+    }
+
+    /// The pose is optional.
+    #[test]
+    fn controller_state_without_pose() {
+        use fakexr::UserPath::*;
+        crate::init_logging();
+        fakexr::set_headless_supported(true);
+        for hand in [LeftHand, RightHand] {
+            fakexr::set_default_interaction_profile(
+                hand,
+                Some("/interaction_profiles/oculus/touch_controller"),
+            );
+        }
+        let xr = Arc::new(
+            OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Background).unwrap(),
+        );
+        let system = System::new(xr.clone(), &Injector::default());
+        let input = Arc::new(Input::new(xr.clone()));
+        system.input.set(Arc::downgrade(&input));
+        xr.input.set(Arc::downgrade(&input));
+        input.frame_start_update();
+        xr.poll_events();
+        input.frame_start_update();
+
+        let mut state = vr::VRControllerState_t::default();
+        let size = std::mem::size_of_val(&state) as u32;
+        let mut pose = vr::TrackedDevicePose_t::default();
+        for pose in [std::ptr::null_mut(), &mut pose] {
+            assert!(system.GetControllerStateWithPose(
+                vr::ETrackingUniverseOrigin::Seated,
+                1,
+                &mut state,
+                size,
+                pose,
+            ));
+        }
     }
 
     #[test]
