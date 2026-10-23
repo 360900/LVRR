@@ -34,6 +34,10 @@ struct Gpu {
     push_constants: Vec<(vk::ShaderStageFlags, u32, Vec<u8>)>,
     draws: usize,
     clears: usize,
+    /// Source and destination image and region of each recorded transfer.
+    copies: Vec<(u64, u64, vk::ImageCopy)>,
+    resolves: Vec<(u64, u64, vk::ImageResolve)>,
+    blits: Vec<(u64, u64, vk::ImageBlit)>,
     /// Pending work never finishes, so waits for it time out.
     hung: bool,
     /// Fails the next submission of command buffers.
@@ -146,6 +150,48 @@ create_destroy! {
     vkCreatePipelineLayout, vkDestroyPipelineLayout: PipelineLayoutCreateInfo -> PipelineLayout;
     vkCreateImageView, vkDestroyImageView: ImageViewCreateInfo -> ImageView;
     vkCreateSampler, vkDestroySampler: SamplerCreateInfo -> Sampler;
+    vkCreateImage, vkDestroyImage: ImageCreateInfo -> Image;
+    vkAllocateMemory, vkFreeMemory: MemoryAllocateInfo -> DeviceMemory;
+}
+
+unsafe extern "system" fn vkGetImageMemoryRequirements(
+    _: vk::Device,
+    _: vk::Image,
+    out: *mut vk::MemoryRequirements,
+) {
+    unsafe {
+        *out = vk::MemoryRequirements {
+            size: 1024,
+            alignment: 1,
+            memory_type_bits: 0b11,
+        }
+    };
+}
+
+unsafe extern "system" fn vkBindImageMemory(
+    _: vk::Device,
+    image: vk::Image,
+    memory: vk::DeviceMemory,
+    _: vk::DeviceSize,
+) -> vk::Result {
+    // The memory is in use as long as the image is.
+    gpu(|gpu| gpu.refs.insert(image.as_raw(), vec![memory.as_raw()]));
+    vk::Result::SUCCESS
+}
+
+/// A host visible and a device local memory type.
+unsafe extern "system" fn vkGetPhysicalDeviceMemoryProperties(
+    _: vk::PhysicalDevice,
+    out: *mut vk::PhysicalDeviceMemoryProperties,
+) {
+    let mut properties = vk::PhysicalDeviceMemoryProperties {
+        memory_type_count: 2,
+        memory_heap_count: 1,
+        ..Default::default()
+    };
+    properties.memory_types[0].property_flags = vk::MemoryPropertyFlags::HOST_VISIBLE;
+    properties.memory_types[1].property_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+    unsafe { *out = properties };
 }
 
 unsafe extern "system" fn vkAllocateCommandBuffers(
@@ -488,12 +534,53 @@ unsafe extern "system" fn vkCmdCopyImage(
     _: vk::ImageLayout,
     dst: vk::Image,
     _: vk::ImageLayout,
-    _: u32,
-    _: *const vk::ImageCopy,
+    count: u32,
+    regions: *const vk::ImageCopy,
 ) {
+    let regions = unsafe { slice(regions, count) };
     gpu(|gpu| {
         gpu.record(buf, src);
         gpu.record(buf, dst);
+        let (src, dst) = (src.as_raw(), dst.as_raw());
+        gpu.copies.extend(regions.iter().map(|&r| (src, dst, r)));
+    });
+}
+
+unsafe extern "system" fn vkCmdResolveImage(
+    buf: vk::CommandBuffer,
+    src: vk::Image,
+    _: vk::ImageLayout,
+    dst: vk::Image,
+    _: vk::ImageLayout,
+    count: u32,
+    regions: *const vk::ImageResolve,
+) {
+    let regions = unsafe { slice(regions, count) };
+    gpu(|gpu| {
+        gpu.record(buf, src);
+        gpu.record(buf, dst);
+        let (src, dst) = (src.as_raw(), dst.as_raw());
+        gpu.resolves.extend(regions.iter().map(|&r| (src, dst, r)));
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "system" fn vkCmdBlitImage(
+    buf: vk::CommandBuffer,
+    src: vk::Image,
+    _: vk::ImageLayout,
+    dst: vk::Image,
+    _: vk::ImageLayout,
+    count: u32,
+    regions: *const vk::ImageBlit,
+    _: vk::Filter,
+) {
+    let regions = unsafe { slice(regions, count) };
+    gpu(|gpu| {
+        gpu.record(buf, src);
+        gpu.record(buf, dst);
+        let (src, dst) = (src.as_raw(), dst.as_raw());
+        gpu.blits.extend(regions.iter().map(|&r| (src, dst, r)));
     });
 }
 
@@ -537,6 +624,12 @@ fn proc_addr(name: &CStr) -> *const c_void {
         vkDestroyImageView,
         vkCreateSampler,
         vkDestroySampler,
+        vkCreateImage,
+        vkDestroyImage,
+        vkAllocateMemory,
+        vkFreeMemory,
+        vkGetImageMemoryRequirements,
+        vkBindImageMemory,
         vkAllocateCommandBuffers,
         vkAllocateDescriptorSets,
         vkUpdateDescriptorSets,
@@ -563,8 +656,20 @@ fn proc_addr(name: &CStr) -> *const c_void {
         vkCmdEndRenderPass,
         vkCmdPipelineBarrier,
         vkCmdCopyImage,
+        vkCmdResolveImage,
+        vkCmdBlitImage,
         vkCmdClearColorImage,
     ]
+}
+
+/// The app's instance, with what the backend uses of it.
+fn instance_proc_addr(name: &CStr) -> *const c_void {
+    match name.to_bytes() {
+        b"vkGetPhysicalDeviceMemoryProperties" => {
+            vkGetPhysicalDeviceMemoryProperties as *const c_void
+        }
+        _ => std::ptr::null(),
+    }
 }
 
 /// Handles of objects the app owns.
@@ -581,7 +686,8 @@ const FULL_BOUNDS: vr::VRTextureBounds_t = vr::VRTextureBounds_t {
 fn fake_vulkan() -> VulkanData {
     gpu(|gpu| *gpu = Gpu::default());
     let entry = new_entry();
-    let instance = unsafe { ash::Instance::load(entry.static_fn(), vk::Instance::from_raw(1)) };
+    let instance =
+        unsafe { ash::Instance::load_with(instance_proc_addr, vk::Instance::from_raw(1)) };
     VulkanData {
         _entry: entry,
         instance,
@@ -619,6 +725,25 @@ fn copy_eye(vk: &VulkanData, texture: &vr::VRVulkanTextureData_t, image_index: u
         image_index,
         vr::EVRSubmitFlags::Default,
     );
+}
+
+fn multisampled(texture: vr::VRVulkanTextureData_t) -> vr::VRVulkanTextureData_t {
+    vr::VRVulkanTextureData_t {
+        m_nSampleCount: 4,
+        ..texture
+    }
+}
+
+/// A gamma encoded UNORM texture, which goes into an sRGB swapchain.
+fn unorm(texture: vr::VRVulkanTextureData_t) -> vr::VRVulkanTextureData_t {
+    vr::VRVulkanTextureData_t {
+        m_nFormat: vk::Format::R8G8B8A8_UNORM.as_raw() as u32,
+        ..texture
+    }
+}
+
+fn offset(x: i32, y: i32, z: i32) -> vk::Offset3D {
+    vk::Offset3D { x, y, z }
 }
 
 fn copy_overlay(
@@ -898,6 +1023,170 @@ fn resolve_only_into_the_same_format() {
     let other = F::B8G8R8A8_SRGB;
     assert_eq!(EyeCopy::new(unorm, srgb, other, true), EyeCopy::Blit);
     assert_eq!(EyeCopy::new(unorm, srgb, other, false), EyeCopy::Blit);
+}
+
+/// A multisampled texture in the swapchain's format is resolved straight into the eye's layer.
+#[test]
+fn multisampled_eye_resolves_into_the_swapchain() {
+    let mut vk = fake_vulkan();
+    store_images(&mut vk, 2);
+    let texture = multisampled(texture(16, 8));
+    for eye in [vr::EVREye::Left, vr::EVREye::Right] {
+        vk.copy_texture_to_swapchain(
+            eye,
+            &texture,
+            vr::EColorSpace::Auto,
+            FULL_BOUNDS,
+            1,
+            vr::EVRSubmitFlags::Default,
+        );
+    }
+    gpu(|gpu| {
+        assert_eq!(gpu.resolves.len(), 2);
+        for (eye, &(src, dst, region)) in gpu.resolves.iter().enumerate() {
+            assert_eq!((src, dst), (GAME_IMAGE, APP_HANDLE + 1));
+            assert_eq!(region.src_subresource.base_array_layer, 0);
+            assert_eq!(region.dst_subresource.base_array_layer, eye as u32);
+            assert_eq!(region.dst_offset, offset(0, 0, 0));
+            assert_eq!((region.extent.width, region.extent.height), (16, 8));
+        }
+        assert!(gpu.copies.is_empty() && gpu.blits.is_empty());
+    });
+    finish(vk);
+}
+
+/// A multisampled texture of another format than the swapchain's is resolved into an image of its
+/// own format, which is then copied.
+#[test]
+fn multisampled_eye_resolves_before_converting() {
+    let mut vk = fake_vulkan();
+    store_images(&mut vk, 1);
+    let bounds = vr::VRTextureBounds_t {
+        uMin: 0.5,
+        ..FULL_BOUNDS
+    };
+    vk.copy_texture_to_swapchain(
+        vr::EVREye::Right,
+        &multisampled(unorm(texture(32, 16))),
+        vr::EColorSpace::Gamma,
+        bounds,
+        0,
+        vr::EVRSubmitFlags::Default,
+    );
+    gpu(|gpu| {
+        let [(src, resolved, resolve)] = gpu.resolves[..] else {
+            panic!("resolved {:?}", gpu.resolves);
+        };
+        assert_eq!(src, GAME_IMAGE);
+        // Created by the backend, not the app's or the runtime's.
+        assert!(gpu.live.contains(&resolved) && resolved < APP_HANDLE);
+        assert_eq!(resolve.src_offset, offset(16, 0, 0));
+        assert_eq!(resolve.dst_offset, offset(16, 0, 0));
+        let [(copied, dst, copy)] = gpu.copies[..] else {
+            panic!("copied {:?}", gpu.copies);
+        };
+        assert_eq!((copied, dst), (resolved, APP_HANDLE));
+        assert_eq!(copy.src_offset, offset(16, 0, 0));
+        assert_eq!(copy.dst_offset, offset(0, 0, 0));
+        assert_eq!(copy.dst_subresource.base_array_layer, 1);
+        assert_eq!((copy.extent.width, copy.extent.height), (16, 16));
+    });
+    finish(vk);
+}
+
+/// Blits take the far corner rather than the extent, also for a texture with both eyes.
+#[test]
+fn eye_blit_covers_the_bounds() {
+    let mut vk = fake_vulkan();
+    // The runtime doesn't support the texture's format.
+    let images = vec![APP_HANDLE];
+    vk.store_swapchain_images(images, vk::Format::B8G8R8A8_SRGB.as_raw() as u32);
+    let bounds = vr::VRTextureBounds_t {
+        uMin: 0.5,
+        vMax: 0.5,
+        ..FULL_BOUNDS
+    };
+    vk.copy_texture_to_swapchain(
+        vr::EVREye::Right,
+        &texture(64, 32),
+        vr::EColorSpace::Auto,
+        bounds,
+        0,
+        vr::EVRSubmitFlags::Default,
+    );
+    gpu(|gpu| {
+        let [(src, dst, blit)] = gpu.blits[..] else {
+            panic!("blitted {:?}", gpu.blits);
+        };
+        assert_eq!((src, dst), (GAME_IMAGE, APP_HANDLE));
+        assert_eq!(blit.src_offsets, [offset(32, 0, 0), offset(64, 16, 1)]);
+        assert_eq!(blit.dst_offsets, [offset(0, 0, 0), offset(32, 16, 1)]);
+        assert_eq!(blit.dst_subresource.base_array_layer, 1);
+    });
+    finish(vk);
+}
+
+/// SubmitWithArrayIndex picks the layer of the texture to read.
+#[test]
+fn eye_copy_reads_the_array_layer() {
+    for texture in [texture(16, 16), multisampled(texture(16, 16))] {
+        let mut vk = fake_vulkan();
+        store_images(&mut vk, 1);
+        let array = vr::VRVulkanTextureArrayData_t {
+            _base: texture,
+            m_unArrayIndex: 1,
+            m_unArraySize: 2,
+        };
+        vk.copy_texture_to_swapchain(
+            vr::EVREye::Left,
+            std::ptr::from_ref(&array).cast(),
+            vr::EColorSpace::Auto,
+            FULL_BOUNDS,
+            0,
+            vr::EVRSubmitFlags::VulkanTextureWithArrayData,
+        );
+        gpu(|gpu| {
+            let copies = gpu.copies.iter().map(|(.., c)| c.src_subresource);
+            let resolves = gpu.resolves.iter().map(|(.., r)| r.src_subresource);
+            let [source] = copies.chain(resolves).collect::<Vec<_>>()[..] else {
+                panic!("copied {:?}, resolved {:?}", gpu.copies, gpu.resolves);
+            };
+            assert_eq!(source.base_array_layer, 1);
+        });
+        finish(vk);
+    }
+}
+
+/// The image a multisampled texture is resolved into is replaced when the texture changes size,
+/// and freed with the swapchain, but only once the copies using it are done.
+#[test]
+fn resolve_images_outlive_their_copies() {
+    let mut vk = fake_vulkan();
+    store_images(&mut vk, 2);
+    let copy = |vk: &VulkanData, texture, image_index| {
+        vk.copy_texture_to_swapchain(
+            vr::EVREye::Left,
+            &multisampled(unorm(texture)),
+            vr::EColorSpace::Gamma,
+            FULL_BOUNDS,
+            image_index,
+            vr::EVRSubmitFlags::Default,
+        );
+    };
+    let resolved = || gpu(|gpu| gpu.resolves.last().unwrap().1);
+
+    copy(&vk, texture(16, 16), 0);
+    let first = resolved();
+    copy(&vk, texture(32, 32), 1);
+    let second = resolved();
+    assert_ne!(first, second);
+    gpu(|gpu| assert!(!gpu.live.contains(&first)));
+
+    // The swapchain is recreated while the copy is pending.
+    store_images(&mut vk, 2);
+    gpu(|gpu| assert!(!gpu.live.contains(&second)));
+    copy(&vk, texture(32, 32), 0);
+    finish(vk);
 }
 
 #[test]
