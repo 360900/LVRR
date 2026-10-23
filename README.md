@@ -71,7 +71,7 @@ If a launcher strips `RUST_LOG`, put the same filter string in a file named `log
 
 `XRIZER_SYNTHESIZED_VELOCITY` - `1` computes controller linear velocity from position deltas, `0` forces the runtime's. Helps with throwing on runtimes that under-report velocity. Enabled automatically for games known to need it.
 
-`XRIZER_CUSTOM_BINDINGS_DIR` - Directory with controller binding overrides, default `xrizer` in the game's working directory. A file named `<controller_type>.json` (e.g. `knuckles.json`) replaces the game's own bindings for that controller, or provides them if the game has none. Same format as SteamVR binding files.
+`XRIZER_CUSTOM_BINDINGS_DIR` - Directory with controller binding overrides, default `xrizer` in the game's working directory. A file named `<controller_type>.json` (e.g. `knuckles.json`) replaces the game's own bindings for that controller, or provides them if the game has none. Same format as SteamVR binding files. Without one, a controller the game ships no bindings for gets them converted from the closest controller it does, like SteamVR.
 
 `XRIZER_ADDITIONAL_BINDINGS` - `;` separated list of controller types to load bindings for in addition to the ones the game lists, e.g. `knuckles;oculus_touch`. Each is read from the custom bindings directory, or `bindings_<controller_type>.json` next to the game's action manifest.
 
