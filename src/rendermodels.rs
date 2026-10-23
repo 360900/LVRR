@@ -634,13 +634,15 @@ impl vr::IVRRenderModels002On004 for RenderModels {
 struct OwnedTexture {
     width: u16,
     height: u16,
-    data: Box<[u8]>,
+    // Not a Box: moving a Box asserts unique access to its contents, which would invalidate the
+    // pointer handed out to the app.
+    data: Vec<u8>,
 }
 
 impl OwnedTexture {
     /// creates a 1x1 dummy texture
     fn new_dummy() -> Self {
-        let data = Box::new(RENDER_MODEL_COLOR);
+        let data = RENDER_MODEL_COLOR.to_vec();
         Self {
             data,
             width: 1,
@@ -659,8 +661,9 @@ impl OwnedTexture {
 }
 
 struct OwnedRenderModel {
-    verts: Box<[vr::RenderModel_Vertex_t]>,
-    indices: Box<[u16]>,
+    // Vecs for the same reason as OwnedTexture::data.
+    verts: Vec<vr::RenderModel_Vertex_t>,
+    indices: Vec<u16>,
 }
 
 impl OwnedRenderModel {
@@ -789,10 +792,7 @@ impl OwnedRenderModel {
             v.vNormal = vr::HmdVector3_t { v: n.to_array() };
         }
 
-        Ok(Self {
-            verts: verts.into_boxed_slice(),
-            indices: indices.into_boxed_slice(),
-        })
+        Ok(Self { verts, indices })
     }
 
     fn transform(&mut self, transform: Mat4) {
