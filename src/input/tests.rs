@@ -2626,8 +2626,15 @@ fn skeletal_tracking_level_follows_hand_tracking() {
     // A different device doesn't inherit it.
     f.set_interaction_profile::<OculusTouch>(LeftHand);
     assert_eq!(level(&mut f), Estimated);
+    // A skeleton derived from the Touch's inputs is replaced by the estimated one.
     fakexr::set_hand_tracked(f.raw_session(), LeftHand, Some(Source::CONTROLLER));
+    assert_eq!(level(&mut f), Estimated);
+    assert_ne!(index_finger(&bones(&f)).0[..3], [0.0; 3]);
+
+    // One from a controller that senses the fingers is kept.
+    f.set_interaction_profile::<FrameController>(LeftHand);
     assert_eq!(level(&mut f), Partial);
+    assert_eq!(index_finger(&bones(&f)).0[..3], [0.0; 3]);
 }
 
 #[test]
@@ -2684,6 +2691,13 @@ fn skeletal_summary_from_hand_tracking() {
     // Estimated, from no inputs.
     fakexr::set_hand_tracked(f.raw_session(), LeftHand, None);
     assert_eq!(curls(&mut f), [0.0; 5]);
+
+    // Joints derived from the Touch's inputs are estimated too, unlike the Frame's.
+    f.set_interaction_profile::<OculusTouch>(LeftHand);
+    fakexr::set_hand_tracked(f.raw_session(), LeftHand, Some(Source::CONTROLLER));
+    assert_eq!(curls(&mut f), [0.0; 5]);
+    f.set_interaction_profile::<FrameController>(LeftHand);
+    assert_eq!(curls(&mut f), [1.0; 5]);
 }
 
 #[test]

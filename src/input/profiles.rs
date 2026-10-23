@@ -37,6 +37,9 @@ pub trait InteractionProfile: SupportedProfile + Sized + 'static {
     /// The skeletal tracking level SteamVR always reports for this controller, if it doesn't
     /// depend on what the runtime tracks.
     const SKELETAL_TRACKING_LEVEL: Option<openvr::EVRSkeletalTrackingLevel> = None;
+    /// Whether the controller senses the fingers, so a hand skeleton the runtime derives from
+    /// it is better than the estimated one.
+    const SENSES_FINGERS: bool = false;
     /// The trigger values (activate, deactivate) at which SteamVR's legacy binding for this
     /// controller presses and releases k_EButton_SteamVR_Trigger, besides the trigger's click.
     const LEGACY_TRIGGER_CLICK: Option<(f32, f32)> = None;

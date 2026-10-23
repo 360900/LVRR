@@ -12,6 +12,7 @@ use openvr::EVRButtonId;
 pub struct FrameController;
 
 impl InteractionProfile for FrameController {
+    const SENSES_FINGERS: bool = true;
     // From legacy_bindings_frame_controller.json
     const LEGACY_TRIGGER_CLICK: Option<(f32, f32)> = Some((0.55, 0.5));
     const LEGACY_GRIP_CLICK: Option<(f32, f32)> = Some((0.1, 0.05));

@@ -79,6 +79,8 @@ pub struct ProfileData {
     /// determine the curl value for the thumb.
     pub force_estimated_thumb: bool,
     pub skeletal_tracking_level: Option<vr::EVRSkeletalTrackingLevel>,
+    /// See [`InteractionProfile::SENSES_FINGERS`].
+    pub senses_fingers: bool,
     /// See [`InteractionProfile::LEGACY_TRIGGER_CLICK`].
     pub legacy_trigger_click: Option<(f32, f32)>,
     /// See [`InteractionProfile::LEGACY_GRIP_CLICK`].
@@ -93,6 +95,7 @@ impl ProfileData {
             get_pose_transformation: P::pose_transformation,
             force_estimated_thumb: TypeId::of::<P>() == TypeId::of::<Knuckles>(),
             skeletal_tracking_level: P::SKELETAL_TRACKING_LEVEL,
+            senses_fingers: P::SENSES_FINGERS,
             legacy_trigger_click: P::LEGACY_TRIGGER_CLICK,
             legacy_grip_click: P::LEGACY_GRIP_CLICK,
         }
@@ -598,6 +601,17 @@ impl TrackedDevice {
         }
         self.get_hand_skeleton(xr_data, base)
             .map(|skeleton| skeleton.data_source)
+    }
+
+    /// Whether a skeleton from `source` only reflects the controller's inputs, like the one the
+    /// Quest derives for its controllers. The estimated skeleton follows the same inputs with
+    /// SteamVR's hand poses.
+    pub fn skeleton_follows_inputs(&self, source: xr::HandTrackingDataSourceEXT) -> bool {
+        source == xr::HandTrackingDataSourceEXT::CONTROLLER
+            && self
+                .profile_data
+                .as_ref()
+                .is_some_and(|data| !data.senses_fingers)
     }
 
     /// Forgets every pose, including the last valid ones that clear_pose_cache keeps.

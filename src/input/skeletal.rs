@@ -69,7 +69,9 @@ impl<C: openxr_data::Compositor> Input<C> {
             }
         };
 
-        let Some(HandSkeleton { joints, .. }) = controller.get_hand_skeleton(&self.openxr, base)
+        let Some(HandSkeleton { joints, .. }) = controller
+            .get_hand_skeleton(&self.openxr, base)
+            .filter(|skeleton| !controller.skeleton_follows_inputs(skeleton.data_source))
         else {
             drop(bone_cache);
             return Some(self.get_estimated_bones(session_data, space, hand, range));
@@ -258,7 +260,10 @@ impl<C: openxr_data::Compositor> Input<C> {
         if let Some(data_source) = data_source {
             *level = match data_source {
                 xr::HandTrackingDataSourceEXT::UNOBSTRUCTED => vr::EVRSkeletalTrackingLevel::Full,
-                // Joints derived from a controller, or an unknown source
+                _ if controller.skeleton_follows_inputs(data_source) => {
+                    vr::EVRSkeletalTrackingLevel::Estimated
+                }
+                // Joints from a controller that senses the fingers, or an unknown source
                 _ => vr::EVRSkeletalTrackingLevel::Partial,
             };
         }
@@ -283,7 +288,9 @@ impl<C: openxr_data::Compositor> Input<C> {
         // works for a hand without a grip space.
         let (raw, _) = joint_space(session_data, controller, hand);
         let base = raw.as_deref().unwrap_or(session_data.tracking_space());
-        let Some(HandSkeleton { joints, .. }) = controller.get_hand_skeleton(&self.openxr, base)
+        let Some(HandSkeleton { joints, .. }) = controller
+            .get_hand_skeleton(&self.openxr, base)
+            .filter(|skeleton| !controller.skeleton_follows_inputs(skeleton.data_source))
         else {
             self.get_estimated_bone_summary(session_data, summary_type, summary_data, hand);
             return;
