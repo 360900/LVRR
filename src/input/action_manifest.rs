@@ -171,6 +171,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             per_profile_bindings,
             per_profile_pose_bindings,
             per_profile_input_paths,
+            head_proximity,
             ..
         } = binding_context;
 
@@ -286,6 +287,20 @@ impl<C: openxr_data::Compositor> Input<C> {
             })
             .collect();
 
+        let head_proximity = head_proximity
+            .iter()
+            .filter_map(|name| {
+                let key = act_guard
+                    .iter()
+                    .find_map(|(key, action)| (action.path == *name).then_some(key))?;
+                let set_name = &name[..name.match_indices('/').nth(2)?.0];
+                let set = set_guard
+                    .iter()
+                    .find_map(|(set, name)| (name == set_name).then_some(set))?;
+                Some((key, super::HeadProximity::new(set)))
+            })
+            .collect();
+
         let loaded = super::ManifestLoadedActions {
             sets,
             hand_restrictable_sets,
@@ -299,6 +314,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             haptic_action,
             haptic_set,
             skeleton_sets,
+            head_proximity,
         };
 
         session_data
@@ -425,8 +441,19 @@ impl<C: openxr_data::Compositor> Input<C> {
                 continue;
             };
 
-            let mut runner = Runner(self, context, &bindings);
-            controller_type.run_for_profile(&mut runner);
+            if controller_type == actions::ControllerType::GenericHmd {
+                if self.openxr.supports_user_presence {
+                    bindings::handle_hmd_bindings(context, &bindings);
+                } else {
+                    // Like SteamVR with a headset that has no proximity sensor.
+                    info!(
+                        "Ignoring {controller_type} bindings, the runtime doesn't report user presence"
+                    );
+                }
+            } else {
+                let mut runner = Runner(self, context, &bindings);
+                controller_type.run_for_profile(&mut runner);
+            }
             loaded.push((controller_type, bindings));
 
             // lifetime moment

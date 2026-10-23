@@ -1,0 +1,44 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/main",
+			"usage": "leftright"
+		},
+		{
+			"name": "/actions/other",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/main/in/HeadsetOnHead",
+			"requirement": "optional",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/OnHeadOrA",
+			"requirement": "optional",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/Analog",
+			"requirement": "optional",
+			"type": "vector1"
+		},
+		{
+			"name": "/actions/other/in/Other",
+			"requirement": "optional",
+			"type": "boolean"
+		}
+	],
+	"default_bindings": [
+		{
+			"controller_type": "knuckles",
+			"binding_url": "knuckles_head_proximity.json"
+		},
+		{
+			"controller_type": "generic_hmd",
+			"binding_url": "generic_hmd_head_proximity.json"
+		}
+	]
+}

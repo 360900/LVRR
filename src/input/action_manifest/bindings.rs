@@ -898,6 +898,34 @@ fn bind_bool_input(
     context.add_custom_binding(output, input.hand, input, make(action));
 }
 
+/// The OpenVR path of the headset's proximity sensor.
+const HEAD_PROXIMITY: &str = "/user/head/proximity";
+
+/// Handles the bindings for the headset, which has no OpenXR inputs. Only buttons on its proximity
+/// sensor are supported, which are driven by user presence.
+pub fn handle_hmd_bindings(context: &mut context::BindingsLoadContext, bindings: &Bindings) {
+    for (action_set_name, set) in &bindings.bindings {
+        for source in &set.sources {
+            match source {
+                ActionBinding::Button(ActionBindingData {
+                    path: MaybeInputPath::Invalid { path, .. },
+                    inputs:
+                        ButtonInput {
+                            click: Some(click), ..
+                        },
+                    ..
+                }) if path.eq_ignore_ascii_case(HEAD_PROXIMITY) => {
+                    context.add_head_proximity_binding(&click.output)
+                }
+                ActionBinding::None(_) => {}
+                _ => debug!(
+                    "Ignoring headset binding in {action_set_name}: only {HEAD_PROXIMITY} clicks are supported"
+                ),
+            }
+        }
+    }
+}
+
 pub fn handle_sources(
     validate_path: &dyn PathValidator,
     context: &mut BindingsProfileLoadContext,

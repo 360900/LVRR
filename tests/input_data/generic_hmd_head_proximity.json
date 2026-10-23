@@ -1,0 +1,45 @@
+{
+	"alias_info": {},
+	"bindings": {
+		"/actions/main": {
+			"chords": [],
+			"haptics": [],
+			"poses": [],
+			"skeleton": [],
+			"sources": [
+				{
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/headsetonhead"
+						}
+					},
+					"mode": "button",
+					"path": "/user/head/proximity"
+				},
+				{
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/onheadora"
+						}
+					},
+					"mode": "button",
+					"path": "/user/head/proximity"
+				},
+				{
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/analog"
+						}
+					},
+					"mode": "button",
+					"path": "/user/head/proximity"
+				}
+			]
+		}
+	},
+	"controller_type": "generic_hmd",
+	"description": "",
+	"name": "generic hmd defaults",
+	"options": {},
+	"simulated_actions": []
+}

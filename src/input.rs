@@ -111,6 +111,7 @@ pub struct Input<C: openxr_data::Compositor> {
     input_source_map: RwLock<SlotMap<InputSourceKey, CString>>,
     left_hand_key: InputSourceKey,
     right_hand_key: InputSourceKey,
+    head_key: InputSourceKey,
     action_map: RwLock<SlotMap<ActionKey, Action>>,
     set_map: RwLock<SlotMap<ActionSetKey, String>>,
     loaded_actions_path: OnceLock<PathBuf>,
@@ -202,11 +203,21 @@ fn inactive_state<T: xr::ActionInput + Default>(error: xr::sys::Result) -> xr::A
     }
 }
 
+fn inactive_bool_state() -> xr::ActionState<bool> {
+    xr::ActionState {
+        current_state: false,
+        changed_since_last_sync: false,
+        last_change_time: xr::Time::from_nanos(0),
+        is_active: false,
+    }
+}
+
 impl<C: openxr_data::Compositor> Input<C> {
     pub fn new(openxr: Arc<OpenXrData<C>>) -> Self {
         let mut map = SlotMap::with_key();
         let left_hand_key = map.insert(c"/user/hand/left".into());
         let right_hand_key = map.insert(c"/user/hand/right".into());
+        let head_key = map.insert(c"/user/head".into());
         let subaction_paths = SubactionPaths::new(&openxr.instance);
 
         // Until controllers actually show up, the HMD identity comes from whatever was bound at
@@ -227,6 +238,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             pending_manifest: Mutex::default(),
             left_hand_key,
             right_hand_key,
+            head_key,
             legacy_state: Default::default(),
             skeletal_tracking_level: RwLock::new([vr::EVRSkeletalTrackingLevel::Estimated; 2]),
             active_sets: Default::default(),
@@ -280,6 +292,18 @@ impl<C: openxr_data::Compositor> Input<C> {
                 None
             }
         })
+    }
+
+    /// Whether an input source handle names the headset or one of its inputs.
+    fn is_head_source(&self, handle: vr::VRInputValueHandle_t) -> bool {
+        let key = InputSourceKey::from(KeyData::from_ffi(handle));
+        key == self.head_key
+            || self
+                .input_source_map
+                .read()
+                .unwrap()
+                .get(key)
+                .is_some_and(|path| path.to_bytes().starts_with(b"/user/head/"))
     }
 
     /// Get or create a handle for a specific input source path
@@ -762,6 +786,58 @@ impl<C: openxr_data::Compositor> Input<C> {
     }
 }
 
+impl<C: openxr_data::Compositor> Input<C> {
+    /// Samples user presence for the actions bound to the headset's proximity sensor, like
+    /// xrSyncActions samples the inputs of the others. Sets restricted to a hand don't apply to
+    /// the headset.
+    fn sync_head_proximity(
+        &self,
+        loaded: &ManifestLoadedActions,
+        active_sets: &[(ActionSetKey, xr::Path)],
+    ) {
+        if loaded.head_proximity.is_empty() {
+            return;
+        }
+        let present = self.openxr.user_present();
+        for proximity in loaded.head_proximity.values() {
+            let active = active_sets
+                .iter()
+                .any(|(set, hand)| *set == proximity.set && *hand == xr::Path::NULL);
+            proximity.sync(active, present, || self.openxr.time_from_now(0.0));
+        }
+    }
+}
+
+/// Combines the states of an action from several devices: it's active if any of them is, pressed
+/// if any active one is, and changed if that changed. The origin is the device that ranks highest
+/// (see [binding_rank]).
+fn combine_bool_states(
+    states: [(xr::ActionState<bool>, vr::VRInputValueHandle_t); 2],
+) -> (xr::ActionState<bool>, vr::VRInputValueHandle_t) {
+    let mut combined = inactive_bool_state();
+    let mut origin = vr::k_ulInvalidInputValueHandle;
+    let mut previous = false;
+    let mut best_rank = None;
+    for (state, state_origin) in states {
+        if !state.is_active {
+            continue;
+        }
+        previous |= state.current_state != state.changed_since_last_sync;
+        combined.is_active = true;
+        combined.current_state |= state.current_state;
+        if state.last_change_time.as_nanos() > combined.last_change_time.as_nanos() {
+            combined.last_change_time = state.last_change_time;
+        }
+        let rank = binding_rank(&state);
+        if best_rank.is_none_or(|best| rank > best) {
+            best_rank = Some(rank);
+            origin = state_origin;
+        }
+    }
+    combined.changed_since_last_sync = combined.current_state != previous;
+    (combined, origin)
+}
+
 /// Ranking used to decide which of an action's bindings should represent it. Highest wins.
 fn binding_rank(state: &xr::ActionState<bool>) -> (bool, bool, i64) {
     (
@@ -1218,6 +1294,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
 
         let index = match self.hand_from_key(key) {
             Some(hand) => hand as u32,
+            None if self.is_head_source(handle) => vr::k_unTrackedDeviceIndex_Hmd,
             None => {
                 debug!(
                     "GetOriginTrackedDeviceInfo: unknown device for handle 0x{:x} path={}",
@@ -1878,35 +1955,50 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
 
         let mut out = WriteOnDrop::new(action_data);
 
-        get_action_from_handle!(self, handle, session_data, action);
-        let subaction_path = get_subaction_path!(self, restrict_to_device, action_data);
-        let ActionData::Bool(action) = &action else {
-            return vr::EVRInputError::WrongType;
-        };
-
+        get_action_from_handle!(self, handle, session_data, action, loaded);
         let key = ActionKey::from(KeyData::from_ffi(handle));
-        let (state, active_hand) = if let Some(mask) = session_data.input_data.hand_mask(key) {
-            self.masked_bool_state(handle, action, &session_data, subaction_path, mask)
-        } else {
-            let mut state = action
-                .state(&session_data.session, subaction_path)
-                .unwrap_or_else(inactive_state);
-            let mut active_hand = if subaction_path == xr::Path::NULL {
-                self.native_bool_origin(action, &session_data.session)
-            } else {
-                restrict_to_device
-            };
+        let head = loaded.head_proximity.get(key).map(HeadProximity::state);
+        let head_origin = self.head_key.data().as_ffi();
+        let (state, active_hand) = match head {
+            // The proximity sensor is the only input on the headset.
+            Some(head) if self.is_head_source(restrict_to_device) => (head, head_origin),
+            _ => {
+                let subaction_path = get_subaction_path!(self, restrict_to_device, action_data);
+                let ActionData::Bool(action) = &action else {
+                    return vr::EVRInputError::WrongType;
+                };
 
-            // An action can be driven both by a natively bound input and by a custom binding.
-            if let Some((binding_state, binding_source)) =
-                self.state_from_bindings(handle, restrict_to_device)
-                && binding_state.is_active
-                && (!state.is_active || binding_rank(&binding_state) > binding_rank(&state))
-            {
-                state = binding_state;
-                active_hand = binding_source;
+                let hands = if let Some(mask) = session_data.input_data.hand_mask(key) {
+                    self.masked_bool_state(handle, action, &session_data, subaction_path, mask)
+                } else {
+                    let mut state = action
+                        .state(&session_data.session, subaction_path)
+                        .unwrap_or_else(inactive_state);
+                    let mut active_hand = if subaction_path == xr::Path::NULL {
+                        self.native_bool_origin(action, &session_data.session)
+                    } else {
+                        restrict_to_device
+                    };
+
+                    // An action can be driven both by a natively bound input and by a custom
+                    // binding.
+                    if let Some((binding_state, binding_source)) =
+                        self.state_from_bindings(handle, restrict_to_device)
+                        && binding_state.is_active
+                        && (!state.is_active || binding_rank(&binding_state) > binding_rank(&state))
+                    {
+                        state = binding_state;
+                        active_hand = binding_source;
+                    }
+                    (state, active_hand)
+                };
+                match head {
+                    Some(head) if subaction_path == xr::Path::NULL => {
+                        combine_bool_states([hands, (head, head_origin)])
+                    }
+                    _ => hands,
+                }
             }
-            (state, active_hand)
         };
 
         if log::log_enabled!(log::Level::Trace) {
@@ -2095,6 +2187,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
                 return vr::EVRInputError::IPCError;
             }
         }
+        self.sync_head_proximity(actions, &activated_sets);
         *self.active_sets.write().unwrap() = activated_sets;
 
         let hands = [
@@ -3143,6 +3236,47 @@ struct ManifestLoadedActions {
     haptic_action: xr::Action<xr::Haptic>,
     /// The set each skeleton action belongs to.
     skeleton_sets: SecondaryMap<ActionKey, ActionSetKey>,
+    head_proximity: SecondaryMap<ActionKey, HeadProximity>,
+}
+
+/// A boolean action bound to the headset's proximity sensor, which has no OpenXR input. It reads
+/// user presence (XR_EXT_user_presence) instead.
+struct HeadProximity {
+    /// The set the action belongs to.
+    set: ActionSetKey,
+    /// As of the last UpdateActionState.
+    state: Mutex<xr::ActionState<bool>>,
+}
+
+impl HeadProximity {
+    fn new(set: ActionSetKey) -> Self {
+        Self {
+            set,
+            state: Mutex::new(inactive_bool_state()),
+        }
+    }
+
+    fn state(&self) -> xr::ActionState<bool> {
+        *self.state.lock().unwrap()
+    }
+
+    /// Updates the state like OpenXR does for an action: an inactive one is released and doesn't
+    /// change.
+    fn sync(&self, active: bool, present: bool, now: impl FnOnce() -> xr::Time) {
+        let mut state = self.state.lock().unwrap();
+        let pressed = active && present;
+        let changed = pressed != state.current_state;
+        *state = xr::ActionState {
+            current_state: pressed,
+            changed_since_last_sync: active && changed,
+            last_change_time: if changed {
+                now()
+            } else {
+                state.last_change_time
+            },
+            is_active: active,
+        };
+    }
 }
 
 impl ManifestLoadedActions {

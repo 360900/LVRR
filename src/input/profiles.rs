@@ -104,7 +104,7 @@ impl ControllerType {
                 runner.run::<HolographicController>();
             }
             Self::HPMotionController => runner.run::<ReverbG2Controller>(),
-            Self::Unknown(_) => {}
+            Self::GenericHmd | Self::Unknown(_) => {}
         }
     }
 }

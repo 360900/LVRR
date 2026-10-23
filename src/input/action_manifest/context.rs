@@ -26,6 +26,8 @@ pub(super) struct BindingsLoadContext<'a> {
     /// Maps each interaction profile path → action name → bound input paths.
     /// Used to implement GetActionBindingInfo/GetActionOrigins.
     pub per_profile_input_paths: HashMap<xr::Path, HashMap<String, Vec<xr::Path>>>,
+    /// Boolean actions bound to the headset's proximity sensor.
+    pub head_proximity: HashSet<String>,
     pub grip_action: &'a xr::Action<xr::Posef>,
     pub info_action: &'a xr::Action<bool>,
     pub haptic_action: &'a xr::Action<xr::Haptic>,
@@ -51,6 +53,7 @@ impl<'a> BindingsLoadContext<'a> {
             per_profile_bindings: Default::default(),
             per_profile_pose_bindings: Default::default(),
             per_profile_input_paths: Default::default(),
+            head_proximity: Default::default(),
             grip_action,
             info_action,
             haptic_action,
@@ -60,6 +63,21 @@ impl<'a> BindingsLoadContext<'a> {
 }
 
 impl BindingsLoadContext<'_> {
+    /// Binds `output` to the headset's proximity sensor, if it's a boolean action.
+    pub fn add_head_proximity_binding(&mut self, output: &ActionPath) {
+        match self.actions.get(&output.path) {
+            Some(ActionData::Bool(_)) => {
+                trace!("binding {} to the proximity sensor", output.path);
+                self.head_proximity.insert(output.path.clone());
+            }
+            Some(_) => warn!(
+                "{} can't be bound to the proximity sensor, it isn't a boolean action",
+                output.path
+            ),
+            None => warn!("Couldn't find action {}, skipping", output.path),
+        }
+    }
+
     pub fn for_profile<'a, 'b: 'a, C: openxr_data::Compositor, P: InteractionProfile>(
         &'b mut self,
         input: &'a Input<C>,

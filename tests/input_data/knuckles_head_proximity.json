@@ -1,0 +1,30 @@
+{
+	"bindings": {
+		"/actions/main": {
+			"sources": [
+				{
+					"mode": "button",
+					"path": "/user/hand/right/input/a",
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/onheadora"
+						}
+					}
+				}
+			]
+		},
+		"/actions/other": {
+			"sources": [
+				{
+					"mode": "button",
+					"path": "/user/hand/left/input/a",
+					"inputs": {
+						"click": {
+							"output": "/actions/other/in/other"
+						}
+					}
+				}
+			]
+		}
+	}
+}

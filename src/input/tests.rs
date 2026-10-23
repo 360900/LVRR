@@ -2955,3 +2955,100 @@ fn input_003_compressed_skeletal_data_fails() {
     );
     assert_eq!(required, 0);
 }
+
+/// Actions bound to /user/head/proximity in the generic_hmd bindings follow user presence.
+#[test]
+fn head_proximity() {
+    let mut f = Fixture::new();
+    let main = f.get_action_set_handle(c"/actions/main");
+    let other = f.get_action_set_handle(c"/actions/other");
+    let on_head = f.get_action_handle(c"/actions/main/in/HeadsetOnHead");
+    let on_head_or_a = f.get_action_handle(c"/actions/main/in/OnHeadOrA");
+    f.load_actions(c"actions_head_proximity.json");
+    f.set_interaction_profile::<Knuckles>(RightHand);
+    let head = f.get_input_source_handle(c"/user/head");
+    let left = f.get_input_source_handle(c"/user/hand/left");
+    let right = f.get_input_source_handle(c"/user/hand/right");
+
+    let sync = |f: &mut Fixture, set| {
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: set,
+            ..Default::default()
+        })
+    };
+    let set_present = |f: &Fixture, present| {
+        fakexr::set_user_presence(f.raw_session(), present);
+        f.input.openxr.poll_events();
+    };
+    let state = |f: &Fixture, action, restrict| f.get_bool_state_hand(action, restrict).unwrap();
+    let flags = |s: vr::InputDigitalActionData_t| (s.bActive, s.bState, s.bChanged);
+
+    // The vector1 action isn't bound.
+    let data = f.input.openxr.session_data.get();
+    let proximity = &data.input_data.get_loaded_actions().unwrap().head_proximity;
+    assert_eq!(proximity.len(), 2);
+    drop(data);
+
+    assert_eq!(flags(state(&f, on_head, 0)), (false, false, false));
+    sync(&mut f, main);
+    let s = state(&f, on_head, 0);
+    assert_eq!(flags(s), (true, true, true));
+    assert_eq!(s.activeOrigin, head);
+    sync(&mut f, main);
+    assert_eq!(flags(state(&f, on_head, 0)), (true, true, false));
+
+    set_present(&f, false);
+    sync(&mut f, main);
+    assert_eq!(flags(state(&f, on_head, 0)), (true, false, true));
+    assert_eq!(flags(state(&f, on_head, head)), (true, false, true));
+    // Not on a hand.
+    assert_eq!(flags(state(&f, on_head, left)), (false, false, false));
+
+    let mut info = Default::default();
+    assert_eq!(
+        f.input
+            .GetOriginTrackedDeviceInfo(head, &mut info, std::mem::size_of_val(&info) as u32),
+        vr::EVRInputError::None
+    );
+    assert_eq!(info.trackedDeviceIndex, vr::k_unTrackedDeviceIndex_Hmd);
+
+    // Hand bindings of the same action count too.
+    let a = f.get_action::<bool>(on_head_or_a);
+    fakexr::set_action_state(a, fakexr::ActionState::Bool(true), RightHand);
+    sync(&mut f, main);
+    let s = state(&f, on_head_or_a, 0);
+    assert_eq!(flags(s), (true, true, true));
+    assert_eq!(s.activeOrigin, right);
+    assert_eq!(flags(state(&f, on_head_or_a, head)), (true, false, false));
+    set_present(&f, true);
+    sync(&mut f, main);
+    assert_eq!(flags(state(&f, on_head_or_a, 0)), (true, true, false));
+    fakexr::set_action_state(a, fakexr::ActionState::Bool(false), RightHand);
+    sync(&mut f, main);
+    let s = state(&f, on_head_or_a, 0);
+    assert_eq!(flags(s), (true, true, false));
+    assert_eq!(s.activeOrigin, head);
+
+    // Inactive with its set, or with the set restricted to a hand.
+    sync(&mut f, other);
+    assert_eq!(flags(state(&f, on_head, 0)), (false, false, false));
+    assert_eq!(flags(state(&f, on_head, head)), (false, false, false));
+    sync(&mut f, main);
+    assert_eq!(flags(state(&f, on_head, 0)), (true, true, true));
+    sync(&mut f, main);
+    f.sync(vr::VRActiveActionSet_t {
+        ulActionSet: main,
+        ulRestrictedToDevice: left,
+        ..Default::default()
+    });
+    assert_eq!(flags(state(&f, on_head, 0)), (false, false, false));
+}
+
+#[test]
+fn generic_hmd_controller_type() {
+    use super::action_manifest::ControllerType;
+    let ty: ControllerType = serde_json::from_str(r#""generic_hmd""#).unwrap();
+    assert_eq!(ty, ControllerType::GenericHmd);
+    assert_eq!("generic_hmd".parse::<ControllerType>(), Ok(ty.clone()));
+    assert_eq!(ty.to_string(), "generic_hmd");
+}
