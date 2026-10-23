@@ -1609,13 +1609,19 @@ extern "system" fn get_system_properties(
         position_tracking: true.into(),
     };
     hand_tracking::fill_system_properties(properties.next as _);
+    // Copy each header out instead of holding a reference to it, so writing the full struct
+    // through the same pointer doesn't invalidate it.
     let mut next = properties.next.cast::<xr::BaseOutStructure>();
-    while let Some(header) = unsafe { next.as_mut() } {
-        if header.ty == xr::SystemUserPresencePropertiesEXT::TYPE {
-            let presence = unsafe { &mut *next.cast::<xr::SystemUserPresencePropertiesEXT>() };
-            presence.supports_user_presence = true.into();
+    while !next.is_null() {
+        let xr::BaseOutStructure {
+            ty,
+            next: following,
+        } = unsafe { *next };
+        if ty == xr::SystemUserPresencePropertiesEXT::TYPE {
+            let presence = next.cast::<xr::SystemUserPresencePropertiesEXT>();
+            unsafe { (*presence).supports_user_presence = true.into() };
         }
-        next = header.next;
+        next = following;
     }
     xr::Result::SUCCESS
 }
