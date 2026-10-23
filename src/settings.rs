@@ -582,6 +582,7 @@ impl vr::IVRSettings001On002 for Settings {
 mod tests {
     use super::*;
     use crate::openxr_data::OpenXrData;
+    use openxr as xr;
     use std::ffi::CString;
     use std::sync::Arc;
     use vr::{IVRSettings001On002, IVRSettings003_Interface};
@@ -829,6 +830,7 @@ mod tests {
 
         let xr =
             Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
+        let session = xr.session_data.get().session.as_raw();
         let system = Arc::new(System::new(xr, &Injector::default()));
         let settings = Settings::new(&Injector::default());
         settings.system.set(Arc::downgrade(&system));
@@ -848,14 +850,35 @@ mod tests {
             (model.into(), EVRSettingsError::None)
         );
 
-        // The fake runtime's eyes are in the same place.
-        let mut err = EVRSettingsError::IPCFailed;
-        let ipd = IVRSettings003_Interface::GetFloat(
-            &settings,
-            c"steamvr".as_ptr(),
-            c"ipd".as_ptr(),
-            &mut err,
-        );
-        assert_eq!((ipd, err), (0.063, EVRSettingsError::None));
+        let ipd = || {
+            let mut err = EVRSettingsError::IPCFailed;
+            let ipd = IVRSettings003_Interface::GetFloat(
+                &settings,
+                c"steamvr".as_ptr(),
+                c"ipd".as_ptr(),
+                &mut err,
+            );
+            (ipd, err)
+        };
+        // The fake runtime's eyes are in the same place until it's given views, which leaves
+        // SteamVR's default.
+        assert_eq!(ipd(), (0.063, EVRSettingsError::None));
+
+        let eye = |x| {
+            let pose = xr::Posef {
+                orientation: xr::Quaternionf::IDENTITY,
+                position: xr::Vector3f { x, y: 0.0, z: 0.0 },
+            };
+            let fov = xr::Fovf {
+                angle_left: -0.8,
+                angle_right: 0.8,
+                angle_up: 0.8,
+                angle_down: -0.8,
+            };
+            (pose, fov)
+        };
+        fakexr::set_views(session, [eye(-0.032), eye(0.032)]);
+        system.reset_views();
+        assert_eq!(ipd(), (0.064, EVRSettingsError::None));
     }
 }
