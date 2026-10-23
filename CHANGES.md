@@ -1,6 +1,6 @@
-# PICKS
+# Changes
 
-Tracking of upstream PRs integrated into xrizer-edge (personal fork of Supreeeme/xrizer).
+Upstream PRs integrated into xrizer-edge (personal fork of Supreeeme/xrizer) and the fork's own changes.
 
 Baseline: upstream `main` at `63fc7eb` (2026-10-14). Merge commits preserve original authors.
 

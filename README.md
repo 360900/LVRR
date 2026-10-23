@@ -2,7 +2,7 @@
 
 An OpenVR implementation on top of OpenXR. Run OpenVR games through any OpenXR runtime (Monado, WiVRn, etc.) without SteamVR.
 
-xrizer-edge started as a fork of [xrizer](https://github.com/Supreeeme/xrizer) and is developed independently. It includes many upstream PRs that weren't merged there (see [PICKS.md](PICKS.md)) plus its own fixes and API coverage. Missing OpenVR functions log a warning and return a safe default instead of crashing the game.
+xrizer-edge started as a fork of [xrizer](https://github.com/Supreeeme/xrizer) and is developed independently. It includes many upstream PRs that weren't merged there (see [CHANGES.md](CHANGES.md)) plus its own fixes and API coverage. Missing OpenVR functions log a warning and return a safe default instead of crashing the game.
 
 Things will still break. Please open issues here, not on upstream xrizer.
 
