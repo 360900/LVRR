@@ -306,7 +306,20 @@ pub fn session_exists(session: xr::Session) -> bool {
 
 pub fn session_frame_state(session: xr::Session) -> FrameState {
     let session = session.to_handle().unwrap();
-    session.frame_state.load()
+    session.frames.lock().unwrap().state()
+}
+
+/// The display time the last xrEndFrame call on `session` passed. Each xrWaitFrame predicts a
+/// later one.
+pub fn last_frame_display_time(session: xr::Session) -> xr::Time {
+    let session = session.to_handle().unwrap();
+    xr::Time::from_nanos(session.frames.lock().unwrap().ended_display_time)
+}
+
+/// The number of begun frames xrBeginFrame discarded on `session`, because they weren't ended.
+pub fn discarded_frames(session: xr::Session) -> u32 {
+    let session = session.to_handle().unwrap();
+    session.frames.lock().unwrap().discarded
 }
 
 /// The number of layers the last xrEndFrame call on `session` submitted.
@@ -382,6 +395,19 @@ pub fn swapchain_exists(swapchain: xr::Swapchain) -> bool {
 pub fn on_next_end_frame(session: xr::Session, hook: impl FnOnce() + Send + 'static) {
     let session = session.to_handle().unwrap();
     *session.end_frame_hook.lock().unwrap() = Some(Box::new(hook));
+}
+
+/// Runs `hook` on the calling thread in the next xrWaitFrame call on `session`, like while it
+/// blocks.
+pub fn on_next_wait_frame(session: xr::Session, hook: impl FnOnce() + Send + 'static) {
+    let session = session.to_handle().unwrap();
+    *session.wait_frame_hook.lock().unwrap() = Some(Box::new(hook));
+}
+
+/// The display time the last xrLocateViews call on `session` located the views at.
+pub fn last_views_time(session: xr::Session) -> xr::Time {
+    let session = session.to_handle().unwrap();
+    session.views_time.load()
 }
 
 /// Loses `session` like Monado does when the connection drops: LOSS_PENDING is queued and the
@@ -817,11 +843,39 @@ impl Default for HandData {
     }
 }
 
+/// The latest frame call that still matters: a waited frame, else a begun one.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum FrameState {
     Waited,
     Begun,
     Ended,
+}
+
+/// Like with a real runtime, the next frame can be waited for while the last one is still begun.
+#[derive(Default)]
+struct Frames {
+    /// A frame was waited for, but not begun yet.
+    waited: bool,
+    /// A frame was begun, but not ended yet.
+    begun: bool,
+    /// Begun frames xrBeginFrame discarded.
+    discarded: u32,
+    /// The predicted display time of the last frame waited for, in nanoseconds.
+    waited_display_time: i64,
+    /// The display time of the last frame ended, in nanoseconds.
+    ended_display_time: i64,
+}
+
+impl Frames {
+    fn state(&self) -> FrameState {
+        if self.waited {
+            FrameState::Waited
+        } else if self.begun {
+            FrameState::Begun
+        } else {
+            FrameState::Ended
+        }
+    }
 }
 
 struct Session {
@@ -838,7 +892,7 @@ struct Session {
     state: AtomicCell<xr::SessionState>,
     state_synced: AtomicBool,
     should_render: AtomicBool,
-    frame_state: AtomicCell<FrameState>,
+    frames: Mutex<Frames>,
     last_layer_count: AtomicCell<u32>,
     with_trackers: AtomicBool,
     stage_bounds: AtomicCell<Option<xr::Extent2Df>>,
@@ -847,10 +901,12 @@ struct Session {
     attach_hook: Hook,
     end_hook: Hook,
     end_frame_hook: Hook,
+    wait_frame_hook: Hook,
     lost: AtomicBool,
     last_frame_layers: Mutex<Vec<xr::StructureType>>,
     record_projection_layers: AtomicBool,
     views: Mutex<Option<[(xr::Posef, xr::Fovf); 2]>>,
+    views_time: AtomicCell<xr::Time>,
     last_projection_layer: Mutex<Option<ProjectionLayer>>,
 }
 
@@ -930,33 +986,6 @@ impl Drop for Session {
             Space::instances().remove(*space);
         }
     }
-}
-
-fn transition_frame_state(
-    state: &AtomicCell<FrameState>,
-    new: FrameState,
-) -> Result<(), xr::Result> {
-    let old = state.load();
-    let transition = |allowed_state| {
-        if allowed_state == new {
-            Ok(())
-        } else {
-            println!("Invalid transition from {old:?} to {new:?}");
-            Err(xr::Result::ERROR_CALL_ORDER_INVALID)
-        }
-    };
-
-    let ret = match old {
-        FrameState::Waited => transition(FrameState::Begun),
-        FrameState::Begun => Ok(()),
-        FrameState::Ended => transition(FrameState::Waited),
-    };
-
-    if ret.is_ok() {
-        state.store(new);
-    }
-
-    ret
 }
 
 static LOCATION_FLAGS_TRACKED: LazyLock<xr::SpaceLocationFlags> = LazyLock::new(|| {
@@ -1276,7 +1305,7 @@ extern "system" fn create_session(
         state: xr::SessionState::READY.into(),
         state_synced: true.into(),
         should_render: false.into(),
-        frame_state: FrameState::Ended.into(),
+        frames: Mutex::default(),
         last_layer_count: 0.into(),
         with_trackers: false.into(),
         stage_bounds: None.into(),
@@ -1285,10 +1314,12 @@ extern "system" fn create_session(
         attach_hook: Mutex::default(),
         end_hook: Mutex::default(),
         end_frame_hook: Mutex::default(),
+        wait_frame_hook: Mutex::default(),
         lost: false.into(),
         last_frame_layers: Mutex::default(),
         record_projection_layers: false.into(),
         views: Mutex::default(),
+        views_time: AtomicCell::new(xr::Time::from_nanos(0)),
         last_projection_layer: Mutex::default(),
     });
 
@@ -2301,14 +2332,23 @@ extern "system" fn wait_frame(
     state: *mut xr::FrameState,
 ) -> xr::Result {
     let session = get_session!(session);
-    if let Err(e) = transition_frame_state(&session.frame_state, FrameState::Waited) {
-        return e;
-    }
+    run_hook(&session.wait_frame_hook);
+    let display_time = {
+        let mut frames = session.frames.lock().unwrap();
+        // A runtime blocks until the waited frame is begun, which would hang the test.
+        if frames.waited {
+            println!("xrWaitFrame called again before xrBeginFrame");
+            return xr::Result::ERROR_CALL_ORDER_INVALID;
+        }
+        frames.waited = true;
+        frames.waited_display_time += 1;
+        xr::Time::from_nanos(frames.waited_display_time)
+    };
     unsafe {
         state.write(xr::FrameState {
             ty: xr::FrameState::TYPE,
             next: std::ptr::null_mut(),
-            predicted_display_time: xr::Time::from_nanos(1),
+            predicted_display_time: display_time,
             predicted_display_period: xr::Duration::from_nanos(1),
             should_render: session.should_render.load(Ordering::Relaxed).into(),
         })
@@ -2321,8 +2361,14 @@ extern "system" fn begin_frame(
     _info: *const xr::FrameBeginInfo,
 ) -> xr::Result {
     let session = get_session!(session);
-    if let Err(e) = transition_frame_state(&session.frame_state, FrameState::Begun) {
-        return e;
+    let mut frames = session.frames.lock().unwrap();
+    if !std::mem::take(&mut frames.waited) {
+        println!("xrBeginFrame called without xrWaitFrame");
+        return xr::Result::ERROR_CALL_ORDER_INVALID;
+    }
+    if std::mem::replace(&mut frames.begun, true) {
+        frames.discarded += 1;
+        return xr::Result::FRAME_DISCARDED;
     }
     xr::Result::SUCCESS
 }
@@ -2333,10 +2379,15 @@ extern "system" fn end_frame(session: xr::Session, info: *const xr::FrameEndInfo
     if unsafe { (*info).layer_count } > MAX_LAYER_COUNT {
         return xr::Result::ERROR_LAYER_LIMIT_EXCEEDED;
     }
-    if let Err(e) = transition_frame_state(&session.frame_state, FrameState::Ended) {
-        return e;
-    }
     let info = unsafe { &*info };
+    {
+        let mut frames = session.frames.lock().unwrap();
+        if !std::mem::take(&mut frames.begun) {
+            println!("xrEndFrame called without xrBeginFrame");
+            return xr::Result::ERROR_CALL_ORDER_INVALID;
+        }
+        frames.ended_display_time = info.display_time.as_nanos();
+    }
     session.last_layer_count.store(info.layer_count);
     *session.last_frame_layers.lock().unwrap() = (0..info.layer_count as usize)
         .map(|i| unsafe { (**info.layers.add(i)).ty })
@@ -2435,7 +2486,9 @@ extern "system" fn locate_views(
     if let Some(error) = LOCATE_VIEWS_ERROR.get() {
         return error;
     }
-    let space = get_handle!(unsafe { (*info).space });
+    let info = unsafe { &*info };
+    session.views_time.store(info.display_time);
+    let space = get_handle!(info.space);
     let mut set_views = *session.views.lock().unwrap();
     // A reference space with a pose offset sees the views from its moved origin.
     if let SpaceType::Reference(_) = space.ty
