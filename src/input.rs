@@ -2399,15 +2399,22 @@ impl<C: openxr_data::Compositor> Input<C> {
             }};
         }
         let subaction_path = get_subaction_path!(self, restrict_to_device, action_data);
-        let devices = data.input_data.devices.read().unwrap();
-        let get_hand = |hand| {
-            devices
-                .get_controller(hand)
-                .map(|h| (hand, h.profile_path))
-                .unzip()
-        };
         let (active_origin, hand, ty) = match loaded.try_get_action(action) {
             Ok(ActionData::Pose) => {
+                let devices = data.input_data.devices.read().unwrap();
+                // Like SteamVR, a pose action is only active while its device is there: a
+                // controller, or a tracked hand.
+                let present = |hand| {
+                    devices
+                        .get_controller(hand)
+                        .is_some_and(|c| c.is_connected(&self.openxr, &data))
+                };
+                let get_hand = |hand| {
+                    devices
+                        .get_controller(hand)
+                        .map(|h| (hand, h.profile_path))
+                        .unzip()
+                };
                 let (mut hand, interaction_profile) = match subaction_path {
                     x if x == self.get_subaction_path(Hand::Left) => get_hand(Hand::Left),
                     x if x == self.get_subaction_path(Hand::Right) => get_hand(Hand::Right),
@@ -2442,16 +2449,14 @@ impl<C: openxr_data::Compositor> Input<C> {
 
                     // We may have no interaction profile (e.g. hand tracking
                     // only), so try a pose synthesised from the hand skeleton.
-                    let pose = hand.and_then(|hand| {
-                        devices
-                            .get_controller(hand)
-                            .map(|d| d.get_pose(xr_time, &data, origin, None))
-                    });
-                    if let Some(pose) = pose {
+                    if let Some(hand) = hand.filter(|hand| present(*hand))
+                        && let Some(device) = devices.get_controller(hand)
+                    {
+                        let pose = device.get_pose(xr_time, &data, origin, None);
                         unsafe {
                             action_data.write(vr::InputPoseActionData_t {
                                 bActive: true,
-                                activeOrigin: 0,
+                                activeOrigin: restrict_to_device,
                                 pose,
                             });
                         }
@@ -2465,21 +2470,26 @@ impl<C: openxr_data::Compositor> Input<C> {
                 let pose_type = match hand {
                     Some(Hand::Left) => bound.left,
                     Some(Hand::Right) => bound.right,
-                    None => {
-                        hand = Some(Hand::Left);
-                        bound.left.or_else(|| {
-                            hand = Some(Hand::Right);
-                            bound.right
-                        })
-                    }
+                    // The first hand that is there and bound.
+                    None => [(Hand::Left, bound.left), (Hand::Right, bound.right)]
+                        .into_iter()
+                        .find(|(h, ty)| ty.is_some() && present(*h))
+                        .and_then(|(h, ty)| {
+                            hand = Some(h);
+                            ty
+                        }),
                 };
 
                 let Some(ty) = pose_type else {
-                    trace!("action has no bindings for the hand {hand:?}");
+                    trace!("action has no bindings for the hand {hand:?}, or it isn't there");
                     no_data!()
                 };
 
                 let hand = hand.unwrap();
+                if !present(hand) {
+                    trace!("the {hand:?} hand isn't there");
+                    no_data!()
+                }
                 let origin = origin.unwrap_or_else(|| match hand {
                     Hand::Left => self.left_hand_key.data().as_ffi(),
                     Hand::Right => self.right_hand_key.data().as_ffi(),
@@ -2491,13 +2501,20 @@ impl<C: openxr_data::Compositor> Input<C> {
                 if subaction_path != xr::Path::NULL {
                     return vr::EVRInputError::InvalidDevice;
                 }
-                (0, *hand, None)
+                // Active like the skeleton's GetSkeletalActionData.
+                if !self.is_skeleton_active(&data, loaded, action, *hand) {
+                    no_data!()
+                }
+                let origin = match hand {
+                    Hand::Left => self.left_hand_key.data().as_ffi(),
+                    Hand::Right => self.right_hand_key.data().as_ffi(),
+                };
+                (origin, *hand, None)
             }
             Ok(_) => return vr::EVRInputError::WrongType,
             Err(e) => return e,
         };
 
-        drop(devices);
         drop(data);
 
         unsafe {

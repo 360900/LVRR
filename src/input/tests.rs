@@ -1232,6 +1232,72 @@ fn cased_actions() {
     assert!(pose.pose.bPoseIsValid);
 }
 
+/// Like SteamVR, pose actions are only active for a hand that is there.
+#[test]
+fn pose_action_inactive_without_its_device() {
+    fakexr::set_hand_tracking_supported(true);
+    let mut f = Fixture::new();
+    let set1 = f.get_action_set_handle(c"/actions/set1");
+    let pose = f.get_action_handle(c"/actions/set1/in/pose");
+    let skeleton = f.get_action_handle(c"/actions/set1/in/skellyl");
+    let left = f.get_input_source_handle(c"/user/hand/left");
+    let right = f.get_input_source_handle(c"/user/hand/right");
+    f.load_actions(c"actions.json");
+    // fakexr can't locate in the stage space.
+    f.input
+        .openxr
+        .set_tracking_space(vr::ETrackingUniverseOrigin::Seated);
+    let sync = |f: &mut Fixture| {
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: set1,
+            ..Default::default()
+        });
+        // drop cached poses and hand skeletons
+        f.input.frame_start_update();
+    };
+    #[track_caller]
+    fn active(f: &Fixture, action: vr::VRActionHandle_t, restrict: u64) -> (bool, u64) {
+        let data = f.get_pose(action, restrict).unwrap();
+        (data.bActive, data.activeOrigin)
+    }
+    let inactive = (false, vr::k_ulInvalidInputValueHandle);
+
+    // No controllers or hands yet.
+    sync(&mut f);
+    for restrict in [0, left, right] {
+        assert_eq!(active(&f, pose, restrict), inactive, "restrict {restrict}");
+    }
+    assert_eq!(active(&f, skeleton, 0), inactive);
+
+    // A tracked hand without an interaction profile.
+    fakexr::set_hand_tracked(
+        f.raw_session(),
+        LeftHand,
+        Some(xr::HandTrackingDataSourceEXT::UNOBSTRUCTED),
+    );
+    sync(&mut f);
+    assert_eq!(active(&f, pose, left), (true, left));
+    assert_eq!(active(&f, pose, right), inactive);
+    assert_eq!(active(&f, skeleton, 0), (true, left));
+    fakexr::set_hand_tracked(f.raw_session(), LeftHand, None);
+
+    // Only the left controller, whose bindings are used for the right hand too.
+    f.set_interaction_profile::<OculusTouch>(LeftHand);
+    sync(&mut f);
+    assert_eq!(active(&f, pose, left), (true, left));
+    assert_eq!(active(&f, pose, right), inactive);
+    assert_eq!(active(&f, pose, 0), (true, left));
+
+    // Only the right one: unrestricted reads use it.
+    fakexr::set_interaction_profile(f.raw_session(), LeftHand, xr::Path::NULL);
+    f.set_interaction_profile::<OculusTouch>(RightHand);
+    sync(&mut f);
+    assert_eq!(active(&f, pose, left), inactive);
+    assert_eq!(active(&f, pose, right), (true, right));
+    assert_eq!(active(&f, pose, 0), (true, right));
+    assert_eq!(active(&f, skeleton, 0), inactive);
+}
+
 #[test]
 fn digital_action_initalize_on_failure() {
     let f = Fixture::new();
