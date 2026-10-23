@@ -1,6 +1,10 @@
-//! XR_EXT_hand_tracking and XR_EXT_hand_tracking_data_source, with all joints at the origin.
+//! XR_EXT_hand_tracking and XR_EXT_hand_tracking_data_source, with all joints at the origin of
+//! LOCAL.
 
-use super::{Handle, UserPath, destroy_handle, get_handle, impl_handle};
+use super::{
+    Handle, LOCATION_FLAGS_TRACKED, UserPath, destroy_handle, get_handle, impl_handle, is_lost,
+    mat_to_pose, pose_to_mat,
+};
 use openxr_sys as xr;
 use openxr_sys::Handle as _;
 use std::cell::Cell;
@@ -117,11 +121,20 @@ pub(super) extern "system" fn destroy_hand_tracker_e_x_t(
 
 pub(super) extern "system" fn locate_hand_joints_e_x_t(
     tracker: xr::HandTrackerEXT,
-    _info: *const xr::HandJointsLocateInfoEXT,
+    info: *const xr::HandJointsLocateInfoEXT,
     locations: *mut xr::HandJointLocationsEXT,
 ) -> xr::Result {
     let tracker = get_handle!(tracker);
     LOCATED.set(LOCATED.get() + 1);
+    let info = unsafe { info.as_ref().unwrap() };
+    let base_space = get_handle!(info.base_space);
+    if is_lost(&base_space.session) {
+        return xr::Result::ERROR_SESSION_LOST;
+    }
+    let base = match base_space.get_pose_relative_to_local() {
+        Ok(base) => base,
+        Err(e) => return e,
+    };
     let locations = unsafe { locations.as_mut().unwrap() };
     let source = TRACKED.lock().unwrap().as_ref().and_then(|t| {
         t.get(&(tracker.session.into_raw(), tracker.hand as usize))
@@ -152,13 +165,13 @@ pub(super) extern "system" fn locate_hand_joints_e_x_t(
     }
 
     locations.is_active = source.is_some().into();
-    let flags = if source.is_some() {
-        xr::SpaceLocationFlags::POSITION_VALID
-            | xr::SpaceLocationFlags::POSITION_TRACKED
-            | xr::SpaceLocationFlags::ORIENTATION_VALID
-            | xr::SpaceLocationFlags::ORIENTATION_TRACKED
+    // Like locate_space, joints can only be located in a base space that is.
+    let located = source.is_some() && base.location_flags.contains(*LOCATION_FLAGS_TRACKED);
+    let (flags, pose) = if located {
+        let pose = mat_to_pose(pose_to_mat(base.pose).inverse());
+        (*LOCATION_FLAGS_TRACKED, pose)
     } else {
-        xr::SpaceLocationFlags::EMPTY
+        (xr::SpaceLocationFlags::EMPTY, xr::Posef::IDENTITY)
     };
     // The output arrays may be uninitialized.
     for i in 0..locations.joint_count as usize {
@@ -168,7 +181,7 @@ pub(super) extern "system" fn locate_hand_joints_e_x_t(
                 .add(i)
                 .write(xr::HandJointLocationEXT {
                     location_flags: flags,
-                    pose: xr::Posef::IDENTITY,
+                    pose,
                     radius: 0.01,
                 })
         };
