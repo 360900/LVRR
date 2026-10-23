@@ -2544,6 +2544,11 @@ fn skeletal_tracking_level_follows_hand_tracking() {
             ),
             vr::EVRInputError::None
         );
+        bones
+    };
+    let index_finger = |bones: &[vr::VRBoneTransform_t]| {
+        let bone = bones[super::HandSkeletonBone::IndexFinger2 as usize];
+        (bone.position.v, bone.orientation.w)
     };
 
     // Reported before any bone data was requested.
@@ -2553,22 +2558,83 @@ fn skeletal_tracking_level_follows_hand_tracking() {
 
     // Joints already located this frame aren't located again.
     f.input.frame_start_update();
-    bones(&f);
+    let tracked = bones(&f);
     let located = fakexr::hand_joints_located();
     assert_eq!(get_level(&f), Full);
     assert_eq!(fakexr::hand_joints_located(), located);
+    // fakexr's joints are all at the origin, so the bones are on their parents.
+    let (position, w) = index_finger(&tracked);
+    assert_eq!(position[..3], [0.0; 3]);
+    assert_eq!(w, 1.0);
 
     fakexr::set_hand_tracked(f.raw_session(), LeftHand, None);
     assert_eq!(level(&mut f), Full);
     // Nor do estimated bones lower it.
-    bones(&f);
+    let estimated = bones(&f);
     assert_eq!(get_level(&f), Full);
+    assert_ne!(index_finger(&estimated).0[..3], [0.0; 3]);
 
     // A different device doesn't inherit it.
     f.set_interaction_profile::<OculusTouch>(LeftHand);
     assert_eq!(level(&mut f), Estimated);
     fakexr::set_hand_tracked(f.raw_session(), LeftHand, Some(Source::CONTROLLER));
     assert_eq!(level(&mut f), Partial);
+}
+
+#[test]
+fn skeletal_summary_from_hand_tracking() {
+    use xr::HandTrackingDataSourceEXT as Source;
+
+    fakexr::set_hand_tracking_supported(true);
+    let mut f = Fixture::new();
+    f.load_actions(c"actions.json");
+    let set1 = f.get_action_set_handle(c"/actions/set1");
+    let skeleton = f.get_action_handle(c"/actions/set1/in/skellyl");
+    // fakexr can't locate in the stage space.
+    f.input
+        .openxr
+        .set_tracking_space(vr::ETrackingUniverseOrigin::Seated);
+    let curls = |f: &mut Fixture| {
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: set1,
+            ..Default::default()
+        });
+        // drop cached hand skeletons
+        f.input.frame_start_update();
+        let mut summary = vr::VRSkeletalSummaryData_t::default();
+        assert_eq!(
+            f.input
+                .GetSkeletalSummaryData(skeleton, vr::EVRSummaryType::FromDevice, &mut summary),
+            vr::EVRInputError::None
+        );
+        summary.flFingerCurl
+    };
+
+    // fakexr's joints are all at the origin, which makes for fully curled fingers.
+    // A hand without a controller, whose joints aren't located in a grip space.
+    fakexr::set_hand_tracked(f.raw_session(), LeftHand, Some(Source::UNOBSTRUCTED));
+    assert_eq!(curls(&mut f), [1.0; 5]);
+
+    f.set_interaction_profile::<SimpleController>(LeftHand);
+    assert_eq!(curls(&mut f), [1.0; 5]);
+    // The bones of the same frame reuse the joints.
+    let located = fakexr::hand_joints_located();
+    let mut bones = [vr::VRBoneTransform_t::default(); super::HandSkeletonBone::Count as usize];
+    assert_eq!(
+        f.input.GetSkeletalBoneData(
+            skeleton,
+            vr::EVRSkeletalTransformSpace::Parent,
+            vr::EVRSkeletalMotionRange::WithController,
+            bones.as_mut_ptr(),
+            bones.len() as u32,
+        ),
+        vr::EVRInputError::None
+    );
+    assert_eq!(fakexr::hand_joints_located(), located);
+
+    // Estimated, from no inputs.
+    fakexr::set_hand_tracked(f.raw_session(), LeftHand, None);
+    assert_eq!(curls(&mut f), [0.0; 5]);
 }
 
 #[test]
