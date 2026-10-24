@@ -1,0 +1,15 @@
+[workspace]
+members = ["lvrr", "xtask"]
+# Components keep their own workspaces and lockfiles; xtask builds them.
+exclude = ["xrizer", "wayvr"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/360900/LVRR"
+
+[workspace.lints.clippy]
+all = "deny"

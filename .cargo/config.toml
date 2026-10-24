@@ -1,0 +1,4 @@
+# Cargo also reads this file when building inside xrizer/ and wayvr/, so keep
+# it to aliases.
+[alias]
+xtask = "run --package xtask --quiet --"
