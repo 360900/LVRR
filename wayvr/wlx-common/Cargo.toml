@@ -1,0 +1,36 @@
+[package]
+name = "wlx-common"
+version = "0.1.0"
+edition = "2024"
+description = "WayVR common library"
+license = "GPL-3.0-only"
+authors = ["galister", "oo8dev"]
+repository = "https://github.com/wlx-team/wayvr"
+
+[dependencies]
+wayvr-ipc = { path = "../wayvr-ipc", default-features = false }
+
+anyhow.workspace = true
+chrono.workspace = true
+glam.workspace = true
+idmap = { workspace = true, features = ["serde"] }
+idmap-derive.workspace = true
+log.workspace = true
+serde = { workspace = true, features = ["rc"] }
+serde_json.workspace = true
+serde_json5.workspace = true
+slotmap.workspace = true
+smol.workspace = true
+strum.workspace = true
+xdg.workspace = true
+
+freedesktop-desktop-entry = "0.8.4"
+glob = "0.3.3"
+identicons-svg = "0.1.0"
+rodio = {
+  version = "0.22.2",
+  default-features = false,
+  features = ["hound", "mp3", "playback", "recording"]
+}
+walkdir = "2.5.0"
+wgui = { path = "../wgui/" }

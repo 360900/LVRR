@@ -1,0 +1,27 @@
+[package]
+name = "wayvr-ipc"
+version = "0.1.0"
+edition = "2024"
+description = "IPC for controlling WayVR"
+license = "MIT"
+authors = ["galister", "oo8dev"]
+repository = "https://github.com/wlx-team/wayvr"
+
+[dependencies]
+anyhow.workspace = true
+async-channel.workspace = true
+async-io.workspace = true
+bytes.workspace = true
+interprocess.workspace = true
+log.workspace = true
+serde.workspace = true
+slotmap.workspace = true
+smallvec.workspace = true
+
+# client-only deps
+serde_json.workspace = true
+smol = { workspace = true, optional = true }
+
+[features]
+default = ["client"]
+client = ["dep:smol"]

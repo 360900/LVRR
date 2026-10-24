@@ -1,0 +1,538 @@
+use std::{rc::Rc, time::Duration};
+
+use crate::{
+    app_misc,
+    gui::{
+        panel::{GuiPanel, NewGuiPanelParams, apply_custom_command},
+        timer::GuiTimer,
+    },
+    overlays::keyboard::{ChildWidget, alt_modifier_to_key},
+    state::AppState,
+    subsystem::hid::XkbKeymap,
+    windowing::backend::OverlayEventData,
+};
+use anyhow::Context;
+use glam::{FloatExt, Mat4, Vec2, vec2, vec3};
+use smallvec::{SmallVec, smallvec};
+use wgui::{
+    animation::{Animation, AnimationDuration, AnimationEasing},
+    assets::AssetPathRef,
+    color::{WguiColor, WguiColorName},
+    event::{self, CallbackMetadata, EventListenerKind},
+    layout::{LayoutUpdateParams, WidgetID},
+    log::LogErr,
+    palette::WguiColorPalette,
+    parser::{Fetchable, ParseDocumentParams, TemplateParams},
+    renderer::util,
+    taffy::{self, prelude::length},
+    widget::{
+        EventResult, div::WidgetDiv, label::WidgetLabel, rectangle::WidgetRectangle,
+        sprite::WidgetSprite,
+    },
+};
+
+use super::{
+    KeyButtonData, KeyState, KeyboardState, handle_press, handle_release,
+    layout::{self, KeyCapType},
+};
+
+const PIXELS_PER_UNIT: f32 = 60.;
+
+fn new_doc_params(panel: &mut GuiPanel<KeyboardState>) -> ParseDocumentParams<'static> {
+    ParseDocumentParams {
+        globals: panel.layout.state.globals.clone(),
+        path: AssetPathRef::FileOrBuiltIn("gui/keyboard.xml"),
+        extra: panel.doc_extra.take().unwrap_or_default(),
+    }
+}
+
+fn bool_to_rc_str(val: bool) -> Rc<str> {
+    if val { "1" } else { "0" }.into()
+}
+
+#[allow(clippy::too_many_lines, clippy::significant_drop_tightening)]
+pub(super) fn create_keyboard_panel(
+    app: &mut AppState,
+    keymap: Option<&XkbKeymap>,
+    state: KeyboardState,
+    layout: &layout::Layout,
+) -> anyhow::Result<GuiPanel<KeyboardState>> {
+    let mut params = NewGuiPanelParams::default();
+    params.extra_vars.insert(
+        "openvr".into(),
+        bool_to_rc_str(app.feats.xr_backend.is_open_vr()),
+    );
+    params
+        .extra_vars
+        .insert("not_passthru".into(), bool_to_rc_str(!app.feats.passthru));
+    params.extra_vars.insert(
+        "not_wayland".into(),
+        bool_to_rc_str(!app.feats.desktop_backend.is_wayland()),
+    );
+
+    let mut panel = GuiPanel::new_from_template(app, "gui/keyboard.xml", state, params)?;
+
+    let doc_params = new_doc_params(&mut panel);
+
+    let root = panel
+        .parser_state
+        .get_widget_id("keyboard_root")
+        .context("Element with id 'keyboard_root' not found; keyboard.xml may be out of date.")?;
+
+    let has_altgr = keymap.as_ref().is_some_and(|m| XkbKeymap::has_altgr(m));
+
+    for row in 0..layout.key_sizes.len() {
+        let (div, _) = panel.layout.add_child(
+            root,
+            WidgetDiv::create(),
+            taffy::Style {
+                flex_direction: taffy::FlexDirection::Row,
+                ..Default::default()
+            },
+        )?;
+
+        for col in 0..layout.key_sizes[row].len() {
+            let my_size_f32 = layout.key_sizes[row][col];
+
+            let key_width = PIXELS_PER_UNIT * my_size_f32;
+            let key_height = PIXELS_PER_UNIT;
+
+            let taffy_size = taffy::Size {
+                width: length(key_width),
+                height: length(PIXELS_PER_UNIT),
+            };
+
+            let Some(key) = layout.get_key_data(
+                keymap,
+                has_altgr,
+                col,
+                row,
+                &app.session.config.keyboard_layouts,
+            ) else {
+                let _ = panel.layout.add_child(
+                    div.id,
+                    WidgetDiv::create(),
+                    taffy::Style {
+                        size: taffy_size,
+                        min_size: taffy_size,
+                        max_size: taffy_size,
+                        ..Default::default()
+                    },
+                )?;
+                continue;
+            };
+
+            let my_id: Rc<str> = Rc::from(format!("key-{row}-{col}"));
+
+            let my_modifier = match key.button_state {
+                KeyButtonData::Modifier { modifier, .. } => Some(modifier),
+                _ => None,
+            };
+
+            // todo: make this easier to maintain somehow
+            let mut params = TemplateParams::new();
+            params.insert_rc("id", my_id.clone());
+            params.insert_rc("width", key_width.to_string().into());
+            params.insert_rc("height", key_height.to_string().into());
+
+            let mut label = key.label.into_iter();
+            label
+                .next()
+                .and_then(|s| params.insert_rc("text", s.into()));
+
+            match key.cap_type {
+                KeyCapType::LetterAltGr => {
+                    label
+                        .next()
+                        .and_then(|s| params.insert_rc("text_altgr", s.into()));
+                }
+                KeyCapType::Symbol => {
+                    label
+                        .next()
+                        .and_then(|s| params.insert_rc("text_shift", s.into()));
+                }
+                KeyCapType::SymbolAltGr => {
+                    label
+                        .next()
+                        .and_then(|s| params.insert_rc("text_shift", s.into()));
+                    label
+                        .next()
+                        .and_then(|s| params.insert_rc("text_altgr", s.into()));
+                }
+                _ => {}
+            }
+
+            let template_key = format!("Key{:?}", key.cap_type);
+            panel.parser_state.instantiate_template(
+                &doc_params,
+                &template_key,
+                &mut panel.layout,
+                div.id,
+                params,
+            )?;
+
+            if let Ok(widget_id) = panel.parser_state.get_widget_id(&my_id) {
+                let (labels, sprites) = find_children(&panel, widget_id);
+
+                let key_state = {
+                    let rect = panel
+                        .layout
+                        .state
+                        .widgets
+                        .get_as::<WidgetRectangle>(widget_id)
+                        .unwrap(); // want panic
+
+                    Rc::new(KeyState {
+                        button_state: key.button_state,
+                        color: rect.params.color,
+                        color2: rect.params.color2,
+                        base_border_color: rect.params.border_color,
+                        cur_border_color: rect.params.border_color.into(),
+                        border: rect.params.border,
+                        drawn_state: false.into(),
+                        labels,
+                        sprites,
+                    })
+                };
+
+                let width_mul = 1. / my_size_f32;
+
+                panel.add_event_listener(
+                    widget_id,
+                    EventListenerKind::MouseEnter,
+                    Box::new({
+                        let k = key_state.clone();
+                        move |common, data, _app, _state| {
+                            common.alterables.trigger_haptics();
+                            on_enter_anim(k.clone(), common, data, width_mul);
+                            Ok(EventResult::Pass)
+                        }
+                    }),
+                );
+                panel.add_event_listener(
+                    widget_id,
+                    EventListenerKind::MouseLeave,
+                    Box::new({
+                        let k = key_state.clone();
+                        move |common, data, _app, _state| {
+                            common.alterables.trigger_haptics();
+                            on_leave_anim(k.clone(), common, data, width_mul);
+                            Ok(EventResult::Pass)
+                        }
+                    }),
+                );
+                panel.add_event_listener(
+                    widget_id,
+                    EventListenerKind::MousePress,
+                    Box::new({
+                        let k = key_state.clone();
+                        move |common, data, app, state| {
+                            let CallbackMetadata::MouseButton(button) = data.metadata else {
+                                panic!("CallbackMetadata should contain MouseButton!");
+                            };
+
+                            handle_press(app, &k, state, button);
+                            on_press_anim(k.clone(), common, data);
+                            Ok(EventResult::Pass)
+                        }
+                    }),
+                );
+                panel.add_event_listener(
+                    widget_id,
+                    EventListenerKind::MouseRelease,
+                    Box::new({
+                        let k = key_state.clone();
+                        move |common, data, app, state| {
+                            if handle_release(app, &k, state) {
+                                on_release_anim(k.clone(), common, data);
+                            }
+                            Ok(EventResult::Pass)
+                        }
+                    }),
+                );
+
+                if let Some(modifier) = my_modifier {
+                    panel.add_event_listener(
+                        widget_id,
+                        EventListenerKind::InternalStateChange,
+                        Box::new({
+                            let k = key_state.clone();
+                            move |common, data, _app, state| {
+                                if (state.modifiers & modifier) != 0 {
+                                    on_press_anim(k.clone(), common, data);
+                                } else {
+                                    on_release_anim(k.clone(), common, data);
+                                }
+                                Ok(EventResult::Pass)
+                            }
+                        }),
+                    );
+                }
+            } else {
+                log::warn!("No ID for key at ({row}, {col})");
+            }
+        }
+    }
+
+    panel.on_notify = Some(Box::new({
+        let name = "kbd";
+        move |panel, app, event_data| {
+            let mut elems_changed = panel.state.overlay_list.on_notify(
+                &mut panel.layout,
+                &mut panel.parser_state,
+                &event_data,
+                &doc_params,
+            )?;
+
+            elems_changed |= panel.state.set_list.on_notify(
+                &mut panel.layout,
+                &mut panel.parser_state,
+                &event_data,
+                &doc_params,
+            )?;
+
+            match event_data {
+                OverlayEventData::SettingsChanged => {
+                    panel.state.alt_modifier =
+                        alt_modifier_to_key(app.session.config.keyboard_middle_click_mode);
+
+                    if app.session.config.clock_12h != panel.state.clock_12h {
+                        panel.state.clock_12h = app.session.config.clock_12h;
+
+                        if let Ok(clock_root) = panel
+                            .parser_state
+                            .get_widget_id("clock_root")
+                            .log_warn("keyboard.xml may be out of date")
+                        {
+                            panel.layout.remove_children(clock_root);
+                            panel.parser_state.instantiate_template(
+                                &doc_params,
+                                "Clock",
+                                &mut panel.layout,
+                                clock_root,
+                                Default::default(),
+                            )?;
+                            elems_changed = true;
+                        }
+                    }
+                }
+
+                OverlayEventData::CustomCommand { element, command } => {
+                    if let Err(e) = apply_custom_command(panel, app, &element, &command) {
+                        log::warn!("Could not apply {command:?} on {name}/{element}: {e:?}");
+                    }
+                }
+
+                _ => {}
+            }
+
+            if elems_changed {
+                panel.process_custom_elems(app);
+            }
+
+            Ok(())
+        }
+    }));
+
+    panel
+        .timers
+        .push(GuiTimer::new(Duration::from_millis(100), 0));
+
+    app_misc::process_layout_result(
+        app,
+        panel.layout.update(&mut LayoutUpdateParams {
+            size: vec2(2048., 2048.),
+            timestep_alpha: 0.0,
+        })?,
+    );
+
+    Ok(panel)
+}
+
+fn find_children<S>(
+    panel: &GuiPanel<S>,
+    widget_id: WidgetID,
+) -> (SmallVec<[ChildWidget; 3]>, SmallVec<[ChildWidget; 1]>) {
+    let mut labels = smallvec![];
+    let mut sprites = smallvec![];
+
+    let mut children = vec![];
+    panel
+        .layout
+        .collect_children_ids_recursive(widget_id, &mut children);
+
+    for child in children {
+        if let Some(widget) = panel.layout.state.widgets.get_as::<WidgetSprite>(child) {
+            sprites.push(ChildWidget {
+                id: child,
+                base_color: widget.get_color(),
+            });
+        } else if let Some(widget) = panel.layout.state.widgets.get_as::<WidgetLabel>(child) {
+            labels.push(ChildWidget {
+                id: child,
+                base_color: widget.get_color(),
+            });
+        }
+    }
+
+    (labels, sprites)
+}
+
+const BUTTON_HOVER_SCALE: f32 = 0.1;
+
+fn get_anim_transform(pos: f32, widget_size: Vec2, width_mult: f32) -> Mat4 {
+    let scale = vec3(
+        (BUTTON_HOVER_SCALE * width_mult).mul_add(pos, 1.0),
+        BUTTON_HOVER_SCALE.mul_add(pos, 1.0),
+        1.0,
+    );
+
+    util::centered_matrix(widget_size, &Mat4::from_scale(scale))
+}
+
+const HOVER_COLOR: WguiColor = WguiColorName::Tertiary.to_wgui_color();
+const HOVER_BORDER_COLOR: WguiColor = WguiColorName::Tertiary.to_wgui_color().mult_rgb(0.5);
+const HOVER_TEXT_COLOR: WguiColor = WguiColorName::OnTertiary.to_wgui_color();
+const PRESS_BORDER_COLOR: WguiColor = WguiColorName::Highlight.to_wgui_color();
+
+fn set_anim_color(
+    palette: &WguiColorPalette,
+    key_state: &KeyState,
+    rect: &mut WidgetRectangle,
+    pos: f32,
+) {
+    rect.params.color = key_state.color.lerp(palette, &HOVER_COLOR, pos);
+    rect.params.color2 = key_state.color2.lerp(palette, &HOVER_COLOR, pos);
+
+    let cur_border_color = key_state.cur_border_color.get();
+    rect.params.border_color = cur_border_color.lerp(palette, &HOVER_BORDER_COLOR, pos);
+    rect.params.border = key_state.border.lerp(key_state.border * 1.5, pos);
+}
+
+fn on_enter_anim(
+    key_state: Rc<KeyState>,
+    common: &mut event::CallbackDataCommon,
+    data: &event::CallbackData,
+    width_mult: f32,
+) {
+    Animation::new(
+        data.widget_id,
+        AnimationDuration::Seconds(0.1666),
+        AnimationEasing::OutBack,
+        Box::new(move |common, data| {
+            let rect = data.obj.get_as_mut::<WidgetRectangle>().unwrap();
+            set_anim_color(&common.globals().palette, &key_state, rect, data.pos);
+
+            for child in &key_state.labels {
+                let mut widget = common
+                    .state
+                    .widgets
+                    .get_as::<WidgetLabel>(child.id)
+                    .unwrap();
+                let color =
+                    child
+                        .base_color
+                        .lerp(&common.globals().palette, &HOVER_TEXT_COLOR, data.pos);
+                widget.set_color(common, color, true);
+            }
+
+            for child in &key_state.sprites {
+                let mut widget = common
+                    .state
+                    .widgets
+                    .get_as::<WidgetSprite>(child.id)
+                    .unwrap();
+                let color =
+                    child
+                        .base_color
+                        .lerp(&common.globals().palette, &HOVER_TEXT_COLOR, data.pos);
+                widget.set_color(common, color);
+            }
+
+            data.data.transform =
+                get_anim_transform(data.pos, data.widget_boundary.size, width_mult);
+            common.alterables.mark_redraw();
+        }),
+    )
+    .submit(common.alterables);
+}
+
+fn on_leave_anim(
+    key_state: Rc<KeyState>,
+    common: &mut event::CallbackDataCommon,
+    data: &event::CallbackData,
+    width_mult: f32,
+) {
+    Animation::new(
+        data.widget_id,
+        AnimationDuration::Seconds(0.25),
+        AnimationEasing::OutQuad,
+        Box::new(move |common, data| {
+            let rect = data.obj.get_as_mut::<WidgetRectangle>().unwrap();
+            set_anim_color(&common.globals().palette, &key_state, rect, 1.0 - data.pos);
+
+            for child in &key_state.labels {
+                let color = child.base_color.lerp(
+                    &common.globals().palette,
+                    &HOVER_TEXT_COLOR,
+                    1.0 - data.pos,
+                );
+                let mut widget = common
+                    .state
+                    .widgets
+                    .get_as::<WidgetLabel>(child.id)
+                    .unwrap();
+                widget.set_color(common, color, true);
+            }
+
+            for child in &key_state.sprites {
+                let color = child.base_color.lerp(
+                    &common.globals().palette,
+                    &HOVER_TEXT_COLOR,
+                    1.0 - data.pos,
+                );
+                let mut widget = common
+                    .state
+                    .widgets
+                    .get_as::<WidgetSprite>(child.id)
+                    .unwrap();
+                widget.set_color(common, color);
+            }
+
+            data.data.transform =
+                get_anim_transform(1.0 - data.pos, data.widget_boundary.size, width_mult);
+            common.alterables.mark_redraw();
+        }),
+    )
+    .submit(common.alterables);
+}
+
+fn on_press_anim(
+    key_state: Rc<KeyState>,
+    common: &mut event::CallbackDataCommon,
+    data: &mut event::CallbackData,
+) {
+    if key_state.drawn_state.get() {
+        return;
+    }
+    let rect = data.obj.get_as_mut::<WidgetRectangle>().unwrap();
+    key_state.cur_border_color.set(PRESS_BORDER_COLOR);
+    rect.params.border_color = key_state.cur_border_color.get();
+    common.alterables.mark_redraw();
+    key_state.drawn_state.set(true);
+}
+
+fn on_release_anim(
+    key_state: Rc<KeyState>,
+    common: &mut event::CallbackDataCommon,
+    data: &mut event::CallbackData,
+) {
+    if !key_state.drawn_state.get() {
+        return;
+    }
+    let rect = data.obj.get_as_mut::<WidgetRectangle>().unwrap();
+    key_state.cur_border_color.set(key_state.base_border_color);
+    rect.params.border_color = key_state.cur_border_color.get();
+    common.alterables.mark_redraw();
+    key_state.drawn_state.set(false);
+}

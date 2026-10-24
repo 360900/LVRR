@@ -1,0 +1,519 @@
+use bytes::BufMut;
+use interprocess::local_socket::{self, ToNsName};
+use serde::Serialize;
+use slotmap::DenseSlotMap;
+use slotmap::new_key_type;
+use smallvec::SmallVec;
+use smol::io::AsyncReadExt;
+use smol::io::AsyncWriteExt;
+use smol::lock::Mutex;
+use std::os::unix::net::UnixStream as StdUnixStream;
+use std::sync::{Arc, Weak};
+
+use crate::{
+	ipc::{self, Serial},
+	packet_client::{self, HandsfreeParams, PacketClient},
+	packet_server::{self, PacketServer},
+	util::notifier::Notifier,
+};
+
+pub struct QueuedPacket {
+	notifier: Notifier,
+	serial: Serial,
+	packet: Option<PacketServer>,
+}
+
+new_key_type! {
+	pub struct QueuedPacketHandle;
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct AuthInfo {
+	pub runtime: String,
+}
+
+pub struct WayVRClient {
+	receiver: ReceiverMutex,
+	sender: SenderMutex,
+	cancel_tx: async_channel::Sender<()>,
+	exiting: bool,
+	queued_packets: DenseSlotMap<QueuedPacketHandle, QueuedPacket>,
+	pub auth: Option<AuthInfo>,
+}
+
+pub async fn send_packet(sender: &SenderMutex, data: &[u8]) -> anyhow::Result<()> {
+	let mut bytes = bytes::BytesMut::new();
+
+	// packet size
+	bytes.put_u32(data.len() as u32);
+
+	// packet data
+	bytes.put_slice(data);
+
+	sender.lock().await.write_all(&bytes).await?;
+
+	Ok(())
+}
+
+pub type WayVRClientMutex = Arc<Mutex<WayVRClient>>;
+pub type WayVRClientWeak = Weak<Mutex<WayVRClient>>;
+
+type ReceiverMutex = Arc<Mutex<smol::net::unix::UnixStream>>;
+type SenderMutex = Arc<Mutex<smol::net::unix::UnixStream>>;
+
+fn interprocess_stream_to_async(
+	stream: local_socket::Stream,
+) -> anyhow::Result<smol::net::unix::UnixStream> {
+	use std::os::unix::io::OwnedFd;
+
+	let uds_stream: interprocess::os::unix::uds_local_socket::Stream = match stream {
+		local_socket::Stream::UdSocket(s) => s,
+		#[allow(unreachable_patterns)]
+		_ => anyhow::bail!("Unsupported socket type"),
+	};
+
+	let owned_fd: OwnedFd = uds_stream.into();
+	let std_stream = StdUnixStream::from(owned_fd);
+
+	smol::net::unix::UnixStream::try_from(std_stream)
+		.map_err(|e| anyhow::anyhow!("Failed to wrap socket for async I/O: {}", e))
+}
+
+async fn client_runner(client: WayVRClientMutex) -> anyhow::Result<()> {
+	loop {
+		WayVRClient::tick(client.clone()).await?;
+	}
+}
+
+type Payload = SmallVec<[u8; 64]>;
+
+async fn read_payload(
+	conn: &mut smol::net::unix::UnixStream,
+	size: u32,
+) -> anyhow::Result<Payload> {
+	let mut payload = Payload::new();
+	payload.resize(size as usize, 0);
+	conn.read_exact(&mut payload).await?;
+	Ok(payload)
+}
+
+macro_rules! bail_unexpected_response {
+	() => {
+		anyhow::bail!("unexpected response");
+	};
+}
+
+// Send and wait for a response from the server
+macro_rules! send_and_wait {
+	($client_mtx:expr, $serial:expr, $packet_to_send:expr, $expected_response_type:ident) => {{
+		let result =
+			WayVRClient::queue_wait_packet($client_mtx, $serial, &ipc::data_encode($packet_to_send))
+				.await?;
+		if let PacketServer::$expected_response_type(_, res) = result {
+			res
+		} else {
+			bail_unexpected_response!();
+		}
+	}};
+}
+
+// Send without expecting any response
+macro_rules! send_only {
+	($client_mtx:expr, $packet_to_send:expr) => {{
+		WayVRClient::send_payload($client_mtx, &ipc::data_encode($packet_to_send)).await?;
+	}};
+}
+
+impl WayVRClient {
+	pub async fn new(client_name: &str) -> anyhow::Result<WayVRClientMutex> {
+		let printname = "/tmp/wayvr_ipc.sock";
+
+		let name = printname
+			.to_ns_name::<local_socket::GenericNamespaced>()
+			.map_err(|e| anyhow::anyhow!("Failed to create socket name: {}", e))?;
+		let opts = local_socket::ConnectOptions::new().name(name);
+		let ip_stream = opts
+			.connect_sync()
+			.map_err(|e| anyhow::anyhow!("Failed to connect to the WayVR IPC: {}", e))?;
+
+		let async_stream = interprocess_stream_to_async(ip_stream)?;
+		let receiver = Arc::new(Mutex::new(async_stream.clone()));
+		let sender = Arc::new(Mutex::new(async_stream));
+
+		let (cancel_tx, cancel_rx) = async_channel::bounded(1);
+
+		let client = Arc::new(Mutex::new(Self {
+			receiver,
+			sender: sender.clone(),
+			cancel_tx,
+			exiting: false,
+			queued_packets: Default::default(),
+			auth: None,
+		}));
+
+		WayVRClient::start_runner(client.clone(), cancel_rx);
+
+		// Send handshake to the server
+		send_packet(
+			&sender,
+			&ipc::data_encode(&PacketClient::Handshake(packet_client::Handshake {
+				client_name: String::from(client_name),
+				magic: String::from(ipc::CONNECTION_MAGIC),
+				protocol_version: ipc::PROTOCOL_VERSION,
+			})),
+		)
+		.await?;
+
+		Ok(client)
+	}
+
+	fn start_runner(client: WayVRClientMutex, cancel_rx: async_channel::Receiver<()>) {
+		smol::spawn(async move {
+			let cancel_fut = async {
+				cancel_rx
+					.recv()
+					.await
+					.map_err(|_| anyhow::anyhow!("cancelled"))
+			};
+
+			let result = smol::future::race(client_runner(client.clone()), cancel_fut).await;
+
+			match result {
+				Ok(()) => {
+					log::info!("IPC Runner completed");
+				}
+				Err(e) => {
+					if e.to_string() == "cancelled" {
+						log::info!("Exiting IPC runner gracefully");
+					} else {
+						log::info!("IPC Runner failed: {:?}", e);
+					}
+				}
+			}
+		})
+		.detach();
+	}
+
+	async fn tick(client_mtx: WayVRClientMutex) -> anyhow::Result<()> {
+		let receiver = {
+			let client = client_mtx.lock().await;
+			client.receiver.clone()
+		};
+
+		// read packet
+		let packet = {
+			let mut receiver = receiver.lock().await;
+			let mut size_buf = [0u8; 4];
+			receiver.read_exact(&mut size_buf).await?;
+			let packet_size = u32::from_be_bytes(size_buf);
+			log::trace!("packet size {}", packet_size);
+			if packet_size > 128 * 1024 {
+				anyhow::bail!("packet size too large (> 128 KiB)");
+			}
+			let payload = read_payload(&mut receiver, packet_size).await?;
+			let packet: PacketServer = ipc::data_decode(&payload)?;
+			packet
+		};
+
+		{
+			let mut client = client_mtx.lock().await;
+
+			if let PacketServer::HandshakeSuccess(success) = &packet {
+				if client.auth.is_some() {
+					anyhow::bail!("Got handshake response twice");
+				}
+
+				client.auth = Some(AuthInfo {
+					runtime: success.runtime.clone(),
+				});
+
+				log::info!(
+					"Authenticated. Server runtime name: \"{}\"",
+					success.runtime
+				);
+			}
+
+			if let PacketServer::Disconnect(disconnect) = &packet {
+				anyhow::bail!("Server disconnected us. Reason: {}", disconnect.reason);
+			}
+
+			if client.auth.is_none() {
+				anyhow::bail!(
+					"Server tried to send us a packet which is not a HandshakeSuccess or Disconnect"
+				);
+			}
+
+			// queue packet to read if it contains a serial response
+			if let Some(serial) = packet.serial() {
+				for (_, qpacket) in &mut client.queued_packets {
+					if qpacket.serial != *serial {
+						continue; //skip
+					}
+
+					// found response serial, fill it and notify the receiver
+					qpacket.packet = Some(packet);
+					let notifier = qpacket.notifier.clone();
+
+					drop(client);
+					notifier.notify();
+					break;
+				}
+			}
+		}
+
+		Ok(())
+	}
+
+	// Send packet without feedback
+	async fn send_payload(client_mtx: WayVRClientMutex, payload: &[u8]) -> anyhow::Result<()> {
+		let client = client_mtx.lock().await;
+		let sender = client.sender.clone();
+		drop(client);
+		send_packet(&sender, payload).await?;
+		Ok(())
+	}
+
+	async fn queue_wait_packet(
+		client_mtx: WayVRClientMutex,
+		serial: Serial,
+		payload: &[u8],
+	) -> anyhow::Result<PacketServer> {
+		let notifier = Notifier::new();
+
+		// Send packet to the server
+		let queued_packet_handle = {
+			let mut client = client_mtx.lock().await;
+			let handle = client.queued_packets.insert(QueuedPacket {
+				notifier: notifier.clone(),
+				packet: None, // will be filled after notify
+				serial,
+			});
+
+			let sender = client.sender.clone();
+
+			drop(client);
+
+			send_packet(&sender, payload).await?;
+			handle
+		};
+
+		// Wait for response message
+		notifier.wait().await;
+
+		// Fetch response packet
+		{
+			let mut client = client_mtx.lock().await;
+
+			let cell = client
+				.queued_packets
+				.get_mut(queued_packet_handle)
+				.ok_or(anyhow::anyhow!(
+					"missing packet cell, this shouldn't happen"
+				))?;
+
+			let Some(packet) = cell.packet.take() else {
+				anyhow::bail!("packet is None, this shouldn't happen");
+			};
+
+			client.queued_packets.remove(queued_packet_handle);
+
+			Ok(packet)
+		}
+	}
+
+	pub async fn fn_wlx_overlay_list(
+		client: WayVRClientMutex,
+		serial: Serial,
+		params: packet_client::WlxOverlayListParams,
+	) -> anyhow::Result<Vec<String>> {
+		Ok(
+			send_and_wait!(
+				client,
+				serial,
+				&PacketClient::WlxOverlayList(serial, params),
+				WlxOverlayListResponse
+			)
+			.list,
+		)
+	}
+
+	pub async fn fn_wlx_overlay_set_visible(
+		client: WayVRClientMutex,
+		overlay: String,
+		visible: bool,
+	) -> anyhow::Result<()> {
+		send_only!(
+			client,
+			&PacketClient::WlxOverlaySetVisible(overlay, visible)
+		);
+		Ok(())
+	}
+
+	pub async fn fn_wvr_window_set_visible(
+		client: WayVRClientMutex,
+		handle: packet_server::WvrWindowHandle,
+		visible: bool,
+	) -> anyhow::Result<()> {
+		send_only!(client, &PacketClient::WvrWindowSetVisible(handle, visible));
+		Ok(())
+	}
+
+	pub async fn fn_wvr_process_list(
+		client: WayVRClientMutex,
+		serial: Serial,
+	) -> anyhow::Result<Vec<packet_server::WvrProcess>> {
+		Ok(
+			send_and_wait!(
+				client,
+				serial,
+				&PacketClient::WvrProcessList(serial),
+				WvrProcessListResponse
+			)
+			.list,
+		)
+	}
+
+	pub async fn fn_wvr_process_get(
+		client: WayVRClientMutex,
+		serial: Serial,
+		handle: packet_server::WvrProcessHandle,
+	) -> anyhow::Result<Option<packet_server::WvrProcess>> {
+		Ok(send_and_wait!(
+			client,
+			serial,
+			&PacketClient::WvrProcessGet(serial, handle),
+			WvrProcessGetResponse
+		))
+	}
+
+	pub async fn fn_wvr_process_terminate(
+		client: WayVRClientMutex,
+		handle: packet_server::WvrProcessHandle,
+	) -> anyhow::Result<()> {
+		send_only!(client, &PacketClient::WvrProcessTerminate(handle));
+		Ok(())
+	}
+
+	pub async fn fn_wvr_process_launch(
+		client: WayVRClientMutex,
+		serial: Serial,
+		params: packet_client::WvrProcessLaunchParams,
+	) -> anyhow::Result<packet_server::WvrProcessHandle> {
+		send_and_wait!(
+			client,
+			serial,
+			&PacketClient::WvrProcessLaunch(serial, params),
+			WvrProcessLaunchResponse
+		)
+		.map_err(|e| anyhow::anyhow!("{}", e))
+	}
+
+	pub async fn fn_wlx_input_state(
+		client: WayVRClientMutex,
+		serial: Serial,
+	) -> anyhow::Result<packet_server::WlxInputState> {
+		Ok(send_and_wait!(
+			client,
+			serial,
+			&PacketClient::WlxInputState(serial),
+			WlxInputStateResponse
+		))
+	}
+
+	pub async fn fn_wlx_device_haptics(
+		client: WayVRClientMutex,
+		device: usize,
+		params: packet_client::WlxHapticsParams,
+	) -> anyhow::Result<()> {
+		send_only!(client, &PacketClient::WlxDeviceHaptics(device, params));
+		Ok(())
+	}
+
+	pub async fn fn_wlx_show_hide(client: WayVRClientMutex) -> anyhow::Result<()> {
+		send_only!(client, &PacketClient::WlxShowHide);
+		Ok(())
+	}
+
+	pub async fn fn_wlx_switch_set(
+		client: WayVRClientMutex,
+		set: Option<usize>,
+	) -> anyhow::Result<()> {
+		send_only!(client, &PacketClient::WlxSwitchSet(set));
+		Ok(())
+	}
+
+	pub async fn fn_wlx_handsfree(
+		client: WayVRClientMutex,
+		params: HandsfreeParams,
+	) -> anyhow::Result<()> {
+		send_only!(client, &PacketClient::WlxHandsfree(params));
+		Ok(())
+	}
+
+	pub async fn fn_wvr_input_capture(client: WayVRClientMutex, grab: bool) -> anyhow::Result<()> {
+		send_only!(client, &PacketClient::WvrInputCapture(grab));
+		Ok(())
+	}
+
+	pub async fn fn_wlx_modify_panel(
+		client: WayVRClientMutex,
+		params: packet_client::WlxModifyPanelParams,
+	) -> anyhow::Result<()> {
+		send_only!(client, &PacketClient::WlxModifyPanel(params));
+		Ok(())
+	}
+
+	pub async fn fn_wlx_window_state_get(
+		client: WayVRClientMutex,
+		serial: Serial,
+		params: packet_client::WlxWindowStateGetParams,
+	) -> anyhow::Result<Result<packet_client::WlxWindowStateValue, String>> {
+		Ok(send_and_wait!(
+			client,
+			serial,
+			&PacketClient::WlxWindowStateGet(serial, params),
+			WlxWindowStateGetResponse
+		))
+	}
+
+	pub async fn fn_wlx_window_state_set(
+		client: WayVRClientMutex,
+		params: packet_client::WlxWindowStateSetParams,
+	) -> anyhow::Result<()> {
+		send_only!(client, &PacketClient::WlxWindowStateSet(params));
+		Ok(())
+	}
+
+	pub async fn fn_wlx_window_attrib_get(
+		client: WayVRClientMutex,
+		serial: Serial,
+		params: packet_client::WlxWindowAttribGetParams,
+	) -> anyhow::Result<Result<packet_client::WlxWindowAttribValue, String>> {
+		Ok(send_and_wait!(
+			client,
+			serial,
+			&PacketClient::WlxWindowAttribGet(serial, params),
+			WlxWindowAttribGetResponse
+		))
+	}
+
+	pub async fn fn_wlx_window_attrib_set(
+		client: WayVRClientMutex,
+		serial: Serial,
+		params: packet_client::WlxWindowAttribSetParams,
+	) -> anyhow::Result<Result<(), String>> {
+		Ok(send_and_wait!(
+			client,
+			serial,
+			&PacketClient::WlxWindowAttribSet(serial, params),
+			WlxWindowAttribSetResponse
+		))
+	}
+}
+
+impl Drop for WayVRClient {
+	fn drop(&mut self) {
+		self.exiting = true;
+		let _ = self.cancel_tx.try_send(());
+	}
+}

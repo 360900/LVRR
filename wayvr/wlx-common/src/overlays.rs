@@ -1,0 +1,94 @@
+use std::sync::Arc;
+
+use idmap_derive::IntegerId;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, IntegerId, Serialize, Deserialize)]
+pub enum ToastTopic {
+	System,
+	Error,
+	DesktopNotification,
+	XSNotification,
+	IpdChange,
+	Priority,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum ToastDisplayMethod {
+	Hide,
+	Center,
+	Watch,
+}
+
+#[derive(Debug, Clone, Copy, IntegerId, PartialEq)]
+pub enum BackendAttrib {
+	Stereo,
+	StereoFullFrame,
+	StereoAdjustMouse,
+	MouseTransform,
+	Icon,
+	Resizable,
+	WindowSize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BackendAttribValue {
+	Stereo(StereoMode),
+	StereoFullFrame(bool),
+	StereoAdjustMouse(bool),
+	MouseTransform(MouseTransform),
+	#[serde(skip_serializing, skip_deserializing)]
+	Icon(Arc<str>),
+	#[serde(skip_serializing, skip_deserializing)]
+	Resizable(bool),
+	WindowSize([u32; 2]),
+}
+
+const WELL_KNOWN_ASPECT_RATIOS: &[f32] = &[16. / 9., 3. / 2., 1., 2. / 3., 9. / 16.];
+
+impl BackendAttribValue {
+	/// Used to determine if value should be saved
+	pub fn is_default(&self) -> bool {
+		match self {
+			Self::Stereo(val) => *val == StereoMode::default(),
+			Self::StereoFullFrame(val) => !*val,
+			Self::StereoAdjustMouse(val) => !*val,
+			Self::MouseTransform(val) => *val == MouseTransform::default(),
+			Self::Icon(_) => false,
+			Self::Resizable(_) => false,
+			Self::WindowSize([w, h]) => {
+				let r = (*w as f32) / (*h as f32);
+				for a in WELL_KNOWN_ASPECT_RATIOS {
+					if (a - r).abs() < 0.01 {
+						return true;
+					}
+				}
+				false
+			}
+		}
+	}
+}
+
+#[derive(Default, Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub enum StereoMode {
+	#[default]
+	None,
+	LeftRight,
+	RightLeft,
+	TopBottom,
+	BottomTop,
+}
+
+#[derive(Default, Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub enum MouseTransform {
+	#[default]
+	Default,
+	Normal,
+	Rotated90,
+	Rotated180,
+	Rotated270,
+	Flipped,
+	Flipped90,
+	Flipped180,
+	Flipped270,
+}

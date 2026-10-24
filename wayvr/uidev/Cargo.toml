@@ -1,0 +1,21 @@
+[package]
+name = "uidev"
+version = "0.1.0"
+edition = "2024"
+description = "wgui library testing using winit backend"
+license = "GPL-3.0-only"
+authors = ["galister", "oo8dev"]
+repository = "https://github.com/wlx-team/wayvr"
+
+[dependencies]
+dash-frontend = { path = "../dash-frontend/" }
+wgui = { path = "../wgui/" }
+wlx-common = { path = "../wlx-common" }
+
+anyhow.workspace = true
+glam.workspace = true
+log.workspace = true
+rust-embed.workspace = true
+tracing-subscriber.workspace = true
+winit.workspace = true
+ureq = "3.3.0"

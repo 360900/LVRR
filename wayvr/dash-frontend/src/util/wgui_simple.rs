@@ -1,0 +1,209 @@
+use glam::{Mat4, Vec2};
+use std::rc::Rc;
+use wgui::{
+	animation::{Animation, AnimationDuration, AnimationEasing},
+	assets::AssetPathRef,
+	color::WguiColorName,
+	components::{
+		self,
+		button::{ButtonClickCallback, ButtonClickEvent, ComponentButton},
+	},
+	i18n::Translation,
+	layout::{Layout, LayoutTask, WidgetID},
+	parser::{Fetchable, ParseDocumentParams, ParserState, TemplateParams},
+	renderer_vk::{
+		text::{FontWeight, TextStyle, custom_glyph::CustomGlyphData},
+		util::centered_matrix,
+	},
+	taffy::{self, prelude::length},
+	widget::{
+		ConstructEssentials,
+		label::{WidgetLabel, WidgetLabelParams},
+		sprite::{WidgetSprite, WidgetSpriteParams},
+	},
+	windowing::context_menu,
+};
+
+pub struct CreateButtonParams<'a> {
+	pub id_parent: WidgetID,
+	pub layout: &'a mut Layout,
+	pub content: Translation,
+	pub icon_builtin: AssetPathRef<'a>,
+	pub on_click: ButtonClickCallback,
+}
+
+pub fn create_button(par: CreateButtonParams) -> anyhow::Result<()> {
+	let (_, button) = components::button::construct(
+		&mut ConstructEssentials {
+			layout: par.layout,
+			parent: par.id_parent,
+		},
+		components::button::Params {
+			text: Some(par.content),
+			sprite_src: Some(par.icon_builtin),
+			..Default::default()
+		},
+	)?;
+
+	button.on_click(par.on_click);
+
+	Ok(())
+}
+
+#[allow(dead_code)]
+pub fn create_label(layout: &mut Layout, id_parent: WidgetID, content: Translation) -> anyhow::Result<()> {
+	let label = WidgetLabel::create(
+		&mut layout.state,
+		WidgetLabelParams {
+			content,
+			style: TextStyle {
+				wrap: true,
+				..Default::default()
+			},
+			..Default::default()
+		},
+	);
+
+	layout.add_child(id_parent, label, Default::default())?;
+
+	Ok(())
+}
+
+pub fn create_label_error(layout: &mut Layout, parent: WidgetID, content: String) -> anyhow::Result<()> {
+	let label = WidgetLabel::create(
+		&mut layout.state,
+		WidgetLabelParams {
+			content: Translation::from_raw_text_string(content),
+			style: TextStyle {
+				wrap: true,
+				color: Some(WguiColorName::Danger.into()),
+				weight: Some(FontWeight::Bold),
+				..Default::default()
+			},
+			..Default::default()
+		},
+	);
+
+	layout.add_child(parent, label, Default::default())?;
+
+	Ok(())
+}
+
+pub fn create_icon(
+	layout: &mut Layout,
+	id_parent: WidgetID,
+	size: Vec2,
+	path: AssetPathRef,
+) -> anyhow::Result<WidgetID> {
+	let widget_sprite = WidgetSprite::create(WidgetSpriteParams {
+		color: Some(WguiColorName::OnBackground.into()),
+		glyph_data: Some(CustomGlyphData::from_assets(&layout.state.globals, path)?),
+		..Default::default()
+	});
+
+	let size = taffy::Size {
+		width: length(size.x),
+		height: length(size.y),
+	};
+
+	let (widget, _) = layout.add_child(
+		id_parent,
+		widget_sprite,
+		taffy::Style {
+			min_size: size,
+			max_size: size,
+			size,
+			..Default::default()
+		},
+	)?;
+
+	Ok(widget.id)
+}
+
+pub struct CreateLoadingParams<'a> {
+	pub layout: &'a mut Layout,
+	pub parent_id: WidgetID,
+	pub with_text: bool,
+}
+
+pub fn create_loading(par: CreateLoadingParams) -> anyhow::Result<WidgetID> {
+	let doc_params = ParseDocumentParams {
+		globals: par.layout.state.globals.clone(),
+		path: AssetPathRef::BuiltIn("gui/t_loading.xml"),
+		extra: Default::default(),
+	};
+
+	let mut parser_state = wgui::parser::parse_from_assets(&doc_params, par.layout, par.parent_id)?;
+
+	let data = parser_state.realize_template(
+		&doc_params,
+		if par.with_text {
+			"LoadingWithText"
+		} else {
+			"LoadingWithoutText"
+		},
+		par.layout,
+		par.parent_id,
+		Default::default(),
+	)?;
+
+	let id_root = data.get_widget_id("root")?;
+	let id_sprite_loading = data.get_widget_id("sprite_loading")?;
+
+	Animation::new(
+		id_sprite_loading,
+		AnimationDuration::SecondsFixed(120.0), /* spin it for 120 seconds at most */
+		AnimationEasing::Linear,
+		Box::new(move |common, data| {
+			// spin it
+			data.data.transform = centered_matrix(data.widget_boundary.size, &Mat4::from_rotation_z(data.pos * 400.0));
+			if data.pos == 1.0 {
+				// remove the spinner, do not waste energy
+				common
+					.alterables
+					.tasks
+					.push(LayoutTask::RemoveWidget(id_sprite_loading));
+			}
+			common.alterables.mark_redraw();
+		}),
+	)
+	.submit_l(par.layout);
+
+	Ok(id_root)
+}
+
+pub struct MountDropdownParams<'a> {
+	pub layout: &'a mut Layout,
+	pub parser_state: &'a mut ParserState,
+	pub doc_params: &'a ParseDocumentParams<'a>,
+	pub parent: WidgetID,
+	pub id: String,
+	pub params: TemplateParams,
+	pub current_text: Translation,
+	pub cells: Vec<context_menu::Cell>,
+	pub on_open: Box<dyn Fn(context_menu::Position, Vec<context_menu::Cell>)>,
+}
+
+pub fn mount_dropdown(par: MountDropdownParams) -> anyhow::Result<()> {
+	let mut params = par.params;
+	params.insert("id", &par.id);
+
+	par
+		.parser_state
+		.instantiate_template(par.doc_params, "DropdownButton", par.layout, par.parent, params)?;
+
+	{
+		let mut label = par
+			.parser_state
+			.fetch_widget_as::<WidgetLabel>(&par.layout.state, &format!("{}_value", par.id))?;
+		label.set_text_simple(&mut par.layout.state.globals.get(), par.current_text);
+	}
+
+	let btn = par.parser_state.fetch_component_as::<ComponentButton>(&par.id)?;
+	btn.on_click(Rc::new(move |_common, e: ButtonClickEvent| {
+		(par.on_open)(e.mouse_pos_absolute.into(), par.cells.clone());
+		Ok(())
+	}));
+
+	Ok(())
+}

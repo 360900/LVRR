@@ -1,0 +1,648 @@
+use std::{
+    collections::VecDeque,
+    ops::Add,
+    sync::{Arc, atomic::Ordering},
+    time::{Duration, Instant},
+};
+
+use glam::{Affine3A, Vec3};
+use input::OpenXrInputSource;
+use openxr as xr;
+use skybox::{Skybox, create_skybox};
+use wgui::i18n::Translation;
+use wlx_common::{
+    dash_interface::InterfaceFeats,
+    overlays::{StereoMode, ToastTopic},
+};
+
+use crate::{
+    Args, FRAME_COUNTER, RUNNING, XrBackend,
+    backend::{
+        BackendError, RunParams,
+        input::interact,
+        openxr::{
+            helpers::{ExtraExts, try_apply_chroma_key},
+            lines::LinePool,
+            overlay::OpenXrOverlayData,
+            swapchain::SwapchainRetirementQueue,
+        },
+        task::{OpenXrTask, OverlayTask, TaskType},
+    },
+    config::{save_settings, save_state},
+    graphics::{GpuFutures, init_openxr_graphics},
+    overlays::{toast::Toast, watch::WATCH_NAME},
+    state::AppState,
+    windowing::{
+        backend::{RenderResources, RenderTarget, ShouldRender},
+        manager::OverlayWindowManager,
+    },
+};
+
+mod blocker;
+mod helpers;
+mod input;
+mod lines;
+pub mod monado_state;
+mod overlay;
+mod playspace;
+mod skybox;
+mod swapchain;
+
+const VIEW_TYPE: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
+
+struct XrState {
+    instance: xr::Instance,
+    session: xr::Session<xr::Vulkan>,
+    predicted_display_time: xr::Time,
+    fps: f32,
+    stage: Arc<xr::Space>,
+    view: Arc<xr::Space>,
+    extra_exts: ExtraExts,
+}
+
+/// XR runtime using our vk device/queue can have submissions in flight after last xrEndFrame/xrReleaseSwapchainImage
+/// This guard is dropped first, draining shared device before swapchain/session teardown begins
+struct OpenXrGpuIdleGuard(Arc<wgui::gfx::WGfx>);
+
+impl Drop for OpenXrGpuIdleGuard {
+    fn drop(&mut self) {
+        if let Err(e) = self.0.wait_idle() {
+            log::error!("Failed waiting for Vulkan device idle during OpenXR shutdown: {e:#}");
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
+pub fn openxr_run(args: &Args, params: RunParams) -> Result<(), BackendError> {
+    let (xr_instance, system, extra_exts) = match helpers::init_xr() {
+        Ok((xr_instance, system, extra_exts)) => (xr_instance, system, extra_exts),
+        Err(e) => {
+            if !args.wait {
+                log::warn!("Will not use OpenXR: {e}");
+            }
+            return Err(BackendError::NotSupported);
+        }
+    };
+
+    let feats = InterfaceFeats {
+        passthru: extra_exts.mndx_composition_layer_alpha_blend_system_ui,
+        ..InterfaceFeats::default_for_backend(XrBackend::OpenXR)
+    };
+
+    let mut app = {
+        let (gfx, gfx_extras) = init_openxr_graphics(xr_instance.clone(), system)?;
+        AppState::from_graphics(gfx, gfx_extras, feats, params)?
+    };
+
+    app.session.no_autostart = args.no_autostart;
+
+    let modes = xr_instance.enumerate_environment_blend_modes(system, VIEW_TYPE)?;
+    log::debug!("Env blend modes: {modes:?}");
+
+    if args.show {
+        app.session.config.tutorial_graduated = true;
+        app.tasks.enqueue_at(
+            TaskType::Overlay(OverlayTask::ShowHide),
+            Instant::now().add(Duration::from_secs(1)),
+        );
+    }
+
+    let mut overlays = OverlayWindowManager::<OpenXrOverlayData>::new(&mut app, args.headless)?;
+    let mut lines = LinePool::new(&app)?;
+    let mut current_lines = Vec::with_capacity(2);
+
+    let mut delete_queue = vec![];
+
+    app.late_init();
+
+    let mut playspace_mover = playspace::PlayspaceMover::new();
+
+    let mut blocker = app
+        .monado_state
+        .as_ref()
+        .map(|m| blocker::InputBlocker::new(&m.ipc));
+
+    let (session, mut frame_wait, mut frame_stream) = unsafe {
+        let raw_session = helpers::create_overlay_session(
+            &xr_instance,
+            system,
+            &xr::vulkan::SessionCreateInfo {
+                instance: app.gfx.raw_instance_handle() as _,
+                physical_device: app.gfx.raw_physical_device_handle() as _,
+                device: app.gfx.raw_device_handle() as _,
+                queue_family_index: app.gfx.graphics_queue_family_index(),
+                queue_index: app.gfx.graphics_queue_index(),
+            },
+        )?;
+        xr::Session::from_raw(xr_instance.clone(), raw_session, Box::new(()))
+    };
+
+    let stage =
+        session.create_reference_space(xr::ReferenceSpaceType::STAGE, xr::Posef::IDENTITY)?;
+
+    let view = session.create_reference_space(xr::ReferenceSpaceType::VIEW, xr::Posef::IDENTITY)?;
+
+    let mut xr_state = XrState {
+        instance: xr_instance,
+        session,
+        predicted_display_time: xr::Time::from_nanos(0),
+        fps: 30.0,
+        stage: Arc::new(stage),
+        view: Arc::new(view),
+        extra_exts,
+    };
+
+    let mut skybox: Option<Skybox> = None;
+
+    let pointer_lines = [
+        lines.allocate(&xr_state, &app)?,
+        lines.allocate(&xr_state, &app)?,
+    ];
+
+    let watch_id = overlays.lookup(WATCH_NAME).unwrap(); // want panic
+
+    let mut input_source = input::OpenXrInputSource::new(&xr_state)?;
+
+    let mut session_running = false;
+    let mut event_storage = xr::EventDataBuffer::new();
+
+    let mut next_device_update = Instant::now();
+    let mut due_tasks = VecDeque::with_capacity(4);
+
+    let mut fps_counter: VecDeque<Instant> = VecDeque::new();
+
+    let mut main_session_visible = false;
+    let mut environment_blend_mode = modes[0];
+    let mut last_frame_time = Instant::now();
+    let mut retired_swapchains = SwapchainRetirementQueue::default();
+
+    // declared last so rust drops this before all long-lived XR objects
+    let _gpu_idle_before_xr_drop = OpenXrGpuIdleGuard(app.gfx.clone());
+
+    if !args.show {
+        Toast::new(
+            ToastTopic::Priority,
+            Some(Translation::from_translation_key(
+                "TOAST.WAYVR_RUNNING_TITLE",
+            )),
+            Translation::from_translation_key("TOAST.WAYVR_RUNNING_TEXT"),
+        )
+        .with_timeout(5.0)
+        .submit(&mut app);
+    }
+
+    'main_loop: loop {
+        let now = Instant::now();
+        app.delta_time = (now.duration_since(last_frame_time).as_secs_f32()).clamp(0.001, 0.2); // 5 - 1000 fps
+        last_frame_time = now;
+        let cur_frame = FRAME_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+        if !RUNNING.load(Ordering::Relaxed) {
+            log::warn!("Received shutdown signal.");
+            match xr_state.session.request_exit() {
+                Ok(()) => log::info!("OpenXR session exit requested."),
+                Err(xr::sys::Result::ERROR_SESSION_NOT_RUNNING) => break 'main_loop,
+                Err(e) => {
+                    log::error!("Failed to request OpenXR session exit: {e}");
+                    break 'main_loop;
+                }
+            }
+        }
+
+        while let Some(event) = xr_state.instance.poll_event(&mut event_storage)? {
+            match event {
+                xr::Event::SessionStateChanged(e) => {
+                    // Session state change is where we can begin and end sessions, as well as
+                    // find quit messages!
+                    log::info!("entered state {:?}", e.state());
+                    match e.state() {
+                        xr::SessionState::READY => {
+                            xr_state.session.begin(VIEW_TYPE)?;
+                            session_running = true;
+                            reconfigure_environment_blend(
+                                &app,
+                                &xr_state,
+                                &modes,
+                                &mut skybox,
+                                &mut retired_swapchains,
+                                &mut environment_blend_mode,
+                                main_session_visible,
+                            );
+                        }
+                        xr::SessionState::STOPPING => {
+                            xr_state.session.end()?;
+                            session_running = false;
+                        }
+                        xr::SessionState::EXITING | xr::SessionState::LOSS_PENDING => {
+                            break 'main_loop;
+                        }
+                        _ => {}
+                    }
+                }
+                xr::Event::InstanceLossPending(_) => {
+                    break 'main_loop;
+                }
+                xr::Event::EventsLost(e) => {
+                    log::warn!("lost {} events", e.lost_event_count());
+                }
+                xr::Event::MainSessionVisibilityChangedEXTX(e) => {
+                    main_session_visible = e.visible();
+                    reconfigure_environment_blend(
+                        &app,
+                        &xr_state,
+                        &modes,
+                        &mut skybox,
+                        &mut retired_swapchains,
+                        &mut environment_blend_mode,
+                        main_session_visible,
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        if app.monado_state.is_some() && next_device_update <= Instant::now() {
+            let changed = OpenXrInputSource::update_devices(&mut app);
+            if changed {
+                overlays.devices_changed(&mut app)?;
+            }
+            next_device_update = Instant::now() + Duration::from_secs(30);
+        }
+
+        if !session_running {
+            std::thread::sleep(Duration::from_millis(100));
+            log::trace!("session not running: continue");
+            continue 'main_loop;
+        }
+
+        // poll only, never wait for GPU
+        retired_swapchains.collect(&app.gfx);
+
+        log::trace!("xrWaitFrame");
+        let xr_frame_state = frame_wait.wait()?;
+        log::trace!("xrBeginFrame");
+        frame_stream.begin()?;
+
+        xr_state.predicted_display_time = xr_frame_state.predicted_display_time;
+        xr_state.fps = {
+            fps_counter.push_back(Instant::now());
+
+            while let Some(time) = fps_counter.front() {
+                if time.elapsed().as_secs_f32() > 1. {
+                    fps_counter.pop_front();
+                } else {
+                    break;
+                }
+            }
+
+            let total_elapsed = fps_counter
+                .front()
+                .map_or(0f32, |time| time.elapsed().as_secs_f32());
+
+            fps_counter.len() as f32 / total_elapsed
+        };
+
+        if !xr_frame_state.should_render {
+            log::trace!("xrEndFrame");
+            frame_stream.end(
+                xr_frame_state.predicted_display_time,
+                environment_blend_mode,
+                &[],
+            )?;
+            continue 'main_loop;
+        }
+
+        app.input_state.pre_update();
+        input_source.update(&xr_state, &mut app)?;
+        app.input_state.post_update(&app.session);
+
+        if let Some(ref mut blocker) = blocker {
+            blocker.update(&mut app);
+        }
+
+        if app
+            .input_state
+            .pointers
+            .iter()
+            .any(|p| p.now.show_hide && !p.before.show_hide)
+        {
+            overlays.show_hide(&mut app);
+        }
+
+        if app
+            .input_state
+            .pointers
+            .iter()
+            .any(|p| p.now.toggle_dashboard && !p.before.toggle_dashboard)
+        {
+            app.tasks
+                .enqueue(TaskType::Overlay(OverlayTask::ToggleDashboard));
+        }
+
+        playspace_mover.update(&mut overlays, &mut app);
+
+        for o in overlays.values_mut() {
+            o.after_input(&mut app)?;
+        }
+
+        #[cfg(feature = "osc")]
+        if let Some(ref mut sender) = app.osc_sender {
+            let _ = sender.send_params(&overlays, &app.input_state.devices);
+        }
+
+        let (_, views) = xr_state.session.locate_views(
+            VIEW_TYPE,
+            xr_frame_state.predicted_display_time,
+            &xr_state.stage,
+        )?;
+
+        let ipd = helpers::ipd_from_views(&views);
+        if (app.input_state.ipd - ipd).abs() > 0.5 {
+            log::info!("IPD changed: {} -> {}", app.input_state.ipd, ipd);
+            app.input_state.ipd = ipd;
+            Toast::new(
+                ToastTopic::IpdChange,
+                Some(Translation::from_raw_text("IPD")),
+                Translation::from_raw_text_string(format!("{ipd:.1} mm")),
+            )
+            .submit(&mut app);
+        }
+
+        overlays.tick(&mut app);
+
+        current_lines.clear();
+
+        let haptics = interact(&mut overlays, &mut app, &mut current_lines);
+        for (idx, haptics) in haptics.iter().enumerate() {
+            if let Some(haptics) = haptics {
+                input_source.haptics(&xr_state, idx, haptics);
+            }
+        }
+        for (idx, line) in current_lines.iter().enumerate() {
+            lines.draw_between(
+                pointer_lines[idx],
+                line.a,
+                line.b,
+                line.mode as usize + 1,
+                app.input_state.hmd,
+            );
+        }
+
+        app.hid_provider.inner.commit();
+
+        let watch = overlays.mut_by_id(watch_id).unwrap(); // want panic
+        if watch.config.active_state.is_none() {
+            watch.config.activate(&mut app, true);
+        }
+        let watch_state = watch.config.active_state.as_mut().unwrap();
+        let watch_transform = watch_state.transform;
+        if watch_state.alpha < 0.05 || !app.session.config.enable_watch {
+            //FIXME: Temporary workaround for Monado bug
+            watch_state.transform = Affine3A::from_scale(Vec3 {
+                x: 0.001,
+                y: 0.001,
+                z: 0.001,
+            });
+            watch_state.alpha = 0.02; // visible but not really. Monado freaks out if no layers are submitted.
+        }
+
+        if let Err(e) =
+            crate::ipc::events::tick_events::<OpenXrOverlayData>(&mut app, &mut overlays)
+        {
+            log::error!("WayVR IPC tick_events failed: {e:?}");
+        }
+
+        // Begin rendering
+        let mut futures = GpuFutures::default();
+
+        if !main_session_visible && let Some(skybox) = skybox.as_mut() {
+            skybox.render(&xr_state, &app, &mut futures)?;
+        }
+
+        for o in overlays.values_mut() {
+            o.data.cur_visible = false;
+            if o.config
+                .active_state
+                .as_ref()
+                .is_none_or(|s| s.alpha < 0.01)
+            {
+                log::trace!("{}: hidden, skip render", o.config.name);
+                continue;
+            }
+
+            if !o.data.init {
+                log::trace!("{}: init", o.config.name);
+                o.init(&mut app)?;
+                o.data.init = true;
+            }
+
+            let should_render = matches!(o.should_render(&mut app)?, ShouldRender::Should);
+            log::trace!("{}: should_render returned: {should_render}", o.config.name);
+
+            if should_render {
+                log::trace!("{}: render new frame", o.config.name);
+                let meta = o.config.backend.frame_meta().unwrap(); // want panic
+                let stereo = !matches!(meta.stereo, StereoMode::None);
+                let wsi = o.ensure_swapchain_acquire(
+                    &app,
+                    &xr_state,
+                    &mut retired_swapchains,
+                    meta.extent,
+                    stereo,
+                )?;
+                let tgt = RenderTarget { views: wsi.views };
+                let mut rdr = RenderResources::new(app.gfx.clone(), tgt, &meta)?;
+                o.render(&mut app, &mut rdr)?;
+                futures.execute_results(rdr.end()?);
+            } else if o.data.swapchain.is_none() {
+                log::trace!("{}: not showing due to missing swapchain", o.config.name);
+                continue;
+            } else {
+                log::trace!("{}: showing stale frame", o.config.name);
+            }
+            o.data.cur_visible = true;
+        }
+
+        lines.render(&app, &mut futures)?;
+        futures.wait()?;
+        // End rendering
+
+        if let Some(monado_state) = &mut app.monado_state {
+            monado_state.update();
+        }
+
+        // Layer composition
+        let mut layers = vec![];
+        if !main_session_visible && let Some(skybox) = skybox.as_mut() {
+            for (idx, layer) in skybox.present(&xr_state, &app)?.into_iter().enumerate() {
+                layers.push(((idx as f32).mul_add(-50.0, 200.0), layer));
+            }
+        }
+
+        for o in overlays.values_mut() {
+            if !o.data.cur_visible {
+                continue;
+            }
+            // unwrap: above if only passes if active_state is some
+            let active_state = o.config.active_state.as_ref().unwrap();
+            let dist_sq = (app.input_state.hmd.translation - active_state.transform.translation)
+                .length_squared()
+                + (100f32 - o.config.z_order as f32);
+            if !dist_sq.is_normal() {
+                o.data.swapchain.as_mut().unwrap().ensure_image_released()?;
+                continue;
+            }
+            for layer in o.present(&xr_state)? {
+                layers.push((dist_sq, layer));
+            }
+        }
+
+        for layer in lines.present(&xr_state)? {
+            layers.push((0.0, layer));
+        }
+        // End layer composition
+
+        // Begin layer submit
+        layers.sort_by(|a, b| b.0.total_cmp(&a.0));
+
+        let frame_ref = layers
+            .iter()
+            .map(|f| match f.1 {
+                CompositionLayer::Quad(ref l) => l as &xr::CompositionLayerBase<xr::Vulkan>,
+                CompositionLayer::Cylinder(ref l) => l as &xr::CompositionLayerBase<xr::Vulkan>,
+                CompositionLayer::Equirect2(ref l) => l as &xr::CompositionLayerBase<xr::Vulkan>,
+            })
+            .collect::<Vec<_>>();
+
+        log::trace!("xrEndFrame");
+        frame_stream.end(
+            xr_state.predicted_display_time,
+            environment_blend_mode,
+            &frame_ref,
+        )?;
+        // End layer submit
+
+        app.tick();
+        app.tasks.retrieve_due(&mut due_tasks);
+        while let Some(task) = due_tasks.pop_front() {
+            match task {
+                TaskType::Global(task) => {
+                    task(&mut app);
+                }
+                TaskType::Input(task) => {
+                    app.input_state.handle_task(task);
+                }
+                TaskType::Overlay(task) => {
+                    overlays.handle_task(&mut app, task)?;
+                }
+                TaskType::Playspace(task) => {
+                    playspace_mover.handle_task(&mut app, &mut overlays, task);
+                }
+                TaskType::OpenXR(task) => {
+                    if matches!(task, OpenXrTask::EnvironmentChanged) {
+                        reconfigure_environment_blend(
+                            &app,
+                            &xr_state,
+                            &modes,
+                            &mut skybox,
+                            &mut retired_swapchains,
+                            &mut environment_blend_mode,
+                            main_session_visible,
+                        );
+                    }
+                }
+                #[cfg(feature = "openvr")]
+                TaskType::OpenVR(_) => {}
+            }
+        }
+
+        while let Some(mut o) = overlays.pop_dropped() {
+            if let Some(swapchain) = o.data.swapchain.take() {
+                retired_swapchains.retire(swapchain, &app.gfx);
+            }
+            delete_queue.push((o, cur_frame + 5));
+        }
+
+        retired_swapchains.collect(&app.gfx);
+        delete_queue.retain(|(_, frame)| *frame > cur_frame);
+
+        //FIXME: Temporary workaround for Monado bug
+        let watch = overlays.mut_by_id(watch_id).unwrap(); // want panic
+
+        if let Some(state) = watch.config.active_state.as_mut() {
+            state.transform = watch_transform;
+        }
+        if !app.session.config.enable_watch {
+            watch.config.deactivate();
+        }
+    } // main_loop
+
+    if let (Some(blocker), Some(monado)) = (blocker, app.monado_state.as_mut()) {
+        blocker.unblock(&mut monado.ipc);
+    }
+
+    overlays.persist_layout(&mut app);
+    if let Err(e) = save_state(&app.session.config) {
+        log::error!("Could not save state: {e:?}");
+    }
+    if app.session.config_dirty {
+        save_settings(&app.session.config)?;
+        app.session.config_dirty = false;
+    }
+
+    Ok(())
+}
+
+pub(super) enum CompositionLayer<'a> {
+    Quad(xr::CompositionLayerQuad<'a, xr::Vulkan>),
+    Cylinder(xr::CompositionLayerCylinderKHR<'a, xr::Vulkan>),
+    Equirect2(xr::CompositionLayerEquirect2KHR<'a, xr::Vulkan>),
+}
+
+// applies chroma key settings.
+// if chroma key or passthrough is enabled, use alpha env blend
+// if alpha blend is not used and skybox is enabled, use skybox
+fn reconfigure_environment_blend(
+    app: &AppState,
+    xr_state: &XrState,
+    modes: &[xr::EnvironmentBlendMode],
+    skybox: &mut Option<Skybox>,
+    retired_swapchains: &mut SwapchainRetirementQueue,
+    environment_blend_mode: &mut xr::EnvironmentBlendMode,
+    main_session_visible: bool,
+) {
+    let has_chroma_key = try_apply_chroma_key(app);
+
+    *environment_blend_mode = {
+        if modes.contains(&xr::EnvironmentBlendMode::ALPHA_BLEND)
+            && (app.session.config.use_passthrough || has_chroma_key)
+        {
+            xr::EnvironmentBlendMode::ALPHA_BLEND
+        } else {
+            modes[0]
+        }
+    };
+
+    let want_skybox = *environment_blend_mode == xr::EnvironmentBlendMode::OPAQUE
+        && app.session.config.use_skybox
+        && !main_session_visible;
+
+    if want_skybox {
+        if skybox
+            .as_ref()
+            .is_some_and(|curr_skybox| curr_skybox.needs_recreate(app))
+        {
+            if let Some(old_skybox) = skybox.take() {
+                old_skybox.retire(retired_swapchains, app);
+            }
+            log::debug!("Allocating skybox.");
+            *skybox = create_skybox(xr_state, app);
+        } else if skybox.is_none() {
+            log::debug!("Allocating skybox.");
+            *skybox = create_skybox(xr_state, app);
+        }
+    } else if let Some(old_skybox) = skybox.take() {
+        log::debug!("Destroying skybox.");
+        old_skybox.retire(retired_swapchains, app);
+    }
+}

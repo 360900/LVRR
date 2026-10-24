@@ -1,0 +1,14 @@
+<layout version="2">
+  <include src_builtin="welcome_common.xml"/>
+  
+  <elements>
+    <rectangle color="#103142" width="100%" height="100%" position="absolute"/>
+
+    <WelcomeVideo src_builtin="@/video/onboarding_watch.ivf" aspect_ratio="1.0">
+      <PageTitle icon="@/dashboard/watch.svg" translation="WELCOME.WATCH"/>
+      <div position="relative" align_self="end" padding="16">
+        <TextDesc translation="WELCOME.LOOK_AT_LEFT_WRIST"/>
+      </div>
+    </WelcomeVideo>
+  </elements>
+</layout>

@@ -1,0 +1,30 @@
+<layout version="2">
+  <macro name="ContextMenuCell" tooltip_str="${tooltip_str}" weight="bold" border="0" padding_left="4" padding_right="4" color="background(transparent)" justify_content="start" min_height="28"/>
+  
+  <!--
+    text
+  -->
+  <template name="CellButton">
+    <Button id="button" text="${text}" macro="ContextMenuCell"/>
+  </template>
+
+  <!--
+    text, sprite_src_builtin
+  -->
+  <template name="CellButtonSprite">
+    <Button id="button" macro="ContextMenuCell" gap="8">
+      <sprite src_builtin="${sprite_src_builtin}" width="24" height="24"/>
+      <label text="${text}" weight="bold"/>
+    </Button>
+  </template>
+
+  <template name="Separator">
+    <rectangle width="100%" height="2" color="outline" />
+  </template>
+
+  <elements>
+    <rectangle consume_mouse_events="1" color="background(opacity-0.98)" round="8" border="2" border_color="outline" gap="4" padding="8" id="buttons" flex_direction="column">
+
+    </rectangle>
+  </elements>
+</layout>

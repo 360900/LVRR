@@ -1,0 +1,270 @@
+{
+   "action_manifest_version" : 0,
+   "alias_info" : {},
+   "app_key" : "wlx-team.wayvr",
+   "bindings" : {
+      "/actions/default" : {
+         "chords" : [
+            {
+               "inputs" : [
+                  [ "/user/hand/left/input/bumper", "single" ],
+                  [ "/user/hand/left/input/view", "single" ]
+               ],
+               "output" : "/actions/default/in/showhide"
+            },
+            {
+               "inputs" : [
+                  [ "/user/hand/left/input/grip", "single" ],
+                  [ "/user/hand/left/input/view", "single" ]
+               ],
+               "output" : "/actions/default/in/spacedrag"
+            },
+            {
+               "inputs" : [
+                  [ "/user/hand/right/input/bumper", "single" ],
+                  [ "/user/hand/right/input/menu", "single" ]
+               ],
+               "output" : "/actions/default/in/toggledashboard"
+            },
+            {
+               "inputs" : [
+                  [ "/user/hand/right/input/grip", "single" ],
+                  [ "/user/hand/right/input/menu", "single" ]
+               ],
+               "output" : "/actions/default/in/spacerotate"
+            },
+            {
+               "inputs" : [
+                  [ "/user/hand/right/input/grip", "single" ],
+                  [ "/user/hand/right/input/menu", "double" ]
+               ],
+               "output" : "/actions/default/in/spacereset"
+            }
+         ],
+         "haptics" : [
+            {
+               "output" : "/actions/default/out/hapticsleft",
+               "path" : "/user/hand/left/output/haptic"
+            },
+            {
+               "output" : "/actions/default/out/hapticsright",
+               "path" : "/user/hand/right/output/haptic"
+            }
+         ],
+         "poses" : [
+            {
+               "output" : "/actions/default/in/lefthand",
+               "path" : "/user/hand/left/pose/tip"
+            },
+            {
+               "output" : "/actions/default/in/righthand",
+               "path" : "/user/hand/right/pose/tip"
+            }
+         ],
+         "skeleton" : [],
+         "sources" : [
+            {
+               "inputs" : {
+                  "touch" : {
+                     "output" : "/actions/default/in/clickmodifierright"
+                  }
+               },
+               "mode" : "button",
+               "parameters" : {},
+               "path" : "/user/hand/left/input/dpad_left"
+            },
+            {
+               "inputs" : {
+                  "touch" : {
+                     "output" : "/actions/default/in/clickmodifierright"
+                  }
+               },
+               "mode" : "button",
+               "parameters" : {},
+               "path" : "/user/hand/left/input/dpad_right"
+            },
+            {
+               "inputs" : {
+                  "touch" : {
+                     "output" : "/actions/default/in/clickmodifierright"
+                  }
+               },
+               "mode" : "button",
+               "parameters" : {},
+               "path" : "/user/hand/left/input/dpad_up"
+            },
+            {
+               "inputs" : {
+                  "touch" : {
+                     "output" : "/actions/default/in/clickmodifiermiddle"
+                  }
+               },
+               "mode" : "button",
+               "parameters" : {},
+               "path" : "/user/hand/left/input/dpad_down"
+            },
+            {
+               "inputs" : {
+                  "touch" : {
+                     "output" : "/actions/default/in/clickmodifierright"
+                  }
+               },
+               "mode" : "button",
+               "parameters" : {},
+               "path" : "/user/hand/right/input/b"
+            },
+            {
+               "inputs" : {
+                  "touch" : {
+                     "output" : "/actions/default/in/clickmodifierright"
+                  }
+               },
+               "mode" : "button",
+               "parameters" : {},
+               "path" : "/user/hand/right/input/x"
+            },
+            {
+               "inputs" : {
+                  "touch" : {
+                     "output" : "/actions/default/in/clickmodifierright"
+                  }
+               },
+               "mode" : "button",
+               "parameters" : {},
+               "path" : "/user/hand/right/input/y"
+            },
+            {
+               "inputs" : {
+                  "touch" : {
+                     "output" : "/actions/default/in/clickmodifiermiddle"
+                  }
+               },
+               "mode" : "button",
+               "parameters" : {},
+               "path" : "/user/hand/right/input/a"
+            },
+            {
+               "inputs" : {
+                  "click" : {
+                     "output" : "/actions/default/in/click"
+                  },
+                  "touch" : {
+                     "output" : "/actions/default/in/movemouse"
+                  }
+               },
+               "mode" : "button",
+               "parameters" : {
+                  "click_activate_threshold" : "0.35",
+                  "click_deactivate_threshold" : "0.31"
+               },
+               "path" : "/user/hand/left/input/trigger"
+            },
+            {
+               "inputs" : {
+                  "click" : {
+                     "output" : "/actions/default/in/click"
+                  },
+                  "touch" : {
+                     "output" : "/actions/default/in/movemouse"
+                  }
+               },
+               "mode" : "button",
+               "parameters" : {},
+               "path" : "/user/hand/left/input/bumper"
+            },
+            {
+               "inputs" : {
+                  "click" : {
+                     "output" : "/actions/default/in/click"
+                  },
+                  "touch" : {
+                     "output" : "/actions/default/in/movemouse"
+                  }
+               },
+               "mode" : "button",
+               "parameters" : {
+                  "click_activate_threshold" : "0.35",
+                  "click_deactivate_threshold" : "0.31"
+               },
+               "path" : "/user/hand/right/input/trigger"
+            },
+            {
+               "inputs" : {
+                  "click" : {
+                     "output" : "/actions/default/in/click"
+                  },
+                  "touch" : {
+                     "output" : "/actions/default/in/movemouse"
+                  }
+               },
+               "mode" : "button",
+               "parameters" : {},
+               "path" : "/user/hand/right/input/bumper"
+            },
+            {
+               "inputs" : {
+                  "click" : {
+                     "output" : "/actions/default/in/grab"
+                  }
+               },
+               "mode" : "button",
+               "parameters" : {},
+               "path" : "/user/hand/left/input/grip"
+            },
+            {
+               "inputs" : {
+                  "click" : {
+                     "output" : "/actions/default/in/grab"
+                  }
+               },
+               "mode" : "button",
+               "parameters" : {},
+               "path" : "/user/hand/right/input/grip"
+            },
+            {
+               "inputs" : {
+                  "scroll" : {
+                     "output" : "/actions/default/in/scroll"
+                  }
+               },
+               "mode" : "scroll",
+               "parameters" : {
+                  "scroll_mode" : "smooth"
+               },
+               "path" : "/user/hand/left/input/thumbstick"
+            },
+            {
+               "inputs" : {
+                  "scroll" : {
+                     "output" : "/actions/default/in/scroll"
+                  }
+               },
+               "mode" : "scroll",
+               "parameters" : {
+                  "scroll_mode" : "smooth"
+               },
+               "path" : "/user/hand/right/input/thumbstick"
+            },
+            {
+               "inputs" : {},
+               "mode" : "button",
+               "parameters" : {},
+               "path" : "/user/hand/left/input/view"
+            },
+            {
+               "inputs" : {},
+               "mode" : "button",
+               "parameters" : {},
+               "path" : "/user/hand/right/input/menu"
+            }
+         ]
+      }
+   },
+   "category" : "steamvr_input",
+   "controller_type" : "frame_controller",
+   "description" : "",
+   "interaction_profile" : "",
+   "name" : "WayVR configuration for Frame Controller",
+   "options" : {},
+   "simulated_actions" : []
+}

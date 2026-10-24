@@ -1,0 +1,18 @@
+<layout version="2">
+  <template name="DialogBoxButton">
+    <Button id="btn" translation="CLOSE_WINDOW" align_self="start" sprite_src_builtin="${icon}"
+      text_size="16"
+      padding_left="16" padding_right="16"
+      padding_top="8" padding_bottom="8"/>
+  </template>
+  
+  <elements>
+    <div flex_direction="column" align_items="center" justify_content="center" width="100%" gap="32">
+      <label id="label_message" size="18" weight="bold"/>
+
+      <div id="buttons" gap="8">
+        <!-- filled-in at runtime -->
+      </div>
+    </div>
+  </elements>
+</layout>

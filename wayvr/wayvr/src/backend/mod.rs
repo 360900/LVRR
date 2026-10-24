@@ -1,0 +1,41 @@
+pub mod input;
+pub mod playspace_common;
+
+#[cfg(feature = "openvr")]
+pub mod openvr;
+
+#[cfg(feature = "openxr")]
+pub mod openxr;
+
+pub mod wayvr;
+
+pub mod set;
+
+pub mod task;
+
+use thiserror::Error;
+use wgui::globals::WguiGlobals;
+use wlx_common::config::GeneralConfig;
+
+#[derive(Error, Debug)]
+pub enum BackendError {
+    #[error("backend not supported")]
+    NotSupported,
+    #[cfg(feature = "openxr")]
+    #[error("OpenXR Error: {0:?}")]
+    OpenXrError(#[from] ::openxr::sys::Result),
+    #[error("Shutdown")]
+    #[allow(dead_code)]
+    Shutdown,
+    #[allow(dead_code)]
+    #[error("Restart")]
+    Restart,
+    #[error("Fatal: {0:?}")]
+    Fatal(#[from] anyhow::Error),
+}
+
+pub struct RunParams {
+    pub wgui_globals: WguiGlobals,
+    pub config: GeneralConfig,
+    pub no_audio: bool,
+}

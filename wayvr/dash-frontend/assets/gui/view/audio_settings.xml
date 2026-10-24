@@ -1,0 +1,80 @@
+<layout version="2">
+  <include src_builtin="@/gui/t_group_box.xml" />
+
+  <!-- device_name, device_icon -->
+  <template name="DeviceSlider">
+    <GroupBox id="rect">
+      <div width="100%" align_items="center" justify_content="center" gap="8">
+        <sprite src_builtin="${device_icon}" width="24" height="24" color="on_background" />
+        <label text="${device_name}" margin_right="8" size="12" weight="bold" color="on_background" />
+      </div>
+      <div width="100%" align_items="center">
+        <CheckBox id="checkbox" tooltip="AUDIO.SWITCH_TO_THIS_DEVICE" />
+        <Slider id="slider" flex_grow="1" height="16" min_value="0" max_value="150" margin_left="8" margin_right="8" />
+        <Button sprite_src_builtin="${volume_icon}" id="btn_mute" width="32" height="32" />
+      </div>
+    </GroupBox>
+  </template>
+
+  <!-- card_name, profile_name -->
+  <template name="Card">
+    <GroupBox>
+      <div width="100%" align_items="center" justify_content="center">
+        <label text="${card_name}" size="12" weight="bold" color="on_background" />
+      </div>
+      <Button id="btn_card" text="${profile_name}" width="100%" height="32" />
+    </GroupBox>
+  </template>
+
+  <template name="SelectAudioProfileText">
+    <div align_items="center" gap="8">
+      <Button width="48" height="32" id="btn_back">
+        <sprite src_builtin="@/dashboard/back.svg" width="24" height="24" color="on_background" />
+      </Button>
+      <label translation="AUDIO.SELECT_AUDIO_CARD_PROFILE" size="14" weight="bold" />
+    </div>
+  </template>
+
+  <!-- id (Button), src, translation -->
+  <template name="BottomButton">
+    <Button
+      flex_grow="1"
+      id="${id}"
+      translation="${translation}"
+      sprite_src_builtin="${src}">
+    </Button>
+  </template>
+
+  <elements>
+    <div flex_direction="column" gap="4">
+      <!--
+        this div shouldn't be  technically needed,  but there's a bug in
+        the  newest  taffy  version  (or we're doing  something  wrong),
+        causing the scrollbar  to show up, even if it's not overflowing.
+        OVERFLOW_START_THRESHOLD_UNITS is already set to 3, but it's not
+        sufficient enough in this case?? (margin_bottom="4" fixes that).
+      -->
+      <div width="100%" flex_direction="column" max_height="400" overflow_y="scroll">
+        <div id="devices" width="100%" flex_direction="column" gap="4" margin_bottom="4">
+
+        </div>
+      </div>
+
+      <!-- bottom buttons -->
+      <div flex_direction="row" gap="4">
+        <Button
+          id="btn_auto"
+          sprite_src_builtin="@/dashboard/magic_wand.svg"
+          min_width="32"
+          tooltip="AUDIO.AUTO_SWITCH_TO_VR_AUDIO"
+          color="primary"
+          sprite_color="on_primary"
+          tooltip_side="right" />
+
+        <BottomButton id="btn_sinks" src_builtin="@/dashboard/volume.svg" translation="AUDIO.SPEAKERS" />
+        <BottomButton id="btn_sources" src_builtin="@/dashboard/microphone.svg" translation="AUDIO.MICROPHONES" />
+        <BottomButton id="btn_cards" src_builtin="@/dashboard/cpu.svg" translation="AUDIO.CARDS" />
+      </div>
+    </div>
+  </elements>
+</layout>

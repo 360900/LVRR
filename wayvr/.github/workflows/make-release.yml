@@ -1,0 +1,104 @@
+name: Make Release
+
+on:
+  push:
+    tags:
+      - 'v**'
+
+env:
+  APPDIR: WayVR.AppDir
+  CARGO_TERM_COLOR: always
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+  
+jobs:
+  make_release:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: ./wayvr
+    steps:
+      - uses: actions/checkout@v3
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Prepare Environment
+        run: |
+          ../.github/workflows/scripts/appimage_prepare_env.sh
+      - name: Cargo Build
+        run: |
+          ../.github/workflows/scripts/appimage_build_wlx.sh
+      - name: Build xwayland-satellite
+        run: |
+          ../.github/workflows/scripts/appimage_build_satellite.sh
+      - name: Package AppImage
+        run: |
+          ../.github/workflows/scripts/appimage_package.sh
+      - name: Build Wayvrctl
+        run: |
+          cd ../wayvrctl
+          cargo build --release
+      - name: Make tarball
+        run: |
+          cargo vendor > vendor-config.toml
+          mv vendor-config.toml vendor
+          tar --xz -cf vendor.tar.xz vendor
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_KEY }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: WayVR ${{ github.ref_name }}
+          draft: true
+          prerelease: false
+
+      - name: Upload ELF
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_KEY }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./target/release/wayvr
+          asset_name: wayvr
+          asset_content_type: application/octet-stream
+
+      - name: Upload WayVRCtl
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_KEY }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./target/release/wayvrctl
+          asset_name: wayvrctl
+          asset_content_type: application/octet-stream
+
+      - name: Upload AppImage
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_KEY }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./wayvr/WayVR-x86_64.AppImage
+          asset_name: WayVR-${{ github.ref_name }}-x86_64.AppImage
+          asset_content_type: application/octet-stream
+
+      - name: Upload AppImage zsync
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_KEY }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./wayvr/WayVR-x86_64.AppImage.zsync
+          asset_name: WayVR-${{ github.ref_name }}-x86_64.AppImage.zsync
+          asset_content_type: application/octet-stream
+
+      - name: Upload vendor tarball
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_KEY }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./wayvr/vendor.tar.xz
+          asset_name: vendor.tar.xz
+          asset_content_type: application/x-gtar

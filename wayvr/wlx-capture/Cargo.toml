@@ -1,0 +1,56 @@
+[package]
+name = "wlx-capture"
+version = "0.6.0"
+edition = "2024"
+authors = ["galister"]
+description = "Screen capture library for Wayland and X11"
+repository = "https://github.com/galister/wlx-capture"
+keywords = ["capture", "desktop", "pipewire", "wayland", "x11"]
+categories = ["computer-vision", "multimedia::images"]
+documentation = "https://docs.rs/wlx-capture"
+license = "GPL-3.0-only"
+
+[dependencies]
+dbus = { workspace = true, features = ["futures"], optional = true }
+idmap = { workspace = true }
+libc.workspace = true
+log = { workspace = true }
+pipewire = { workspace = true, optional = true }
+slotmap.workspace = true
+wayland-client = { workspace = true, optional = true }
+wayland-protocols = {
+  workspace = true,
+  features = [
+    "client",
+    "staging",
+    "unstable",
+    "wayland-client",
+  ],
+  optional = true
+}
+
+drm-fourcc = "2.2.0"
+rxscreen = {
+  git = "https://github.com/galister/rxscreen.git",
+  rev = "7197e1de6622b65859e6f2060b5750185e0dad2a",
+  # version = "0.1.7",
+  features = [
+    "mouse",
+    "shm",
+    "xrandr",
+  ],
+  optional = true
+}
+smithay-client-toolkit = { version = "0.20.0", optional = true }
+
+[features]
+default = ["pipewire", "wayland"]
+egl = []
+pipewire = ["dep:dbus", "dep:pipewire", "wayland"]
+wayland = [
+  "dep:smithay-client-toolkit",
+  "dep:wayland-client",
+  "dep:wayland-protocols",
+]
+wlr = ["wayland"]
+xshm = ["dep:rxscreen"]

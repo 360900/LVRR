@@ -1,0 +1,27 @@
+<layout version="2">
+  <macro name="group_box"
+    flex_direction="column"
+    align_items="baseline"
+    border="2"
+    color="background_contrast(opacity-0.5)"
+    border_color="outline"
+    padding="12"
+    gap="8"
+    round="8"/>
+  
+  <!-- id -->
+  <template name="GroupBox">
+    <rectangle macro="group_box" id="rect">
+      <CHILDREN/>
+    </rectangle>
+  </template>
+
+  <!-- src_builtin, text, translation -->
+  <template name="GroupBoxTitle">
+    <div flex_direction="row" align_items="center" gap="8">
+      <sprite src_builtin="${src_builtin}" width="24" height="24" color="secondary" />
+      <label text="${text}" translation="${translation}" weight="bold" size="18" color="secondary" />
+    </div>
+    <rectangle color="outline" width="100%" height="2" />
+  </template>
+</layout>

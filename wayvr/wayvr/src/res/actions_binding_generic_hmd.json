@@ -1,0 +1,20 @@
+{
+   "action_manifest_version" : 0,
+   "app_key" : "wlx-team.wayvr",
+   "bindings" : {
+      "/actions/default" : {
+         "eyetracking": [
+            {
+              "output": "/actions/default/in/EyeTracking",
+              "path": "/user/head/eyetracking"
+            }
+          ]
+      }
+   },
+   "category" : "steamvr_input",
+   "controller_type" : "generic_hmd",
+   "description" : "",
+   "name" : "WayVR configuration for Generic HMD",
+   "options" : {},
+   "simulated_actions" : []
+}
