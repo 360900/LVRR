@@ -1,0 +1,341 @@
+use super::{
+    BoundPoseType, HmdProperties, InteractionProfile, MainAxisType, PoseTransformations,
+    ProfileProperties, Property, SkeletalInputBindings, legal_paths, paths::*,
+};
+use crate::button_mask_from_ids;
+use crate::input::legacy::{self, LegacyBindings, button_mask_from_id};
+use crate::input::profiles::DynInputPath;
+use crate::openxr_data::Hand;
+use glam::{EulerRot, Mat4, Quat, Vec3};
+use openvr::EVRButtonId as btn;
+
+pub struct ViveFocus3;
+
+impl InteractionProfile for ViveFocus3 {
+    type LegalPaths = legal_paths![
+        Both::<
+            (Squeeze, Value),
+            (Squeeze, Click),
+            (Squeeze, Touch),
+            (Trigger, Value),
+            (Trigger, Click),
+            (Trigger, Touch),
+            (Thumbstick, ()),
+            (Thumbstick, Click),
+            (Thumbstick, Touch),
+            (Thumbrest, Touch),
+        >,
+        Left::<(X, Click), (Y, Click), (Menu, Click)>,
+        Right::<(A, Click), (B, Click), (System, Click)>
+    ];
+
+    fn properties() -> &'static ProfileProperties {
+        static DEVICE_PROPERTIES: ProfileProperties = ProfileProperties {
+            model: Property::BothHands(c"vive_focus3_controller"),
+            openvr_controller_type: c"vive_focus3_controller",
+            render_model_name: Property::PerHand {
+                left: c"vive_focus3_controller_left",
+                right: c"vive_focus3_controller_right",
+            },
+            registered_device_type: Property::BothHands(
+                c"htc_business_streaming/vive_focus3_controller",
+            ),
+            serial_number: Property::PerHand {
+                left: c"CTL_LEFT",
+                right: c"CTL_RIGHT",
+            },
+            tracking_system_name: c"htc_eyes",
+            manufacturer_name: c"htc_rr",
+            input_profile_path:
+                c"{htc_business_streaming}/input/vive_focus3_controller_profile.json",
+            main_axis: MainAxisType::Thumbstick,
+            legacy_buttons_mask: button_mask_from_ids!(
+                btn::System,
+                btn::ApplicationMenu,
+                btn::Grip,
+                btn::A,
+                btn::Axis1,
+                btn::Axis2,
+                btn::Axis3,
+                btn::Axis4,
+            ),
+            // TODO: These are guesses, not pulled from a real system report
+            hmd: HmdProperties {
+                model: c"VIVE Focus 3",
+                controller_type: c"vive_focus3",
+                serial_number: c"HMD",
+            },
+        };
+        &DEVICE_PROPERTIES
+    }
+    fn profile_path() -> &'static str {
+        "/interaction_profiles/htc/vive_focus3_controller"
+    }
+    fn has_required_extensions(enabled_extensions: &openxr::ExtensionSet) -> bool {
+        enabled_extensions.htc_vive_focus3_controller_interaction
+    }
+    fn translate_path(path: DynInputPath) -> Option<DynInputPath> {
+        match path {
+            path @ DynInputPath {
+                subpath: DynSubpath::A | DynSubpath::B | DynSubpath::X | DynSubpath::Y,
+                component: Some(DynComponent::Touch),
+                ..
+            } => Some(path.with_component(DynComponent::Click)),
+            _ => None,
+        }
+    }
+
+    fn legacy_bindings(c: &super::InputToXrPath<Self>) -> LegacyBindings {
+        LegacyBindings {
+            extra: legacy::Bindings {
+                grip_pose: c.pose(),
+            },
+            trigger: c.leftright::<Trigger, Value, _, _>(),
+            trigger_click: c.leftright::<Trigger, Click, _, _>(),
+            app_menu: [
+                c.into::<super::Left<Y, Click>, _>(),
+                c.into::<super::Left<Menu, Click>, _>(),
+                c.into::<super::Right<B, Click>, _>(),
+            ]
+            .concat(),
+            a: [
+                c.into::<super::Left<X, Click>, _>(),
+                c.into::<super::Right<A, Click>, _>(),
+            ]
+            .concat(),
+            squeeze_click: c.leftright::<Squeeze, Click, _, _>(),
+            squeeze: c.leftright::<Squeeze, Value, _, _>(),
+            main_xy: c.leftright::<Thumbstick, (), _, _>(),
+            main_xy_click: c.leftright::<Thumbstick, Click, _, _>(),
+            main_xy_touch: c.leftright::<Thumbstick, Touch, _, _>(),
+            trigger_touch: c.leftright::<Trigger, Touch, _, _>(),
+            app_menu_touch: vec![],
+            a_touch: vec![],
+            axis2_touch: c.leftright::<Squeeze, Touch, _, _>(),
+            grip_touch: c.leftright::<Squeeze, Touch, _, _>(),
+            grip_click: vec![],
+            main_xy_deflect: vec![],
+            haptic: c.haptics(),
+        }
+    }
+
+    fn skeletal_input_bindings(c: &super::InputToXrPath<Self>) -> SkeletalInputBindings {
+        SkeletalInputBindings {
+            thumb_touch: c
+                .leftright::<Thumbstick, Touch, _, _>()
+                .into_iter()
+                .chain(c.into::<super::Left<X, Click>, _>())
+                .chain(c.into::<super::Left<Y, Click>, _>())
+                .chain(c.into::<super::Right<A, Click>, _>())
+                .chain(c.into::<super::Right<B, Click>, _>())
+                .chain(c.leftright::<Thumbrest, Touch, _, _>())
+                .collect(),
+            index_touch: c.leftright::<Trigger, Touch, _, _>(),
+            index_curl: c.leftright::<Trigger, Value, _, _>(),
+            rest_curl: c.leftright::<Squeeze, Value, _, _>(),
+        }
+    }
+
+    fn offset_grip_pose(hand: Hand) -> Mat4 {
+        super::offset_grip_pose_from_pose_type::<ViveFocus3>(hand, BoundPoseType::OpenxrGrip)
+    }
+
+    /// Derived from `SteamVR/drivers/vrlink/resources/rendermodels/vive_focus3_controller*/*.json`
+    fn pose_transformation(pose: BoundPoseType) -> Option<PoseTransformations> {
+        match pose {
+            BoundPoseType::Raw => None,
+            // Base is all 0s so we return None to save us from pointless transformation math
+            BoundPoseType::Base => None,
+            // These are all not present in rendermodels
+            BoundPoseType::Gdc2015 => None,
+            BoundPoseType::OpenxrPoke => None,
+            BoundPoseType::OpenxrPinch => None,
+            BoundPoseType::Tip => Some(PoseTransformations {
+                left_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        -30.0_f32.to_radians(),
+                        0_f32.to_radians(),
+                        0_f32.to_radians(),
+                    ),
+                    Vec3::new(0.01, -0.025, 0.029),
+                ),
+                right_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        -30.0_f32.to_radians(),
+                        0_f32.to_radians(),
+                        0_f32.to_radians(),
+                    ),
+                    Vec3::new(-0.01, -0.025, 0.029),
+                ),
+            }),
+            BoundPoseType::Handgrip => Some(PoseTransformations {
+                left_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        20.037_f32.to_radians(),
+                        0_f32.to_radians(),
+                        0_f32.to_radians(),
+                    ),
+                    Vec3::new(0.0, 0.003, 0.097),
+                ),
+                right_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        20.037_f32.to_radians(),
+                        0_f32.to_radians(),
+                        0_f32.to_radians(),
+                    ),
+                    Vec3::new(0.0, 0.003, 0.097),
+                ),
+            }),
+            BoundPoseType::Grip => Some(PoseTransformations {
+                left_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        20.037_f32.to_radians(),
+                        0_f32.to_radians(),
+                        0_f32.to_radians(),
+                    ),
+                    Vec3::new(0.0, 0.003, 0.097),
+                ),
+                right_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        20.037_f32.to_radians(),
+                        0_f32.to_radians(),
+                        0_f32.to_radians(),
+                    ),
+                    Vec3::new(0.0, 0.003, 0.097),
+                ),
+            }),
+            BoundPoseType::OpenxrHandmodel => Some(PoseTransformations {
+                left_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        -39.4_f32.to_radians(),
+                        0_f32.to_radians(),
+                        0_f32.to_radians(),
+                    ),
+                    Vec3::new(-0.01125, -0.00182941, 0.1019482),
+                ),
+                right_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        -39.4_f32.to_radians(),
+                        0_f32.to_radians(),
+                        0_f32.to_radians(),
+                    ),
+                    Vec3::new(0.01125, -0.00182941, 0.1019482),
+                ),
+            }),
+            BoundPoseType::OpenxrAim => Some(PoseTransformations {
+                left_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        -39.4_f32.to_radians(),
+                        0_f32.to_radians(),
+                        0_f32.to_radians(),
+                    ),
+                    Vec3::new(0.007, -0.03894766, 0.00949694),
+                ),
+                right_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        -39.4_f32.to_radians(),
+                        0_f32.to_radians(),
+                        0_f32.to_radians(),
+                    ),
+                    Vec3::new(-0.007, -0.03894766, 0.00949694),
+                ),
+            }),
+            BoundPoseType::OpenxrGrip => Some(PoseTransformations {
+                left_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        20.6_f32.to_radians(),
+                        0_f32.to_radians(),
+                        0_f32.to_radians(),
+                    ),
+                    Vec3::new(0.007, -0.00182941, 0.1019482),
+                ),
+                right_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        20.6_f32.to_radians(),
+                        0_f32.to_radians(),
+                        0_f32.to_radians(),
+                    ),
+                    Vec3::new(-0.007, -0.00182941, 0.1019482),
+                ),
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{InteractionProfile, ViveFocus3};
+    use crate::input::tests::Fixture;
+    use openxr as xr;
+
+    #[test]
+    fn verify_bindings() {
+        let f = Fixture::new();
+        f.load_actions(c"actions.json");
+
+        let path = ViveFocus3::profile_path();
+        f.verify_bindings::<bool>(
+            path,
+            c"/actions/set1/in/boolact",
+            [
+                "/user/hand/left/input/x/click".into(),
+                "/user/hand/left/input/y/click".into(),
+                "/user/hand/right/input/a/click".into(),
+                "/user/hand/right/input/b/click".into(),
+                "/user/hand/right/input/thumbstick/click".into(),
+                "/user/hand/right/input/thumbstick/touch".into(),
+                "/user/hand/left/input/menu/click".into(),
+            ],
+        );
+
+        f.verify_threshold_bindings(
+            path,
+            c"/actions/set1/in/boolact",
+            [
+                "/user/hand/left/input/squeeze/value".into(),
+                "/user/hand/right/input/squeeze/value".into(),
+                "/user/hand/left/input/trigger/value".into(),
+                "/user/hand/right/input/trigger/value".into(),
+            ],
+        );
+
+        f.verify_bindings::<f32>(
+            path,
+            c"/actions/set1/in/vec1act",
+            [
+                "/user/hand/left/input/trigger/value".into(),
+                "/user/hand/right/input/trigger/value".into(),
+            ],
+        );
+
+        f.verify_bindings::<xr::Vector2f>(
+            path,
+            c"/actions/set1/in/vec2act",
+            [
+                "/user/hand/left/input/thumbstick".into(),
+                "/user/hand/right/input/thumbstick".into(),
+            ],
+        );
+
+        f.verify_bindings::<xr::Haptic>(
+            path,
+            c"/actions/set1/in/vib",
+            [
+                "/user/hand/left/output/haptic".into(),
+                "/user/hand/right/output/haptic".into(),
+            ],
+        );
+    }
+}

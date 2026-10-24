@@ -1,0 +1,402 @@
+use super::{
+    BoundPoseType, HmdProperties, InteractionProfile, Left, MainAxisType, PoseTransformations,
+    ProfileProperties, Property, Right, SkeletalInputBindings, legal_paths, paths::*,
+};
+use crate::button_mask_from_ids;
+use crate::input::legacy::{self, LegacyBindings, button_mask_from_id};
+use crate::input::profiles::{DynInputPath, InputToXrPath};
+use crate::openxr_data::Hand;
+use glam::{EulerRot, Mat4, Quat, Vec3};
+
+pub struct OculusTouch;
+
+impl InteractionProfile for OculusTouch {
+    type LegalPaths = legal_paths![
+        Both::<
+            (Squeeze, Value),
+            (Trigger, Value),
+            (Trigger, Touch),
+            (Thumbstick, ()),
+            (Thumbstick, Click),
+            (Thumbstick, Touch),
+            (Thumbrest, Touch),
+        >,
+        Left::<(X, Click), (X, Touch), (Y, Click), (Y, Touch), (Menu, Click)>,
+        Right::<(A, Click), (A, Touch), (B, Click), (B, Touch), (System, Click)>
+    ];
+    fn properties() -> &'static ProfileProperties {
+        use openvr::EVRButtonId as btn;
+        static DEVICE_PROPERTIES: ProfileProperties = ProfileProperties {
+            model: Property::PerHand {
+                left: c"Oculus Quest2 (Left Controller)",
+                right: c"Oculus Quest2 (Right Controller)",
+            },
+            openvr_controller_type: c"oculus_touch",
+            render_model_name: Property::PerHand {
+                left: c"oculus_quest2_controller_left",
+                right: c"oculus_quest2_controller_right",
+            },
+            registered_device_type: Property::PerHand {
+                left: c"oculus/WMHD315M3010GV_Controller_Left",
+                right: c"oculus/WMHD315M3010GV_Controller_Right",
+            },
+            serial_number: Property::PerHand {
+                left: c"WMHD315M3010GV_Controller_Left",
+                right: c"WMHD315M3010GV_Controller_Right",
+            },
+            tracking_system_name: c"oculus",
+            manufacturer_name: c"Oculus",
+            input_profile_path: c"{oculus}/input/touch_profile.json",
+            main_axis: MainAxisType::Thumbstick,
+            legacy_buttons_mask: button_mask_from_ids!(
+                btn::System,
+                btn::ApplicationMenu,
+                btn::Grip,
+                btn::A,
+                btn::Axis0,
+                btn::Axis1,
+                btn::Axis2
+            ),
+            hmd: HmdProperties {
+                model: c"Oculus Quest2",
+                controller_type: c"rift",
+                serial_number: c"WMHD315M3010GV",
+            },
+        };
+        &DEVICE_PROPERTIES
+    }
+    fn translate_path(path: DynInputPath) -> Option<DynInputPath> {
+        match path {
+            p @ DynInputPath {
+                subpath: DynSubpath::Squeeze | DynSubpath::Trigger,
+                component: Some(DynComponent::Click),
+                ..
+            } => Some(p.with_component(DynComponent::Value)),
+            _ => None,
+        }
+    }
+    fn profile_path() -> &'static str {
+        "/interaction_profiles/oculus/touch_controller"
+    }
+    fn has_required_extensions(_: &openxr::ExtensionSet) -> bool {
+        true
+    }
+
+    fn legacy_bindings(c: &InputToXrPath<Self>) -> LegacyBindings {
+        LegacyBindings {
+            extra: legacy::Bindings {
+                grip_pose: c.pose(),
+            },
+            trigger: c.leftright::<Trigger, Value, _, _>(),
+            trigger_click: c.leftright::<Trigger, Value, _, _>(),
+            app_menu: [
+                c.into::<Left<Y, Click>, _>(),
+                c.into::<Right<B, Click>, _>(),
+            ]
+            .concat(),
+            a: [
+                c.into::<Left<X, Click>, _>(),
+                c.into::<Right<A, Click>, _>(),
+            ]
+            .concat(),
+            squeeze_click: c.leftright::<Squeeze, Value, _, _>(),
+            squeeze: c.leftright::<Squeeze, Value, _, _>(),
+            main_xy: c.leftright::<Thumbstick, (), _, _>(),
+            main_xy_click: c.leftright::<Thumbstick, Click, _, _>(),
+            main_xy_touch: c.leftright::<Thumbstick, Touch, _, _>(),
+            trigger_touch: c.leftright::<Trigger, Touch, _, _>(),
+            app_menu_touch: [
+                c.into::<Left<Y, Touch>, _>(),
+                c.into::<Right<B, Touch>, _>(),
+            ]
+            .concat(),
+            a_touch: [
+                c.into::<Left<X, Touch>, _>(),
+                c.into::<Right<A, Touch>, _>(),
+            ]
+            .concat(),
+            axis2_touch: vec![],
+            grip_touch: vec![],
+            grip_click: vec![],
+            main_xy_deflect: vec![],
+            haptic: c.haptics(),
+        }
+    }
+
+    fn skeletal_input_bindings(c: &InputToXrPath<Self>) -> SkeletalInputBindings {
+        SkeletalInputBindings {
+            thumb_touch: [
+                c.leftright::<Thumbstick, Touch, _, _>(),
+                c.into::<Left<X, Touch>, _>(),
+                c.into::<Left<Y, Touch>, _>(),
+                c.into::<Right<A, Touch>, _>(),
+                c.into::<Right<B, Touch>, _>(),
+                c.leftright::<Thumbrest, Touch, _, _>(),
+            ]
+            .concat(),
+            index_touch: c.leftright::<Trigger, Touch, _, _>(),
+            index_curl: c.leftright::<Trigger, Value, _, _>(),
+            rest_curl: c.leftright::<Squeeze, Value, _, _>(),
+        }
+    }
+
+    fn offset_grip_pose(hand: Hand) -> Mat4 {
+        super::offset_grip_pose_from_pose_type::<OculusTouch>(hand, BoundPoseType::OpenxrGrip)
+    }
+
+    /// Derived from `SteamVR/resources/rendermodels/oculus_quest2_controller_*/*.json`
+    fn pose_transformation(pose: BoundPoseType) -> Option<PoseTransformations> {
+        match pose {
+            BoundPoseType::Raw => None,
+            BoundPoseType::Gdc2015 => None,
+            BoundPoseType::Tip => Some(PoseTransformations {
+                left_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        -37.4_f32.to_radians(),
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
+                    ),
+                    Vec3::new(0.016694, -0.02522, 0.024687),
+                ),
+                right_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        -37.4_f32.to_radians(),
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
+                    ),
+                    Vec3::new(-0.016694, -0.02522, 0.024687),
+                ),
+            }),
+            BoundPoseType::Base => Some(PoseTransformations {
+                left_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        -0.4_f32.to_radians(),
+                        180.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
+                    ),
+                    Vec3::new(-0.0034, -0.0034, 0.1491),
+                ),
+                right_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        -0.4_f32.to_radians(),
+                        180.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
+                    ),
+                    Vec3::new(0.0034, -0.0034, 0.1491),
+                ),
+            }),
+            BoundPoseType::Handgrip => Some(PoseTransformations {
+                left_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        5.037_f32.to_radians(),
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
+                    ),
+                    Vec3::new(0.0, 0.003, 0.097),
+                ),
+                right_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        5.037_f32.to_radians(),
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
+                    ),
+                    Vec3::new(0.0, 0.003, 0.097),
+                ),
+            }),
+            BoundPoseType::Grip => Some(PoseTransformations {
+                left_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        5.037_f32.to_radians(),
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
+                    ),
+                    Vec3::new(0.0, 0.003, 0.097),
+                ),
+                right_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        5.037_f32.to_radians(),
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
+                    ),
+                    Vec3::new(0.0, 0.003, 0.097),
+                ),
+            }),
+            BoundPoseType::OpenxrHandmodel => Some(PoseTransformations {
+                left_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        -39.4_f32.to_radians(),
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
+                    ),
+                    Vec3::new(-0.01125, -0.00182941, 0.1019482),
+                ),
+                right_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        -39.4_f32.to_radians(),
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
+                    ),
+                    Vec3::new(0.01125, -0.00182941, 0.1019482),
+                ),
+            }),
+            BoundPoseType::OpenxrPinch => Some(PoseTransformations {
+                left_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        -90.0_f32.to_radians(),
+                        -39.4_f32.to_radians(),
+                        -90.0_f32.to_radians(),
+                    ),
+                    Vec3::new(0.043, -0.015779, 0.037701),
+                ),
+                right_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        -90.0_f32.to_radians(),
+                        -39.4_f32.to_radians(),
+                        -90.0_f32.to_radians(),
+                    ),
+                    Vec3::new(-0.043, -0.015779, 0.037701),
+                ),
+            }),
+            BoundPoseType::OpenxrPoke => Some(PoseTransformations {
+                left_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        -6.3_f32.to_radians(),
+                        -45.1_f32.to_radians(),
+                        -89.2_f32.to_radians(),
+                    ),
+                    Vec3::new(-0.0225, -0.066903, 0.015636),
+                ),
+                right_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        -6.3_f32.to_radians(),
+                        -45.1_f32.to_radians(),
+                        -89.2_f32.to_radians(),
+                    ),
+                    Vec3::new(0.0225, -0.066903, 0.015637),
+                ),
+            }),
+            BoundPoseType::OpenxrAim => Some(PoseTransformations {
+                left_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        -39.4_f32.to_radians(),
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
+                    ),
+                    Vec3::new(0.007, -0.03894766, 0.00949694),
+                ),
+                right_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        -39.4_f32.to_radians(),
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
+                    ),
+                    Vec3::new(-0.007, -0.03894766, 0.00949694),
+                ),
+            }),
+            BoundPoseType::OpenxrGrip => Some(PoseTransformations {
+                left_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        20.6_f32.to_radians(),
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
+                    ),
+                    Vec3::new(0.007, -0.00182941, 0.1019482),
+                ),
+                right_hand: Mat4::from_rotation_translation(
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        20.6_f32.to_radians(),
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
+                    ),
+                    Vec3::new(-0.007, -0.00182941, 0.1019482),
+                ),
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{InteractionProfile, OculusTouch};
+    use crate::input::tests::Fixture;
+    use openxr as xr;
+
+    #[test]
+    fn verify_bindings() {
+        let f = Fixture::new();
+        f.load_actions(c"actions.json");
+
+        let path = OculusTouch::profile_path();
+        f.verify_bindings::<bool>(
+            path,
+            c"/actions/set1/in/boolact",
+            [
+                "/user/hand/left/input/x/click".into(),
+                "/user/hand/left/input/y/click".into(),
+                "/user/hand/right/input/a/click".into(),
+                "/user/hand/right/input/b/click".into(),
+                "/user/hand/left/input/menu/click".into(),
+                "/user/hand/left/input/trigger/value".into(),
+                "/user/hand/left/input/thumbrest/touch".into(),
+                "/user/hand/right/input/thumbstick/click".into(),
+                "/user/hand/right/input/thumbstick/touch".into(),
+            ],
+        );
+
+        f.verify_threshold_bindings(
+            path,
+            c"/actions/set1/in/boolact",
+            [
+                "/user/hand/left/input/squeeze/value".into(),
+                "/user/hand/right/input/squeeze/value".into(),
+                "/user/hand/left/input/trigger/value".into(),
+                "/user/hand/right/input/trigger/value".into(),
+            ],
+        );
+
+        f.verify_bindings::<f32>(
+            path,
+            c"/actions/set1/in/vec1act",
+            [
+                "/user/hand/left/input/trigger/value".into(),
+                "/user/hand/right/input/trigger/value".into(),
+            ],
+        );
+
+        f.verify_bindings::<xr::Vector2f>(
+            path,
+            c"/actions/set1/in/vec2act",
+            [
+                "/user/hand/left/input/thumbstick".into(),
+                "/user/hand/right/input/thumbstick".into(),
+            ],
+        );
+
+        f.verify_bindings::<xr::Haptic>(
+            path,
+            c"/actions/set1/in/vib",
+            [
+                "/user/hand/left/output/haptic".into(),
+                "/user/hand/right/output/haptic".into(),
+            ],
+        );
+    }
+}

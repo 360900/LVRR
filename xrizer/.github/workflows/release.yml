@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - v[0-9]+.[0-9]+**
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  vendor-dependencies:
+    runs-on: ubuntu-latest
+    container:
+      image: 'ghcr.io/360900/xrizer-edge-ubuntu:latest'
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+    - uses: actions/checkout@v6
+    - name: Vendor dependencies
+      id: vendor
+      run: |
+        cargo vendor --versioned-dirs > config.toml
+        mv config.toml vendor
+        echo "vendor=$(realpath vendor)" >> "$GITHUB_OUTPUT"
+    - name: Upload artifact
+      id: upload
+      uses: actions/upload-artifact@v6
+      with:
+        path: ${{ steps.vendor.outputs.vendor }}
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+  build:
+    runs-on: ubuntu-latest
+    env:
+      # git describe can pick another tag on the same commit.
+      XRIZER_VERSION: ${{ github.ref_name }}
+    container:
+      image: 'ghcr.io/360900/xrizer-edge-ubuntu:latest'
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+        # Keep the token away from dependency build scripts.
+        persist-credentials: false
+    - uses: ./.github/actions/build
+    - uses: ./.github/actions/check
+    - name: Upload
+      uses: actions/upload-artifact@v6
+      with:
+        name: xrizer-edge-release
+        path: out
+  draft-release:
+    runs-on: ubuntu-latest
+    needs: [vendor-dependencies, build]
+    permissions:
+      contents: write
+    steps:
+      - name: Download build
+        uses: actions/download-artifact@v7
+        with:
+          name: xrizer-edge-release
+      - name: Download vendored dependencies
+        uses: actions/download-artifact@v7
+        with:
+          path: vendor
+          artifact-ids: ${{ needs.vendor-dependencies.outputs.artifact_id }}
+      # download-artifact unzips artifacts so we need to zip them back up
+      - name: Zip build
+        id: zip
+        env:
+            VERSION: ${{ github.ref_name }}
+        run: |
+          mv xrizer-edge xrizer-edge-$VERSION
+          zip -r xrizer-edge-$VERSION.zip xrizer-edge-$VERSION
+          zip -r dependencies.zip vendor
+      - name: Draft release
+        uses: softprops/action-gh-release@v3
+        with:
+          draft: true
+          files: |
+            ${{ format('xrizer-edge-{0}.zip', github.ref_name) }}
+            dependencies.zip
+          fail_on_unmatched_files: true

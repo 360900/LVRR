@@ -1,0 +1,41 @@
+{
+	"bindings": {
+		"/actions/main": {
+			"sources": [
+				{
+					"mode": "scalar_constant",
+					"path": "/user/hand/right/input/a",
+					"inputs": {
+						"value": {
+							"output": "/actions/main/in/alternateuse"
+						}
+					}
+				},
+				{
+					"mode": "scalar_constant",
+					"path": "/user/hand/left/input/trigger",
+					"inputs": {
+						"value": {
+							"output": "/actions/main/in/repel"
+						}
+					},
+					"parameters": {
+						"on/x": "1.0"
+					}
+				},
+				{
+					"mode": "scalar_constant",
+					"path": "/user/hand/left/input/x",
+					"inputs": {
+						"value": {
+							"output": "/actions/main/in/reverse"
+						}
+					},
+					"parameters": {
+						"on/x": "-1"
+					}
+				}
+			]
+		}
+	}
+}

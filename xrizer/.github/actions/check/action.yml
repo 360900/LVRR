@@ -1,0 +1,17 @@
+name: Check
+description: Tests and lints that gate CI artifacts and releases
+runs:
+  using: composite
+  steps:
+    - name: Run tests
+      shell: sh
+      run: cargo test --workspace --verbose
+    - name: Run tests with miri
+      shell: sh
+      run: cargo +nightly miri nextest run --workspace
+    - name: Format check
+      shell: sh
+      run: cargo fmt --check
+    - name: Clippy
+      shell: sh
+      run: cargo clippy --workspace --all-targets

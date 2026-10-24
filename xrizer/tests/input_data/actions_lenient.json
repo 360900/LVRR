@@ -1,0 +1,56 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/main",
+			"usage": "leftright"
+		},
+		{
+			"name": "/actions/Poses",
+			"usage": "leftright"
+		},
+		"not an object"
+	],
+	"actions": [
+		{
+			"name": "/actions/main/in/A",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/B",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/Dpad",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/Unknown",
+			"type": "vector7"
+		},
+		{
+			"name": "/actions/poses/in/Pose",
+			"type": "pose"
+		}
+	],
+	"default_bindings": [
+		{
+			"controller_type": "knuckles",
+			"binding_url": "knuckles_lenient.json"
+		},
+		{
+			"controller_type": "vive_tracker_left_foot",
+			"binding_url": "missing_tracker.json"
+		},
+		{
+			"binding_url": "no_controller_type.json"
+		},
+		{
+			"controller_type": "oculus_touch",
+			"binding_url": "missing_touch.json"
+		},
+		{
+			"controller_type": "knuckles",
+			"binding_url": "knuckles_lenient_dup.json"
+		}
+	]
+}

@@ -1,0 +1,15 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/main",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/main/in/boolact",
+			"type": "boolean"
+		}
+	],
+	"default_bindings": []
+}

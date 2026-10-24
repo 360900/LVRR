@@ -1,0 +1,63 @@
+{
+	"bindings": {
+		"/actions/main": {
+			"sources": [
+				{
+					"mode": "button",
+					"path": "/user/hand/left/input/application_menu",
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/pause"
+						}
+					}
+				},
+				{
+					"mode": "button",
+					"path": "/user/hand/right/input/application_menu",
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/pause"
+						}
+					}
+				}
+			]
+		},
+		"/actions/menu": {
+			"sources": [
+				{
+					"mode": "button",
+					"path": "/user/hand/left/input/application_menu",
+					"inputs": {
+						"click": {
+							"output": "/actions/menu/in/back"
+						}
+					}
+				},
+				{
+					"mode": "button",
+					"path": "/user/hand/right/input/application_menu",
+					"inputs": {
+						"click": {
+							"output": "/actions/menu/in/back"
+						}
+					}
+				}
+			],
+			"chords": [
+				{
+					"output": "/actions/menu/in/reset",
+					"inputs": [
+						[
+							"/user/hand/left/input/application_menu",
+							"click"
+						],
+						[
+							"/user/hand/right/input/application_menu",
+							"click"
+						]
+					]
+				}
+			]
+		}
+	}
+}
