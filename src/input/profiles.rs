@@ -507,6 +507,9 @@ impl std::str::FromStr for DynInputPath {
                 Some("middle" | "ring" | "pinky") => paths::DynSubpath::Squeeze,
                 other => return Err(format!("invalid finger {other:?}")),
             },
+            // The Index's pinch gesture, which SteamVR derives from the trigger value, the index
+            // finger's touch and the trackpad force. The trigger is its value.
+            Some("pinch") => paths::DynSubpath::Trigger,
             _ => subpath_str
                 .and_then(paths::DynSubpath::from_openvr_str)
                 .ok_or_else(|| format!("invalid subpath {subpath_str:?}"))?,

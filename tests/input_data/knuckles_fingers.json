@@ -73,6 +73,15 @@
 							"output": "/actions/hands/in/pinkycurl"
 						}
 					}
+				},
+				{
+					"mode": "grab",
+					"path": "/user/hand/left/input/pinch",
+					"inputs": {
+						"grab": {
+							"output": "/actions/hands/in/grabpinch"
+						}
+					}
 				}
 			]
 		}

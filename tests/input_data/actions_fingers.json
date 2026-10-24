@@ -21,6 +21,10 @@
 		{
 			"name": "/actions/hands/in/pinkycurl",
 			"type": "vector1"
+		},
+		{
+			"name": "/actions/hands/in/grabpinch",
+			"type": "boolean"
 		}
 	],
 	"default_bindings": [
