@@ -89,6 +89,15 @@ Status: `pending` | `merged` | `superseded-by-<n>` | `blocked` | `dropped` | `re
 | `5353596` | probe: skip for Background/Utility, `XRIZER_PROFILE_PROBE=0` opt-out, keep results on teardown failure |
 | `a0e4ea0` | input: dedup set priorities, i64 priority offset, unrestricted sync for sets without OpenXR actions, no panic on sync failure |
 | `3348188` | refresh rate fallback returns Hz instead of seconds |
+| `3950c0c` | gl: apps rendering on another GPU than the runtime (hybrid laptops) get frames copied through host memory |
+| `e193c84` | session the runtime stops (WiVRn's stop button) ended right away instead of after WiVRn's 10 s loss |
+| `2b3e8e4` | refresh rate cached and updated from runtime events; no queries once the session is lost |
+| `a7c8ef3` | gaps in converted bindings logged at debug, in the game's own once at info; quieter repeated manifest loads and routine events |
+| `31c311f` | libmonado found through the host's runtime file inside Steam's container (Proton battery, trackers) |
+| `23ad894` | Index `/input/pinch` bound to the trigger, like SteamVR |
+| `ef5dbfb` | gl: fbconfig of contexts created without one taken from the drawable |
+| `176f51f` | applications: added manifests and the app's identity kept for the process |
+| `9714aab` | apps that don't quit 5 s after the runtime asks (30 s if acknowledged) are killed, like SteamVR; `XRIZER_KILL_ON_QUIT=0` opts out |
 
 ## Audit fixes (2026-10-22, 335 commits `9a6d924`..`3323c56`)
 
