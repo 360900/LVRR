@@ -4601,6 +4601,7 @@ mod tests {
         f.comp.PostPresentHandoff();
         assert_eq!(f.wait_get_poses(), DoNotHaveFocus);
         assert_eq!(quit_events(&system), [true]);
+        assert!(f.comp.openxr.quit_watchdog.deadline().is_none());
     }
 
     /// xrWaitFrame fails on a lost session, so WaitGetPoses has to keep a game that ignores Quit
@@ -4725,6 +4726,7 @@ mod tests {
         fakexr::lose_session(f.raw_session());
         assert_eq!(f.wait_get_poses(), DoNotHaveFocus);
         assert_eq!(quit_events(&system), [false]);
+        assert!(f.comp.openxr.quit_watchdog.deadline().is_some());
     }
 
     /// A loss first seen when the frame's views are located at the end of the frame, because

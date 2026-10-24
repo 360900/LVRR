@@ -75,6 +75,8 @@ pub struct OpenXrData<C: Compositor> {
     /// Set once the application was told to quit because the runtime stopped or lost the session.
     /// No new session is started afterwards, so this and `lost` are never cleared.
     exiting: AtomicBool,
+    /// Kills the application if it doesn't quit in time after the runtime stopped the session.
+    pub quit_watchdog: crate::quit_watchdog::QuitWatchdog,
     /// Set once the runtime lost the session or instance, or stopped the session and we ended it.
     /// Every call on the session fails or is pointless from then on, so callers skip them.
     lost: AtomicBool,
@@ -341,6 +343,7 @@ impl<C: Compositor> OpenXrData<C> {
             headless,
             exit_requested: false.into(),
             exiting: false.into(),
+            quit_watchdog: Default::default(),
             lost: false.into(),
             runtime_stopped: false.into(),
             session_creation_failed: false.into(),
@@ -701,7 +704,9 @@ impl<C: Compositor> OpenXrData<C> {
         self.push_quit(true);
     }
 
-    /// Sends the application VREvent_Quit, at most once.
+    /// Sends the application VREvent_Quit, at most once. Like SteamVR, an app that doesn't quit
+    /// when asked to is killed, but not when the connection was lost, as SteamVR's server can't
+    /// kill apps once it's gone.
     fn push_quit(&self, connection_lost: bool) {
         if self.exiting.swap(true, Ordering::Relaxed) {
             return;
@@ -723,6 +728,9 @@ impl<C: Compositor> OpenXrData<C> {
                 },
             },
         });
+        if !connection_lost {
+            self.quit_watchdog.start();
+        }
     }
 
     /// Why [Self::restart_session] would refuse to start a new session, if it would.

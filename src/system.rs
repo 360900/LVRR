@@ -746,7 +746,9 @@ impl vr::IVRSystem026_Interface for System {
         crate::warn_unimplemented!("GetAppContainerFilePaths");
         0
     }
-    fn AcknowledgeQuit_Exiting(&self) {}
+    fn AcknowledgeQuit_Exiting(&self) {
+        self.openxr.quit_watchdog.acknowledged();
+    }
     fn PerformFirmwareUpdate(&self, _: vr::TrackedDeviceIndex_t) -> vr::EVRFirmwareError {
         crate::warn_unimplemented!("PerformFirmwareUpdate");
         vr::EVRFirmwareError::Fail
@@ -1589,7 +1591,10 @@ impl vr::IVRSystem021On022 for System {
 }
 
 impl vr::IVRSystem020On021 for System {
-    fn AcknowledgeQuit_UserPrompt(&self) {}
+    // Halts the timeout, the app quits once the user answered.
+    fn AcknowledgeQuit_UserPrompt(&self) {
+        self.openxr.quit_watchdog.stop();
+    }
 }
 
 impl vr::IVRSystem019On020 for System {
@@ -1785,6 +1790,23 @@ mod tests {
     use crate::{clientcore::Injector, openxr_data::OpenXrData};
     use std::ffi::CStr;
     use vr::IVRSystem022_Interface;
+
+    /// AcknowledgeQuit_Exiting gives an app longer to quit before it's killed,
+    /// AcknowledgeQuit_UserPrompt lets it take as long as the user does.
+    #[test]
+    fn acknowledging_quit() {
+        let xr =
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
+        let system = System::new(xr.clone(), &Injector::default());
+
+        let start = std::time::Instant::now();
+        xr.quit_watchdog.start();
+        assert!(xr.quit_watchdog.deadline().unwrap() < start + std::time::Duration::from_secs(10));
+        system.AcknowledgeQuit_Exiting();
+        assert!(xr.quit_watchdog.deadline().unwrap() >= start + std::time::Duration::from_secs(30));
+        vr::IVRSystem020On021::AcknowledgeQuit_UserPrompt(&system);
+        assert_eq!(xr.quit_watchdog.deadline(), None);
+    }
 
     #[test]
     fn distortion_is_identity() {

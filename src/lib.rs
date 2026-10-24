@@ -15,6 +15,7 @@ mod openxr_data;
 mod overlay;
 mod overlayview;
 mod quirks;
+mod quit_watchdog;
 mod rendermodels;
 mod screenshots;
 mod settings;
