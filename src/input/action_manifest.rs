@@ -422,7 +422,10 @@ impl<C: openxr_data::Compositor> Input<C> {
         } in bindings
         {
             if let actions::ControllerType::Unknown(other) = &controller_type {
-                info!("Ignoring bindings for unknown profile {other}");
+                crate::log_unique!(
+                    log::Level::Info,
+                    "Ignoring bindings for unknown profile {other}"
+                );
                 continue;
             }
             // The first file that loads wins, like in SteamVR (e.g. Half-Life: Alyx lists
@@ -465,6 +468,12 @@ impl<C: openxr_data::Compositor> Input<C> {
             impl<C: openxr_data::Compositor> RunWithProfile for Runner<'_, '_, '_, '_, C> {
                 fn run<P: super::InteractionProfile>(&mut self) {
                     if let Some(mut context) = self.1.for_profile::<C, P>(self.0) {
+                        // simple_controller gets the Vive's bindings, most of whose inputs it
+                        // lacks.
+                        context.adapted = std::any::TypeId::of::<P>()
+                            == std::any::TypeId::of::<
+                                super::profiles::simple_controller::SimpleController,
+                            >();
                         self.0
                             .load_bindings_for_profile::<P>(&self.2.bindings, &mut context);
                     } else {
@@ -502,6 +511,9 @@ impl<C: openxr_data::Compositor> Input<C> {
                 if self.context.suggested_profiles.contains(&profile_path) {
                     return;
                 }
+                if !P::has_required_extensions(&self.input.openxr.enabled_extensions) {
+                    return;
+                }
                 // Profiles no SteamVR controller type maps to (hand tracking) have no bindings.
                 let Some(native) = actions::ControllerType::known()
                     .into_iter()
@@ -523,7 +535,10 @@ impl<C: openxr_data::Compositor> Input<C> {
                     info!("Using {} for {profile}", custom_path.display());
                     custom
                 } else if let Some((source, bindings)) = source {
-                    info!("No {native} bindings for {profile}, converting the {source} bindings");
+                    crate::log_unique!(
+                        log::Level::Info,
+                        "No {native} bindings for {profile}, converting the {source} bindings"
+                    );
                     let mut bindings = bindings.clone();
                     fallback::convert(&mut bindings, source, has_input::<P>);
                     bindings
@@ -533,6 +548,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                 };
 
                 if let Some(mut context) = self.context.for_profile::<C, P>(self.input) {
+                    context.adapted = true;
                     self.input
                         .load_bindings_for_profile::<P>(&bindings.bindings, &mut context);
                 }
@@ -559,7 +575,10 @@ impl<C: openxr_data::Compositor> Input<C> {
 
         for (action_set_name, bindings) in bindings.iter() {
             let Some(set) = context.get_action_set(action_set_name) else {
-                warn!("Action set {action_set_name} missing.");
+                crate::log_unique!(
+                    log::Level::Info,
+                    "Ignoring the bindings for action set {action_set_name}, which isn't in the action manifest"
+                );
                 continue;
             };
 

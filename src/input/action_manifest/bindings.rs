@@ -294,7 +294,10 @@ struct ValidActionBindingData<'a, Inputs, Parameters> {
 }
 
 impl<Inputs, Parameters> ActionBindingData<Inputs, Parameters> {
-    fn validate_path(&self) -> Option<ValidActionBindingData<'_, Inputs, Parameters>> {
+    fn validate_path(
+        &self,
+        context: &BindingsProfileLoadContext,
+    ) -> Option<ValidActionBindingData<'_, Inputs, Parameters>> {
         match &self.path {
             MaybeInputPath::Valid(path) => Some(ValidActionBindingData {
                 path: *path,
@@ -302,7 +305,7 @@ impl<Inputs, Parameters> ActionBindingData<Inputs, Parameters> {
                 parameters: self.parameters.as_ref(),
             }),
             MaybeInputPath::Invalid { path, error } => {
-                warn!("got invalid input path {path} - {error}");
+                context.unusable_binding(format_args!("invalid input path {path}: {error}"));
                 None
             }
         }
@@ -335,8 +338,8 @@ struct Custom;
 
 struct InvalidActionPath<'a>(DynInputPath, &'a str);
 impl InvalidActionPath<'_> {
-    fn warn(&self) {
-        warn!("invalid path {} for {}", self.0, self.1);
+    fn report(&self, context: &BindingsProfileLoadContext) {
+        context.unusable_binding(format_args!("no {} for {}", self.0, self.1));
     }
 }
 
@@ -544,6 +547,25 @@ struct DpadInput {
     north: Option<ActionBindingOutput<Custom>>,
     west: Option<ActionBindingOutput<Custom>>,
     center: Option<ActionBindingOutput<Custom>>,
+}
+
+impl DpadInput {
+    /// The actions bound to the directions, for logs.
+    fn outputs(&self) -> String {
+        [
+            ("north", &self.north),
+            ("east", &self.east),
+            ("south", &self.south),
+            ("west", &self.west),
+            ("center", &self.center),
+        ]
+        .into_iter()
+        .filter_map(|(direction, output)| {
+            Some(format!("{} ({direction})", output.as_ref()?.output.path))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -862,7 +884,8 @@ fn bind_touch(
     context: &mut BindingsProfileLoadContext,
 ) {
     let Some((input, params)) = touch_input(path, validate_path) else {
-        InvalidActionPath(path.with_component(DynComponent::Touch), &touch.output.path).warn();
+        InvalidActionPath(path.with_component(DynComponent::Touch), &touch.output.path)
+            .report(context);
         return;
     };
     if input.component == Some(DynComponent::Value) || input.component == Some(DynComponent::Force)
@@ -941,7 +964,7 @@ pub fn handle_sources(
                     path,
                     inputs: ButtonInput { touch, click, .. },
                     parameters: _,
-                }) = data.validate_path()
+                }) = data.validate_path(context)
                 else {
                     continue;
                 };
@@ -960,7 +983,7 @@ pub fn handle_sources(
                 if let Some(click) = click {
                     let click_path = path.with_component(DynComponent::Click);
                     let Some(click_path) = validate_path(click_path) else {
-                        InvalidActionPath(click_path, &click.output.path).warn();
+                        InvalidActionPath(click_path, &click.output.path).report(context);
                         continue;
                     };
                     trace!("suggesting {click_path} for {} (toggle)", click.output.path);
@@ -989,7 +1012,7 @@ pub fn handle_sources(
                             unknown,
                         },
                     parameters,
-                }) = data.validate_path()
+                }) = data.validate_path(context)
                 else {
                     continue;
                 };
@@ -1012,7 +1035,7 @@ pub fn handle_sources(
                 if let Some(double) = double
                     && let Ok(complete_path) = validate_path(click_path)
                         .ok_or_else(|| InvalidActionPath(click_path, &double.output.path))
-                        .inspect_err(InvalidActionPath::warn)
+                        .inspect_err(|e| e.report(context))
                 {
                     bind_bool_input(
                         &double.output,
@@ -1028,7 +1051,7 @@ pub fn handle_sources(
                     button_press_input(path, parameters.and_then(|p| p.force_input), validate_path)
                 else {
                     for output in [click, grab, long, held, single].into_iter().flatten() {
-                        InvalidActionPath(click_path, &output.output.path).warn();
+                        InvalidActionPath(click_path, &output.output.path).report(context);
                     }
                     continue;
                 };
@@ -1102,7 +1125,7 @@ pub fn handle_sources(
                     path,
                     inputs,
                     parameters,
-                }) = data.validate_path()
+                }) = data.validate_path(context)
                 else {
                     continue;
                 };
@@ -1123,7 +1146,7 @@ pub fn handle_sources(
                 let parameters = legacy_parameters.as_ref().or(parameters);
 
                 let Some(parent_path) = validate_path(path) else {
-                    InvalidActionPath(path, &format!("{inputs:#?}")).warn();
+                    InvalidActionPath(path, &inputs.outputs()).report(context);
                     continue;
                 };
                 handle_dpad_binding(
@@ -1141,7 +1164,7 @@ pub fn handle_sources(
                     path,
                     inputs: TriggerInput { pull, touch, click },
                     parameters,
-                }) = data.validate_path()
+                }) = data.validate_path(context)
                 else {
                     continue;
                 };
@@ -1149,7 +1172,7 @@ pub fn handle_sources(
                 if let Some(pull) = pull {
                     let _ = pull
                         .try_bind_with_component(path, context, validate_path)
-                        .inspect_err(InvalidActionPath::warn);
+                        .inspect_err(|e| e.report(context));
                 }
 
                 if let Some(click) = click {
@@ -1176,7 +1199,7 @@ pub fn handle_sources(
                         ),
                         Some(click_path) => context
                             .try_suggest_binding::<bool>(click.output.path.clone(), click_path),
-                        None => InvalidActionPath(click_path, &click.output.path).warn(),
+                        None => InvalidActionPath(click_path, &click.output.path).report(context),
                     }
                 }
 
@@ -1196,7 +1219,7 @@ pub fn handle_sources(
                     path,
                     inputs: ScalarConstantInput { value },
                     parameters,
-                }) = data.validate_path()
+                }) = data.validate_path(context)
                 else {
                     continue;
                 };
@@ -1226,7 +1249,7 @@ pub fn handle_sources(
                         action_set,
                         context,
                     ),
-                    None => InvalidActionPath(path, &value.output.path).warn(),
+                    None => InvalidActionPath(path, &value.output.path).report(context),
                 }
             }
             ActionBinding::ForceSensor(data) => {
@@ -1234,28 +1257,28 @@ pub fn handle_sources(
                     path,
                     inputs: ForceSensorInput { force },
                     ..
-                }) = data.validate_path()
+                }) = data.validate_path(context)
                 else {
                     continue;
                 };
 
                 let _ = force
                     .try_bind_with_component(path, context, validate_path)
-                    .inspect_err(InvalidActionPath::warn);
+                    .inspect_err(|e| e.report(context));
             }
             ActionBinding::Grab(data) => {
                 let Some(ValidActionBindingData {
                     path,
                     inputs: GrabInput { grab },
                     parameters,
-                }) = data.validate_path()
+                }) = data.validate_path(context)
                 else {
                     continue;
                 };
 
                 let value_path = path.with_component(DynComponent::Value);
                 let Some(value_path) = validate_path(value_path) else {
-                    InvalidActionPath(value_path, &grab.output.path).warn();
+                    InvalidActionPath(value_path, &grab.output.path).report(context);
                     continue;
                 };
                 // Controllers without a force sensor grab by value alone.
@@ -1303,12 +1326,12 @@ pub fn handle_sources(
                     inputs: ScrollInput { scroll },
                     path,
                     parameters,
-                }) = data.validate_path()
+                }) = data.validate_path(context)
                 else {
                     continue;
                 };
                 let Some(path) = validate_path(path) else {
-                    InvalidActionPath(path, &scroll.output.path).warn();
+                    InvalidActionPath(path, &scroll.output.path).report(context);
                     continue;
                 };
                 let input = match path.subpath {
@@ -1341,7 +1364,7 @@ pub fn handle_sources(
                     path,
                     inputs,
                     parameters,
-                }) = data.validate_path()
+                }) = data.validate_path(context)
                 else {
                     continue;
                 };
@@ -1376,7 +1399,7 @@ pub fn handle_sources(
                                     action_set,
                                 );
                             } else {
-                                InvalidActionPath(path, &position.output.path).warn();
+                                InvalidActionPath(path, &position.output.path).report(context);
                             }
                         }
                     }
@@ -1407,10 +1430,10 @@ pub fn handle_chord_bindings(
             let path = match path {
                 MaybeInputPath::Valid(path) => *path,
                 MaybeInputPath::Invalid { path, error } => {
-                    warn!(
-                        "Ignoring chord for {}: invalid path {path} - {error}",
+                    context.unusable_binding(format_args!(
+                        "ignoring chord for {}: invalid input path {path}: {error}",
                         output.path
-                    );
+                    ));
                     continue 'chords;
                 }
             };
@@ -1464,10 +1487,10 @@ pub fn handle_chord_bindings(
                 }
             };
             let Some(part) = part else {
-                warn!(
-                    "Ignoring chord for {}: no {slot} on {path} for this controller",
+                context.unusable_binding(format_args!(
+                    "ignoring chord for {}: no {slot} on {path}",
                     output.path
-                );
+                ));
                 continue 'chords;
             };
             parts.push((context.hand_path(path.hand), part));

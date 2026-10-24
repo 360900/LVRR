@@ -51,6 +51,31 @@ macro_rules! warn_once {
 }
 use warn_once;
 
+/// Logs at `level` the first time this exact message comes up, and at debug level after that,
+/// for messages about data that is loaded again, e.g. on every session restart.
+macro_rules! log_unique {
+    ($level:expr, $($arg:tt)+) => {{
+        let message = format!($($arg)+);
+        let level = if crate::first_occurrence(&message) {
+            $level
+        } else {
+            log::Level::Debug
+        };
+        log::log!(level, "{message}");
+    }};
+}
+use log_unique;
+
+/// Whether `message` comes up for the first time in this process.
+fn first_occurrence(message: &str) -> bool {
+    static SEEN: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
+        std::sync::Mutex::new(None);
+    SEEN.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get_or_insert_default()
+        .insert(message.to_owned())
+}
+
 #[cfg(feature = "tracing")]
 macro_rules! tracy_span {
     ($($tt:tt)*) => {

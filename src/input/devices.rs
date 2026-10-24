@@ -1152,7 +1152,14 @@ impl TrackedDeviceList {
 
         xdevs.truncate(max_generic_trackers);
 
-        log::info!(
+        // Checked on every interaction profile change, which mostly finds none.
+        let level = if xdevs.is_empty() {
+            log::Level::Debug
+        } else {
+            log::Level::Info
+        };
+        log::log!(
+            level,
             "Creating {} generic trackers via Monado XDev extension",
             xdevs.len()
         );

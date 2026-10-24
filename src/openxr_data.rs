@@ -506,8 +506,9 @@ impl<C: Compositor> OpenXrData<C> {
                     if is_stale(event.session(), &present) {
                         continue;
                     }
-                    info!("User present: {present}");
+                    // Monado reports the presence when a session begins too, changed or not.
                     if self.user_present.swap(present, Ordering::Relaxed) != present {
+                        info!("User present: {present}");
                         self.push_event(
                             if present {
                                 vr::EVREventType::TrackedDeviceUserInteractionStarted
@@ -528,9 +529,12 @@ impl<C: Compositor> OpenXrData<C> {
                     let to = if to.is_finite() && to > 0.0 { to } else { 0.0 };
                     self.refresh_rate.store(to.to_bits(), Ordering::Relaxed);
                 }
-                _ => {
-                    info!("unknown event");
+                // Hidden area meshes are fetched from the runtime whenever the app asks.
+                xr::Event::VisibilityMaskChangedKHR(_) => debug!("visibility mask changed"),
+                xr::Event::EventsLost(event) => {
+                    warn!("The runtime dropped {} events", event.lost_event_count())
                 }
+                _ => debug!("unhandled event"),
             }
         }
 
