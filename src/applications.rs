@@ -1,7 +1,9 @@
 use openvr as vr;
-use std::ffi::c_char;
+use std::ffi::{CStr, CString, c_char};
+use std::path::PathBuf;
+use std::sync::Mutex;
 
-use log::info;
+use log::{info, warn};
 use std::process::Command;
 
 #[derive(Default, macros::InterfaceImpl)]
@@ -9,6 +11,57 @@ use std::process::Command;
 #[versions(008, 007, 006, 005, 004, 003, 002)]
 pub struct Applications {
     vtables: Vtables,
+    /// Apps of the manifests added in this process, by app key, with their manifest. Nothing is
+    /// installed for good, like SteamVR's temporary manifests.
+    apps: Mutex<Vec<(CString, PathBuf)>>,
+    /// The app key this process identified as.
+    identity: Mutex<Option<CString>>,
+}
+
+impl Applications {
+    fn is_installed(&self, key: &CStr) -> bool {
+        self.apps
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(app, _)| **app == *key)
+    }
+}
+
+/// The app keys a .vrmanifest lists.
+fn manifest_app_keys(path: &std::path::Path) -> Result<Vec<CString>, vr::EVRApplicationError> {
+    let contents = std::fs::read_to_string(path).map_err(|e| {
+        warn!("Can't read application manifest {}: {e}", path.display());
+        vr::EVRApplicationError::NoManifest
+    })?;
+    let invalid = |e: &dyn std::fmt::Display| {
+        warn!("Invalid application manifest {}: {e}", path.display());
+        vr::EVRApplicationError::InvalidManifest
+    };
+    let manifest: serde_json::Value = serde_json::from_str(&contents).map_err(|e| invalid(&e))?;
+    let keys: Vec<_> = manifest["applications"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|app| CString::new(app["app_key"].as_str()?).ok())
+        .collect();
+    if keys.is_empty() {
+        return Err(invalid(&"no applications with an app_key"));
+    }
+    Ok(keys)
+}
+
+/// Copies an app key to an app's buffer.
+fn write_key(key: &CStr, buffer: *mut c_char, size: u32) -> vr::EVRApplicationError {
+    let bytes = key.to_bytes_with_nul();
+    if buffer.is_null() || (size as usize) < bytes.len() {
+        if !buffer.is_null() && size > 0 {
+            unsafe { *buffer = 0 };
+        }
+        return vr::EVRApplicationError::BufferTooSmall;
+    }
+    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr().cast(), buffer, bytes.len()) };
+    vr::EVRApplicationError::None
 }
 
 impl vr::IVRApplications008_Interface for Applications {
@@ -195,12 +248,27 @@ impl vr::IVRApplications008_Interface for Applications {
             _ => c"Unknown".as_ptr(),
         }
     }
-    fn GetApplicationProcessId(&self, _: *const c_char) -> u32 {
-        crate::warn_unimplemented!("GetApplicationProcessId");
-        0
+    fn GetApplicationProcessId(&self, key: *const c_char) -> u32 {
+        if key.is_null() {
+            return 0;
+        }
+        let key = unsafe { CStr::from_ptr(key) };
+        match &*self.identity.lock().unwrap() {
+            Some(identity) if **identity == *key => std::process::id(),
+            _ => 0,
+        }
     }
-    fn IdentifyApplication(&self, _: u32, _: *const c_char) -> vr::EVRApplicationError {
-        crate::warn_unimplemented!("IdentifyApplication");
+    fn IdentifyApplication(&self, pid: u32, key: *const c_char) -> vr::EVRApplicationError {
+        if key.is_null() {
+            return vr::EVRApplicationError::InvalidParameter;
+        }
+        let key = unsafe { CStr::from_ptr(key) };
+        // Only this process is known here. Launchers identifying the apps they start are
+        // accepted, as nothing else would track them.
+        if pid == std::process::id() {
+            info!("Application identified as {key:?}");
+            *self.identity.lock().unwrap() = Some(key.to_owned());
+        }
         vr::EVRApplicationError::None
     }
     fn CancelApplicationLaunch(&self, _: *const c_char) -> bool {
@@ -235,42 +303,69 @@ impl vr::IVRApplications008_Interface for Applications {
     }
     fn GetApplicationKeyByProcessId(
         &self,
-        _: u32,
+        pid: u32,
         buffer: *mut c_char,
         size: u32,
     ) -> vr::EVRApplicationError {
-        crate::warn_unimplemented!("GetApplicationKeyByProcessId");
-        if !buffer.is_null() && size > 0 {
-            unsafe { *buffer = 0 };
+        let identity = self.identity.lock().unwrap();
+        match &*identity {
+            Some(key) if pid == std::process::id() => write_key(key, buffer, size),
+            _ => {
+                if !buffer.is_null() && size > 0 {
+                    unsafe { *buffer = 0 };
+                }
+                vr::EVRApplicationError::UnknownApplication
+            }
         }
-        vr::EVRApplicationError::UnknownApplication
     }
     fn GetApplicationKeyByIndex(
         &self,
-        _: u32,
+        index: u32,
         buffer: *mut c_char,
         size: u32,
     ) -> vr::EVRApplicationError {
-        crate::warn_unimplemented!("GetApplicationKeyByIndex");
-        if !buffer.is_null() && size > 0 {
-            unsafe { *buffer = 0 };
+        let apps = self.apps.lock().unwrap();
+        match apps.get(index as usize) {
+            Some((key, _)) => write_key(key, buffer, size),
+            None => {
+                if !buffer.is_null() && size > 0 {
+                    unsafe { *buffer = 0 };
+                }
+                vr::EVRApplicationError::InvalidIndex
+            }
         }
-        vr::EVRApplicationError::UnknownApplication
     }
     fn GetApplicationCount(&self) -> u32 {
-        crate::warn_unimplemented!("GetApplicationCount");
-        0
+        self.apps.lock().unwrap().len() as u32
     }
-    fn IsApplicationInstalled(&self, _: *const c_char) -> bool {
-        crate::warn_unimplemented!("IsApplicationInstalled");
-        false
+    fn IsApplicationInstalled(&self, key: *const c_char) -> bool {
+        !key.is_null() && self.is_installed(unsafe { CStr::from_ptr(key) })
     }
-    fn RemoveApplicationManifest(&self, _: *const c_char) -> vr::EVRApplicationError {
-        crate::warn_unimplemented!("RemoveApplicationManifest");
+    fn RemoveApplicationManifest(&self, path: *const c_char) -> vr::EVRApplicationError {
+        if path.is_null() {
+            return vr::EVRApplicationError::InvalidParameter;
+        }
+        let path = PathBuf::from(unsafe { CStr::from_ptr(path) }.to_string_lossy().as_ref());
+        self.apps
+            .lock()
+            .unwrap()
+            .retain(|(_, manifest)| *manifest != path);
         vr::EVRApplicationError::None
     }
-    fn AddApplicationManifest(&self, _: *const c_char, _: bool) -> vr::EVRApplicationError {
-        crate::warn_unimplemented!("AddApplicationManifest");
+    fn AddApplicationManifest(&self, path: *const c_char, _: bool) -> vr::EVRApplicationError {
+        if path.is_null() {
+            return vr::EVRApplicationError::InvalidParameter;
+        }
+        let path = PathBuf::from(unsafe { CStr::from_ptr(path) }.to_string_lossy().as_ref());
+        let keys = match manifest_app_keys(&path) {
+            Ok(keys) => keys,
+            Err(e) => return e,
+        };
+        info!("Added application manifest {} ({keys:?})", path.display());
+        let mut apps = self.apps.lock().unwrap();
+        // Adding a manifest again replaces its apps, and the newest manifest of an app wins.
+        apps.retain(|(key, manifest)| *manifest != path && !keys.contains(key));
+        apps.extend(keys.into_iter().map(|key| (key, path.clone())));
         vr::EVRApplicationError::None
     }
 
@@ -309,8 +404,64 @@ impl vr::IVRApplications006On007 for Applications {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::CStr;
     use vr::{IVRApplications006On007, IVRApplications008_Interface};
+
+    /// Vivecraft adds its manifest, checks it's installed and identifies as its app.
+    #[test]
+    fn manifests_and_identity() {
+        let apps = Applications::default();
+        let dir = std::env::temp_dir().join(format!("xrizer-manifest-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = dir.join("app.vrmanifest");
+        std::fs::write(
+            &manifest,
+            r#"{"source": "builtin", "applications": [{"app_key": "org.example.app", "launch_type": "binary"}]}"#,
+        )
+        .unwrap();
+        let invalid = dir.join("invalid.vrmanifest");
+        std::fs::write(&invalid, r#"{"applications": []}"#).unwrap();
+        let path = CString::new(manifest.to_str().unwrap()).unwrap();
+        let invalid_path = CString::new(invalid.to_str().unwrap()).unwrap();
+        let key = c"org.example.app";
+
+        assert!(!apps.IsApplicationInstalled(key.as_ptr()));
+        let added = apps.AddApplicationManifest(path.as_ptr(), true);
+        let rejected = apps.AddApplicationManifest(invalid_path.as_ptr(), true);
+        let missing = apps.AddApplicationManifest(c"/nonexistent.vrmanifest".as_ptr(), true);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(added, vr::EVRApplicationError::None);
+        assert_eq!(rejected, vr::EVRApplicationError::InvalidManifest);
+        assert_eq!(missing, vr::EVRApplicationError::NoManifest);
+        assert!(apps.IsApplicationInstalled(key.as_ptr()));
+        assert_eq!(apps.GetApplicationCount(), 1);
+
+        let pid = std::process::id();
+        let mut buffer = [1 as c_char; 64];
+        assert_eq!(
+            apps.GetApplicationKeyByProcessId(pid, buffer.as_mut_ptr(), buffer.len() as u32),
+            vr::EVRApplicationError::UnknownApplication
+        );
+        assert_eq!(
+            apps.IdentifyApplication(pid, key.as_ptr()),
+            vr::EVRApplicationError::None
+        );
+        assert_eq!(apps.GetApplicationProcessId(key.as_ptr()), pid);
+        assert_eq!(
+            apps.GetApplicationKeyByProcessId(pid, buffer.as_mut_ptr(), 4),
+            vr::EVRApplicationError::BufferTooSmall
+        );
+        assert_eq!(
+            apps.GetApplicationKeyByProcessId(pid, buffer.as_mut_ptr(), buffer.len() as u32),
+            vr::EVRApplicationError::None
+        );
+        assert_eq!(unsafe { CStr::from_ptr(buffer.as_ptr()) }, key);
+
+        assert_eq!(
+            apps.RemoveApplicationManifest(path.as_ptr()),
+            vr::EVRApplicationError::None
+        );
+        assert!(!apps.IsApplicationInstalled(key.as_ptr()));
+    }
 
     #[test]
     fn unknown_enum_names() {
