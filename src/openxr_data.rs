@@ -18,7 +18,7 @@ use parking_lot::{RwLock, RwLockReadGuard};
 use std::collections::HashSet;
 use std::mem::ManuallyDrop;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 /// How long to wait for the runtime to move the session to a requested state.
@@ -60,6 +60,9 @@ pub struct OpenXrData<C: Compositor> {
     /// [Self::get_display_time].
     display_time: AtomicXrTime,
     pub display_period_nanos: AtomicI64,
+    /// The runtime's refresh rate in Hz as f32 bits, 0 until it's known. Cached, as games ask
+    /// every frame and each query is a round trip to the runtime's server.
+    refresh_rate: AtomicU32,
     pub enabled_extensions: xr::ExtensionSet,
     /// The interaction profiles that were bound when we probed at init - see
     /// [crate::input::probe_interaction_profiles].
@@ -331,6 +334,7 @@ impl<C: Compositor> OpenXrData<C> {
             session_data,
             display_time: AtomicXrTime(1.into()), // This will get replaced on the first WaitGetPoses
             display_period_nanos: 11111111.into(), // This will get replaced on the first WaitGetPoses
+            refresh_rate: 0.into(),
             enabled_extensions: exts,
             probed_profiles,
             application_type,
@@ -513,6 +517,16 @@ impl<C: Compositor> OpenXrData<C> {
                             Default::default(),
                         );
                     }
+                }
+                xr::Event::DisplayRefreshRateChangedFB(event) => {
+                    let (from, to) = (
+                        event.from_display_refresh_rate(),
+                        event.to_display_refresh_rate(),
+                    );
+                    info!("Display refresh rate changed from {from} Hz to {to} Hz");
+                    // A rate that isn't positive is unknown, so it's queried again.
+                    let to = if to.is_finite() && to > 0.0 { to } else { 0.0 };
+                    self.refresh_rate.store(to.to_bits(), Ordering::Relaxed);
                 }
                 _ => {
                     info!("unknown event");
@@ -927,26 +941,29 @@ impl<C: Compositor> OpenXrData<C> {
         self.check("xrLocateSpace", located).flatten()
     }
 
+    /// The display's refresh rate in Hz: the runtime's while it reports one, otherwise from the
+    /// frame period.
     pub fn get_refresh_rate(&self) -> f32 {
-        let get_fallback_rate = || {
-            Duration::from_nanos(
-                self.display_period_nanos
-                    .load(Ordering::Relaxed)
-                    .try_into()
-                    .unwrap(),
-            )
-            .as_secs_f32()
-            .recip()
+        let cached = f32::from_bits(self.refresh_rate.load(Ordering::Relaxed));
+        if cached > 0.0 {
+            return cached;
+        }
+        let get_fallback_rate = || match self.display_period().as_secs_f32() {
+            period if period > 0.0 => period.recip(),
+            _ => 90.0,
         };
-        if !self.enabled_extensions.fb_display_refresh_rate {
+        if !self.enabled_extensions.fb_display_refresh_rate || self.is_lost() {
             return get_fallback_rate();
         }
 
-        self.session_data
-            .get()
-            .session
-            .get_display_refresh_rate()
-            .unwrap_or_else(|_| get_fallback_rate())
+        let rate = self.session_data.get().session.get_display_refresh_rate();
+        match self.check("xrGetDisplayRefreshRateFB", rate) {
+            Some(rate) if rate.is_finite() && rate > 0.0 => {
+                self.refresh_rate.store(rate.to_bits(), Ordering::Relaxed);
+                rate
+            }
+            _ => get_fallback_rate(),
+        }
     }
 
     /// Time since the most recent vsync and a running vsync count, extrapolated from the last
@@ -2175,6 +2192,45 @@ mod tests {
             head_pose(&data, Origin::Seated),
             pitch_only(pitch, [0.0, 0.0, 0.0]),
         );
+    }
+
+    /// Games ask for the refresh rate every frame, so the runtime's is only queried again when it
+    /// reports a change, and not at all once the session is lost.
+    #[test]
+    fn refresh_rate_cached() {
+        crate::init_logging();
+        fakexr::advertise_extension(xr::sys::FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+        let data = OpenXrData::<FakeCompositor>::new(
+            &Injector::default(),
+            openvr::EVRApplicationType::Other,
+        )
+        .unwrap();
+        assert!(data.enabled_extensions.fb_display_refresh_rate);
+        let session = data.session_data.get().session.as_raw();
+        let queries = || fakexr::display_refresh_rate_queries(session);
+
+        assert_eq!(data.get_refresh_rate(), 90.0);
+        assert_eq!(data.get_refresh_rate(), 90.0);
+        assert_eq!(queries(), 1);
+        fakexr::set_display_refresh_rate(session, 120.0);
+        data.poll_events();
+        assert_eq!(data.get_refresh_rate(), 120.0);
+        assert_eq!(queries(), 1);
+
+        // An unknown rate is queried again, and the frame period stands in for it.
+        fakexr::set_display_refresh_rate(session, 0.0);
+        data.poll_events();
+        data.set_frame_timing(xr::Time::from_nanos(1), 12_500_000);
+        assert_eq!(data.get_refresh_rate(), 80.0);
+        assert_eq!(queries(), 2);
+        data.set_frame_timing(xr::Time::from_nanos(1), 0);
+        assert_eq!(data.get_refresh_rate(), 90.0);
+
+        fakexr::lose_session(session);
+        data.poll_events();
+        assert!(data.is_lost());
+        assert_eq!(data.get_refresh_rate(), 90.0);
+        assert_eq!(queries(), 3);
     }
 
     /// A session the runtime stops is ended, but never while another thread is in a frame call
