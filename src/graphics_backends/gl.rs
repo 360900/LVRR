@@ -6,7 +6,7 @@ use glutin_glx_sys::{
     glx::{self, Glx},
 };
 use libc::{dlopen, dlsym};
-use log::warn;
+use log::{debug, warn};
 use openvr as vr;
 use openxr as xr;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
@@ -240,15 +240,12 @@ unsafe fn xlib_session_info(
     unsafe {
         let x_display = glx.GetCurrentDisplay();
         let glx_drawable = glx.GetCurrentDrawable();
-        let fbconfig = get_fbconfig(glx, x_display, glx_context);
+        let fbconfig = get_fbconfig(glx, x_display, glx_context, glx_drawable);
         let visualid = get_visualid(glx, x_display, fbconfig);
 
         SessionCreateInfo::Xlib {
             x_display: x_display.cast(),
-            glx_fb_config: fbconfig.map(|p| p.cast_mut()).unwrap_or_else(|| {
-                warn!("No fbconfig found.");
-                1 as _
-            }),
+            glx_fb_config: fbconfig.map(|p| p.cast_mut()).unwrap_or(1 as _),
             visualid: visualid.unwrap_or(1),
             glx_drawable,
             glx_context: glx_context.cast_mut(),
@@ -256,19 +253,15 @@ unsafe fn xlib_session_info(
     }
 }
 
+/// The fbconfig of the current context, or of the current drawable for contexts made without
+/// one (glXCreateContext), which report none (NVIDIA) or GLX_DONT_CARE (Mesa).
 unsafe fn get_fbconfig(
     glx: &GlxLib,
     display: *mut glx::types::Display,
     glx_context: glx::types::GLXContext,
+    drawable: glx::types::GLXDrawable,
 ) -> Option<glx::types::GLXFBConfig> {
     unsafe {
-        let mut config_id = 0;
-        let ret = glx.QueryContext(display, glx_context, glx::FBCONFIG_ID as _, &mut config_id);
-        if ret != Success as i32 {
-            warn!("Failed to get fbconfig id from context (error code {ret})");
-            return None;
-        }
-
         let mut screen = 0;
         let ret = glx.QueryContext(display, glx_context, glx::SCREEN as _, &mut screen);
         if ret != Success as i32 {
@@ -276,18 +269,59 @@ unsafe fn get_fbconfig(
             return None;
         }
 
-        let attrs = [glx::FBCONFIG_ID, config_id as _, glx::NONE];
-        let mut items = 0;
-        let cfgs = glx.ChooseFBConfig(display, screen, attrs.as_ptr() as _, &mut items);
-        if cfgs.is_null() {
+        let mut context_id = 0;
+        let ret = glx.QueryContext(display, glx_context, glx::FBCONFIG_ID as _, &mut context_id);
+        if ret != Success as i32 {
+            debug!("Failed to get fbconfig id from context (error code {ret})");
+            context_id = 0;
+        }
+        // Safe for X windows made current too, not just GLX drawables, on Mesa and NVIDIA.
+        let mut drawable_id = 0;
+        if drawable != 0 {
+            glx.QueryDrawable(display, drawable, glx::FBCONFIG_ID as _, &mut drawable_id);
+        }
+
+        let config = [context_id as u32, drawable_id]
+            .into_iter()
+            .filter(|&id| id != 0 && id != glx::DONT_CARE)
+            .find_map(|id| find_fbconfig(glx, display, screen, id));
+        if config.is_none() {
+            warn!(
+                "No fbconfig found for the GLX context (context fbconfig {context_id:#x}, drawable fbconfig {drawable_id:#x}, screen {screen})"
+            );
+        }
+        config
+    }
+}
+
+/// The fbconfig with `id` on `screen`. Matched by hand, as glXChooseFBConfig with a
+/// GLX_FBCONFIG_ID of GLX_DONT_CARE returns every config.
+unsafe fn find_fbconfig(
+    glx: &GlxLib,
+    display: *mut glx::types::Display,
+    screen: i32,
+    id: u32,
+) -> Option<glx::types::GLXFBConfig> {
+    unsafe {
+        let mut count = 0;
+        let configs = glx.GetFBConfigs(display, screen, &mut count);
+        if configs.is_null() {
             return None;
         }
         // The configs belong to the display, only the array is ours.
-        let cfg = (items > 0).then(|| *cfgs);
+        let found = std::slice::from_raw_parts(configs, count.max(0) as usize)
+            .iter()
+            .copied()
+            .find(|&config| {
+                let mut config_id = 0;
+                glx.GetFBConfigAttrib(display, config, glx::FBCONFIG_ID as _, &mut config_id)
+                    == Success as i32
+                    && config_id as u32 == id
+            });
         if let Some(x_free) = glx.x_free {
-            x_free(cfgs.cast());
+            x_free(configs.cast());
         }
-        cfg
+        found
     }
 }
 
