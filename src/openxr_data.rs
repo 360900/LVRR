@@ -72,9 +72,11 @@ pub struct OpenXrData<C: Compositor> {
     /// Set once the application was told to quit because the runtime stopped or lost the session.
     /// No new session is started afterwards, so this and `lost` are never cleared.
     exiting: AtomicBool,
-    /// Set once the runtime lost the session or instance. Every call on the session fails from
-    /// then on, so callers skip them.
+    /// Set once the runtime lost the session or instance, or stopped the session and we ended it.
+    /// Every call on the session fails or is pointless from then on, so callers skip them.
     lost: AtomicBool,
+    /// Set when the runtime stops the session, until [Self::poll_events] ends it.
+    runtime_stopped: AtomicBool,
     /// Set when creating the real session failed, so Submit doesn't tear down the temporary
     /// session for another attempt every frame.
     session_creation_failed: AtomicBool,
@@ -336,6 +338,7 @@ impl<C: Compositor> OpenXrData<C> {
             exit_requested: false.into(),
             exiting: false.into(),
             lost: false.into(),
+            runtime_stopped: false.into(),
             session_creation_failed: false.into(),
             max_layer_count,
             logged_errors: Mutex::default(),
@@ -407,6 +410,9 @@ impl<C: Compositor> OpenXrData<C> {
                 data.state = state;
             }
         }
+        if self.runtime_stopped.load(Ordering::Relaxed) {
+            self.end_stopped_session(session);
+        }
         if self.is_lost() {
             return;
         }
@@ -455,7 +461,10 @@ impl<C: Compositor> OpenXrData<C> {
                         xr::SessionState::STOPPING if exit_requested => {
                             debug!("session stopping at our request, not pushing Quit");
                         }
-                        xr::SessionState::STOPPING => self.push_quit(false),
+                        xr::SessionState::STOPPING => {
+                            self.push_quit(false);
+                            self.runtime_stopped.store(true, Ordering::Relaxed);
+                        }
                         xr::SessionState::LOSS_PENDING => self.mark_lost("session loss pending"),
                         // We only end the session ourselves, so the runtime ended it.
                         xr::SessionState::EXITING if !exit_requested => {
@@ -512,6 +521,32 @@ impl<C: Compositor> OpenXrData<C> {
         }
 
         state
+    }
+
+    /// Ends the session the runtime stopped, as OpenXR asks of apps: some runtimes keep the app's
+    /// last frame up meanwhile, and WiVRn loses the session only after 10 seconds. The app was told
+    /// to quit and no new session follows, so the session is done with like a lost one. Frame
+    /// calls must not run concurrently with xrEndSession, so this tries again on the next poll
+    /// while one is in progress.
+    fn end_stopped_session(&self, session: xr::sys::Session) {
+        let Some(mut data) = self.session_data.0.try_write() else {
+            return;
+        };
+        if !self.runtime_stopped.swap(false, Ordering::Relaxed) || self.is_lost() {
+            return;
+        }
+        // Another thread restarted the session in between, which isn't stopped then.
+        if data.session.as_raw() != session || data.state != xr::SessionState::STOPPING {
+            return;
+        }
+        match data.session.end() {
+            Ok(_) => {
+                info!("The runtime stopped the session, ended it");
+                data.state = xr::SessionState::IDLE;
+                self.lost.store(true, Ordering::Relaxed);
+            }
+            Err(e) => self.handle_error("xrEndSession", e),
+        }
     }
 
     /// Mirrors SteamVR's dashboard taking input focus when the runtime does (e.g. its system menu
@@ -2140,6 +2175,37 @@ mod tests {
             head_pose(&data, Origin::Seated),
             pitch_only(pitch, [0.0, 0.0, 0.0]),
         );
+    }
+
+    /// A session the runtime stops is ended, but never while another thread is in a frame call
+    /// on it: that thread holds the session, so ending waits for the next poll.
+    #[test]
+    fn stopped_session_ended_between_frame_calls() {
+        crate::init_logging();
+        let data = OpenXrData::<FakeCompositor>::new(
+            &Injector::default(),
+            openvr::EVRApplicationType::Other,
+        )
+        .unwrap();
+        let session = data.session_data.get().session.as_raw();
+        let (tx, rx) = std::sync::mpsc::channel();
+        fakexr::on_next_end(session, move || {
+            let _ = tx.send(());
+        });
+        data.session_data.get().session.request_exit().unwrap();
+        let state = data.poll_events_impl(&data.session_data.get());
+        data.session_data.0.write().state = state.unwrap();
+
+        let frame_call = data.session_data.get();
+        data.end_stopped_session(session);
+        assert!(!data.is_lost());
+        assert!(rx.try_recv().is_err());
+        drop(frame_call);
+
+        data.poll_events();
+        assert!(data.is_lost());
+        assert!(rx.try_recv().is_ok());
+        assert_eq!(data.session_data.get().state, xr::SessionState::IDLE);
     }
 
     /// Ending the session ourselves isn't the runtime taking input focus, and focus the runtime
