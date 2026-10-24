@@ -10,6 +10,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+mod rebrand;
+
 const USAGE: &str = "usage: cargo xtask <command>
 
 commands:
@@ -22,6 +24,8 @@ commands:
         release build with --i686, packed into target/dist/lvrr-<version>-x86_64.tar.gz
   apk [--debug] [-- GRADLE_ARGS...]
         build the headset APK into target/dist (needs the Android SDK and NDK)
+  rebrand [--check]
+        show LVRR instead of WiVRn and WayVR to users; run after merging an upstream
   version
         print the LVRR version";
 
@@ -50,6 +54,7 @@ fn main() -> ExitCode {
         Some("install") => install(rest),
         Some("dist") => dist(rest),
         Some("apk") => apk(rest),
+        Some("rebrand") => rebrand::run(rest),
         Some("version") => version().map(|v| println!("{v}")),
         _ => Err(USAGE.into()),
     };

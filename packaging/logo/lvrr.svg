@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- LVRR placeholder logo. Also installed as wivrn/images/wivrn*.svg by `cargo xtask rebrand`. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="180" height="180" viewBox="0 0 180 180">
+  <title>LVRR</title>
+  <defs>
+    <linearGradient id="lvrr-accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#4f8cff"/>
+      <stop offset="1" stop-color="#a06bff"/>
+    </linearGradient>
+    <!-- Referenced by WiVRn's build stylesheets (wivrn/images/*.css) -->
+    <filter id="filter60"><feColorMatrix type="hueRotate" values="60"/></filter>
+    <filter id="blue-tint"><feColorMatrix type="hueRotate" values="-30"/></filter>
+  </defs>
+  <g id="night-sky" style="display:none"/>
+  <g id="wivrn">
+    <rect width="180" height="180" rx="40" fill="#161a24"/>
+    <g fill="none" stroke="#f2f4f8" stroke-width="9" stroke-linejoin="round" stroke-linecap="round">
+      <path d="M19,62 V100 H37"/>
+      <path d="M55,62 L68,100 L81,62"/>
+      <path d="M99,100 V62 H110 A10.5,10.5 0 0 1 110,83 H99 M109,83 L121,100"/>
+      <path d="M139,100 V62 H150 A10.5,10.5 0 0 1 150,83 H139 M149,83 L161,100"/>
+    </g>
+    <rect x="19" y="116" width="142" height="7" rx="3.5" fill="url(#lvrr-accent)"/>
+  </g>
+</svg>

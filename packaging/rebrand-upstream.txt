@@ -1,0 +1,3 @@
+4f2bf2003ae10f9144229ceb7772a120127f51cd wayvr/dash-frontend/assets/dashboard/splash.png
+e2e7ad210f22ee2274a086379d2f5dfba6cb586f wayvr/dash-frontend/assets/dashboard/wayvr_dashboard_mono.svg
+e2e7ad210f22ee2274a086379d2f5dfba6cb586f wayvr/wayvr/src/assets/watch/wayvr_dashboard_mono.svg
