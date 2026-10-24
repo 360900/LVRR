@@ -1,0 +1,466 @@
+/*
+ * WiVRn VR streaming
+ * Copyright (C) 2022  Guillaume Meunier <guillaume.meunier@centraliens.net>
+ * Copyright (C) 2022  Patrick Nicolas <patricknicolas@laposte.net>
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+#pragma once
+
+#ifdef __ANDROID__
+#include "android/hid.h"
+#include <android_native_app_glue.h>
+#endif
+
+#include "configuration.h"
+#include "hmd_traits.h"
+#include "utils/singleton.h"
+#include "utils/thread_safe.h"
+#include "vk/vk_allocator.h"
+#include "wifi_lock.h"
+#include "xr/actionset.h"
+#include "xr/instance.h"
+#include "xr/session.h"
+#include "xr/swapchain.h"
+#include "xr/system.h"
+#include <atomic>
+#include <boost/locale/generator.hpp>
+#include <boost/locale/gnu_gettext.hpp>
+#include <chrono>
+#include <filesystem>
+#include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
+#include <mutex>
+#include <optional>
+#include <spdlog/spdlog.h>
+#include <unordered_map>
+#include <unordered_set>
+#include <vulkan/vulkan_raii.hpp>
+#include <openxr/openxr.h>
+#include <openxr/openxr_platform.h>
+#include <openxr/openxr_reflection.h>
+
+class scene;
+
+#ifdef __ANDROID__
+extern "C" void Java_org_meumeu_wivrn_MainActivity_onNewIntent(JNIEnv * env, jobject instance, jobject intent_obj);
+#endif
+
+struct application_info
+{
+	std::string name = "Unnamed application";
+	int version = VK_MAKE_VERSION(1, 0, 0);
+	XrFormFactor formfactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
+	XrViewConfigurationType viewconfig = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+	XrVersion min_vulkan_version = XR_MAKE_VERSION(1, 1, 0);
+
+#ifdef __ANDROID__
+	android_app * native_app;
+#endif
+};
+
+class application : public singleton<application>
+{
+	friend class scene;
+
+private:
+#ifdef __ANDROID__
+	friend void Java_org_meumeu_wivrn_MainActivity_onNewIntent(JNIEnv * env, jobject instance, jobject intent_obj);
+#endif
+
+	application_info app_info;
+#ifdef __ANDROID__
+	ANativeWindow * native_window = nullptr;
+	bool resumed = false;
+
+	android_hid::input_handler input_handler{};
+#endif
+
+	static inline const char engine_name[] = "No engine";
+	static inline const int engine_version = VK_MAKE_VERSION(1, 0, 0);
+
+	void initialize_vulkan();
+
+	void log_views();
+
+	void initialize();
+	void cleanup();
+
+	void poll_events();
+
+	void session_state_changed(XrSessionState new_state, XrTime timestamp);
+
+	// Vulkan stuff
+	vk::raii::Context vk_context;
+	vk::raii::Instance vk_instance = nullptr;
+	vk::raii::PhysicalDevice vk_physical_device = nullptr;
+	vk::raii::Device vk_device = nullptr;
+	uint32_t vk_queue_family_index;
+	thread_safe<vk::raii::Queue> vk_queue = nullptr;
+	vk::raii::CommandPool vk_cmdpool = nullptr;
+	vk::raii::PipelineCache pipeline_cache = nullptr;
+	vk::PhysicalDeviceProperties physical_device_properties;
+
+	// Vulkan memory allocator stuff
+	std::optional<vk_allocator> allocator;
+
+	// OpenXR stuff
+	void initialize_actions();
+
+	xr::instance xr_instance;
+	xr::system xr_system_id;
+	xr::session xr_session;
+	XrSessionState session_state = XR_SESSION_STATE_UNKNOWN;
+
+	std::array<xr::space, size_t(xr::spaces::count)> spaces;
+	xr::actionset xr_actionset;
+	std::vector<std::tuple<XrAction, XrActionType, std::string>> actions;
+
+	std::vector<std::pair<XrPath, xr::space>> generic_trackers;
+
+	bool eye_gaze_supported = false;
+	bool foveation_center_supported = false;
+	bool foveation_vulkan_supported = false;
+
+	bool openxr_post_processing_supported = false;
+
+	bool session_running = false;
+	bool session_focused = false;
+	bool session_visible = false;
+	std::optional<std::chrono::steady_clock::time_point> timestamp_unsynchronized; // Timestamp when session_synchronized becomes false
+
+	bool debug_extensions_found = false;
+	std::vector<const char *> vk_device_extensions;
+	std::atomic<bool> exit_requested = false;
+	std::filesystem::path config_path;
+	std::filesystem::path cache_path;
+
+	std::shared_ptr<wifi_lock> wifi;
+
+	std::mutex server_intent_mutex;
+	std::optional<wivrn_discover::service> server_intent;
+
+	std::mutex scene_stack_lock;
+	std::vector<std::shared_ptr<scene>> scene_stack;
+	std::weak_ptr<scene> last_scene;
+	std::chrono::nanoseconds last_scene_cpu_time;
+
+	std::optional<configuration> config;
+	std::optional<configuration> default_config;
+
+	boost::locale::generator gen;
+	boost::locale::gnu_gettext::messages_info messages_info;
+	hmd_traits runtime_hmd_traits;
+
+private:
+	void loop();
+
+	std::mutex debug_report_mutex;
+	static VkBool32 vulkan_debug_report_callback(
+#if VK_HEADER_VERSION >= 304
+	        vk::DebugReportFlagsEXT flags,
+	        vk::DebugReportObjectTypeEXT objectType,
+#else
+	        VkDebugReportFlagsEXT flags,
+	        VkDebugReportObjectTypeEXT objectType,
+#endif
+	        uint64_t object,
+	        size_t location,
+	        int32_t messageCode,
+	        const char * pLayerPrefix,
+	        const char * pMessage,
+	        void * pUserData);
+	std::unordered_set<uint64_t> debug_report_ignored_objects;
+	std::unordered_map<uint64_t, std::string> debug_report_object_name;
+
+#ifndef NDEBUG
+	vk::raii::DebugReportCallbackEXT debug_report_callback = nullptr;
+#endif
+
+public:
+	using singleton<application>::instance;
+	application(application_info info);
+
+	application(const application &) = delete;
+	~application();
+#ifdef __ANDROID__
+	void setup_jni();
+
+	static AAssetManager * asset_manager()
+	{
+		return instance().app_info.native_app->activity->assetManager;
+	}
+
+	static android_app * native_app()
+	{
+		return instance().app_info.native_app;
+	}
+
+	static android_hid::input_handler & get_input_handler()
+	{
+		return instance().input_handler;
+	}
+#endif
+
+	void set_server_uri(std::string uri);
+
+	static bool is_session_running()
+	{
+		return instance().session_running;
+	}
+
+	static bool is_focused()
+	{
+		return instance().session_focused;
+	}
+
+	static bool is_visible()
+	{
+		return instance().session_visible;
+	}
+
+	static bool is_exit_requested()
+	{
+		return instance().exit_requested;
+	};
+
+	static void poll_actions();
+	static std::optional<std::pair<XrTime, float>> read_action_float(XrAction action);
+	static std::optional<std::pair<XrTime, bool>> read_action_bool(XrAction action);
+	static std::optional<std::pair<XrTime, XrVector2f>> read_action_vec2(XrAction action);
+	static void haptic_start(XrAction action, XrPath subpath, int64_t duration, float frequency, float amplitude);
+	static void haptic_stop(XrAction action, XrPath subpath);
+
+	static const std::vector<std::tuple<XrAction, XrActionType, std::string>> & inputs()
+	{
+		return instance().actions;
+	}
+	static std::pair<XrAction, XrActionType> get_action(std::string_view name);
+
+	static std::optional<std::pair<glm::vec3, glm::quat>> locate_controller(XrSpace space, XrSpace reference, XrTime time)
+	{
+		XrSpaceLocation location{.type = XR_TYPE_SPACE_LOCATION};
+
+		assert(space != XR_NULL_HANDLE);
+		assert(reference != XR_NULL_HANDLE);
+
+		xrLocateSpace(space, reference, time, &location);
+
+		auto req_flags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
+		if ((location.locationFlags & req_flags) != req_flags)
+			return {};
+
+		glm::vec3 position{
+		        location.pose.position.x,
+		        location.pose.position.y,
+		        location.pose.position.z,
+		};
+
+		glm::quat orientation{
+		        location.pose.orientation.w,
+		        location.pose.orientation.x,
+		        location.pose.orientation.y,
+		        location.pose.orientation.z,
+		};
+
+		return std::make_pair(position, orientation);
+	}
+
+	void run();
+
+	static void push_scene(std::shared_ptr<scene>);
+
+	template <typename T, typename... Args>
+	static void push_scene(Args &&... args)
+	{
+		std::unique_lock _{instance().scene_stack_lock};
+
+		instance().scene_stack.push_back(std::make_shared<T>(std::forward<Args>(args)...));
+	}
+
+	static void pop_scene();
+
+	static std::shared_ptr<scene> current_scene();
+
+	template <typename T>
+	static T get_vulkan_proc(const char * proc_name)
+	{
+		auto proc = instance().vk_instance.getProcAddr(proc_name);
+		if (!proc)
+			throw std::runtime_error(std::string("Cannot find Vulkan function ") + proc_name);
+		return (T)proc;
+	}
+
+	static XrSpace space(xr::spaces s)
+	{
+		assert(size_t(s) >= 0 and s < xr::spaces::count);
+		return instance().spaces[size_t(s)];
+	}
+
+	static wifi_lock & get_wifi_lock()
+	{
+		return *instance().wifi;
+	}
+
+#ifdef __ANDROID__
+	void set_usb_networking(bool enabled);
+#endif
+
+	static void ignore_debug_reports_for(void * object)
+	{
+#ifndef NDEBUG
+		std::lock_guard lock(instance().debug_report_mutex);
+		instance().debug_report_ignored_objects.emplace((uint64_t)object);
+#endif
+	}
+
+	static void unignore_debug_reports_for(void * object)
+	{
+#ifndef NDEBUG
+		std::lock_guard lock(instance().debug_report_mutex);
+		instance().debug_report_ignored_objects.erase((uint64_t)object);
+#endif
+	}
+
+	template <typename T>
+	static void set_debug_reports_name(const T & object, std::string name)
+	{
+		if (not vk_allocator::instance().has_debug_utils)
+			return;
+
+		const vk::DebugUtilsObjectNameInfoEXT name_info{
+		        .objectType = T::objectType,
+		        .objectHandle = (uint64_t)(typename T::NativeType)object,
+		        .pObjectName = name.c_str(),
+		};
+
+		instance().vk_device.setDebugUtilsObjectNameEXT(name_info);
+	}
+
+	static thread_safe<vk::raii::Queue> & get_queue()
+	{
+		return instance().vk_queue;
+	}
+
+	static std::optional<wivrn_discover::service> get_intent()
+	{
+		std::unique_lock _{instance().server_intent_mutex};
+
+		auto intent = instance().server_intent;
+		instance().server_intent.reset();
+
+		return intent;
+	}
+
+	static const vk::PhysicalDeviceProperties & get_physical_device_properties()
+	{
+		return instance().physical_device_properties;
+	}
+
+	static vk::raii::Instance & get_vulkan_instance()
+	{
+		return instance().vk_instance;
+	}
+
+	static vk::raii::PhysicalDevice & get_physical_device()
+	{
+		return instance().vk_physical_device;
+	}
+
+	static xr::system & get_system()
+	{
+		return instance().xr_system_id;
+	}
+
+	static vk::raii::PipelineCache & get_pipeline_cache()
+	{
+		return instance().pipeline_cache;
+	}
+
+	static const std::filesystem::path & get_config_path()
+	{
+		return instance().config_path;
+	}
+
+	static const std::filesystem::path & get_cache_path()
+	{
+		return instance().cache_path;
+	}
+
+	static std::chrono::nanoseconds get_cpu_time()
+	{
+		return instance().last_scene_cpu_time;
+	}
+
+	static bool get_eye_gaze_supported()
+	{
+		return instance().eye_gaze_supported;
+	}
+
+	static bool get_foveation_center_supported()
+	{
+		return instance().foveation_center_supported;
+	}
+
+	static bool get_foveation_vulkan_supported()
+	{
+		return instance().foveation_vulkan_supported;
+	}
+
+	static bool get_openxr_post_processing_supported()
+	{
+		return instance().openxr_post_processing_supported;
+	}
+
+	static const hmd_traits & get_hmd_traits()
+	{
+		assert(instance().runtime_hmd_traits.is_initialized());
+		return instance().runtime_hmd_traits;
+	}
+
+	static auto & get_generic_trackers()
+	{
+		return instance().generic_trackers;
+	}
+
+	static const std::vector<const char *> & get_vk_device_extensions()
+	{
+		return instance().vk_device_extensions;
+	}
+
+	static configuration & get_config()
+	{
+		assert(instance().config);
+		return *instance().config;
+	}
+
+	static configuration & get_default_config()
+	{
+		assert(instance().default_config);
+		return *instance().default_config;
+	}
+
+	static XrSessionState get_session_state()
+	{
+		return instance().session_state;
+	}
+
+	static boost::locale::gnu_gettext::messages_info & get_messages_info()
+	{
+		return instance().messages_info;
+	}
+
+	void load_locale();
+};

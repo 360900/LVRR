@@ -1,0 +1,656 @@
+/*
+ * WiVRn VR streaming
+ * Copyright (C) 2022-2024  Guillaume Meunier <guillaume.meunier@centraliens.net>
+ * Copyright (C) 2022-2024  Patrick Nicolas <patricknicolas@laposte.net>
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+#include "video_encoder_nvenc.h"
+#include "encoder_settings.h"
+
+#include "os/os_time.h"
+#include "util/u_logging.h"
+#include "utils/wivrn_trace.h"
+#include "utils/wivrn_vk_bundle.h"
+
+bool operator==(const GUID & l, const GUID & r)
+{
+	return l.Data1 == r.Data1 and
+	       l.Data2 == r.Data2 and
+	       l.Data3 == r.Data3 and
+	       std::ranges::equal(l.Data4, r.Data4);
+}
+
+#include <algorithm>
+#include <stdexcept>
+
+#define NVENC_CHECK_NOENCODER(x)                                          \
+	do                                                                \
+	{                                                                 \
+		NVENCSTATUS status = x;                                   \
+		if (status != NV_ENC_SUCCESS)                             \
+		{                                                         \
+			U_LOG_E("%s:%d: %d", __FILE__, __LINE__, status); \
+			throw std::runtime_error("nvenc error");          \
+		}                                                         \
+	} while (0)
+
+#define NVENC_CHECK(x)                                                                                                                  \
+	do                                                                                                                              \
+	{                                                                                                                               \
+		NVENCSTATUS status = x;                                                                                                 \
+		if (status != NV_ENC_SUCCESS)                                                                                           \
+		{                                                                                                                       \
+			U_LOG_E("%s:%d: %d, %s", __FILE__, __LINE__, status, shared_state->fn.nvEncGetLastErrorString(session_handle)); \
+			throw std::runtime_error("nvenc error");                                                                        \
+		}                                                                                                                       \
+	} while (0)
+
+#define CU_CHECK(x)                                                                               \
+	do                                                                                        \
+	{                                                                                         \
+		CUresult status = x;                                                              \
+		if (status != CUDA_SUCCESS)                                                       \
+		{                                                                                 \
+			const char * error_string;                                                \
+			shared_state->cuda_fn->cuGetErrorString(status, &error_string);           \
+			U_LOG_E("%s:%d: %s (%d)", __FILE__, __LINE__, error_string, (int)status); \
+			throw std::runtime_error(std::string("CUDA error: ") + error_string);     \
+		}                                                                                 \
+	} while (0)
+
+namespace wivrn
+{
+
+static auto encode_guid(video_codec codec)
+{
+	switch (codec)
+	{
+		case h264:
+			return NV_ENC_CODEC_H264_GUID;
+		case h265:
+			return NV_ENC_CODEC_HEVC_GUID;
+		case av1:
+			return NV_ENC_CODEC_AV1_GUID;
+		case raw:
+			break;
+	}
+	throw std::out_of_range("Invalid codec " + std::to_string(codec));
+}
+
+static void check_encode_guid_supported(std::shared_ptr<video_encoder_nvenc_shared_state> shared_state, void * session_handle, GUID encode_guid)
+{
+	uint32_t count;
+	NVENC_CHECK(shared_state->fn.nvEncGetEncodeGUIDCount(session_handle, &count));
+
+	std::vector<GUID> encodeGUIDs(count);
+	NVENC_CHECK(shared_state->fn.nvEncGetEncodeGUIDs(session_handle, encodeGUIDs.data(), count, &count));
+
+	if (!std::ranges::contains(encodeGUIDs, encode_guid))
+	{
+		throw std::runtime_error("nvenc: GPU doesn't support selected codec.");
+	}
+}
+
+static void check_preset_guid_supported(std::shared_ptr<video_encoder_nvenc_shared_state> shared_state, void * session_handle, GUID encode_guid, GUID preset_guid)
+{
+	uint32_t count;
+	NVENC_CHECK(shared_state->fn.nvEncGetEncodePresetCount(session_handle, encode_guid, &count));
+
+	std::vector<GUID> presetGUIDs(count);
+	NVENC_CHECK(shared_state->fn.nvEncGetEncodePresetGUIDs(session_handle, encode_guid, presetGUIDs.data(), count, &count));
+
+	if (!std::ranges::contains(presetGUIDs, preset_guid))
+	{
+		throw std::runtime_error("nvenc: Internal error. GPU doesn't support selected encoder preset.");
+	}
+}
+
+static void check_profile_guid_supported(std::shared_ptr<video_encoder_nvenc_shared_state> shared_state, void * session_handle, GUID encodeGUID, GUID profileGUID, std::string err_msg = "GPU doesn't support selected encoding profile.")
+{
+	uint32_t count;
+	NVENC_CHECK(shared_state->fn.nvEncGetEncodeProfileGUIDCount(session_handle, encodeGUID, &count));
+
+	std::vector<GUID> profileGUIDs(count);
+	NVENC_CHECK(shared_state->fn.nvEncGetEncodeProfileGUIDs(session_handle, encodeGUID, profileGUIDs.data(), count, &count));
+
+	if (!std::ranges::contains(profileGUIDs, profileGUID))
+	{
+		throw std::runtime_error("nvenc: " + err_msg);
+	}
+}
+
+NV_ENC_RC_PARAMS video_encoder_nvenc::get_rc_params(uint64_t bitrate, float framerate)
+{
+	return {
+	        .rateControlMode = NV_ENC_PARAMS_RC_CBR,
+	        .averageBitRate = static_cast<uint32_t>(bitrate),
+	        .vbvBufferSize = static_cast<uint32_t>(bitrate / framerate * 2.0f),
+	        .vbvInitialDelay = static_cast<uint32_t>(bitrate / framerate),
+	        .enableLookahead = 0,
+	        .lowDelayKeyFrameScale = 1,
+	        .multiPass = NV_ENC_TWO_PASS_QUARTER_RESOLUTION};
+}
+
+void video_encoder_nvenc::set_init_params_fps(float framerate)
+{
+	init_params.frameRateNum = framerate;
+	init_params.frameRateDen = 1;
+}
+
+static vk::raii::CommandPool make_cmd_pool(wivrn::vk_bundle & vk, uint8_t stream_idx)
+{
+	auto res = vk.device.createCommandPool(vk::CommandPoolCreateInfo{
+
+	        .flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer | vk::CommandPoolCreateFlagBits::eTransient,
+	        .queueFamilyIndex = vk.queue.family_index,
+	});
+	vk.name(res, std::format("nvenc encoder {} command pool", stream_idx));
+	return res;
+}
+
+video_encoder_nvenc::video_encoder_nvenc(
+        wivrn::vk_bundle & vk,
+        const encoder_settings & settings,
+        uint8_t stream_idx) :
+        video_encoder(vk, stream_idx, vk.queue.family_index, settings, std::make_unique<default_idr_handler>(), true),
+        vk(vk),
+        cmd_pool{make_cmd_pool(vk, stream_idx)},
+        shared_state(video_encoder_nvenc_shared_state::get()),
+        fps(settings.fps),
+        bitrate(settings.bitrate)
+{
+	if (settings.bit_depth != 8 && settings.bit_depth != 10)
+		throw std::runtime_error("nvenc encoder only supports 8-bit and 10-bit encoding");
+
+	assert(extent.width % 32 == 0);
+	assert(extent.height % 32 == 0);
+
+	auto command_buffers = vk.device.allocateCommandBuffers(
+	        {.commandPool = *cmd_pool,
+	         .commandBufferCount = num_slots});
+	for (size_t i = 0; i < num_slots; ++i)
+	{
+		in[i].cmd = std::move(command_buffers[i]);
+		in[i].fence = vk::raii::Fence(vk.device,
+		                              vk::FenceCreateInfo{.flags = vk::FenceCreateFlagBits::eSignaled});
+	}
+
+	NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS session_params = {
+	        .version = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER,
+	        .deviceType = NV_ENC_DEVICE_TYPE_CUDA,
+	        .device = shared_state->cuda,
+	        .apiVersion = NVENCAPI_VERSION,
+	};
+	NVENC_CHECK_NOENCODER(shared_state->fn.nvEncOpenEncodeSessionEx(&session_params, &session_handle));
+
+	auto encodeGUID = encode_guid(settings.codec);
+	check_encode_guid_supported(shared_state, session_handle, encodeGUID);
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+	GUID presetGUID = NV_ENC_PRESET_P4_GUID;
+	check_preset_guid_supported(shared_state, session_handle, encodeGUID, presetGUID);
+
+	NV_ENC_TUNING_INFO tuningInfo = NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY;
+#pragma GCC diagnostic pop
+	NV_ENC_PRESET_CONFIG preset_config{
+	        .version = NV_ENC_PRESET_CONFIG_VER,
+	        .presetCfg = {
+	                .version = NV_ENC_CONFIG_VER,
+	        }};
+	NVENC_CHECK(shared_state->fn.nvEncGetEncodePresetConfigEx(session_handle, encodeGUID, presetGUID, tuningInfo, &preset_config));
+
+	config = preset_config.presetCfg;
+
+	// Bitrate control
+	config.rcParams = get_rc_params(bitrate, fps);
+	config.rcParams.enableTemporalAQ = 0;
+	config.rcParams.enableAQ = 1;
+	config.rcParams.enableNonRefP = 1;
+
+	config.gopLength = NVENC_INFINITE_GOPLENGTH;
+	config.frameIntervalP = 1;
+
+	NV_ENC_BIT_DEPTH bitDepth = NV_ENC_BIT_DEPTH_8;
+	if (settings.bit_depth == 10)
+	{
+		NV_ENC_CAPS_PARAM cap_param{
+		        .version = NV_ENC_CAPS_PARAM_VER,
+		        .capsToQuery = NV_ENC_CAPS_SUPPORT_10BIT_ENCODE,
+		};
+
+		int res = 0;
+		NVENC_CHECK(shared_state->fn.nvEncGetEncodeCaps(session_handle, encodeGUID, &cap_param, &res));
+
+		if (res == 1)
+		{
+			bitDepth = NV_ENC_BIT_DEPTH_10;
+			bytesPerPixel = 2;
+		}
+		else
+		{
+			throw std::runtime_error("nvenc: 10-bit encoding requested, but GPU doesn't support it");
+		}
+	}
+
+	const uint32_t intra_refresh_period = 100;
+	const uint32_t intra_refresh_cnt = 50;
+	auto set_intra_refresh = [&](auto & codec_config) {
+		NV_ENC_CAPS_PARAM cap_param{
+		        .version = NV_ENC_CAPS_PARAM_VER,
+		        .capsToQuery = NV_ENC_CAPS_SUPPORT_INTRA_REFRESH,
+		};
+
+		int res = 0;
+		NVENC_CHECK(shared_state->fn.nvEncGetEncodeCaps(session_handle, encodeGUID, &cap_param, &res));
+		if (res != 1)
+		{
+			U_LOG_W("nvenc: intra refresh not supported, disabling feature");
+			return;
+		}
+		codec_config.enableIntraRefresh = 1;
+		codec_config.intraRefreshPeriod = intra_refresh_period;
+		codec_config.intraRefreshCnt = intra_refresh_cnt;
+	};
+
+	switch (settings.codec)
+	{
+		case video_codec::h264:
+			if (bitDepth != NV_ENC_BIT_DEPTH_8)
+				throw std::runtime_error("nvenc: selected codec only supports 8-bit encoding");
+
+			config.encodeCodecConfig.h264Config.repeatSPSPPS = 1;
+			config.encodeCodecConfig.h264Config.maxNumRefFrames = 0;
+			config.encodeCodecConfig.h264Config.h264VUIParameters.videoFullRangeFlag = 1;
+			config.encodeCodecConfig.h264Config.idrPeriod = NVENC_INFINITE_GOPLENGTH;
+			set_intra_refresh(config.encodeCodecConfig.h264Config);
+
+			break;
+		case video_codec::h265:
+			if (bitDepth == NV_ENC_BIT_DEPTH_10)
+			{
+				config.profileGUID = NV_ENC_HEVC_PROFILE_MAIN10_GUID;
+				check_profile_guid_supported(shared_state, session_handle, encodeGUID, config.profileGUID, "GPU doesn't support 10-bit depth with H.265 codec.");
+			}
+
+			config.encodeCodecConfig.hevcConfig.inputBitDepth = bitDepth;
+			config.encodeCodecConfig.hevcConfig.outputBitDepth = bitDepth;
+
+			config.encodeCodecConfig.hevcConfig.repeatSPSPPS = 1;
+			config.encodeCodecConfig.hevcConfig.maxNumRefFramesInDPB = 0;
+			config.encodeCodecConfig.hevcConfig.hevcVUIParameters.videoFullRangeFlag = 1;
+			config.encodeCodecConfig.hevcConfig.idrPeriod = NVENC_INFINITE_GOPLENGTH;
+			set_intra_refresh(config.encodeCodecConfig.hevcConfig);
+
+			break;
+		case video_codec::av1:
+			if (bitDepth == NV_ENC_BIT_DEPTH_10)
+			{
+				config.profileGUID = NV_ENC_AV1_PROFILE_MAIN_GUID;
+				check_profile_guid_supported(shared_state, session_handle, encodeGUID, config.profileGUID, "GPU doesn't support 10-bit depth with AV1 codec.");
+			}
+
+			config.encodeCodecConfig.av1Config.inputBitDepth = bitDepth;
+			config.encodeCodecConfig.av1Config.outputBitDepth = bitDepth;
+
+			config.encodeCodecConfig.av1Config.repeatSeqHdr = 1;
+			config.encodeCodecConfig.av1Config.maxNumRefFramesInDPB = 0;
+			config.encodeCodecConfig.av1Config.idrPeriod = NVENC_INFINITE_GOPLENGTH;
+			set_intra_refresh(config.encodeCodecConfig.av1Config);
+
+			break;
+		case video_codec::raw:
+			throw std::runtime_error("raw codec not supported for nvenc");
+	}
+
+	init_params = {
+	        .version = NV_ENC_INITIALIZE_PARAMS_VER,
+	        .encodeGUID = encodeGUID,
+	        .presetGUID = presetGUID,
+	        .encodeWidth = extent.width,
+	        .encodeHeight = extent.height,
+	        .darWidth = extent.width,
+	        .darHeight = extent.height,
+	        .enableEncodeAsync = 0,
+	        .enablePTD = 1,
+	        .encodeConfig = &config,
+	        .tuningInfo = tuningInfo};
+
+	set_init_params_fps(fps);
+
+	NVENC_CHECK(shared_state->fn.nvEncInitializeEncoder(session_handle, &init_params));
+
+	NV_ENC_CREATE_BITSTREAM_BUFFER out_buf_params{
+	        .version = NV_ENC_CREATE_BITSTREAM_BUFFER_VER,
+	};
+	NVENC_CHECK(shared_state->fn.nvEncCreateBitstreamBuffer(session_handle, &out_buf_params));
+	outputBuffer = out_buf_params.bitstreamBuffer;
+
+	vk::DeviceSize buffer_size = extent.width * extent.height * bytesPerPixel * 3 / 2;
+
+	vk::StructureChain buffer_create_info{
+	        vk::BufferCreateInfo{
+	                .size = buffer_size,
+	                .usage = vk::BufferUsageFlagBits::eTransferDst,
+	        },
+	        vk::ExternalMemoryBufferCreateInfo{
+	                .handleTypes = vk::ExternalMemoryHandleTypeFlagBitsKHR::eOpaqueFd,
+	        },
+	};
+
+	for (auto & i: in)
+	{
+		i.yuv = vk::raii::Buffer(vk.device, buffer_create_info.get());
+		vk.name(i.yuv, "nvenc yuv buffer");
+		auto memory_req = i.yuv.getMemoryRequirements();
+
+		vk::StructureChain mem_info{
+		        vk::MemoryAllocateInfo{
+		                .allocationSize = buffer_size,
+		                .memoryTypeIndex = vk.get_memory_type(memory_req.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal),
+		        },
+		        vk::MemoryDedicatedAllocateInfo{
+		                .buffer = *i.yuv,
+		        },
+		        vk::ExportMemoryAllocateInfo{
+		                .handleTypes = vk::ExternalMemoryHandleTypeFlagBitsKHR::eOpaqueFd,
+		        },
+		};
+		i.mem = vk.device.allocateMemory(mem_info.get());
+		vk.name(i.mem, "nvenc memory");
+		i.yuv.bindMemory(*i.mem, 0);
+
+		int fd = vk.device.getMemoryFdKHR({
+		        .memory = *i.mem,
+		        .handleType = vk::ExternalMemoryHandleTypeFlagBitsKHR::eOpaqueFd,
+		});
+
+		CUdeviceptr frame;
+		CU_CHECK(shared_state->cuda_fn->cuCtxPushCurrent(shared_state->cuda));
+		{
+			CUexternalMemory extmem;
+			CUDA_EXTERNAL_MEMORY_HANDLE_DESC mem_handle_params{
+			        .type = CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD,
+			        .handle = {.fd = fd},
+			        .size = memory_req.size,
+			        .flags = 0,
+			};
+			CU_CHECK(shared_state->cuda_fn->cuImportExternalMemory(&extmem, &mem_handle_params));
+
+			CUDA_EXTERNAL_MEMORY_BUFFER_DESC ext_map_params{
+			        .offset = 0,
+			        .size = buffer_size,
+			        .flags = 0,
+			};
+			CU_CHECK(shared_state->cuda_fn->cuExternalMemoryGetMappedBuffer(&frame, extmem, &ext_map_params));
+		}
+
+		NV_ENC_REGISTER_RESOURCE resource_params{
+		        .version = NV_ENC_REGISTER_RESOURCE_VER,
+		        .resourceType = NV_ENC_INPUT_RESOURCE_TYPE_CUDADEVICEPTR,
+		        .width = extent.width,
+		        .height = extent.height,
+		        .pitch = extent.width * bytesPerPixel,
+		        .resourceToRegister = (void *)frame,
+		        .bufferFormat = (bitDepth == NV_ENC_BIT_DEPTH_10 ? NV_ENC_BUFFER_FORMAT_YUV420_10BIT : NV_ENC_BUFFER_FORMAT_NV12),
+		        .bufferUsage = NV_ENC_INPUT_IMAGE,
+		};
+		NVENC_CHECK(shared_state->fn.nvEncRegisterResource(session_handle, &resource_params));
+		i.nvenc_resource = resource_params.registeredResource;
+	}
+	CU_CHECK(shared_state->cuda_fn->cuCtxPopCurrent(NULL));
+
+	ts_pool = gpu_timestamp_pool(vk, vk.queue.family_index, num_slots, std::format("nvenc encoder {} pixel copy", stream_idx));
+}
+
+video_encoder_nvenc::~video_encoder_nvenc()
+{
+	if (session_handle)
+		shared_state->fn.nvEncDestroyEncoder(session_handle);
+}
+
+void video_encoder_nvenc::present_image(vk::Image y_cbcr, vk::SemaphoreSubmitInfo, uint8_t slot, uint64_t frame_index)
+{
+	if (vk.device.waitForFences(*in[slot].fence, true, 1'000'000'000) == vk::Result::eTimeout)
+	{
+		U_LOG_E("Timeout on stream %d", stream_idx);
+		return;
+	}
+	auto & cmd = in[slot].cmd;
+	cmd.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+
+	ts_pool.cmd_begin(cmd, slot, frame_index, vk::PipelineStageFlagBits2::eTopOfPipe);
+
+	cmd.copyImageToBuffer(
+	        y_cbcr,
+	        vk::ImageLayout::eGeneral,
+	        *in[slot].yuv,
+	        std::array{
+	                vk::BufferImageCopy{
+	                        .bufferRowLength = extent.width,
+	                        .imageSubresource = {
+	                                .aspectMask = vk::ImageAspectFlagBits::ePlane0,
+	                                .baseArrayLayer = stream_idx,
+	                                .layerCount = 1,
+	                        },
+	                        .imageExtent = {
+	                                .width = extent.width,
+	                                .height = extent.height,
+	                                .depth = 1,
+	                        }},
+	                vk::BufferImageCopy{
+	                        .bufferOffset = extent.width * extent.height * bytesPerPixel,
+	                        .bufferRowLength = uint32_t(extent.width / 2),
+	                        .imageSubresource = {
+	                                .aspectMask = vk::ImageAspectFlagBits::ePlane1,
+	                                .baseArrayLayer = stream_idx,
+	                                .layerCount = 1,
+	                        },
+	                        .imageExtent = {
+	                                .width = extent.width / 2,
+	                                .height = extent.height / 2,
+	                                .depth = 1,
+	                        },
+	                }});
+	ts_pool.cmd_end(cmd, slot, vk::PipelineStageFlagBits2::eAllTransfer);
+	cmd.end();
+
+	std::unique_lock lock(vk.queue.mutex);
+	vk::CommandBufferSubmitInfo cmd_info{
+	        .commandBuffer = *cmd,
+	};
+
+	vk.device.resetFences(*in[slot].fence);
+	vk.queue.queue.submit2(vk::SubmitInfo2{
+	                               .commandBufferInfoCount = 1,
+	                               .pCommandBufferInfos = &cmd_info,
+	                       },
+	                       *in[slot].fence);
+}
+
+std::optional<video_encoder::data> video_encoder_nvenc::encode(uint8_t slot, uint64_t frame_index)
+{
+	if (vk.device.waitForFences(*in[slot].fence, true, 1'000'000'000) == vk::Result::eTimeout)
+	{
+		U_LOG_E("Timeout on stream %d", stream_idx);
+		return {};
+	}
+
+	if (auto s = ts_pool.collect(slot))
+	{
+		wivrn::trace::gpu_slice(wivrn::trace::gpu_track::nvenc_copy,
+		                        "vk_copy_image_to_buffer",
+		                        s->begin_ns,
+		                        s->end_ns,
+		                        s->frame_index,
+		                        stream_idx);
+	}
+
+	CU_CHECK(shared_state->cuda_fn->cuCtxPushCurrent(shared_state->cuda));
+	auto & idr_handler = ((default_idr_handler &)*idr);
+
+	auto new_bitrate = pending_bitrate.exchange(0);
+	auto new_framerate = pending_framerate.exchange(0);
+
+	if (new_bitrate || new_framerate)
+	{
+		if (new_framerate)
+			U_LOG_I("nvenc: reconfiguring framerate, new value: %f", new_framerate);
+		else
+			new_framerate = fps;
+
+		if (new_bitrate)
+			U_LOG_I("nvenc: reconfiguring bitrate, new value: %d", new_bitrate);
+		else
+			new_bitrate = bitrate;
+
+		config.rcParams = get_rc_params(new_bitrate, new_framerate);
+		set_init_params_fps(new_framerate);
+
+		NV_ENC_RECONFIGURE_PARAMS reconfig_params{
+		        .version = NV_ENC_RECONFIGURE_PARAMS_VER,
+		        .reInitEncodeParams = init_params,
+		        .resetEncoder = 1,
+		        .forceIDR = 1};
+
+		try
+		{
+			NVENC_CHECK(shared_state->fn.nvEncReconfigureEncoder(session_handle, &reconfig_params));
+			fps = new_framerate;
+			bitrate = new_bitrate;
+			idr_handler.reset();
+
+			U_LOG_I("nvenc: reconfiguring succeeded.");
+		}
+		catch (const std::exception & e)
+		{
+			U_LOG_E("nvenc: reconfiguring failed.");
+			config.rcParams = get_rc_params(bitrate, fps);
+			set_init_params_fps(fps);
+		}
+	}
+
+	NV_ENC_MAP_INPUT_RESOURCE inp_resource_params{
+	        .version = NV_ENC_MAP_INPUT_RESOURCE_VER,
+	        .registeredResource = in[slot].nvenc_resource};
+
+	NVENC_CHECK(shared_state->fn.nvEncMapInputResource(session_handle, &inp_resource_params));
+
+	NV_ENC_PIC_PARAMS frame_params{
+	        .version = NV_ENC_PIC_PARAMS_VER,
+	        .inputWidth = extent.width,
+	        .inputHeight = extent.height,
+	        .inputPitch = extent.width,
+	        .encodePicFlags = 0,
+	        .frameIdx = 0,
+	        .inputTimeStamp = 0,
+	        .inputBuffer = inp_resource_params.mappedResource,
+	        .outputBitstream = outputBuffer,
+	        .bufferFmt = inp_resource_params.mappedBufferFmt,
+	        .pictureStruct = NV_ENC_PIC_STRUCT_FRAME,
+	};
+
+	auto frame_type = idr_handler.get_type(frame_index, stream_idx);
+	switch (frame_type)
+	{
+		case default_idr_handler::frame_type::i:
+			frame_params.encodePicFlags |= NV_ENC_PIC_FLAG_FORCEIDR | NV_ENC_PIC_FLAG_OUTPUT_SPSPPS;
+			frame_params.pictureType = NV_ENC_PIC_TYPE_IDR;
+			break;
+		case default_idr_handler::frame_type::p:
+			frame_params.pictureType = NV_ENC_PIC_TYPE_UNKNOWN;
+			break;
+	}
+	NV_ENC_LOCK_BITSTREAM buf_lock_params{
+	        .version = NV_ENC_LOCK_BITSTREAM_VER,
+	        .doNotWait = 0,
+	        .outputBitstream = outputBuffer,
+	};
+	{
+		wivrn::trace::scope trace_nvenc(wivrn::trace::cpu_track::encoder, stream_idx, frame_index, "nvEncEncodePicture+Lock");
+		NVENC_CHECK(shared_state->fn.nvEncEncodePicture(session_handle, &frame_params));
+		NVENC_CHECK(shared_state->fn.nvEncLockBitstream(session_handle, &buf_lock_params));
+	}
+
+	if (buf_lock_params.pictureType == NV_ENC_PIC_TYPE_NONREF_P)
+		idr_handler.set_non_ref(frame_index);
+
+	CU_CHECK(shared_state->cuda_fn->cuCtxPopCurrent(NULL));
+	return data{
+	        .encoder = this,
+	        .span = std::span((uint8_t *)buf_lock_params.bitstreamBufferPtr, buf_lock_params.bitstreamSizeInBytes),
+	        .mem = std::shared_ptr<void>(buf_lock_params.bitstreamBufferPtr, [this](void *) {
+		        NVENCSTATUS status = shared_state->fn.nvEncUnlockBitstream(session_handle, outputBuffer);
+		        if (status != NV_ENC_SUCCESS)
+			        U_LOG_E("%s:%d: %d, %s", __FILE__, __LINE__, status, shared_state->fn.nvEncGetLastErrorString(session_handle));
+	        }),
+	        .prefer_control = frame_type == default_idr_handler::frame_type::i,
+	};
+}
+
+std::array<int, 2> video_encoder_nvenc::get_max_size(video_codec codec)
+{
+	std::shared_ptr<video_encoder_nvenc_shared_state> state = video_encoder_nvenc_shared_state::get();
+	void * session_handle = nullptr;
+	NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS params_ex = {
+	        .version = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER,
+	        .deviceType = NV_ENC_DEVICE_TYPE_CUDA,
+	        .device = state->cuda,
+	        .apiVersion = NVENCAPI_VERSION,
+	};
+	if (state->fn.nvEncOpenEncodeSessionEx(&params_ex, &session_handle) != NV_ENC_SUCCESS)
+	{
+		throw std::runtime_error("nvenc get_max_size: Failed to open session");
+	}
+	std::array<int, 2> result;
+	std::exception_ptr ex;
+	try
+	{
+		auto encodeGUID = encode_guid(codec);
+		for (auto [cap, res]: {
+		             std::pair{NV_ENC_CAPS_WIDTH_MAX, &result[0]},
+		             {NV_ENC_CAPS_HEIGHT_MAX, &result[1]},
+		     })
+		{
+			NV_ENC_CAPS_PARAM cap_params{
+			        .version = NV_ENC_CAPS_PARAM_VER,
+			        .capsToQuery = cap,
+			};
+
+			check_encode_guid_supported(state, session_handle, encodeGUID);
+
+			NVENCSTATUS status = state->fn.nvEncGetEncodeCaps(session_handle, encodeGUID, &cap_params, res);
+			if (status != NV_ENC_SUCCESS)
+			{
+				throw std::runtime_error("nvenc get_max_size: failed to get caps");
+			}
+		}
+	}
+	catch (...)
+	{
+		ex = std::current_exception();
+	}
+	if (session_handle)
+	{
+		state->fn.nvEncDestroyEncoder(session_handle);
+	}
+	if (ex)
+		std::rethrow_exception(ex);
+	U_LOG_D("nvenc maximum encoded size: %dx%d", result[0], result[1]);
+	return result;
+}
+
+} // namespace wivrn

@@ -1,0 +1,22 @@
+[Unit]
+Description=OpenXR streaming server
+
+[Service]
+Type=simple
+ExecStart=@CMAKE_INSTALL_PREFIX@/bin/wivrn-server
+LockPersonality=true
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectProc=invisible
+ProtectSystem=strict
+RemoveIPC=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=default.target

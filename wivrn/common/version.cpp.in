@@ -1,0 +1,41 @@
+/*
+ * WiVRn VR streaming
+ * Copyright (C) 2022  Guillaume Meunier <guillaume.meunier@centraliens.net>
+ * Copyright (C) 2022  Patrick Nicolas <patricknicolas@laposte.net>
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+#include <cctype>
+#include <iterator>
+
+static const char git_desc[] = "@GIT_DESC@";
+
+namespace wivrn
+{
+
+extern const char git_commit[];
+const char git_commit[] = "@GIT_COMMIT@";
+
+extern const bool is_tag;
+const bool is_tag = @GIT_TAG@;
+
+const char * display_version()
+{
+	if (std::size(git_desc) > 2 and git_desc[0] == 'v' and isdigit(git_desc[1]))
+		return git_desc + 1;
+	else
+		return git_desc;
+}
+} // namespace wivrn

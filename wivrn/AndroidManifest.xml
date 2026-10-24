@@ -1,0 +1,155 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:installLocation="auto">
+
+    <!-- https://developer.android.com/reference/android/content/pm/PackageManager#FEATURE_VULKAN_HARDWARE_VERSION -->
+   <uses-feature android:name="android.hardware.vulkan.version" android:version="0x400000" android:required="true"/>
+   <!-- https://developer.android.com/reference/android/content/pm/PackageManager#FEATURE_VULKAN_HARDWARE_LEVEL -->
+   <uses-feature android:name="android.hardware.vulkan.level" android:version="0" android:required="true"/>
+
+    <!-- Tell the system this app works in either 3dof or 6dof mode -->
+    <uses-feature android:name="android.hardware.vr.headtracking" android:required="true" android:version="1" />
+
+    <!-- If building externally with the OpenXR AAR, this would be merged in automatically. -->
+    <uses-permission android:name="org.khronos.openxr.permission.OPENXR" />
+    <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />
+
+    <queries tools:ignore="ExportedContentProvider">
+        <intent>
+            <action android:name="org.khronos.openxr.OpenXRRuntimeService"/>
+        </intent>
+        <provider android:authorities="org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker" />
+        <package android:name="com.ultraleap.tracking.service"/>
+        <package android:name="com.ultraleap.openxr.api_layer"/>
+    </queries>
+
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- Allow network access -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+
+    <!-- Required for WiFi locking, see https://developer.android.com/reference/android/net/wifi/WifiManager.WifiLock -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Allow starting the application even without controllers -->
+    <uses-feature android:name="oculus.software.handtracking" android:required="false" />
+    <uses-feature android:name="oculus.software.eye_tracking" android:required="false" />
+    <uses-feature android:name="oculus.software.face_tracking" android:required="false" />
+    <uses-feature android:name="com.oculus.software.body_tracking" android:required="false" />
+    <uses-permission android:name="com.magicleap.permission.HAND_TRACKING" />
+    <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
+    <uses-permission android:name="com.oculus.permission.EYE_TRACKING" />
+    <uses-permission android:name="com.picovr.permission.EYE_TRACKING" />
+    <uses-permission android:name="com.oculus.permission.FACE_TRACKING" />
+    <uses-permission android:name="com.picovr.permission.FACE_TRACKING" />
+    <uses-permission android:name="com.oculus.permission.BODY_TRACKING" />
+    <uses-permission android:name="android.permission.EYE_TRACKING_FINE" />
+    <uses-permission android:name="android.permission.FACE_TRACKING" />
+    <uses-permission android:name="android.permission.HAND_TRACKING" />
+
+    <!-- Required for XR_FB_render_model -->
+    <uses-feature android:name="com.oculus.feature.RENDER_MODEL" android:required="false" />
+    <uses-permission android:name="com.oculus.permission.RENDER_MODEL" />
+
+    <!-- Required for passthrough on Quest -->
+    <!-- https://developer.oculus.com/documentation/native/android/mobile-passthrough/ -->
+    <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="false" />
+
+    <!-- Required for XR_META_boundary_visibility -->
+    <uses-permission android:name="com.oculus.permission.BOUNDARY_VISIBILITY" />
+
+    <!-- See https://hub.vive.com/storage/docs/en-us/ConfigureAppCapabilities.html -->
+    <uses-feature android:name="wave.feature.handtracking" android:required="false" />
+    <uses-feature android:name="wave.feature.eyetracking" android:required="false" />
+    <uses-feature android:name="wave.feature.lipexpression" android:required="false" />
+    <uses-feature android:name="wave.feature.tracker" android:required="false" />
+
+    <!-- See https://developer.android.com/develop/xr/get-started -->
+    <uses-feature android:name="android.software.xr.api.openxr" android:version="0x00010000" android:required="true" />
+    <uses-feature android:name="android.hardware.xr.input.controller" android:required="false" />
+    <uses-feature android:name="android.hardware.xr.input.hand_tracking" android:required="false" />
+    <uses-feature android:name="android.hardware.xr.input.eye_tracking" android:required="false" />
+
+    <application
+        android:allowBackup="false"
+        android:hasCode="true"
+        android:icon="@mipmap/ic_wivrn_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_wivrn_launcher">
+
+        <profileable android:shell="true" />
+
+        <!-- https://developer.android.com/develop/xr/get-started#uses-native-library_openxr -->
+        <uses-native-library android:name="libopenxr.google.so" android:required="false" />
+
+        <meta-data android:name="pvr.app.type" android:value="vr" />
+        <meta-data android:name="pvr.sdk.version" android:value="OpenXR" />
+        <meta-data android:name="picovr.software.eye_tracking" android:value="true" />
+        <meta-data android:name="picovr.software.face_tracking" android:value="true" />
+        <meta-data android:name="com.oculus.intent.category.VR" android:value="vr_only"/>
+        <meta-data android:name="com.oculus.supportedDevices" android:value="${ComOculusSupportedDevices}"/> <!-- "quest2|questpro|quest3" on Oculus Store, "all" otherwise -->
+        <meta-data android:name="com.oculus.vr.focusaware" android:value="true"/>
+
+        <!-- See https://hub.vive.com/storage/docs/en-us/ConfigureAppCapabilities.html -->
+        <meta-data android:name="com.htc.vr.content.NumDoFHmd" android:value="6DoF"/>
+        <meta-data android:name="com.htc.vr.content.NumDoFController" android:value="6DoF"/>
+
+        <meta-data android:name="handtracking" android:value="1" />
+        <meta-data android:name="eyetracking_calibration" android:value="true" />
+
+        <!-- https://developer.oculus.com/documentation/native/android/mobile-splash/ -->
+        <meta-data android:name="com.oculus.ossplash" android:value="true"/>
+        <!-- https://developers.meta.com/horizon/documentation/native/android/mobile-passthrough-loading-screens -->
+        <meta-data android:name="com.oculus.ossplash.background" android:value="passthrough-contextual"/>
+
+        <!-- https://developer.android.com/develop/xr/get-started#xr_activity_start_mode_full_space_unmanaged -->
+        <property
+            android:name="android.window.PROPERTY_XR_ACTIVITY_START_MODE"
+            android:value="XR_ACTIVITY_START_MODE_FULL_SPACE_UNMANAGED" />
+        <property
+            android:name="android.window.PROPERTY_XR_BOUNDARY_TYPE_RECOMMENDED"
+            android:value="XR_BOUNDARY_TYPE_LARGE" />
+
+        <!-- The activity is the built-in NativeActivity framework class. -->
+        <!-- launchMode is set to singleTask because there should never be multiple copies of the app running. -->
+        <!-- Theme.Black.NoTitleBar.Fullscreen gives solid black instead of a (bad stereoscopic) gradient on app transition. -->
+        <activity
+            android:exported="true"
+            android:name="org.meumeu.wivrn.MainActivity"
+            android:configChanges="screenSize|screenLayout|orientation|keyboardHidden|keyboard|navigation|uiMode|density"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:resizeableActivity="false"
+            android:screenOrientation="landscape"
+            android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+            tools:ignore="NonResizeableActivity">
+
+            <!-- Tell NativeActivity the name of the .so -->
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="wivrn" />
+
+
+            <!-- This filter lets the apk show up as a launchable icon. -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="com.oculus.intent.category.VR" />
+                <category android:name="com.htc.intent.category.VRAPP" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="org.khronos.openxr.intent.category.IMMERSIVE_HMD" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="wivrn" />
+                <data android:scheme="wivrn+tcp" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

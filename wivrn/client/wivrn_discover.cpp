@@ -1,0 +1,708 @@
+#include "wivrn_discover.h"
+
+#include "application.h"
+#include "mdns.h"
+#include "utils/named_thread.h"
+#include "utils/overloaded.h"
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <poll.h>
+#include <spdlog/spdlog.h>
+#include <string>
+#include <sys/ioctl.h>
+#include <variant>
+#include <vector>
+
+using namespace std::chrono;
+
+namespace
+{
+std::string ip_address_to_string(const in_addr & address)
+{
+	char buffer[128];
+	if (inet_ntop(AF_INET, &address, buffer, sizeof(buffer)))
+		return buffer;
+
+	return "";
+}
+
+std::string ip_address_to_string(const in6_addr & address)
+{
+	char buffer[128];
+	if (inet_ntop(AF_INET6, &address, buffer, sizeof(buffer)))
+		return buffer;
+
+	return "";
+}
+
+struct if_addr
+{
+	std::string if_name;
+	std::variant<sockaddr_in6, sockaddr_in> addr;
+};
+
+std::string to_string(const std::variant<sockaddr_in6, sockaddr_in> & addr)
+{
+	return std::visit(utils::overloaded{
+	                          [](const sockaddr_in6 & a) {
+		                          return ip_address_to_string(a.sin6_addr);
+	                          },
+	                          [](const sockaddr_in & a) {
+		                          return ip_address_to_string(a.sin_addr);
+	                          },
+	                  },
+	                  addr);
+}
+
+std::set<if_addr> get_if_addrs(int port)
+{
+	struct Deleter
+	{
+		void operator()(ifaddrs * a)
+		{
+			freeifaddrs(a);
+		}
+	};
+	using ifaddr_ptr = std::unique_ptr<ifaddrs, Deleter>;
+	ifaddrs * addresses_raw;
+	if (getifaddrs(&addresses_raw) < 0)
+	{
+		spdlog::error("Cannot get network interfaces: {}", strerror(errno));
+		return {};
+	}
+	ifaddr_ptr addresses{addresses_raw};
+
+	const int required_flags = IFF_UP | IFF_MULTICAST;
+	const int forbidden_flags = IFF_LOOPBACK;
+
+	std::set<if_addr> result;
+	for (ifaddrs * i = addresses.get(); i; i = i->ifa_next)
+	{
+		spdlog::debug("interface {}, address {} flags 0x{:x} required 0x{:x} forbidden 0x{:x}", i->ifa_name, uintptr_t(i->ifa_addr), i->ifa_flags, required_flags, forbidden_flags);
+		if (i->ifa_addr == nullptr)
+			continue;
+
+		if ((i->ifa_flags & required_flags) != required_flags)
+			continue;
+
+		if ((i->ifa_flags & forbidden_flags) != 0)
+			continue;
+
+		if (i->ifa_addr->sa_family == AF_INET6)
+		{
+			struct sockaddr_in6 * saddr = (struct sockaddr_in6 *)i->ifa_addr;
+			static const unsigned char localhost[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+			static const unsigned char localhost_mapped[] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0x7f, 0, 0, 1};
+			if (memcmp(saddr->sin6_addr.s6_addr, localhost, 16) &&
+			    memcmp(saddr->sin6_addr.s6_addr, localhost_mapped, 16))
+			{
+				saddr->sin6_port = htons(port);
+				result.insert({.if_name = i->ifa_name, .addr = *saddr});
+			}
+		}
+		else if (i->ifa_addr->sa_family == AF_INET)
+		{
+			struct sockaddr_in * saddr = (struct sockaddr_in *)i->ifa_addr;
+			if (saddr->sin_addr.s_addr != htonl(INADDR_LOOPBACK))
+			{
+				saddr->sin_port = htons(port);
+				result.insert({.if_name = i->ifa_name, .addr = *saddr});
+			}
+		}
+		else
+		{
+			spdlog::warn("unknown family {}", i->ifa_addr->sa_family);
+		}
+	}
+	return result;
+}
+
+} // namespace
+
+static std::strong_ordering operator<=>(const in_addr & a, const in_addr & b) noexcept
+{
+	auto x = memcmp(&a, &b, sizeof(a));
+	if (x < 0)
+		return std::strong_ordering::less;
+	if (x > 0)
+		return std::strong_ordering::greater;
+	return std::strong_ordering::equal;
+}
+
+static std::strong_ordering operator<=>(const in6_addr & a, const in6_addr & b) noexcept
+{
+	auto x = memcmp(&a, &b, sizeof(a));
+	if (x < 0)
+		return std::strong_ordering::less;
+	if (x > 0)
+		return std::strong_ordering::greater;
+	return std::strong_ordering::equal;
+}
+
+static std::strong_ordering operator<=>(const sockaddr_in & a, const sockaddr_in & b) noexcept
+{
+	if (auto comp = a.sin_addr <=> b.sin_addr; comp != std::strong_ordering::equal)
+		return comp;
+	return a.sin_port <=> b.sin_port;
+}
+
+static std::strong_ordering operator<=>(const sockaddr_in6 & a, const sockaddr_in6 & b) noexcept
+{
+	if (auto comp = a.sin6_addr <=> b.sin6_addr; comp != std::strong_ordering::equal)
+		return comp;
+	return a.sin6_port <=> b.sin6_port;
+}
+
+static bool operator==(const sockaddr_in & a, const sockaddr_in & b) noexcept
+{
+	return (a <=> b) == std::strong_ordering::equal;
+}
+static bool operator==(const sockaddr_in6 & a, const sockaddr_in6 & b) noexcept
+{
+	return (a <=> b) == std::strong_ordering::equal;
+}
+
+namespace
+{
+static std::strong_ordering operator<=>(const if_addr & a, const if_addr & b) noexcept
+{
+	// Sort by interface name first
+	// We'll get eth < usb < wlan
+	if (auto comp = a.if_name <=> b.if_name; comp != std::strong_ordering::equal)
+		return comp;
+	return a.addr <=> b.addr;
+}
+
+[[maybe_unused]] static bool operator==(const if_addr & a, const if_addr & b) noexcept
+{
+	return (a <=> b) == std::strong_ordering::equal;
+}
+} // namespace
+
+class dnssd_cache
+{
+public:
+	using ptr = std::string;
+	struct srv
+	{
+		std::string hostname;
+		int port;
+		bool operator==(const srv &) const noexcept = default;
+	};
+	using a = sockaddr_in;
+	using aaaa = sockaddr_in6;
+	struct txt
+	{
+		std::string key;
+		std::string value;
+		bool operator==(const txt &) const noexcept = default;
+	};
+
+private:
+	struct cache_entry
+	{
+		steady_clock::time_point timeout;
+		std::string name;
+		std::variant<ptr, srv, a, aaaa, txt> record;
+		std::string if_name;
+
+		bool operator==(const cache_entry & other) const noexcept
+		{
+			return name == other.name && record == other.record;
+		}
+	};
+
+	std::vector<cache_entry> cache;
+	std::vector<std::tuple<steady_clock::time_point, mdns_record_type, std::string>> last_queries;
+
+	std::set<if_addr> addresses;
+	std::map<int, std::string> if_names; // socket fd to interface name
+
+	// pollfds[0] is used for inter-thread communication, the others are for mDNS
+	std::vector<pollfd> pollfds;
+	int itc_fd;
+
+	void open_client_sockets()
+	{
+		close_client_sockets();
+		for (const auto & addr: addresses)
+		{
+			int sock = std::visit(utils::overloaded{
+			                              [](sockaddr_in6 const & a) { return mdns_socket_open_ipv6(&a); },
+			                              [](sockaddr_in const & a) { return mdns_socket_open_ipv4(&a); },
+			                      },
+			                      addr.addr);
+			if (sock >= 0)
+			{
+				if_names.emplace(sock, addr.if_name);
+
+				spdlog::info("Local address ({}): {}", addr.if_name, to_string(addr.addr));
+			}
+			else
+				spdlog::warn("Failed to open socket for {} {}", addr.if_name, to_string(addr.addr));
+		}
+
+		pollfds.reserve(if_names.size() + 1);
+
+		int fds[2];
+		if (pipe(fds) < 0)
+		{
+			spdlog::error("Cannot create pipe: {}", strerror(errno));
+			abort();
+		}
+
+		itc_fd = fds[1];
+		pollfds.push_back({.fd = fds[0], .events = POLLIN});
+
+		for (auto [socket, _]: if_names)
+			pollfds.push_back(pollfd{.fd = socket, .events = POLLIN});
+	}
+
+	void close_client_sockets()
+	{
+		for (pollfd socket: pollfds)
+			mdns_socket_close(socket.fd);
+
+		pollfds.clear();
+		if_names.clear();
+		itc_fd = -1;
+	}
+
+	void log_entry(const cache_entry & entry)
+	{
+		std::string type;
+		std::string record;
+		if (std::holds_alternative<ptr>(entry.record))
+		{
+			type = "PTR";
+			record = std::get<ptr>(entry.record);
+		}
+		else if (std::holds_alternative<srv>(entry.record))
+		{
+			type = "SRV";
+			auto [addr, port] = std::get<srv>(entry.record);
+			record = addr + ":" + std::to_string(port);
+		}
+		else if (std::holds_alternative<a>(entry.record))
+		{
+			type = "A";
+			auto addr = std::get<a>(entry.record);
+			record = ip_address_to_string(addr.sin_addr);
+		}
+		else if (std::holds_alternative<aaaa>(entry.record))
+		{
+			type = "AAAA";
+			auto addr = std::get<aaaa>(entry.record);
+			record = ip_address_to_string(addr.sin6_addr);
+		}
+		else if (std::holds_alternative<txt>(entry.record))
+		{
+			type = "TXT";
+			auto txt_record = std::get<txt>(entry.record);
+			record = txt_record.key + "=" + txt_record.value;
+		}
+
+		auto ttl = entry.timeout - steady_clock::now();
+		spdlog::info("{:40} {:4} {:40} TTL {}", entry.name, type, record, duration_cast<seconds>(ttl).count());
+	}
+
+	std::string_view record_type_name(mdns_record_type record_type)
+	{
+		switch (record_type)
+		{
+			case MDNS_RECORDTYPE_A:
+				return "A";
+			case MDNS_RECORDTYPE_AAAA:
+				return "AAAA";
+			case MDNS_RECORDTYPE_ANY:
+				return "ANY";
+			case MDNS_RECORDTYPE_PTR:
+				return "PTR";
+			case MDNS_RECORDTYPE_SRV:
+				return "SRV";
+			case MDNS_RECORDTYPE_TXT:
+				return "TXT";
+			default:
+				return "UNKNOWN";
+		}
+	}
+
+	void log_query(mdns_record_type record_type, std::string_view service_name)
+	{
+		spdlog::info("Sending query for {}, type {}", service_name, record_type_name(record_type));
+	}
+
+	void update(mdns_string_t entry, std::variant<ptr, srv, a, aaaa, txt> record, int ttl, std::string if_name)
+	{
+		auto now = steady_clock::now();
+
+		cache_entry e =
+		        {
+		                .timeout = now + seconds(ttl),
+		                .name = std::string(entry.str, entry.length),
+		                .record = std::move(record),
+		                .if_name = std::move(if_name),
+		        };
+
+		// log_entry(e);
+
+		if (ttl == 0)
+		{
+			std::erase_if(cache, [&e](const cache_entry & i) {
+				return i == e;
+			});
+		}
+		else
+		{
+			auto it = std::find(cache.begin(), cache.end(), e);
+			if (it == cache.end())
+				cache.push_back(std::move(e));
+			else
+				it->timeout = e.timeout;
+		}
+	}
+
+	static int query_callback(
+	        int sock,
+	        const sockaddr * from,
+	        size_t addrlen,
+	        mdns_entry_type_t entry,
+	        uint16_t query_id,
+	        uint16_t rtype,
+	        uint16_t rclass,
+	        uint32_t ttl,
+	        const void * data,
+	        size_t size,
+	        size_t name_offset,
+	        size_t name_length,
+	        size_t record_offset,
+	        size_t record_length,
+	        void * user_data)
+	{
+		dnssd_cache * self = (dnssd_cache *)user_data;
+
+		char entrybuffer[256];
+
+		mdns_string_t entrystr = mdns_string_extract(data, size, &name_offset, entrybuffer, sizeof(entrybuffer));
+
+		switch (rtype)
+		{
+			case MDNS_RECORDTYPE_PTR: {
+				char namebuffer[256];
+				auto ptr_record = mdns_record_parse_ptr(data, size, record_offset, record_length, namebuffer, sizeof(namebuffer));
+				self->update(entrystr, std::string{ptr_record.str, ptr_record.length}, ttl, self->if_names[sock]);
+				break;
+			}
+
+			case MDNS_RECORDTYPE_SRV: {
+				char namebuffer[256];
+				auto srv_record = mdns_record_parse_srv(data, size, record_offset, record_length, namebuffer, sizeof(namebuffer));
+				self->update(entrystr, srv{{srv_record.name.str, srv_record.name.length}, srv_record.port}, ttl, self->if_names[sock]);
+				break;
+			}
+
+			case MDNS_RECORDTYPE_A: {
+				sockaddr_in ipv4_buffer;
+				self->update(entrystr, *mdns_record_parse_a(data, size, record_offset, record_length, &ipv4_buffer), ttl, self->if_names[sock]);
+				break;
+			}
+
+			case MDNS_RECORDTYPE_AAAA: {
+				sockaddr_in6 ipv6_buffer;
+				mdns_record_parse_aaaa(data, size, record_offset, record_length, &ipv6_buffer);
+				ipv6_buffer.sin6_scope_id = ((sockaddr_in6 *)from)->sin6_scope_id;
+				self->update(entrystr, ipv6_buffer, ttl, self->if_names[sock]);
+				break;
+			}
+
+			case MDNS_RECORDTYPE_TXT: {
+				std::array<mdns_record_txt_t, 32> txt_buffer;
+				size_t nb_records = mdns_record_parse_txt(data, size, record_offset, record_length, txt_buffer.data(), txt_buffer.size());
+
+				for (size_t i = 0; i < nb_records; ++i)
+				{
+					std::string key{txt_buffer[i].key.str, txt_buffer[i].key.length};
+					std::string value{txt_buffer[i].value.str, txt_buffer[i].value.length};
+					self->update(entrystr, txt{key, value}, ttl, self->if_names[sock]);
+				}
+				break;
+			}
+
+			default:
+				break;
+		}
+
+		return 0;
+	}
+
+public:
+	void send_query(mdns_record_type record, std::string service_name)
+	{
+		auto now = steady_clock::now();
+
+		std::erase_if(last_queries, [now](const auto & q) {
+			return now - std::get<steady_clock::time_point>(q) > 5s;
+		});
+
+		for (const auto & [i, j, k]: last_queries)
+		{
+			if (j == record && k == service_name)
+			{
+				return;
+			}
+		}
+
+		if (auto addr = get_if_addrs(5353); addr != addresses)
+		{
+			std::swap(addr, addresses);
+			open_client_sockets();
+		}
+
+		log_query(record, service_name);
+		std::array<uint8_t, 2048> buffer;
+		for (size_t i = 1; i < pollfds.size(); i++)
+		{
+			if (mdns_query_send(pollfds[i].fd, record, service_name.data(), service_name.size(), buffer.data(), buffer.size(), 0))
+			{
+				spdlog::error("Failed to send DNS-DS discovery for {}, record type {}: {}", service_name, record_type_name(record), strerror(errno));
+			}
+		}
+
+		last_queries.emplace_back(now, record, std::move(service_name));
+	}
+
+	void poll_response(milliseconds ms)
+	{
+		std::array<uint8_t, 2048> buffer;
+		int timeout = ms < 0ms ? -1 : std::min<int64_t>(std::numeric_limits<int>::max(), ms.count());
+
+		poll(pollfds.data(), pollfds.size(), timeout);
+
+		if (pollfds[0].revents & POLLIN)
+		{
+			if (::read(pollfds[0].fd, buffer.data(), buffer.size()) < 0)
+				spdlog::debug("Cannot read from interthread pipe");
+		}
+
+		for (size_t i = 1; i < pollfds.size(); i++)
+		{
+			if (pollfds[i].revents & POLLIN)
+			{
+				mdns_query_recv(pollfds[i].fd, buffer.data(), buffer.size(), query_callback, this, 0);
+			}
+		}
+	}
+
+	void stop_polling()
+	{
+		char c = 0;
+		if (write(itc_fd, &c, 1) < 0)
+			spdlog::debug("Cannot write to interthread pipe");
+	}
+
+	template <typename T>
+	std::vector<std::tuple<T, std::string, steady_clock::time_point>> read(const std::string & name)
+	{
+		std::vector<std::tuple<T, std::string, steady_clock::time_point>> entries;
+		auto now = steady_clock::now();
+
+		std::erase_if(cache, [now](const cache_entry & i) {
+			return i.timeout < now;
+		});
+
+		for (const auto & i: cache)
+		{
+			if (i.name == name && std::holds_alternative<T>(i.record))
+				entries.emplace_back(std::get<T>(i.record), i.if_name, i.timeout);
+		}
+
+		return entries;
+	}
+
+	dnssd_cache()
+	{
+		addresses = get_if_addrs(5353);
+		open_client_sockets();
+	}
+
+	dnssd_cache(const dnssd_cache &) = delete;
+
+	~dnssd_cache()
+	{
+		close_client_sockets();
+	}
+};
+
+void wivrn_discover::discover(std::string service_name)
+{
+	cache->send_query(MDNS_RECORDTYPE_PTR, service_name);
+	auto next_query = steady_clock::now() + discover_period;
+
+	milliseconds poll_timeout = poll_max_time;
+	std::vector<service> services_staging;
+
+	while (!quit)
+	{
+		poll_timeout = std::clamp(poll_timeout, poll_min_time, poll_max_time);
+		cache->poll_response(poll_timeout);
+
+		poll_timeout = poll_max_time;
+
+		auto now = steady_clock::now();
+
+		if (now > next_query)
+		{
+			cache->send_query(MDNS_RECORDTYPE_PTR, service_name);
+			next_query = now + discover_period;
+		}
+		poll_timeout = std::min(poll_timeout, duration_cast<milliseconds>(next_query - now));
+
+		for (auto [ptr, _, ttl]: cache->read<dnssd_cache::ptr>(service_name))
+		{
+			bool srv_found = false;
+			auto srv_min_ttl = milliseconds::max();
+
+			service s;
+			// Remove the suffix
+			if (ptr.ends_with("." + service_name))
+				s.name = ptr.substr(0, ptr.size() - service_name.size() - 1);
+			else
+				s.name = ptr;
+
+			std::multimap<std::string, decltype(service::address::address)> addr_by_if_name;
+
+			for (auto [srv, _, ttl]: cache->read<dnssd_cache::srv>(ptr))
+			{
+				srv_found = true;
+				srv_min_ttl = std::min(duration_cast<milliseconds>(ttl - now), srv_min_ttl);
+
+				// Remove the suffix
+				if (srv.hostname.ends_with(".local."))
+					s.hostname = srv.hostname.substr(0, srv.hostname.size() - 7);
+				else if (srv.hostname.ends_with("."))
+					s.hostname = srv.hostname.substr(0, srv.hostname.size() - 1);
+				else
+					s.hostname = srv.hostname;
+
+				s.port = srv.port;
+				s.ttl = ttl;
+
+				bool address_found = false;
+				auto address_min_ttl = milliseconds::max();
+				for (auto [a, if_name, ttl]: cache->read<dnssd_cache::a>(srv.hostname))
+				{
+					address_found = true;
+					address_min_ttl = std::min(duration_cast<milliseconds>(ttl - now), address_min_ttl);
+					a.sin_port = htons(srv.port);
+					addr_by_if_name.emplace(if_name, a);
+				}
+
+				for (auto [aaaa, if_name, ttl]: cache->read<dnssd_cache::aaaa>(srv.hostname))
+				{
+					address_found = true;
+					address_min_ttl = std::min(duration_cast<milliseconds>(ttl - now), address_min_ttl);
+					aaaa.sin6_port = htons(srv.port);
+					addr_by_if_name.emplace(if_name, aaaa);
+				}
+
+				for (auto && [if_name, addr]: addr_by_if_name)
+					s.addresses.push_back({.interface = std::move(if_name), .address = addr});
+
+				for (auto [txt_record, _, ttl]: cache->read<dnssd_cache::txt>(ptr))
+				{
+					s.txt[txt_record.key] = txt_record.value;
+				}
+
+				if (!address_found || address_min_ttl < 5s)
+				{
+					cache->send_query(MDNS_RECORDTYPE_ANY, srv.hostname);
+				}
+				else // address_found && address_min_ttl >= 5s
+				{
+					poll_timeout = std::min(poll_timeout, address_min_ttl - 4s);
+				}
+
+				services_staging.push_back(s);
+			}
+
+			if (!srv_found || srv_min_ttl < 10s)
+			{
+				cache->send_query(MDNS_RECORDTYPE_SRV, ptr);
+			}
+			else // srv_found && srv_min_ttl >= 10s
+			{
+				poll_timeout = std::min(poll_timeout, srv_min_ttl - 9s);
+			}
+		}
+
+		std::unique_lock lock(mutex);
+		std::swap(services, services_staging);
+		services_staging.clear();
+	}
+}
+
+wivrn_discover::wivrn_discover(std::string service_name) :
+        multicast{application::get_wifi_lock().get_multicast_lock()},
+        cache(std::make_unique<dnssd_cache>()),
+        dnssd_thread(utils::named_thread("dnssd_thread", &wivrn_discover::discover, this, service_name))
+{
+}
+
+wivrn_discover::~wivrn_discover()
+{
+	quit = true;
+	cache->stop_polling();
+	dnssd_thread.join();
+}
+
+std::vector<wivrn_discover::service> wivrn_discover::get_services()
+{
+	std::unique_lock lock(mutex);
+
+	auto now = steady_clock::now();
+
+	std::erase_if(services, [now](const service & i) {
+		return i.ttl < now;
+	});
+
+	return services;
+}
+
+// g++ wivrn_discover.cpp -I .. -I ../external -g $(pkg-config spdlog --cflags --libs) -std=c++20 -DTEST && ./a.out
+#ifdef TEST
+int main()
+{
+	wivrn_discover wd("_wivrn._tcp.local.");
+
+	while (true)
+	{
+		auto now = steady_clock::now();
+		auto services = wd.get_services();
+
+		spdlog::info("{} service(s) found", services.size());
+		for (auto & i: services)
+		{
+			spdlog::info("    {} at {}:{}, expires in {} s", i.name, i.hostname, i.port, duration_cast<seconds>(i.ttl - now).count());
+			for (auto & j: i.addresses)
+			{
+				std::visit([](const auto & addr) {
+					spdlog::info("        {}", ip_address_to_string(addr));
+				},
+				           j);
+			}
+
+			for (auto & [key, value]: i.txt)
+			{
+				spdlog::info("        {} = {}", key, value);
+			}
+		}
+
+		pollfd pfd{.fd = 0, .events = POLLIN};
+		poll(&pfd, 1, 1000);
+
+		if (pfd.revents & POLLIN)
+			break;
+	}
+}
+#endif

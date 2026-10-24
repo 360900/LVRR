@@ -1,0 +1,321 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+	<id>io.github.wivrn.wivrn</id>
+	<name>WiVRn server</name>
+	<metadata_license>FSFAP</metadata_license>
+	<project_license>GPL-3.0-or-later</project_license>
+	<summary>Play your PC VR games on a standalone headset</summary>
+	<description>
+		<p>WiVRn allows you to run your VR games from your PC and play them from a standalone headset.</p>
+
+		<p>Works with the WiVRn client app on standalone headsets, available as an APK and on the Meta Store.</p>
+
+		<p>Features:</p>
+		<ul>
+			<li>Supports OpenXR and OpenVR applications through xrizer or OpenComposite</li>
+			<li>Controller tracking, hand tracking, eye gaze tracking, body tracking as supported by the headset</li>
+			<li>Audio streaming and microphone</li>
+			<li>Low latency video streaming with H264 / HEVC / AV1 compression</li>
+			<li>Hardware accelerated compression with Vulkan video encode, VAAPI or NVENC</li>
+			<li>Software compression with x264</li>
+		</ul>
+
+		<p>Supported headsets:</p>
+		<ul>
+			<li>Meta Quest 1, 2, 3, 3S, pro</li>
+			<li>Pico Neo 4</li>
+			<li>HTC Vive Focus 3, XR Elite</li>
+			<li>Samsung Galaxy XR</li>
+		</ul>
+
+		<p>For desktop streaming, check out WayVR.</p>
+	</description>
+	<developer id="io.github.wivrn.wivrn">
+		<name>Guillaume Meunier, Patrick Nicolas et al</name>
+	</developer>
+	<branding>
+		<color type="primary" scheme_preference="light">#F6F5F5</color>
+		<color type="primary" scheme_preference="dark">#424242</color>
+	</branding>
+
+	<launchable type="desktop-id">io.github.wivrn.wivrn.desktop</launchable>
+
+	<categories>
+		<category>Game</category>
+		<category>Network</category>
+	</categories>
+
+	<screenshots>
+		<screenshot type="default">
+			<image type="source">https://wivrn.github.io/screenshots/dashboard-2.png</image>
+			<caption>Dashboard</caption>
+		</screenshot>
+		<screenshot>
+			<image type="source">https://wivrn.github.io/screenshots/dashboard-1.png</image>
+			<caption>Wizard</caption>
+		</screenshot>
+		<screenshot>
+			<image type="source">https://wivrn.github.io/screenshots/dashboard-3.png</image>
+			<caption>Settings</caption>
+		</screenshot>
+	</screenshots>
+
+	<url type="homepage">https://wivrn.github.io</url>
+	<url type="vcs-browser">https://www.github.com/WiVRn/WiVRn</url>
+	<url type="bugtracker">https://github.com/WiVRn/WiVRn/issues</url>
+	<url type="donation">https://opencollective.com/wivrn</url>
+
+	<content_rating type="oars-1.1" />
+
+	<releases>
+		<release version="26.9" date="2026-09-12">
+			<url type="details">https://github.com/WiVRn/WiVRn/releases/tag/v26.9</url>
+			<description>
+				<ul>
+					<li>Revamped headset graphical user interface</li>
+					<li>Forward gamepad inputs from headset to PC</li>
+					<li>Enable XR_FB_body_tracking</li>
+					<li>USB networking on Meta headsets</li>
+					<li>Fixes for Vulkan video encode on NVIDIA (again)</li>
+				</ul>
+			</description>
+		</release>
+		<release version="26.6" date="2026-06-10">
+			<url type="details">https://github.com/WiVRn/WiVRn/releases/tag/v26.6</url>
+			<description>
+				<ul>
+					<li>Improved reconnection mechanism, now with warnings and errors</li>
+					<li>Improved image quality when content does not fill the whole field of view</li>
+					<li>Add a half FPS mode to reduce load at the expense of framerate</li>
+					<li>Fixed Vulkan video encode on NVIDIA GPUs</li>
+					<li>Many bugfixes</li>
+				</ul>
+			</description>
+		</release>
+		<release version="26.2" date="2026-02-08">
+			<url type="details">https://github.com/WiVRn/WiVRn/releases/tag/v26.2</url>
+			<description>
+				<ul>
+					<li>Added support for SlimeVR trackers</li>
+					<li>Unsafe configuration values can now be used on headset</li>
+					<li>Improved head and controller tracking</li>
+				</ul>
+			</description>
+		</release>
+		<release version="25.12" date="2025-12-19">
+			<url type="details">https://github.com/WiVRn/WiVRn/releases/tag/v25.12</url>
+			<description>
+				<ul>
+					<li>Samsung Galaxy XR support</li>
+					<li>Mouse and keyboard forwarding from headset to PC</li>
+					<li>Refresh rate and bitrate can be adjusted while streaming</li>
+					<li>Moved video settings from dashboard to headset</li>
+					<li>Update default encoder and codecs, will be Vulkan/H.265 on AMD or Intel, nvenc/AV1 or H.265 on NVIDIA</li>
+				</ul>
+			</description>
+		</release>
+		<release version="25.11.1" date="2025-11-10">
+			<url type="details">https://github.com/WiVRn/WiVRn/releases/tag/v25.11.1</url>
+			<description>
+				<ul>
+					<li>Fixed a dashboard crash when configuration is empty</li>
+				</ul>
+			</description>
+		</release>
+		<release version="25.11" date="2025-11-08">
+			<url type="details">https://github.com/WiVRn/WiVRn/releases/tag/v25.11</url>
+			<description>
+				<ul>
+					<li>10-bit encoding support for AV1 and h.265</li>
+					<li>H.265 encoding on Vulkan video backend</li>
+					<li>Firewall configuration for ufw and firewalld</li>
+					<li>Customizable lobby environment</li>
+					<li>Running application management during stream</li>
+					<li>Default to lower power states on headset</li>
+				</ul>
+			</description>
+		</release>
+		<release version="25.9" date="2025-09-17">
+			<url type="details">https://github.com/WiVRn/WiVRn/releases/tag/v25.9</url>
+			<description>
+				<ul>
+					<li>GPU usage reduction on headset</li>
+					<li>Disable face and body tracking when not used</li>
+					<li>Fix black screen on Unreal Engine games</li>
+				</ul>
+			</description>
+		</release>
+		<release version="25.8" date="2025-08-10">
+			<url type="details">https://github.com/WiVRn/WiVRn/releases/tag/v25.8</url>
+			<description>
+				<ul>
+					<li>Add a screen to launch applications when the headset connects</li>
+					<li>Add a screen with many options during stream, which can be summoned by pressing both thumbsticks</li>
+					<li>Add XR_EXT_user_presence and XR_EXT_hand_interaction OpenXR extensions</li>
+					<li>Fix vulkan video encode and performances issues with multiple nvenc encoders on NVIDIA GPUs</li>
+					<li>Support 10-bit encoding on VAAPI for H.265 and AV1 codecs</li>
+					<li>Xrizer is now the default OpenVR compatibility layer (may be overridden by distribution packages)</li>
+					<li>Added Slovak and Turkish translations</li>
+				</ul>
+			</description>
+		</release>
+		<release version="25.6.1" date="2025-06-29">
+			<url type="details">https://github.com/WiVRn/WiVRn/releases/tag/v25.6.1</url>
+			<description>
+				<ul>
+					<li>Fix crash in H3VR</li>
+					<li>Workaround controller positions on Meta headsets</li>
+				</ul>
+			</description>
+		</release>
+		<release version="25.6" date="2025-06-26">
+			<url type="details">https://github.com/WiVRn/WiVRn/releases/tag/v25.6</url>
+			<description>
+				<ul>
+					<li>Improved image clarity</li>
+					<li>Support for body tracking on Quest</li>
+					<li>Support for face tracking on Pico</li>
+					<li>Support for Vive ultimate trackers</li>
+					<li>Added some advanced configuration options on dashboard</li>
+					<li>Changed versioning scheme to year.month</li>
+				</ul>
+			</description>
+		</release>
+		<release version="0.25" date="2025-05-18">
+			<url type="details">https://github.com/WiVRn/WiVRn/releases/tag/v0.25</url>
+			<description>
+				<ul>
+					<li>Client-side post-processing (sharpening)</li>
+					<li>Configurable OpenVR compatibility library and path to adb</li>
+					<li>Include xrizer in flatpak release</li>
+				</ul>
+			</description>
+		</release>
+		<release version="0.24.1" date="2025-04-10">
+			<url type="details">https://github.com/WiVRn/WiVRn/releases/tag/v0.24.1</url>
+			<description>
+				<ul>
+					<li>Workaround for broken passthrough on Quest V76</li>
+					<li>Disable split encoder on nvenc by default</li>
+					<li>New option to set the minimum refresh rate in automatic mode</li>
+					<li>Brazilian Portuguese translation</li>
+				</ul>
+			</description>
+		</release>
+		<release version="0.24" date="2025-04-04">
+			<url type="details">https://github.com/WiVRn/WiVRn/releases/tag/v0.24</url>
+			<description>
+				<ul>
+					<li>Improved framerate for applications that can't reach the target refresh rate</li>
+					<li>Optional auto-selection of refresh rate based on application performance</li>
+					<li>AV1 support for nvenc</li>
+					<li>Improved nvenc parameters, for better quality and lower latency</li>
+					<li>Expose the actual controller on PC side, with fallback to Oculus Touch</li>
+				</ul>
+			</description>
+		</release>
+		<release version="0.23" date="2025-02-08">
+			<url type="details">https://github.com/WiVRn/WiVRn/releases/tag/v0.23</url>
+			<description>
+				<ul>
+					<li>New dashboard, built on Kirigami</li>
+					<li>Improved controller tracking</li>
+					<li>Forward visibility mask and framerate change (OpenXR features)</li>
+					<li>H.264 Vulkan video encode works on Radeon</li>
+					<li>Face tracking support on HTC headsets</li>
+					<li>Allow updating bitrate at runtime, works on vulkan video and x264 only</li>
+					<li>Various performance improvements</li>
+				</ul>
+			</description>
+		</release>
+		<release version="0.22" date="2024-12-05">
+			<url type="details">https://github.com/WiVRn/WiVRn/releases/tag/v0.22</url>
+			<description>
+				<ul>
+					<li>Passthrough streaming support</li>
+					<li>Fully encrypted connection</li>
+					<li>Improved compositor pacing</li>
+					<li>Add support for Quest 3S</li>
+					<li>Add wivrnctl utility to control server</li>
+					<li>Add Spanish translation for headset app</li>
+				</ul>
+			</description>
+		</release>
+
+		<release version="0.21" date="2024-11-03">
+			<url type="details">https://github.com/WiVRn/WiVRn/releases/tag/v0.21</url>
+			<description>
+				<ul>
+					<li>Fixed multiple dashboard issues</li>
+					<li>Improved compositor pacing</li>
+					<li>Changed default encoder configuration</li>
+					<li>Inhibit sleeping while a session is active</li>
+					<li>Avahi publication is now optional</li>
+					<li>Always set the active runtime even if there was already one</li>
+				</ul>
+			</description>
+		</release>
+
+		<release version="0.20" date="2024-10-14">
+			<url type="details">https://github.com/WiVRn/WiVRn/releases/tag/v0.20</url>
+			<description>
+				<ul>
+					<li>Added server dashboard</li>
+					<li>Added optional SolarXR support</li>
+					<li>Network latency improvements</li>
+					<li>More accurate frame pacing</li>
+					<li>Smarter default configuration</li>
+				</ul>
+			</description>
+		</release>
+
+		<release version="0.19.1" date="2024-09-21">
+			<url type="details">https://github.com/WiVRn/WiVRn/releases/tag/v0.19.1</url>
+			<description>
+				<ul>
+					<li>Fix possible crash when requesting Android permissions on client</li>
+				</ul>
+			</description>
+		</release>
+
+		<release version="0.19" date="2024-09-19">
+			<url type="details">https://github.com/WiVRn/WiVRn/releases/tag/v0.19</url>
+			<description>
+				<ul>
+					<li>Added support for eye-tracked foveation</li>
+					<li>Added support for FB_face_tracking2</li>
+					<li>More fluid experience with improved frame and input pacing</li>
+					<li>AV1 support with VAAPI</li>
+					<li>Reduced aliasing with high foveation</li>
+					<li>Improved server and client performance</li>
+				</ul>
+			</description>
+		</release>
+
+		<release version="0.18" date="2024-08-13">
+			<url type="details">https://github.com/WiVRn/WiVRn/releases/tag/v0.18</url>
+			<description>
+				<ul>
+					<li>The standard APK is now compatible with Pico headsets</li>
+					<li>Fixes for position on start and reconnect</li>
+					<li>Support for EXT_eye_gaze_interaction by @galister</li>
+					<li>Better support for libmonado, now discoverable in manifest</li>
+					<li>Server can now be distributed as a flatpak</li>
+				</ul>
+			</description>
+		</release>
+
+		<release version="0.17" date="2024-07-14">
+			<url type="details">https://github.com/WiVRn/WiVRn/releases/tag/v0.17</url>
+			<description>
+				<ul>
+					<li>Add systemd hardening options by @Pandapip1</li>
+					<li>update monado to 24.0.0 by @galister</li>
+					<li>Update building doc by @SanyaNya</li>
+					<li>Multiple tweaks for controller tracking, audio resync</li>
+					<li>Minor performance improvements</li>
+				</ul>
+			</description>
+		</release>
+	</releases>
+</component>

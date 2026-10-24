@@ -1,0 +1,83 @@
+<?xml version="1.0"?>
+<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN" "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+<node name="/io/github/wivrn/Server">
+	<interface name="org.freedesktop.DBus.Properties">
+		<method name="Get">
+			<arg name="interface_name" direction="in" type="s"/>
+			<arg name="property_name" direction="in" type="s"/>
+			<arg name="value" direction="out" type="v"/>
+		</method>
+		<method name="GetAll">
+			<arg name="interface_name" direction="in" type="s"/>
+			<arg name="props" direction="out" type="a{sv}"/>
+			<annotation name="org.qtproject.QtDBus.QtTypeName.Out0" value="QVariantMap"/>
+		</method>
+		<method name="Set">
+			<arg name="interface_name" direction="in" type="s"/>
+			<arg name="property_name" direction="in" type="s"/>
+			<arg name="value" direction="in" type="v"/>
+		</method>
+		<signal name="PropertiesChanged">
+			<arg type="s" name="interface_name"/>
+			<arg type="a{sv}" name="changed_properties"/>
+			<annotation name="org.qtproject.QtDBus.QtTypeName.Out1" value="QVariantMap"/>
+			<arg type="as" name="invalidated_properties"/>
+		</signal>
+	</interface>
+
+	<interface name="io.github.wivrn.Server">
+		<method name="Disconnect"/>
+		<method name="Quit"/>
+		<method name="RevokeKey">
+			<arg type="s" name="PublicKey"/>
+		</method>
+		<method name="RenameKey">
+			<arg type="s" name="PublicKey"/>
+			<arg type="s" name="Name"/>
+		</method>
+		<method name="EnablePairing">
+			<arg type="i" name="TimeoutSecs"/>
+			<arg type="s" name="Pin" direction="out"/>
+		</method>
+		<method name="DisablePairing"/>
+
+		<property name="HeadsetConnected"      type="b" access="read"/>
+		<property name="SessionRunning"        type="b" access="read"/>
+		<property name="SteamCommand"          type="s" access="read"/>
+		<property name="JsonConfiguration"     type="s" access="readwrite"/>
+		<property name="Bitrate"               type="u" access="read"/>
+
+		<!-- Data from the headset info packet -->
+		<property name="AvailableRefreshRates" type="ad" access="read">
+			<annotation name="org.qtproject.QtDBus.QtTypeName" value="QList&lt;double&gt;"/>
+		</property>
+		<property name="PreferredRefreshRate"  type="d" access="read"/>
+		<property name="SpeakerChannels"       type="u" access="read"/>
+		<property name="SpeakerSampleRate"     type="u" access="read"/>
+		<property name="MicChannels"           type="u" access="read"/>
+		<property name="MicSampleRate"         type="u" access="read"/>
+		<property name="HandTracking"          type="b" access="read"/>
+		<property name="EyeGaze"               type="b" access="read"/>
+		<property name="FaceTracking"          type="b" access="read"/>
+		<property name="SupportedCodecs"       type="as" access="read"/>
+		<property name="SystemName"            type="s" access="read"/>
+
+		<property name="Pin"                   type="s" access="read"/>
+		<property name="KnownKeys"             type="a(ssx)" access="read">
+			<annotation name="org.qtproject.QtDBus.QtTypeName" value="QList&lt;std::tuple&lt;QString,QString,uint64_t&gt;&gt;"/>
+			<!-- first: name, second: public key, third: last connection timestamp (seconds since epoch, or 0) -->
+		</property>
+		<property name="PairingEnabled"        type="b" access="read"/>
+		<property name="EncryptionEnabled"     type="b" access="read"/>
+
+		<property name="ClientTab"             type="s" access="read"/>
+		<method name="SetClientTab">
+			<arg type="s" name="Tab"/>
+		</method>
+
+		<signal name="ServerError">
+			<arg type="s" name="where"/>
+			<arg type="s" name="message"/>
+		</signal>
+	</interface>
+</node>

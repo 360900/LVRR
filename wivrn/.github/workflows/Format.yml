@@ -1,0 +1,41 @@
+name: Format
+on: [push, pull_request]
+jobs:
+  formatting-check:
+    name: Formatting check
+    runs-on: ubuntu-24.04
+    if: ${{ vars.APK_ONLY == '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        path:
+          - 'client'
+          - 'server'
+          - 'dashboard'
+          - 'common'
+          - 'tools/wireshark'
+    steps:
+    - uses: actions/checkout@v6
+    - name: Run clang-format style check for C/C++/Protobuf programs.
+      uses: jidicula/clang-format-action@v4.18.0
+      with:
+        clang-format-version: '22'
+        check-path: ${{ matrix.path }}
+
+  python-format-check:
+    name: Python lint (ruff)
+    runs-on: ubuntu-24.04
+    if: ${{ vars.APK_ONLY == '' }}
+    steps:
+    - uses: actions/checkout@v6
+    # Scope set by `include` in ruff.toml.
+    - name: Run ruff lint check
+      uses: astral-sh/ruff-action@v4.1.0
+      with:
+        version: "0.16.0"
+        args: "check"
+    - name: Run ruff format check
+      uses: astral-sh/ruff-action@v4.1.0
+      with:
+        version: "0.16.0"
+        args: "format --check"

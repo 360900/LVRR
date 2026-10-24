@@ -1,0 +1,50 @@
+/*
+ * WiVRn VR streaming
+ * Copyright (C) 2022  Guillaume Meunier <guillaume.meunier@centraliens.net>
+ * Copyright (C) 2022  Patrick Nicolas <patricknicolas@laposte.net>
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+#pragma once
+
+#include <cstdint>
+namespace wivrn
+{
+// Default port for server to listen, both TCP and UDP
+static const int default_port = 9757;
+
+static const int64_t max_extrapolation_ns = 80'000'000;
+} // namespace wivrn
+
+#cmakedefine01 WIVRN_USE_NVENC
+#cmakedefine01 WIVRN_USE_VAAPI
+#cmakedefine01 WIVRN_USE_VULKAN_ENCODE
+#cmakedefine01 WIVRN_USE_X264
+#cmakedefine01 WIVRN_USE_V4L2
+
+#cmakedefine01 WIVRN_USE_PIPEWIRE
+
+#cmakedefine01 WIVRN_FEATURE_DEBUG_GUI
+#cmakedefine01 WIVRN_FEATURE_RENDERDOC
+#cmakedefine01 WIVRN_FEATURE_STEAMVR_LIGHTHOUSE
+#cmakedefine01 WIVRN_FEATURE_SOLARXR
+
+#cmakedefine01 WIVRN_SHOW_IMGUI_DEMO_WINDOW
+#cmakedefine01 WIVRN_CLIENT_DEBUG_MENU
+
+#define WIVRN_INSTALL_PREFIX "@CMAKE_INSTALL_PREFIX@"
+#define OVR_COMPAT_SEARCH_PATH "@OVR_COMPAT_SEARCH_PATH@"
+
+#define WIVRN_ENVIRONMENTS_URL "@WIVRN_ENVIRONMENTS_URL@"
