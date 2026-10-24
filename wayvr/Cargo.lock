@@ -1413,6 +1413,7 @@ dependencies = [
  "glam",
  "keyvalues-parser",
  "log",
+ "lvrr-common",
  "lz4_flex",
  "rand 0.10.2",
  "rust-embed",
@@ -2976,6 +2977,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b6180140927ee907000b0aa540091f6ea512ead4447c92b8fc35bc72788a5a6"
 dependencies = [
  "hashbrown 0.17.1",
+]
+
+[[package]]
+name = "lvrr-common"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
 ]
 
 [[package]]
@@ -6233,6 +6242,7 @@ dependencies = [
  "libmonado",
  "log",
  "log-panics",
+ "lvrr-common",
  "mint",
  "openxr",
  "ovr_overlay",

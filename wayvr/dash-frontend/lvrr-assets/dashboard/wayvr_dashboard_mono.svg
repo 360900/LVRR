@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- LVRR placeholder monochrome icon, used for WayVR's dashboard buttons. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 30 30">
+  <g fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M7,4.5 V13.5 H13"/>
+    <path d="M16,4.5 L19.5,13.5 L23,4.5"/>
+    <path d="M7,25.5 V16.5 H11 A2.7,2.7 0 0 1 11,21.9 H7 M10.5,21.9 L13.5,25.5"/>
+    <path d="M16.5,25.5 V16.5 H20.5 A2.7,2.7 0 0 1 20.5,21.9 H16.5 M20,21.9 L23,25.5"/>
+  </g>
+</svg>

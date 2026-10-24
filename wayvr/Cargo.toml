@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
   "dash-frontend",
+  "lvrr-common",
   "scripts/prost_build",
   "uidev",
   "wayvr",
