@@ -530,7 +530,20 @@ impl<C: Compositor> OpenXrData<C> {
                     info!("Display refresh rate changed from {from} Hz to {to} Hz");
                     // A rate that isn't positive is unknown, so it's queried again.
                     let to = if to.is_finite() && to > 0.0 { to } else { 0.0 };
-                    self.refresh_rate.store(to.to_bits(), Ordering::Relaxed);
+                    let previous = self.refresh_rate.swap(to.to_bits(), Ordering::Relaxed);
+                    // Like SteamVR when a driver changes a property. Apps can't look container
+                    // handles up, so none is given.
+                    if previous != to.to_bits() {
+                        self.push_event(
+                            vr::EVREventType::PropertyChanged,
+                            vr::VREvent_Data_t {
+                                property: vr::VREvent_Property_t {
+                                    container: vr::k_ulInvalidPropertyContainer,
+                                    prop: vr::ETrackedDeviceProperty::DisplayFrequency_Float,
+                                },
+                            },
+                        );
+                    }
                 }
                 // Hidden area meshes are fetched from the runtime whenever the app asks.
                 xr::Event::VisibilityMaskChangedKHR(_) => debug!("visibility mask changed"),
