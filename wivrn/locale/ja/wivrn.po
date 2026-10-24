@@ -89,9 +89,7 @@ msgid "Refresh rate"
 msgstr "リフレッシュレート"
 
 #: client/scenes/gui_settings.cpp:237
-msgid ""
-"WiVRn can't directly change the refresh rate on this device. See your "
-"device's settings to change the refresh rate."
+msgid "LVRR can't directly change the refresh rate on this device. See your device's settings to change the refresh rate."
 msgstr ""
 "このデバイスでは直接リフレッシュレートを変更できません。デバイスの設定から変"
 "更してください。"
@@ -686,12 +684,12 @@ msgid "Opacity of the panel and card backgrounds"
 msgstr "パネルとカードの背景の透け具合"
 
 #: client/scenes/lobby.cpp:232
-msgid "Incompatible WiVRn server: no protocol field in TXT"
+msgid "Incompatible LVRR server: no protocol field in TXT"
 msgstr "互換性のないサーバー（プロトコルのフィールドは欠落）"
 
 #: client/scenes/lobby.cpp:235
 #, c++-format
-msgid "Incompatible WiVRn server protocol (client: {}, server: {})"
+msgid "Incompatible LVRR server protocol (client: {}, server: {})"
 msgstr "互換性のないサーバー（クライエント{}、サーバー{}）"
 
 #: client/scenes/lobby.cpp:250
@@ -802,16 +800,16 @@ msgstr "パソコン"
 
 #: client/scenes/lobby_gui.cpp:370
 msgctxt "page header subtitle"
-msgid "Pick a PC running the WiVRn server to stream from."
-msgstr "WiVRnサーバーが動作しているPCを選択して接続しましょう。"
+msgid "Pick a PC running the LVRR server to stream from."
+msgstr "LVRRサーバーが動作しているPCを選択して接続しましょう。"
 
 #: client/scenes/lobby_gui.cpp:373
 msgid "Add server"
 msgstr "サーバーを追加する"
 
 #: client/scenes/lobby_gui.cpp:401
-msgid "Start a WiVRn server on your local network."
-msgstr "ローカルネットワークでWiVRnサーバーを起動してください。"
+msgid "Start an LVRR server on your local network."
+msgstr "ローカルネットワークでLVRRサーバーを起動してください。"
 
 #: client/scenes/lobby_gui.cpp:424
 msgid "Connect"
@@ -914,16 +912,16 @@ msgid "Enable body tracking?"
 msgstr "ボディトラッキングを有効にしますか？"
 
 #: client/scenes/lobby_gui.cpp:858
-msgid "Welcome to WiVRn"
-msgstr "WiVRnへようこそ！"
+msgid "Welcome to LVRR"
+msgstr "LVRRへようこそ！"
 
 #: client/scenes/lobby_gui.cpp:914
 msgid "Licenses"
 msgstr "ライセンス"
 
 #: client/scenes/lobby_gui.cpp:914
-msgid "Open-source components bundled with WiVRn."
-msgstr "WiVRnに同梱されているオープンソースコンポーネント"
+msgid "Open-source components bundled with LVRR."
+msgstr "LVRRに同梱されているオープンソースコンポーネント"
 
 #: client/scenes/lobby_gui.cpp:949
 msgctxt ""
@@ -1241,7 +1239,7 @@ msgid "Press the grip button to move the window"
 msgstr "グリップを握ってパネルを動かしましょう。"
 
 #: client/scenes/stream_gui.cpp:360 client/scenes/stream_gui.cpp:623
-msgid "Press both thumbsticks to display the WiVRn window"
+msgid "Press both thumbsticks to display the LVRR window"
 msgstr "両方のサムスティックを同時に押すことで設定表示"
 
 #: client/scenes/stream_gui.cpp:382

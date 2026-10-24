@@ -367,7 +367,7 @@ void scenes::lobby::gui_server_list()
 	// header with an Add server button on the right
 	const ImVec2 hstart = ImGui::GetCursorPos();
 	const float header_avail = ImGui::GetContentRegionAvail().x;
-	ui::page_header(_cS("page header title", "Computers"), _cS("page header subtitle", "Pick a PC running the WiVRn server to stream from."));
+	ui::page_header(_cS("page header title", "Computers"), _cS("page header subtitle", "Pick a PC running the LVRR server to stream from."));
 	const ImVec2 hend = ImGui::GetCursorPos();
 
 	const std::string add_label = _("Add server");
@@ -398,7 +398,7 @@ void scenes::lobby::gui_server_list()
 		if (sorted_cookies.empty())
 		{
 			ImGui::PushStyleColor(ImGuiCol_Text, t.text_muted);
-			ImGui::TextUnformatted(_S("Start a WiVRn server on your local network."));
+			ImGui::TextUnformatted(_S("Start an LVRR server on your local network."));
 			ImGui::PopStyleColor();
 		}
 
@@ -805,7 +805,7 @@ void scenes::lobby::gui_debug()
 void scenes::lobby::gui_about()
 {
 	ImGui::PushFont(nullptr, constants::gui::font_size_large);
-	CenterTextH(std::string("WiVRn ") + wivrn::display_version());
+	CenterTextH(std::string("LVRR ") + wivrn::display_version());
 	ImGui::PopFont();
 
 	ImGui::Dummy(ImVec2(0, 60));
@@ -855,7 +855,7 @@ void scenes::lobby::gui_first_run()
 	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {20, 40});
 
 	ImGui::PushFont(nullptr, constants::gui::font_size_large);
-	CenterTextH(_("Welcome to WiVRn"));
+	CenterTextH(_("Welcome to LVRR"));
 	ImGui::PopFont();
 
 	config.set_feature(feature::hand_tracking, true);
@@ -911,7 +911,7 @@ void scenes::lobby::gui_licenses()
 	namespace ui = wivrn::ui;
 	const auto & t = ui::current();
 
-	ui::page_header(_S("Licenses"), _S("Open-source components bundled with WiVRn."));
+	ui::page_header(_S("Licenses"), _S("Open-source components bundled with LVRR."));
 
 	// Components shipping a license file, probed once
 	static const std::vector<std::string> components = [] {

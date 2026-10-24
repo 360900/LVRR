@@ -775,7 +775,7 @@ impl View {
 			par.insert("device_name", &disp.name);
 			par.insert("device_icon", disp.icon_path);
 		} else {
-			let icon_path = if params.device_desc.contains("WiVRn") {
+			let icon_path = if params.device_desc.contains("LVRR") {
 				"@/dashboard/wivrn_head_symbolic.svg"
 			} else {
 				"@/dashboard/binary.svg"

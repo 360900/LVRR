@@ -1384,7 +1384,7 @@ void top_bar(float height, ImTextureID logo, const std::vector<top_bar_item> & r
 		ImGui::SameLine(0, 12);
 		ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 1.3f);
 		ImGui::SetCursorPosY((height - ImGui::GetFontSize()) * 0.5f);
-		ImGui::TextUnformatted("WiVRn");
+		ImGui::TextUnformatted("LVRR");
 		ImGui::PopFont();
 
 		// right-aligned cluster

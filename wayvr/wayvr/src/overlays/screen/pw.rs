@@ -371,7 +371,7 @@ fn check(mut par: CheckParams, finalize_fn: ScreenCastFinalizeFn) {
                             ),
                         );
                         par.notify_id =
-                            DbusConnector::notify_send("WayVR", &text, 1, 30000, 0, true).ok();
+                            DbusConnector::notify_send("LVRR", &text, 1, 30000, 0, true).ok();
                     }
                     1
                 } else {

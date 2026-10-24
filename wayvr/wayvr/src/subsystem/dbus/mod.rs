@@ -111,7 +111,7 @@ impl DbusConnector {
         hints.insert("transient".to_string(), Variant(Box::new(transient)));
 
         let retval = proxy.notify(
-            "WayVR",
+            "LVRR",
             replaces_id,
             "",
             summary,

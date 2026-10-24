@@ -613,13 +613,13 @@ msgid "Opacity of the panel and card backgrounds"
 msgstr "Panel və kart arxa fonlarının qeyri-şəffaflığı"
 
 #: client/scenes/lobby.cpp:231
-msgid "Incompatible WiVRn server: no protocol field in TXT"
-msgstr "Uyğun olmayan WiVRn serveri: TXT-də protokol sahəsi yoxdur"
+msgid "Incompatible LVRR server: no protocol field in TXT"
+msgstr "Uyğun olmayan LVRR serveri: TXT-də protokol sahəsi yoxdur"
 
 #: client/scenes/lobby.cpp:234
 #, c++-format
-msgid "Incompatible WiVRn server protocol (client: {}, server: {})"
-msgstr "Uyğun olmayan WiVRn server protokolu (klient: {}, server: {})"
+msgid "Incompatible LVRR server protocol (client: {}, server: {})"
+msgstr "Uyğun olmayan LVRR server protokolu (klient: {}, server: {})"
 
 #: client/scenes/lobby.cpp:249
 #, c++-format
@@ -729,16 +729,16 @@ msgstr "Kompüterlər"
 
 #: client/scenes/lobby_gui.cpp:370
 msgctxt "page header subtitle"
-msgid "Pick a PC running the WiVRn server to stream from."
-msgstr "Yayım almaq üçün WiVRn serveri işləyən kompüter seçin."
+msgid "Pick a PC running the LVRR server to stream from."
+msgstr "Yayım almaq üçün LVRR serveri işləyən kompüter seçin."
 
 #: client/scenes/lobby_gui.cpp:373
 msgid "Add server"
 msgstr "Server əlavə et"
 
 #: client/scenes/lobby_gui.cpp:401
-msgid "Start a WiVRn server on your local network."
-msgstr "Lokal şəbəkənizdə WiVRn serverini başladın."
+msgid "Start an LVRR server on your local network."
+msgstr "Lokal şəbəkənizdə LVRR serverini başladın."
 
 #: client/scenes/lobby_gui.cpp:424
 msgid "Connect"
@@ -841,16 +841,16 @@ msgid "Enable body tracking?"
 msgstr "Bədən izləməsi aktivləşdirilsin?"
 
 #: client/scenes/lobby_gui.cpp:858
-msgid "Welcome to WiVRn"
-msgstr "WiVRn-ə xoş gəlmisiniz"
+msgid "Welcome to LVRR"
+msgstr "LVRR-ə xoş gəlmisiniz"
 
 #: client/scenes/lobby_gui.cpp:914
 msgid "Licenses"
 msgstr "Lisenziyalar"
 
 #: client/scenes/lobby_gui.cpp:914
-msgid "Open-source components bundled with WiVRn."
-msgstr "WiVRn ilə birlikdə təqdim olunan açıq mənbəli komponentlər."
+msgid "Open-source components bundled with LVRR."
+msgstr "LVRR ilə birlikdə təqdim olunan açıq mənbəli komponentlər."
 
 #: client/scenes/lobby_gui.cpp:949
 msgctxt ""
@@ -1164,8 +1164,8 @@ msgid "Press the grip button to move the window"
 msgstr "Pəncərəni hərəkət etdirmək üçün tutma düyməsinə basın"
 
 #: client/scenes/stream_gui.cpp:360 client/scenes/stream_gui.cpp:623
-msgid "Press both thumbsticks to display the WiVRn window"
-msgstr "WiVRn pəncərəsini göstərmək üçün hər iki analoq çubuğa basın"
+msgid "Press both thumbsticks to display the LVRR window"
+msgstr "LVRR pəncərəsini göstərmək üçün hər iki analoq çubuğa basın"
 
 #: client/scenes/stream_gui.cpp:382
 msgid "Motion to photon latency"

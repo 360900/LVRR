@@ -233,7 +233,7 @@ void settings_video(const settings_context & ctx)
 		        .id = "##refresh",
 		        .label = _("Refresh rate"),
 		        .description = system_managed
-		                               ? _("WiVRn can't directly change the refresh rate on this device. See your device's settings to change the refresh rate.")
+		                               ? _("LVRR can't directly change the refresh rate on this device. See your device's settings to change the refresh rate.")
 		                               : _("Use 'auto' to select the refresh rate based on measured application performance. May cause flicker when a change happens."),
 		        .ui = rates.size() < 7 ? ui_kind::segmented : ui_kind::combo,
 		        .get_int = [&config, rates] {

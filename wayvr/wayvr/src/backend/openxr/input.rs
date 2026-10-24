@@ -255,10 +255,10 @@ pub(super) struct OpenXrHandSource {
 
 impl OpenXrInputSource {
     pub fn new(xr: &XrState) -> anyhow::Result<Self> {
-        let mut action_set =
-            xr.session
-                .instance()
-                .create_action_set("wayvr", "WayVR Actions", 0)?;
+        let mut action_set = xr
+            .session
+            .instance()
+            .create_action_set("wayvr", "LVRR Actions", 0)?;
 
         let mut left_source = OpenXrHandSource::new(&mut action_set, "left")?;
         let mut right_source = OpenXrHandSource::new(&mut action_set, "right")?;

@@ -32,5 +32,5 @@ extern "C"
 	extern const uint16_t u_version_major = version(0);
 	extern const uint16_t u_version_minor = version(1);
 	extern const uint16_t u_version_patch = version(2);
-	extern const char u_runtime_description[] = "WiVRn";
+	extern const char u_runtime_description[] = "LVRR";
 }

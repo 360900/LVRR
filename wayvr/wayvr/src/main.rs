@@ -86,15 +86,15 @@ struct Args {
     #[arg(long)]
     uninstall: bool,
 
-    /// Install SteamVR manifest (not recommended; WayVR may have issues when auto-started by SteamVR!)
+    /// Install SteamVR manifest (not recommended; LVRR may have issues when auto-started by SteamVR!)
     #[arg(long)]
     install: bool,
 
-    /// Replace running WayVR instance
+    /// Replace running LVRR desktop instance
     #[arg(long)]
     replace: bool,
 
-    /// Allow multiple running instances of WayVR (things may break!)
+    /// Allow multiple running instances of the LVRR desktop (things may break!)
     #[arg(long)]
     multi: bool,
 
@@ -152,7 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     if !args.multi && !ensure_single_instance(args.replace) {
-        println!("Looks like WayVR is already running.");
+        println!("Looks like the LVRR desktop is already running.");
         println!("Use --replace and I will terminate it for you.");
         return Ok(());
     }
@@ -275,7 +275,7 @@ fn auto_run(args: Args, used_backend: &mut Option<XrBackend>) {
 
     let instructions = format!("{instructions_title}\n{instructions_str}");
 
-    let _ = DbusConnector::notify_send("WayVR", &instructions, 1, 30000, 0, false);
+    let _ = DbusConnector::notify_send("LVRR", &instructions, 1, 30000, 0, false);
 
     #[cfg(not(any(feature = "openvr", feature = "openxr")))]
     compile_error!("No VR support! Enable either openvr or openxr features!");

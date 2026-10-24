@@ -50,8 +50,8 @@ sleep_inhibitor::sleep_inhibitor()
 	        g_variant_new(
 	                "(ssss)",
 	                "sleep:idle",                // What
-	                "WiVRn",                     // Who
-	                "A WiVRn session is active", // Why
+	                "LVRR",                      // Who
+	                "An LVRR session is active", // Why
 	                "block"),                    // Mode
 	        G_DBUS_CALL_FLAGS_NONE,
 	        -1,       // timeout_msec

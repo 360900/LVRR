@@ -94,10 +94,8 @@ msgid "Refresh rate"
 msgstr "更新頻率"
 
 #: client/scenes/gui_settings.cpp:237
-msgid ""
-"WiVRn can't directly change the refresh rate on this device. See your "
-"device's settings to change the refresh rate."
-msgstr "WiVRn 無法直接變更此裝置的更新頻率。請到裝置的設定中變更更新頻率。"
+msgid "LVRR can't directly change the refresh rate on this device. See your device's settings to change the refresh rate."
+msgstr "LVRR 無法直接變更此裝置的更新頻率。請到裝置的設定中變更更新頻率。"
 
 #: client/scenes/gui_settings.cpp:238
 msgid ""
@@ -672,12 +670,12 @@ msgid "Opacity of the panel and card backgrounds"
 msgstr "面板與卡片背景的不透明度"
 
 #: client/scenes/lobby.cpp:232
-msgid "Incompatible WiVRn server: no protocol field in TXT"
-msgstr "不相容的 WiVRn 伺服器: TXT 中沒有協議欄位"
+msgid "Incompatible LVRR server: no protocol field in TXT"
+msgstr "不相容的 LVRR 伺服器: TXT 中沒有協議欄位"
 
 #: client/scenes/lobby.cpp:235
-msgid "Incompatible WiVRn server protocol (client: {}, server: {})"
-msgstr "不相容的 WiVRn 伺服器協議（用戶端: {}，伺服器: {}）"
+msgid "Incompatible LVRR server protocol (client: {}, server: {})"
+msgstr "不相容的 LVRR 伺服器協議（用戶端: {}，伺服器: {}）"
 
 #: client/scenes/lobby.cpp:250
 msgid "Cannot resolve hostname: {}"
@@ -783,16 +781,16 @@ msgstr "電腦"
 
 #: client/scenes/lobby_gui.cpp:370
 msgctxt "page header subtitle"
-msgid "Pick a PC running the WiVRn server to stream from."
-msgstr "選擇一台執行 WiVRn 伺服器的電腦進行串流。"
+msgid "Pick a PC running the LVRR server to stream from."
+msgstr "選擇一台執行 LVRR 伺服器的電腦進行串流。"
 
 #: client/scenes/lobby_gui.cpp:373
 msgid "Add server"
 msgstr "新增伺服器"
 
 #: client/scenes/lobby_gui.cpp:401
-msgid "Start a WiVRn server on your local network."
-msgstr "在區域網路中啟動 WiVRn 伺服器。"
+msgid "Start an LVRR server on your local network."
+msgstr "在區域網路中啟動 LVRR 伺服器。"
 
 #: client/scenes/lobby_gui.cpp:424
 msgid "Connect"
@@ -894,16 +892,16 @@ msgid "Enable body tracking?"
 msgstr "要啟用身體追蹤嗎？"
 
 #: client/scenes/lobby_gui.cpp:858
-msgid "Welcome to WiVRn"
-msgstr "歡迎使用 WiVRn"
+msgid "Welcome to LVRR"
+msgstr "歡迎使用 LVRR"
 
 #: client/scenes/lobby_gui.cpp:914
 msgid "Licenses"
 msgstr "授權資訊"
 
 #: client/scenes/lobby_gui.cpp:914
-msgid "Open-source components bundled with WiVRn."
-msgstr "WiVRn 內含的開放原始碼元件。"
+msgid "Open-source components bundled with LVRR."
+msgstr "LVRR 內含的開放原始碼元件。"
 
 #: client/scenes/lobby_gui.cpp:949
 msgctxt ""
@@ -1210,8 +1208,8 @@ msgid "Press the grip button to move the window"
 msgstr "按下握把按鈕來移動視窗"
 
 #: client/scenes/stream_gui.cpp:360 client/scenes/stream_gui.cpp:623
-msgid "Press both thumbsticks to display the WiVRn window"
-msgstr "同時按下兩側搖桿以顯示 WiVRn 視窗"
+msgid "Press both thumbsticks to display the LVRR window"
+msgstr "同時按下兩側搖桿以顯示 LVRR 視窗"
 
 #: client/scenes/stream_gui.cpp:382
 msgid "Motion to photon latency"

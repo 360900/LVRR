@@ -96,11 +96,9 @@ msgid "Refresh rate"
 msgstr "Frecuencia de actualización"
 
 #: client/scenes/gui_settings.cpp:237
-msgid ""
-"WiVRn can't directly change the refresh rate on this device. See your "
-"device's settings to change the refresh rate."
+msgid "LVRR can't directly change the refresh rate on this device. See your device's settings to change the refresh rate."
 msgstr ""
-"WiVRn no puede cambiar directamente la tasa de refresco en este dispositivo. "
+"LVRR no puede cambiar directamente la tasa de refresco en este dispositivo. "
 "Vea los ajustes del dispositivo para cambiar la tasa de refresco."
 
 #: client/scenes/gui_settings.cpp:238
@@ -708,13 +706,13 @@ msgid "Opacity of the panel and card backgrounds"
 msgstr "Opacidad de los fondos del panel y de la tarjeta"
 
 #: client/scenes/lobby.cpp:232
-msgid "Incompatible WiVRn server: no protocol field in TXT"
-msgstr "Servidor WiVRn incompatible: no hay campo de protocolo en TXT"
+msgid "Incompatible LVRR server: no protocol field in TXT"
+msgstr "Servidor LVRR incompatible: no hay campo de protocolo en TXT"
 
 #: client/scenes/lobby.cpp:235
 #, c++-format
-msgid "Incompatible WiVRn server protocol (client: {}, server: {})"
-msgstr "Protocolo del servidor WiVRn incompatible (cliente: {}, servidor: {})"
+msgid "Incompatible LVRR server protocol (client: {}, server: {})"
+msgstr "Protocolo del servidor LVRR incompatible (cliente: {}, servidor: {})"
 
 #: client/scenes/lobby.cpp:250
 #, c++-format
@@ -824,16 +822,16 @@ msgstr "Ordenadores"
 
 #: client/scenes/lobby_gui.cpp:370
 msgctxt "page header subtitle"
-msgid "Pick a PC running the WiVRn server to stream from."
-msgstr "Elija un PC de los cuales corre WiVRn para empezar la transimsión."
+msgid "Pick a PC running the LVRR server to stream from."
+msgstr "Elija un PC de los cuales corre LVRR para empezar la transimsión."
 
 #: client/scenes/lobby_gui.cpp:373
 msgid "Add server"
 msgstr "Agregar servidor"
 
 #: client/scenes/lobby_gui.cpp:401
-msgid "Start a WiVRn server on your local network."
-msgstr "Iniciar un servidor de WiVRn en tu red local."
+msgid "Start an LVRR server on your local network."
+msgstr "Iniciar un servidor de LVRR en tu red local."
 
 #: client/scenes/lobby_gui.cpp:424
 msgid "Connect"
@@ -936,16 +934,16 @@ msgid "Enable body tracking?"
 msgstr "¿Habilitar seguimiento corporal?"
 
 #: client/scenes/lobby_gui.cpp:858
-msgid "Welcome to WiVRn"
-msgstr "Bienvenido a WiVRn"
+msgid "Welcome to LVRR"
+msgstr "Bienvenido a LVRR"
 
 #: client/scenes/lobby_gui.cpp:914
 msgid "Licenses"
 msgstr "Licencias"
 
 #: client/scenes/lobby_gui.cpp:914
-msgid "Open-source components bundled with WiVRn."
-msgstr "Componentes de código abierto incluidos con WiVRn."
+msgid "Open-source components bundled with LVRR."
+msgstr "Componentes de código abierto incluidos con LVRR."
 
 #: client/scenes/lobby_gui.cpp:949
 msgctxt ""
@@ -1263,8 +1261,8 @@ msgid "Press the grip button to move the window"
 msgstr "Pulsa el botón de agarre para mover la ventana"
 
 #: client/scenes/stream_gui.cpp:360 client/scenes/stream_gui.cpp:623
-msgid "Press both thumbsticks to display the WiVRn window"
-msgstr "Pulsa ambos joysticks para mostrar la ventana de WiVRn"
+msgid "Press both thumbsticks to display the LVRR window"
+msgstr "Pulsa ambos joysticks para mostrar la ventana de LVRR"
 
 #: client/scenes/stream_gui.cpp:382
 msgid "Motion to photon latency"

@@ -534,13 +534,13 @@ msgid "Language and advanced options."
 msgstr ""
 
 #: client/scenes/lobby.cpp:217
-msgid "Incompatible WiVRn server: no protocol field in TXT"
-msgstr "Несовместимый сервер WiVRn: нет поля протокола в TXT"
+msgid "Incompatible LVRR server: no protocol field in TXT"
+msgstr "Несовместимый сервер LVRR: нет поля протокола в TXT"
 
 #: client/scenes/lobby.cpp:220
 #, c++-format
-msgid "Incompatible WiVRn server protocol (client: {}, server: {})"
-msgstr "Несовместимый протокол сервера WiVRn (клиент: {}, сервер: {})"
+msgid "Incompatible LVRR server protocol (client: {}, server: {})"
+msgstr "Несовместимый протокол сервера LVRR (клиент: {}, сервер: {})"
 
 #: client/scenes/lobby.cpp:235
 #, c++-format
@@ -649,7 +649,7 @@ msgstr ""
 
 #: client/scenes/lobby_gui.cpp:372
 msgctxt "page header subtitle"
-msgid "Pick a PC running the WiVRn server to stream from."
+msgid "Pick a PC running the LVRR server to stream from."
 msgstr ""
 
 #: client/scenes/lobby_gui.cpp:375
@@ -657,7 +657,7 @@ msgid "Add server"
 msgstr "Добавить сервер"
 
 #: client/scenes/lobby_gui.cpp:403
-msgid "Start a WiVRn server on your local network."
+msgid "Start an LVRR server on your local network."
 msgstr ""
 
 #: client/scenes/lobby_gui.cpp:426
@@ -762,8 +762,8 @@ msgid "Enable body tracking?"
 msgstr "Включить отслеживание тела?"
 
 #: client/scenes/lobby_gui.cpp:839
-msgid "Welcome to WiVRn"
-msgstr "Добро пожаловать в WiVRn"
+msgid "Welcome to LVRR"
+msgstr "Добро пожаловать в LVRR"
 
 #: client/scenes/lobby_gui.cpp:867
 msgid "Yes"
@@ -778,7 +778,7 @@ msgid "Licenses"
 msgstr "Лицензии"
 
 #: client/scenes/lobby_gui.cpp:895
-msgid "Open-source components bundled with WiVRn."
+msgid "Open-source components bundled with LVRR."
 msgstr ""
 
 #: client/scenes/lobby_gui.cpp:930
@@ -1171,8 +1171,8 @@ msgid "Press the grip button to move the window"
 msgstr "Нажмите кнопку захвата чтобы передвинуть окно"
 
 #: client/scenes/stream_gui.cpp:357 client/scenes/stream_gui.cpp:613
-msgid "Press both thumbsticks to display the WiVRn window"
-msgstr "Нажмите оба джойстика чтобы показать окно WiVRn"
+msgid "Press both thumbsticks to display the LVRR window"
+msgstr "Нажмите оба джойстика чтобы показать окно LVRR"
 
 #: client/scenes/stream_gui.cpp:379
 msgid "Motion to photon latency"

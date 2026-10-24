@@ -127,7 +127,7 @@ int create_listen_socket()
 		std::cerr << "Could not bind socket to path " << sock_file << ": " << strerror(errno) << ". Is the service running already?" << std::endl;
 		if (errno == EADDRINUSE)
 		{
-			std::cerr << "If WiVRn is not running, delete " << sock_file << " before starting a new instance" << std::endl;
+			std::cerr << "If LVRR is not running, delete " << sock_file << " before starting a new instance" << std::endl;
 		}
 		close(fd);
 		throw std::system_error(errno, std::system_category());
@@ -941,7 +941,7 @@ auto create_dbus_connection()
 
 int inner_main(int argc, char * argv[], bool show_instructions)
 {
-	std::cerr << "WiVRn " << wivrn::display_version() << " starting" << std::endl;
+	std::cerr << "LVRR " << wivrn::display_version() << " starting" << std::endl;
 	if (show_instructions)
 	{
 		if (auto command = steam_command(); not command.empty())
@@ -999,7 +999,7 @@ int inner_main(int argc, char * argv[], bool show_instructions)
 	                             nullptr);
 
 	// Initialize libnotify
-	notify_init("WiVRn");
+	notify_init("LVRR");
 
 	// Main loop
 	g_main_loop_run(main_loop);
@@ -1039,7 +1039,7 @@ int main(int argc, char * argv[])
 
 	if (*version_flag)
 	{
-		std::cout << "WiVRn version " << wivrn::display_version() << std::endl;
+		std::cout << "LVRR version " << wivrn::display_version() << std::endl;
 		return 0;
 	}
 

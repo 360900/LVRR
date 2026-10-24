@@ -640,13 +640,13 @@ msgid "Opacity of the panel and card backgrounds"
 msgstr "Opacità del pannello e degli sfondi delle schede"
 
 #: client/scenes/lobby.cpp:217
-msgid "Incompatible WiVRn server: no protocol field in TXT"
-msgstr "Server WiVRn incompatibile: nessun campo protocollo in TXT"
+msgid "Incompatible LVRR server: no protocol field in TXT"
+msgstr "Server LVRR incompatibile: nessun campo protocollo in TXT"
 
 #: client/scenes/lobby.cpp:220
 #, c++-format
-msgid "Incompatible WiVRn server protocol (client: {}, server: {})"
-msgstr "Protocollo server WiVRn incompatibile (client: {}, server: {})"
+msgid "Incompatible LVRR server protocol (client: {}, server: {})"
+msgstr "Protocollo server LVRR incompatibile (client: {}, server: {})"
 
 #: client/scenes/lobby.cpp:235
 #, c++-format
@@ -756,9 +756,9 @@ msgstr "Computer"
 
 #: client/scenes/lobby_gui.cpp:372
 msgctxt "page header subtitle"
-msgid "Pick a PC running the WiVRn server to stream from."
+msgid "Pick a PC running the LVRR server to stream from."
 msgstr ""
-"Seleziona un PC su cui è in esecuzione il server WiVRn da cui avviare lo strea"
+"Seleziona un PC su cui è in esecuzione il server LVRR da cui avviare lo strea"
 "ming."
 
 #: client/scenes/lobby_gui.cpp:375
@@ -766,8 +766,8 @@ msgid "Add server"
 msgstr "Aggiungi server"
 
 #: client/scenes/lobby_gui.cpp:403
-msgid "Start a WiVRn server on your local network."
-msgstr "Avvia un server WiVRn sulla tua rete locale."
+msgid "Start an LVRR server on your local network."
+msgstr "Avvia un server LVRR sulla tua rete locale."
 
 #: client/scenes/lobby_gui.cpp:426
 msgid "Connect"
@@ -870,16 +870,16 @@ msgid "Enable body tracking?"
 msgstr "Attivare il tracciamento del corpo?"
 
 #: client/scenes/lobby_gui.cpp:839
-msgid "Welcome to WiVRn"
-msgstr "Benvenuto su WiVRn"
+msgid "Welcome to LVRR"
+msgstr "Benvenuto su LVRR"
 
 #: client/scenes/lobby_gui.cpp:895
 msgid "Licenses"
 msgstr "Licenze"
 
 #: client/scenes/lobby_gui.cpp:895
-msgid "Open-source components bundled with WiVRn."
-msgstr "Componenti open-source inclusi in WiVRn."
+msgid "Open-source components bundled with LVRR."
+msgstr "Componenti open-source inclusi in LVRR."
 
 #: client/scenes/lobby_gui.cpp:930
 msgctxt ""
@@ -1197,8 +1197,8 @@ msgid "Press the grip button to move the window"
 msgstr "Premi il pulsante laterale per spostare la finestra"
 
 #: client/scenes/stream_gui.cpp:360 client/scenes/stream_gui.cpp:623
-msgid "Press both thumbsticks to display the WiVRn window"
-msgstr "Premi entrambe le levette analogiche per mostrare la finestra di WiVRn"
+msgid "Press both thumbsticks to display the LVRR window"
+msgstr "Premi entrambe le levette analogiche per mostrare la finestra di LVRR"
 
 #: client/scenes/stream_gui.cpp:382
 msgid "Motion to photon latency"

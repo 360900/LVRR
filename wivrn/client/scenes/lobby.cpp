@@ -229,10 +229,10 @@ std::unique_ptr<wivrn_session> scenes::lobby::connect_to_session(wivrn_discover:
 
 		auto protocol = service.txt.find("protocol");
 		if (protocol == service.txt.end())
-			throw std::runtime_error(_("Incompatible WiVRn server: no protocol field in TXT"));
+			throw std::runtime_error(_("Incompatible LVRR server: no protocol field in TXT"));
 
 		if (protocol->second != protocol_string)
-			throw std::runtime_error(fmt::format(_F("Incompatible WiVRn server protocol (client: {}, server: {})"), protocol_string, protocol->second));
+			throw std::runtime_error(fmt::format(_F("Incompatible LVRR server protocol (client: {}, server: {})"), protocol_string, protocol->second));
 	}
 
 	// Only the automatically discovered servers already have their IP addresses available

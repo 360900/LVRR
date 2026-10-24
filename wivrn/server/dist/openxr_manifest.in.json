@@ -1,7 +1,7 @@
 {
     "file_format_version": "1.0.0",
     "runtime": {
-        "name": "WiVRn",
+        "name": "LVRR",
         "library_path": "@target_path@"@extra_fields@
     }
 }

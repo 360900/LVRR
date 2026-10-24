@@ -239,7 +239,7 @@ void systemd_units_manager::start_application(const std::vector<std::string> & a
 	g_variant_builder_add(&b,
 	                      "(sv)",
 	                      "Description",
-	                      g_variant_new("s", "Application spawned by WiVRn"));
+	                      g_variant_new("s", "Application spawned by LVRR"));
 
 	variant_builder argv(G_VARIANT_TYPE("as"));
 	for (const auto & arg: args)

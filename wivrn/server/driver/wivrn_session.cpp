@@ -105,9 +105,9 @@ wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection
 	{
 		audio_handle = audio_device::create(
 		        "wivrn.source",
-		        "WiVRn(microphone)",
+		        "LVRR (microphone)",
 		        "wivrn.sink",
-		        "WiVRn",
+		        "LVRR",
 		        get_info(),
 		        *this);
 	}
@@ -265,7 +265,7 @@ wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection
 
 	if (auto system_name = get_info().system_name; !system_name.empty())
 	{
-		system_name += " on WiVRn";
+		system_name += " on LVRR";
 		strlcpy(xrt_system.base.properties.name, system_name.c_str(), std::size(xrt_system.base.properties.name));
 	}
 
