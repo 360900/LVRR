@@ -46,7 +46,7 @@ cargo xtask install
 target/stage/bin/lvrr
 ```
 
-`cargo xtask apk` builds the headset APK and needs the Android SDK and NDK. Upstream changes are merged as described in [CHANGES.md](CHANGES.md).
+`cargo xtask apk` builds the headset APK and needs the Android SDK and NDK. Upstream changes are merged as described in [CHANGES.md](CHANGES.md), followed by `cargo xtask rebrand`.
 
 # License
 

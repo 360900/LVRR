@@ -55,6 +55,7 @@ jobs:
         run: |
           cargo fmt --check
           cargo clippy --locked -p lvrr -p xtask --all-targets -- -D warnings
+          cargo xtask rebrand --check
       - name: Build
         run: cargo xtask dist
       - name: Test wayvr

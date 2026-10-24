@@ -101,6 +101,7 @@ def check(name, repo, branch, prefix, local_edits, ack_commits, seen):
                 "  ```",
                 f"  git fetch --no-tags {url} {branch}",
                 f'  git subtree merge --prefix={prefix} {head[:10]} -m "{name}: merge {repo} {branch} at {head[:10]}"',
+                "  cargo xtask rebrand",
                 "  ```",
             ]
             findings.append("\n".join(lines))
