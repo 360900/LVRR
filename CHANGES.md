@@ -91,7 +91,7 @@ Status: `pending` | `merged` | `superseded-by-<n>` | `blocked` | `dropped` | `re
 | `3348188` | refresh rate fallback returns Hz instead of seconds |
 | `3950c0c` | gl: apps rendering on another GPU than the runtime (hybrid laptops) get frames copied through host memory |
 | `e193c84` | session the runtime stops (WiVRn's stop button) ended right away instead of after WiVRn's 10 s loss |
-| `2b3e8e4` | refresh rate cached and updated from runtime events; no queries once the session is lost |
+| `2b3e8e4` `5cb67b7` | refresh rate cached and updated from runtime events, which apps get as a display frequency change; no queries once the session is lost |
 | `a7c8ef3` | gaps in converted bindings logged at debug, in the game's own once at info; quieter repeated manifest loads and routine events |
 | `31c311f` | libmonado found through the host's runtime file inside Steam's container (Proton battery, trackers) |
 | `23ad894` | Index `/input/pinch` bound to the trigger, like SteamVR |
