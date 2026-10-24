@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Job names must not be make_release or build_appimage, which wayvr's
+  # build.rs adds to its version.
+  linux:
+    name: Linux
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    steps:
+      - name: Install dependencies
+        run: |
+          printf '\n[multilib]\nInclude = /etc/pacman.d/mirrorlist\n' >> /etc/pacman.conf
+          pacman -Syu --noconfirm --needed git rustup \
+            boost clang cli11 cmake eigen extra-cmake-modules glib2-devel libdrm ninja nlohmann-json python \
+            qt6-tools shaderc vulkan-headers \
+            avahi boost-libs cairo ffmpeg glib2 libarchive libbsd libgl libnotify libpipewire libpng librsvg \
+            libx11 libxcb openssl systemd-libs vulkan-icd-loader x264 \
+            kcoreaddons ki18n kiconthemes kirigami kirigami-addons polkit qcoro qqc2-desktop-style qt6-base \
+            qt6-declarative \
+            alsa-lib dav1d dbus libinput libxext libxkbcommon libxkbcommon-x11 libxrandr openvr openxr \
+            lib32-gcc-libs lib32-glibc
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      # The container runs as root on a checkout owned by the runner user, so
+      # git (and the versions WiVRn and wayvr take from it) would fail.
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Install Rust
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            xrizer -> ../target/xrizer
+            wayvr -> ../target/wayvr
+      - name: Lint
+        run: |
+          cargo fmt --check
+          cargo clippy --locked -p lvrr -p xtask --all-targets -- -D warnings
+      - name: Build
+        run: cargo xtask dist
+      - name: Test wayvr
+        working-directory: wayvr
+        env:
+          CARGO_TARGET_DIR: ../target/wayvr
+        run: cargo test --workspace --locked --release
+      - uses: actions/upload-artifact@v7
+        with:
+          name: lvrr-linux-x86_64
+          path: target/dist/*.tar.gz
+
+  android:
+    name: Android (${{ matrix.type }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        type: [release, debug]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/cache@v5
+        with:
+          key: gradle-${{ hashFiles('wivrn/gradle/wrapper/gradle-wrapper.properties', 'wivrn/build.gradle') }}
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          restore-keys: gradle-
+      - uses: actions/cache@v5
+        with:
+          key: android-fetch-${{ matrix.type }}-${{ hashFiles('wivrn/CMakeLists.txt') }}
+          path: |
+            target/android-fetch/*-subbuild/*-populate-prefix/src/*.tar.*
+            target/android-fetch/*-subbuild/*-populate-prefix/src/*.zip
+            target/android-fetch/*.tar.*
+            target/android-fetch/*.zip
+            target/android-fetch/*.tgz
+          restore-keys: android-fetch-${{ matrix.type }}-
+      # Same as WiVRn's own Android job.
+      - name: Install dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y glslang-tools spirv-tools librsvg2-bin gettext
+          wget -q https://github.com/KhronosGroup/KTX-Software/releases/download/v4.3.2/KTX-Software-4.3.2-Linux-x86_64.deb
+          sudo dpkg --install KTX-Software-4.3.2-Linux-x86_64.deb
+          rm KTX-Software-4.3.2-Linux-x86_64.deb
+          npm install --global @gltf-transform/cli
+      - name: Install Rust
+        run: rustup toolchain install
+      - name: Signing key
+        if: matrix.type == 'release'
+        env:
+          APK_SIGNINGKEYPASSWORD: ${{ secrets.APK_SIGNINGKEYPASSWORD }}
+          APK_KEYSTORE_BASE64: ${{ secrets.APK_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$APK_SIGNINGKEYPASSWORD" ] && [ -n "$APK_KEYSTORE_BASE64" ]; then
+            echo signingKeyPassword="$APK_SIGNINGKEYPASSWORD" > wivrn/gradle.properties
+            echo "$APK_KEYSTORE_BASE64" | base64 --decode --ignore-garbage > wivrn/ks.keystore
+          else
+            echo "No signing secrets, the release APK will be unsigned"
+          fi
+      - name: Build
+        run: cargo xtask apk ${{ matrix.type == 'debug' && '--debug' || '' }} -- -Pwivrn_compress_glb=ON
+      - uses: actions/upload-artifact@v7
+        with:
+          name: lvrr-apk-${{ matrix.type }}
+          path: target/dist/*.apk
