@@ -1105,6 +1105,7 @@ impl std::fmt::Display for GraphicalSession {
         match self {
             GraphicalSession::Vulkan(_) => f.write_str("GraphicalSession::Vulkan"),
             GraphicalSession::OpenGL(_) => f.write_str("GraphicalSession::OpenGL"),
+            GraphicalSession::GlBridge(_) => f.write_str("GraphicalSession::GlBridge"),
             GraphicalSession::Headless(_) => f.write_str("GraphicalSession::Headless"),
             #[cfg(test)]
             GraphicalSession::Fake(_) => f.write_str("GraphicalSession::Fake"),

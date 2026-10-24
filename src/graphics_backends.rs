@@ -3,7 +3,7 @@ mod headless;
 mod vulkan;
 
 use derive_more::{From, TryInto};
-pub use gl::GlData;
+pub use gl::{GlBridgeData, GlData};
 pub use headless::HeadlessData;
 use openvr as vr;
 use openxr as xr;
@@ -72,6 +72,9 @@ pub trait GraphicsBackend: Into<SupportedBackend> {
         info
     }
 
+    /// Called with the create info of a new swapchain, before its images are stored.
+    fn swapchain_created(&mut self, _info: &xr::SwapchainCreateInfo<Self::Api>) {}
+
     fn store_swapchain_images(
         &mut self,
         images: Vec<<Self::Api as xr::Graphics>::SwapchainImage>,
@@ -106,6 +109,7 @@ pub trait GraphicsBackend: Into<SupportedBackend> {
 pub enum SupportedBackend {
     Vulkan(VulkanData),
     OpenGL(GlData),
+    GlBridge(GlBridgeData),
     Headless(HeadlessData),
     #[cfg(test)]
     Fake(crate::compositor::FakeGraphicsData),
@@ -182,7 +186,14 @@ impl SupportedBackend {
                     && !vk_texture.m_pQueue.is_null();
                 handles_set.then(|| Self::Vulkan(VulkanData::new(vk_texture)))
             }
-            vr::ETextureType::OpenGL => GlData::new(instance).map(Self::OpenGL),
+            vr::ETextureType::OpenGL => {
+                let gl = GlData::new(instance)?;
+                if gl.on_runtime_device(instance) {
+                    Some(Self::OpenGL(gl))
+                } else {
+                    GlBridgeData::new(gl, instance).map(Self::GlBridge)
+                }
+            }
             #[cfg(test)]
             vr::ETextureType::Reserved => Some(Self::Fake(
                 crate::compositor::FakeGraphicsData::new(texture),

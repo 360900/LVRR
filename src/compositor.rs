@@ -1698,6 +1698,7 @@ impl<G: GraphicsBackend> FrameController<G> {
         let images = swapchain.enumerate_images()?;
 
         let format = G::from_openxr_format(create_info.format);
+        backend.swapchain_created(create_info);
         backend.store_swapchain_images(images, format);
         debug!(
             "Created new swapchain: {}x{}, format = {:?}",

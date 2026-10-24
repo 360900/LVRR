@@ -697,6 +697,7 @@ fn fake_vulkan() -> VulkanData {
         queue_family_index: 0,
         real_data: None,
         owns_device: false,
+        host_import_alignment: None,
     }
 }
 

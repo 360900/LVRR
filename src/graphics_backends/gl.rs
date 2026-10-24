@@ -15,6 +15,9 @@ use std::sync::{LazyLock, Mutex, Once, OnceLock, PoisonError};
 use xr::sys::Handle as _;
 use xr::sys::platform::{EGLConfig, EGLContext, EGLDisplay, EglGetProcAddressMNDX};
 
+mod bridge;
+pub use bridge::GlBridgeData;
+
 /// None if GLX isn't installed (EGL-only systems).
 static GLX: LazyLock<Option<GlxLib>> = LazyLock::new(|| {
     // Without glvnd, GLX is part of libGL.
@@ -422,6 +425,8 @@ pub struct GlData {
     resolved: Mutex<Resolved>,
     /// The extent last copied to each eye's layer of each swapchain image.
     eye_extents: Mutex<Vec<[Option<xr::Extent2Di>; 2]>>,
+    /// Copies flip rows, so the images read back top to bottom like Vulkan's, see [bridge].
+    flip: bool,
 }
 
 /// Single-sample copy of a multisampled renderbuffer, see [GlData::resolve].
@@ -470,7 +475,168 @@ impl GlData {
             draw_fbo: fbos[1],
             resolved: Default::default(),
             eye_extents: Default::default(),
+            flip: false,
         })
+    }
+}
+
+const NUM_DEVICE_UUIDS_EXT: GLenum = 0x9596;
+const DEVICE_UUID_EXT: GLenum = 0x9597;
+
+/// Runtimes import their swapchain memory into the app's context, which can't work across GPUs
+/// (Monado based ones crash in xrCreateSwapchain), e.g. when a hybrid laptop runs the app on the
+/// iGPU. Devices that can't be identified are assumed to match.
+fn same_device_as_runtime(instance: &xr::Instance, session_info: &SessionCreateInfo) -> bool {
+    let Some(gl_uuids) = (unsafe { gl_device_uuids(session_info) }) else {
+        return true;
+    };
+
+    static RUNTIME_UUID: Mutex<Option<(u64, Option<[u8; 16]>)>> = Mutex::new(None);
+    let runtime_uuid = {
+        let mut cached = RUNTIME_UUID.lock().unwrap_or_else(PoisonError::into_inner);
+        let handle = instance.as_raw().into_raw();
+        match *cached {
+            Some((h, uuid)) if h == handle => uuid,
+            _ => {
+                let uuid = instance
+                    .system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)
+                    .map_err(|e| e.to_string())
+                    .and_then(|system| super::vulkan::runtime_device_uuid(instance, system))
+                    .inspect_err(|e| warn!("Can't tell which GPU the runtime uses: {e}"))
+                    .ok();
+                *cached = Some((handle, uuid));
+                uuid
+            }
+        }
+    };
+    let Some(runtime_uuid) = runtime_uuid else {
+        return true;
+    };
+
+    let same = gl_uuids.contains(&runtime_uuid);
+    if !same {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            let hex = |uuid: &[u8; 16]| uuid.iter().map(|b| format!("{b:02x}")).collect::<String>();
+            warn!(
+                "The app renders OpenGL on a different GPU ({}) than the OpenXR runtime ({}), \
+                 copying frames through system memory. Running the app on the runtime's GPU is \
+                 faster.",
+                gl_uuids.iter().map(hex).collect::<Vec<_>>().join(", "),
+                hex(&runtime_uuid),
+            );
+        });
+    }
+    same
+}
+
+/// Whether the current context has extension `name`.
+fn has_gl_extension(name: &CStr) -> bool {
+    if !gl::GetStringi::is_loaded() {
+        return false;
+    }
+    unsafe {
+        let mut count = 0;
+        gl::GetIntegerv(gl::NUM_EXTENSIONS, &mut count);
+        (0..count.max(0) as GLuint).any(|i| {
+            let ext = gl::GetStringi(gl::EXTENSIONS, i);
+            !ext.is_null() && CStr::from_ptr(ext.cast()) == name
+        })
+    }
+}
+
+/// The devices of the current context per GL_EXT_memory_object, which runtimes import swapchain
+/// memory with.
+unsafe fn gl_device_uuids(session_info: &SessionCreateInfo) -> Option<Vec<[u8; 16]>> {
+    type GetUnsignedBytei = unsafe extern "system" fn(GLenum, GLuint, *mut u8);
+    unsafe {
+        let get = session_info.get_proc_address("glGetUnsignedBytei_vEXT");
+        if !has_gl_extension(c"GL_EXT_memory_object") || get.is_null() {
+            return None;
+        }
+        let get = std::mem::transmute::<*const c_void, GetUnsignedBytei>(get);
+
+        let mut count = 0;
+        gl::GetIntegerv(NUM_DEVICE_UUIDS_EXT, &mut count);
+        let uuids: Vec<[u8; 16]> = (0..count.max(0) as GLuint)
+            .map(|i| {
+                let mut uuid = [0; 16];
+                get(DEVICE_UUID_EXT, i, uuid.as_mut_ptr());
+                uuid
+            })
+            .collect();
+        (!uuids.is_empty()).then_some(uuids)
+    }
+}
+
+impl GlData {
+    /// Whether the runtime can use swapchain images in this context directly, see
+    /// [same_device_as_runtime].
+    pub(crate) fn on_runtime_device(&self, instance: &xr::Instance) -> bool {
+        same_device_as_runtime(instance, &self.session_info)
+    }
+
+    /// Starts reading the bottom-left `extent` of layer `layer` of swapchain image `image_index`
+    /// into the start of `pack_buffer`, rows tightly packed. Leaves the app's bindings and pack
+    /// state as they were.
+    ///
+    /// # Safety
+    /// `pack_buffer` must hold `extent` pixels of `format` and `ty`.
+    pub(super) unsafe fn read_image(
+        &self,
+        image_index: usize,
+        target: GLenum,
+        layer: GLint,
+        extent: xr::Extent2Di,
+        (format, ty): (GLenum, GLenum),
+        pack_buffer: GLuint,
+    ) {
+        let src = GlTexture {
+            name: self.images[image_index],
+            target,
+            layer: None,
+        };
+        // Pack state that would move or reshape the rows.
+        const PACK_STATE: [(GLenum, GLint); 6] = [
+            (gl::PACK_ROW_LENGTH, 0),
+            (gl::PACK_SKIP_ROWS, 0),
+            (gl::PACK_SKIP_PIXELS, 0),
+            (gl::PACK_ALIGNMENT, 4),
+            (gl::PACK_SWAP_BYTES, 0),
+            (gl::PACK_LSB_FIRST, 0),
+        ];
+        unsafe {
+            let mut read_fbo = 0;
+            gl::GetIntegerv(gl::READ_FRAMEBUFFER_BINDING, &mut read_fbo);
+            let mut bound_pack_buffer = 0;
+            gl::GetIntegerv(gl::PIXEL_PACK_BUFFER_BINDING, &mut bound_pack_buffer);
+            let saved = PACK_STATE.map(|(name, value)| {
+                let mut old = 0;
+                gl::GetIntegerv(name, &mut old);
+                gl::PixelStorei(name, value);
+                old
+            });
+            gl::BindBuffer(gl::PIXEL_PACK_BUFFER, pack_buffer);
+
+            gl::BindFramebuffer(gl::READ_FRAMEBUFFER, self.read_fbo);
+            src.attach(gl::READ_FRAMEBUFFER, layer);
+            gl::ReadBuffer(gl::COLOR_ATTACHMENT0);
+            gl::ReadPixels(
+                0,
+                0,
+                extent.width,
+                extent.height,
+                format,
+                ty,
+                ptr::null_mut(),
+            );
+
+            gl::BindFramebuffer(gl::READ_FRAMEBUFFER, read_fbo as GLuint);
+            gl::BindBuffer(gl::PIXEL_PACK_BUFFER, bound_pack_buffer as GLuint);
+            for ((name, _), old) in PACK_STATE.into_iter().zip(saved) {
+                gl::PixelStorei(name, old);
+            }
+        }
     }
 }
 
@@ -834,6 +1000,10 @@ impl GlData {
         dst_layer: GLint,
         mirror: Mirror,
     ) {
+        let mirror = Mirror {
+            vertical: mirror.vertical != self.flip,
+            ..mirror
+        };
         let (src, src_layer) = if info.samples > 0 {
             (unsafe { self.resolve(src, info) }, 0)
         } else {

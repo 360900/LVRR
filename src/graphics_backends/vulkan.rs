@@ -4,7 +4,7 @@ use log::warn;
 use openvr as vr;
 use openxr as xr;
 use std::collections::HashSet;
-use std::ffi::{CString, c_char};
+use std::ffi::{CStr, CString, c_char};
 use std::sync::{LazyLock, Mutex};
 
 struct RealSessionData {
@@ -72,6 +72,9 @@ pub struct VulkanData {
     /// Whether we created the instance and device for the temporary session. Otherwise they
     /// belong to the app, even before any swapchain images are stored.
     owns_device: bool,
+    /// The alignment of host memory the device can import, if it has VK_EXT_external_memory_host
+    /// enabled.
+    pub host_import_alignment: Option<vk::DeviceSize>,
 }
 
 /// A single sampled image in the format and size of a multisampled eye texture.
@@ -902,6 +905,7 @@ impl VulkanData {
             queue_family_index: data.m_nQueueFamilyIndex,
             real_data: Default::default(),
             owns_device: false,
+            host_import_alignment: None,
         }
     }
 
@@ -915,6 +919,16 @@ impl VulkanData {
         xr_instance: &xr::Instance,
         system_id: xr::SystemId,
     ) -> Result<Self, String> {
+        Self::try_new_temporary_with(xr_instance, system_id, false)
+    }
+
+    /// Like [Self::try_new_temporary], with VK_EXT_external_memory_host if `host_import` and the
+    /// device has it.
+    pub fn try_new_temporary_with(
+        xr_instance: &xr::Instance,
+        system_id: xr::SystemId,
+        host_import: bool,
+    ) -> Result<Self, String> {
         let entry = new_entry();
 
         let inst_exts = xr_instance
@@ -924,6 +938,10 @@ impl VulkanData {
             .split_ascii_whitespace()
             .map(|ext| CString::new(ext).unwrap())
             .collect();
+        // The import alignment is only reported through vkGetPhysicalDeviceProperties2.
+        let has_properties2 = inst_exts
+            .iter()
+            .any(|ext| ext.as_c_str() == ash::khr::get_physical_device_properties2::NAME);
         let inst_exts: Vec<*const c_char> = inst_exts.iter().map(|ext| ext.as_ptr()).collect();
 
         let instance = unsafe {
@@ -941,11 +959,26 @@ impl VulkanData {
                 .map_err(|e| format!("Failed to create temporary Vulkan instance: {e}"))?
         };
 
-        let (physical_device, queue_family_index, device) =
-            Self::create_temporary_device(xr_instance, system_id, &instance).inspect_err(|_| {
+        let (physical_device, queue_family_index, device, host_import) =
+            Self::create_temporary_device(
+                xr_instance,
+                system_id,
+                &instance,
+                host_import && has_properties2,
+            )
+            .inspect_err(|_| {
                 unsafe { instance.destroy_instance(None) };
             })?;
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
+        let host_import_alignment = host_import.then(|| {
+            let mut host = vk::PhysicalDeviceExternalMemoryHostPropertiesEXT::default();
+            let mut props = vk::PhysicalDeviceProperties2::default().push_next(&mut host);
+            unsafe {
+                ash::khr::get_physical_device_properties2::Instance::new(&entry, &instance)
+                    .get_physical_device_properties2(physical_device, &mut props)
+            };
+            host.min_imported_host_pointer_alignment
+        });
 
         Ok(Self {
             _entry: entry,
@@ -956,6 +989,7 @@ impl VulkanData {
             queue_family_index,
             real_data: Default::default(),
             owns_device: true,
+            host_import_alignment,
         })
     }
 
@@ -963,7 +997,8 @@ impl VulkanData {
         xr_instance: &xr::Instance,
         system_id: xr::SystemId,
         instance: &ash::Instance,
-    ) -> Result<(vk::PhysicalDevice, u32, ash::Device), String> {
+        host_import: bool,
+    ) -> Result<(vk::PhysicalDevice, u32, ash::Device, bool), String> {
         let physical_device = vk::PhysicalDevice::from_raw(unsafe {
             xr_instance
                 .vulkan_graphics_device(system_id, instance.handle().as_raw() as _)
@@ -995,7 +1030,21 @@ impl VulkanData {
                 "The Vulkan device lacks extensions the runtime requires: {missing:?}"
             ));
         }
-        let dev_exts: Vec<*const c_char> = dev_exts.iter().map(|ext| ext.as_ptr()).collect();
+        let has = |name: &CStr| {
+            available
+                .iter()
+                .any(|p| p.extension_name_as_c_str() == Ok(name))
+        };
+        // It extends VK_KHR_external_memory, which runtimes require to share images.
+        let host_import = host_import
+            && has(ash::ext::external_memory_host::NAME)
+            && dev_exts
+                .iter()
+                .any(|ext| ext.as_c_str() == ash::khr::external_memory::NAME);
+        let mut dev_exts: Vec<*const c_char> = dev_exts.iter().map(|ext| ext.as_ptr()).collect();
+        if host_import {
+            dev_exts.push(ash::ext::external_memory_host::NAME.as_ptr());
+        }
 
         // find whatever graphics queue family
         let queue_family_index =
@@ -1020,8 +1069,59 @@ impl VulkanData {
                 .map_err(|e| format!("Could not create temporary vulkan device: {e}"))?
         };
 
-        Ok((physical_device, queue_family_index, device))
+        Ok((physical_device, queue_family_index, device, host_import))
     }
+}
+
+/// UUID of the device the runtime renders on, which the images it shares with other APIs live on.
+pub fn runtime_device_uuid(
+    xr_instance: &xr::Instance,
+    system_id: xr::SystemId,
+) -> Result<[u8; vk::UUID_SIZE], String> {
+    let entry = new_entry();
+    let inst_exts = xr_instance
+        .vulkan_legacy_instance_extensions(system_id)
+        .map_err(|e| format!("Couldn't get the required Vulkan instance extensions: {e}"))?;
+    let inst_exts: Vec<CString> = inst_exts
+        .split_ascii_whitespace()
+        .map(|ext| CString::new(ext).unwrap())
+        .collect();
+    let inst_exts: Vec<*const c_char> = inst_exts.iter().map(|ext| ext.as_ptr()).collect();
+
+    let instance = unsafe {
+        entry
+            .create_instance(
+                &vk::InstanceCreateInfo::default()
+                    .application_info(
+                        &vk::ApplicationInfo::default()
+                            .api_version(vk::API_VERSION_1_1)
+                            .application_name(c"XRizer device query"),
+                    )
+                    .enabled_extension_names(&inst_exts),
+                None,
+            )
+            .map_err(|e| format!("Failed to create Vulkan instance: {e}"))?
+    };
+
+    let uuid = (|| {
+        let physical_device = vk::PhysicalDevice::from_raw(unsafe {
+            xr_instance
+                .vulkan_graphics_device(system_id, instance.handle().as_raw() as _)
+                .map_err(|e| format!("Failed to get the runtime's Vulkan device: {e}"))?
+                as _
+        });
+        let version =
+            unsafe { instance.get_physical_device_properties(physical_device) }.api_version;
+        if version < vk::API_VERSION_1_1 {
+            return Err("The runtime's Vulkan device predates Vulkan 1.1".to_owned());
+        }
+        let mut id = vk::PhysicalDeviceIDProperties::default();
+        let mut props = vk::PhysicalDeviceProperties2::default().push_next(&mut id);
+        unsafe { instance.get_physical_device_properties2(physical_device, &mut props) };
+        Ok(id.device_uuid)
+    })();
+    unsafe { instance.destroy_instance(None) };
+    uuid
 }
 
 /// Overlay resources for one swapchain image.
