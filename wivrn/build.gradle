@@ -103,7 +103,7 @@ android {
     }
 
     defaultConfig {
-        applicationId "org.meumeu.wivrn"
+        applicationId "io.github.lvrr"
         // for Vulkan, need at least 24
         // for AImage_getHardwareBuffer, API 26
         minSdkVersion 29

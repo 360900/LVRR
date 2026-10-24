@@ -185,6 +185,17 @@ QCoro::Task<> adb::add_device(QString serial)
 		}
 	}
 
+	// LVRR: prefer the LVRR client over WiVRn's
+	for (auto & line: QString{out_list_packages}.split('\n'))
+	{
+		if (line == "package:io.github.lvrr" or line.startsWith("package:io.github.lvrr."))
+		{
+			new_dev.is_wivrn_installed = true;
+			new_dev.app = line.mid(8);
+			break;
+		}
+	}
+
 	auto getprop = escape_sandbox(m_path, "-s", new_dev.serial, "shell", "getprop");
 	getprop->setProcessChannelMode(QProcess::ForwardedErrorChannel);
 
