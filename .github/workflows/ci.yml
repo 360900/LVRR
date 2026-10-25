@@ -58,6 +58,8 @@ jobs:
           cargo xtask rebrand --check
       - name: Build
         run: cargo xtask dist
+      - name: Test LVRR server
+        run: target/wivrn/server/lvrr-test
       - name: Test wayvr
         working-directory: wayvr
         env:

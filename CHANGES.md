@@ -31,3 +31,6 @@ cargo xtask rebrand
 | wivrn | app id `io.github.lvrr`, detected by the dashboard over adb | `build.gradle`, `dashboard/adb.cpp` |
 | wivrn, wayvr | LVRR name in user-visible strings and translations, LVRR logo | applied by `cargo xtask rebrand`, see `xtask/src/rebrand.rs` |
 | wayvr | LVRR assets (`lvrr-assets/`) looked up before upstream ones; language files rebranded on load | `Cargo.toml`, `dash-frontend/src/assets.rs`, `wayvr/src/gui/asset.rs`, new `lvrr-common` crate |
+| wivrn | headset settings, statistics and session restarts for the LVRR dashboard: new packets and D-Bus API ([docs/dbus.md](docs/dbus.md)) | `common/wivrn_packets.h`, `dbus/io.github.wivrn.Server.xml`, `server/{CMakeLists.txt,main.cpp,wivrn_ipc.h,accept_connection.cpp}`, `server/driver/{wivrn_connection.cpp,wivrn_session.h}`, `client/{configuration.h,configuration.cpp}`, `client/scenes/{stream.h,stream.cpp,stream_network.cpp,lobby.cpp}`; new `common/lvrr_packets.h`, `server/lvrr_*`, `server/driver/wivrn_session_lvrr.cpp`, `client/scenes/stream_lvrr.cpp` |
+| wivrn | a headset the running session refuses gets a new session | `server/driver/wivrn_session.cpp` |
+| wivrn | the server listens again only once the old session's applications stopped, and restarts the dashboard when a headset reconnects | `server/main.cpp` |

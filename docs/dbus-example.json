@@ -1,0 +1,113 @@
+{
+  "HeadsetSettings": {
+    "capabilities": {
+      "android": true,
+      "body_parts": [
+        "chest",
+        "left_elbow",
+        "right_elbow",
+        "hip"
+      ],
+      "body_tracking": true,
+      "codecs": [
+        "h264",
+        "h265",
+        "av1"
+      ],
+      "codecs_10bit": [
+        "h265",
+        "av1"
+      ],
+      "eye_gaze": false,
+      "eye_size": [
+        1680,
+        1760
+      ],
+      "face_tracking": false,
+      "hand_tracking": true,
+      "high_power_mode": true,
+      "keyboard_mouse": true,
+      "max_bitrate_bps": 200000000,
+      "max_bitrate_extended_bps": 800000000,
+      "passthrough_boundary": true,
+      "post_processing": true,
+      "refresh_rate_control": true,
+      "refresh_rates": [
+        72.0,
+        90.0,
+        120.0
+      ],
+      "spacewarp": true,
+      "usb_network": false
+    },
+    "config": {
+      "bit_depth": 10,
+      "bitrate_bps": 50000000,
+      "body_parts": [
+        "chest",
+        "hip"
+      ],
+      "body_tracking": true,
+      "codec": "automatic",
+      "extended_config": false,
+      "eye_gaze": false,
+      "face_tracking": false,
+      "forward_gamepad": true,
+      "forward_keyboard": false,
+      "forward_mouse": false,
+      "foveation": 0.5,
+      "foveation_distance": 3.0,
+      "foveation_override": false,
+      "foveation_pitch": -0.17000000178813934,
+      "fps_divider": 1,
+      "hand_tracking": true,
+      "height_offset": 0.0,
+      "high_power_mode": true,
+      "mic_unprocessed": false,
+      "microphone": false,
+      "minimum_refresh_rate": 0.0,
+      "passthrough_boundary": false,
+      "posture": "standing",
+      "preferred_refresh_rate": 90.0,
+      "resolution_scale": 1.2000000476837158,
+      "sharpening": "normal",
+      "super_sampling": "off",
+      "usb_network": false
+    },
+    "permission_denied": [
+      "eye_gaze"
+    ],
+    "permission_pending": [
+      "microphone"
+    ],
+    "request_id": 7,
+    "restart_required": true,
+    "server_input_forwarding": true
+  },
+  "HeadsetStats": {
+    "cpu_time_ms": 4.199999809265137,
+    "decoders": [
+      {
+        "decode_ms": 5.0,
+        "display_ms": 9.0,
+        "encode_ms": 3.0,
+        "network_ms": 4.0,
+        "send_ms": 1.0,
+        "total_ms": 22.0
+      },
+      {
+        "decode_ms": 5.0,
+        "display_ms": 9.0,
+        "encode_ms": 3.0,
+        "network_ms": 4.0,
+        "send_ms": 1.0,
+        "total_ms": 22.0
+      }
+    ],
+    "display_hz": 90.0,
+    "gpu_time_ms": 1.5,
+    "motion_to_photon_ms": 38.0,
+    "rx_bps": 48000000.0,
+    "tx_bps": 400000.0
+  }
+}
