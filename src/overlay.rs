@@ -10,6 +10,7 @@ use log::{debug, trace};
 use openvr as vr;
 use openxr as xr;
 use slotmap::{Key, KeyData, SecondaryMap, SlotMap, new_key_type};
+use std::borrow::Cow;
 use std::f32::consts::{FRAC_PI_2, TAU};
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
@@ -67,19 +68,7 @@ impl OverlayMan {
             crate::warn_once!("Unsupported overlay texture type: {:?}", texture.eType);
             return Err(vr::EVROverlayError::InvalidTexture);
         }
-        if self.openxr.is_lost() {
-            return Err(vr::EVROverlayError::RequestFailed);
-        }
-
-        // Overlays are only drawn by the scene app's frame loop. Without a compositor there is
-        // nothing to restart the session.
-        if !self.openxr.can_render() {
-            crate::warn_once!(
-                "{:?} applications can't show overlay textures",
-                self.openxr.application_type
-            );
-            return Err(vr::EVROverlayError::RequestFailed);
-        }
+        self.check_can_show_textures()?;
 
         if !self.openxr.session_data.get().is_real_session() {
             let Some(compositor) = self.compositor.get() else {
@@ -91,6 +80,37 @@ impl OverlayMan {
                 .map_err(|_| vr::EVROverlayError::InvalidTexture)?;
         }
         Ok(RealSessionData(self.openxr.session_data.get()))
+    }
+
+    /// The real session for a raw texture, which doesn't say which graphics API the app uses, so
+    /// no session can be set up for it.
+    fn get_existing_real_session_data(&self) -> Result<RealSessionData<'_>, vr::EVROverlayError> {
+        self.check_can_show_textures()?;
+        let session = self.openxr.session_data.get();
+        if !session.is_real_session() {
+            crate::warn_once!(
+                "Can't show raw overlay textures before the app submits a frame or an overlay texture"
+            );
+            return Err(vr::EVROverlayError::RequestFailed);
+        }
+        Ok(RealSessionData(session))
+    }
+
+    /// What showing any overlay texture needs: a session that isn't lost, of an app that renders.
+    fn check_can_show_textures(&self) -> Result<(), vr::EVROverlayError> {
+        if self.openxr.is_lost() {
+            return Err(vr::EVROverlayError::RequestFailed);
+        }
+        // Overlays are only drawn by the scene app's frame loop. Without a compositor there is
+        // nothing to restart the session.
+        if !self.openxr.can_render() {
+            crate::warn_once!(
+                "{:?} applications can't show overlay textures",
+                self.openxr.application_type
+            );
+            return Err(vr::EVROverlayError::RequestFailed);
+        }
+        Ok(())
     }
 
     pub fn set_skybox(&self, textures: &[vr::Texture_t]) -> Result<(), vr::EVRCompositorError> {
@@ -873,25 +893,76 @@ impl Overlay {
         {
             texture.eColorSpace = self.color_space;
         }
-        #[macros::any_graphics(SupportedBackend)]
-        fn uses_session_api<G: GraphicsBackend>(_: &G, session_data: &SessionData) -> bool
-        where
-            for<'a> &'a GraphicalSession: TryInto<&'a Session<G::Api>>,
-        {
-            session_data.uses_api::<G::Api>()
-        }
-
         let backend = match self.compositor.take() {
             Some(b) => b,
             None => SupportedBackend::new(&texture, session_data.session.instance())
                 .ok_or(vr::EVROverlayError::InvalidTexture)?,
         };
-        // Overlays are drawn into the scene app's frames, so their swapchains are the session's.
+        self.show(
+            openxr,
+            key,
+            session_data,
+            backend,
+            TextureSource::Texture(texture),
+        )
+    }
+
+    /// Shows `width` x `height` RGBA8 pixels, see SetOverlayRaw. `backend` is for an overlay
+    /// without one, from the session: the pixels don't say which graphics API the app uses.
+    #[allow(clippy::too_many_arguments)]
+    fn set_raw_texture(
+        &mut self,
+        openxr: &OpenXrData<Compositor>,
+        key: OverlayKey,
+        session_data: &RealSessionData<'_>,
+        backend: Option<SupportedBackend>,
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<(), vr::EVROverlayError> {
+        let Some(backend) = self.compositor.take().or(backend) else {
+            debug!("no graphics backend for the raw texture of {:?}", self.name);
+            return Err(vr::EVROverlayError::RequestFailed);
+        };
+        self.show(
+            openxr,
+            key,
+            session_data,
+            backend,
+            TextureSource::Raw {
+                pixels,
+                width,
+                height,
+            },
+        )
+    }
+
+    /// Copies `source` into the overlay's swapchain with `backend`, which becomes the overlay's.
+    fn show(
+        &mut self,
+        openxr: &OpenXrData<Compositor>,
+        key: OverlayKey,
+        session_data: &RealSessionData<'_>,
+        backend: SupportedBackend,
+        source: TextureSource<'_>,
+    ) -> Result<(), vr::EVROverlayError> {
+        /// Overlays are drawn into the scene app's frames, so their swapchains are the session's.
+        #[macros::any_graphics(SupportedBackend)]
+        fn uses_session_api<G: GraphicsBackend>(_: &G, session_data: &SessionData) -> bool
+        where
+            for<'a> &'a GraphicalSession: TryInto<&'a Session<G::Api>>,
+        {
+            let uses = session_data.uses_api::<G::Api>();
+            if !uses {
+                crate::warn_once!(
+                    "Overlay texture for {} doesn't use the session's graphics API",
+                    std::any::type_name::<G::Api>()
+                );
+            }
+            uses
+        }
+
         if !backend.with_any_graphics::<uses_session_api>(session_data) {
-            crate::warn_once!(
-                "Overlay texture of type {:?} doesn't use the session's graphics API",
-                texture.eType
-            );
             return Err(vr::EVROverlayError::InvalidTexture);
         }
         let backend = self.compositor.insert(backend);
@@ -908,109 +979,6 @@ impl Overlay {
         let swapchains =
             swapchains.get_or_insert_with(|| backend.with_any_graphics::<create_swapchain_map>(()));
 
-        #[macros::any_graphics(SupportedBackend)]
-        fn set_swapchain_texture<G: GraphicsBackend>(
-            backend: &mut G,
-            openxr: &OpenXrData<Compositor>,
-            session_data: &SessionData,
-            texture_bounds: vr::VRTextureBounds_t,
-            map: &mut AnySwapchainMap,
-            key: OverlayKey,
-            texture: vr::Texture_t,
-        ) -> Result<xr::Extent2Di, vr::EVROverlayError>
-        where
-            for<'a> &'a mut SwapchainMap<G::Api>:
-                TryFrom<&'a mut AnySwapchainMap, Error: std::fmt::Display>,
-            for<'a> &'a GraphicalSession: TryInto<&'a Session<G::Api>, Error: std::fmt::Display>,
-            G::Format: Eq,
-        {
-            let map: &mut SwapchainMap<G::Api> = match map.try_into() {
-                Ok(map) => map,
-                Err(e) => {
-                    crate::warn_once!(
-                        "Received different texture type for overlay than current ({}) - {}",
-                        std::any::type_name::<G::Api>(),
-                        e
-                    );
-                    return Err(vr::EVROverlayError::InvalidTexture);
-                }
-            };
-            let Some(b_texture) = G::get_texture(&texture, vr::EVRSubmitFlags::Default) else {
-                debug!("received invalid overlay texture handle");
-                return Err(vr::EVROverlayError::InvalidTexture);
-            };
-            let mut info =
-                backend.swapchain_info_for_texture(b_texture, texture_bounds, texture.eColorSpace);
-            // OpenComposite creates overlay swapchains with arraySize=1; some runtimes (e.g. Monado)
-            // do not render quad layers correctly when a multi-array swapchain is used.
-            info.array_size = 1;
-            // Runtimes may not support multisampled swapchains, and copies resolve the texture.
-            info.sample_count = 1;
-            // Degenerate bounds or a texture without storage.
-            if !is_valid_swapchain_info(&info) {
-                debug!(
-                    "overlay texture region is empty ({}x{})",
-                    info.width, info.height
-                );
-                return Err(vr::EVROverlayError::InvalidTexture);
-            }
-            let failed = |call: &'static str| {
-                move |e| {
-                    openxr.handle_error(call, e);
-                    vr::EVROverlayError::RequestFailed
-                }
-            };
-
-            if !map.get(key).is_some_and(|data| {
-                is_usable_swapchain(
-                    &data.info,
-                    G::from_openxr_format(data.initial_format),
-                    &info,
-                    G::from_openxr_format(info.format),
-                )
-            }) {
-                let initial_format = info.format;
-                session_data.check_format::<G>(&mut info);
-                let swapchain = session_data
-                    .create_swapchain(&info)
-                    .map_err(failed("Creating overlay swapchain"))?;
-                let images = swapchain
-                    .enumerate_images()
-                    .map_err(failed("Enumerating overlay swapchain images"))?;
-                backend.swapchain_created(&info);
-                backend.store_swapchain_images(images, G::from_openxr_format(info.format));
-                map.insert(
-                    key,
-                    SwapchainData {
-                        swapchain,
-                        info,
-                        initial_format,
-                    },
-                );
-            }
-
-            let swapchain = &mut map[key].swapchain;
-            let mut copy = || {
-                let idx = swapchain.acquire_image()?;
-                swapchain.wait_image(xr::Duration::INFINITE)?;
-                let extent = backend.copy_overlay_to_swapchain(
-                    b_texture,
-                    texture.eColorSpace,
-                    texture_bounds,
-                    idx as usize,
-                );
-                swapchain.release_image()?;
-                Ok(extent)
-            };
-            copy().map_err(|e| {
-                // The swapchain might still hold an acquired image, so start over with a new one,
-                // once the copy into it has finished.
-                backend.wait_for_copies();
-                map.remove(key);
-                failed("Updating overlay swapchain")(e)
-            })
-        }
-
         // Bounds outside the texture would have the backends copy from outside of it.
         let b = self.bounds;
         let clamp = |v: f32| v.clamp(0.0, 1.0);
@@ -1020,167 +988,38 @@ impl Overlay {
             uMax: clamp(b.uMax),
             vMax: clamp(b.vMax),
         };
+        let color_space = self.color_space;
         let backend = self.compositor.as_mut().unwrap();
-        let extent = backend.with_any_graphics_mut::<set_swapchain_texture>((
-            openxr,
-            session_data,
-            bounds,
-            swapchains,
-            key,
-            texture,
-        ))?;
+        let extent = match source {
+            TextureSource::Texture(texture) => backend
+                .with_any_graphics_mut::<set_swapchain_texture>((
+                    openxr,
+                    session_data,
+                    bounds,
+                    swapchains,
+                    key,
+                    texture,
+                )),
+            TextureSource::Raw {
+                pixels,
+                width,
+                height,
+            } => backend.with_any_graphics_mut::<set_swapchain_raw>((
+                openxr,
+                session_data,
+                bounds,
+                swapchains,
+                key,
+                pixels,
+                width,
+                height,
+                color_space,
+            )),
+        }?;
         self.rect = Some(xr::Rect2Di {
             extent,
             offset: xr::Offset2Di::default(),
         });
-        Ok(())
-    }
-
-    pub fn set_raw_texture(
-        &mut self,
-        _key: OverlayKey,
-        _session_data: &SessionData,
-        _texture: *mut c_void,
-        width: u32,
-        height: u32,
-        bytes_per_pixel: u32,
-    ) -> Result<(), vr::EVROverlayError> {
-        debug!(
-            "setting overlay raw texture on {:?} with size {width}x{height} and {bytes_per_pixel} bytes per pixel",
-            self.name
-        );
-
-        // let backend = self
-        //     .compositor
-        //     .get_or_insert_with(|| SupportedBackend::OpenGL(GlData::new()));
-
-        // #[macros::any_graphics(SupportedBackend)]
-        // fn create_swapchain_map<G: GraphicsBackend>(_: &G) -> AnySwapchainMap
-        // where
-        //     AnySwapchainMap: From<SwapchainMap<G::Api>>,
-        // {
-        //     SwapchainMap::<G::Api>::default().into()
-        // }
-
-        // let mut swapchains = session_data.overlay_data.swapchains.lock().unwrap();
-        // let swapchains =
-        //     swapchains.get_or_insert_with(|| backend.with_any_graphics::<create_swapchain_map>(()));
-
-        // #[macros::any_graphics(SupportedBackend)]
-        // fn set_swapchain_texture<G: GraphicsBackend>(
-        //     backend: &mut G,
-        //     session_data: &SessionData,
-        //     texture_bounds: vr::VRTextureBounds_t,
-        //     map: &mut AnySwapchainMap,
-        //     key: OverlayKey,
-        //     texture: *mut c_void,
-        //     width: u32,
-        //     height: u32,
-        //     bytes_per_pixel: u32,
-        // ) -> Result<xr::Extent2Di, vr::EVROverlayError>
-        // where
-        //     for<'a> &'a mut SwapchainMap<G::Api>:
-        //         TryFrom<&'a mut AnySwapchainMap, Error: std::fmt::Display>,
-        //     for<'a> &'a GraphicalSession: TryInto<&'a Session<G::Api>, Error: std::fmt::Display>,
-        //     <G::Api as xr::Graphics>::Format: Eq,
-        // {
-        //     let map: &mut SwapchainMap<G::Api> = map.try_into().unwrap_or_else(|e| {
-        //         panic!(
-        //             "Received different texture type for overlay than current ({}) - {e}",
-        //             std::any::type_name::<G::Api>()
-        //         );
-        //     });
-        //     // let Some(b_texture) = G::get_texture(&texture) else {
-        //     //     debug!("received invalid overlay texture handle");
-        //     //     return Err(vr::EVROverlayError::InvalidTexture);
-        //     // };
-        //     // let b_texture = G::get_texture_from_raw(texture, width, height, bytes_per_pixel)
-        //     //     .ok_or_else(|| {
-        //     //         debug!("received invalid overlay raw texture");
-        //     //         vr::EVROverlayError::InvalidTexture
-        //     //     })?;
-        //     let internal_format = match bytes_per_pixel {
-        //         3 => gl::RGB8 as i32,
-        //         4 => gl::RGBA8 as i32,
-        //         _ => unreachable!(),
-        //     };
-        //     let format = match bytes_per_pixel {
-        //         3 => gl::RGB,
-        //         4 => gl::RGBA,
-        //         _ => unreachable!(),
-        //     };
-        //     unsafe {
-        //         gl::TexImage2D(
-        //             gl::TEXTURE_2D,
-        //             0,
-        //             internal_format,
-        //             width as i32,
-        //             height as i32,
-        //             0,
-        //             format,
-        //             gl::UNSIGNED_BYTE,
-        //             texture.cast(),
-        //         );
-        //         gl::GenerateMipmap(gl::TEXTURE_2D);
-        //         // get handle for TexImage2D
-        //         // let tex_handle = gl::GetTexImage(gl::TEXTURE_2D, 0, format, gl::UNSIGNED_BYTE, texture.cast());
-        //     }
-        //     let tex_swapchain_info = backend.swapchain_info_for_texture(
-        //         b_texture,
-        //         texture_bounds,
-        //         vr::EColorSpace::Auto,
-        //     );
-        //     let mut create_swapchain = || {
-        //         let mut info = backend.swapchain_info_for_texture(
-        //             b_texture,
-        //             texture_bounds,
-        //             vr::EColorSpace::Auto,
-        //         );
-        //         let initial_format = info.format;
-        //         session_data.check_format::<G>(&mut info);
-        //         let swapchain = session_data.create_swapchain(&info).unwrap();
-        //         let images = swapchain
-        //             .enumerate_images()
-        //             .expect("Couldn't enumerate swapchain images");
-        //         backend.store_swapchain_images(images, info.format);
-        //         SwapchainData {
-        //             swapchain,
-        //             info,
-        //             initial_format,
-        //         }
-        //     };
-        //     let swapchain = {
-        //         let data = map
-        //             .entry(key)
-        //             .unwrap()
-        //             .or_insert_with(&mut create_swapchain);
-        //         if !is_usable_swapchain(&data.info, data.initial_format, &tex_swapchain_info) {
-        //             *data = create_swapchain();
-        //         }
-        //         &mut data.swapchain
-        //     };
-        //     let idx = swapchain.acquire_image().unwrap();
-        //     swapchain.wait_image(xr::Duration::INFINITE).unwrap();
-        //     let extent = backend.copy_overlay_to_swapchain(b_texture, texture_bounds, idx as usize);
-        //     swapchain.release_image().unwrap();
-        //     Ok(extent)
-        // }
-        // let backend = self.compositor.as_mut().unwrap();
-        // let extent = backend.with_any_graphics_mut::<set_swapchain_texture>((
-        //     session_data,
-        //     self.bounds,
-        //     swapchains,
-        //     key,
-        //     texture,
-        //     width,
-        //     height,
-        //     bytes_per_pixel,
-        // ))?;
-        // self.rect = Some(xr::Rect2Di {
-        //     extent,
-        //     offset: xr::Offset2Di::default(),
-        // });
-
         Ok(())
     }
 
@@ -1215,7 +1054,295 @@ impl Overlay {
     }
 }
 
+/// What an overlay is given to show.
+enum TextureSource<'a> {
+    /// The app's texture, with its colour space settled.
+    Texture(vr::Texture_t),
+    /// RGBA8 pixels with the rows top to bottom, shown in the overlay's colour space.
+    Raw {
+        pixels: &'a [u8],
+        width: u32,
+        height: u32,
+    },
+}
+
+#[macros::any_graphics(SupportedBackend)]
+fn set_swapchain_texture<G: GraphicsBackend>(
+    backend: &mut G,
+    openxr: &OpenXrData<Compositor>,
+    session_data: &SessionData,
+    texture_bounds: vr::VRTextureBounds_t,
+    map: &mut AnySwapchainMap,
+    key: OverlayKey,
+    texture: vr::Texture_t,
+) -> Result<xr::Extent2Di, vr::EVROverlayError>
+where
+    for<'a> &'a mut SwapchainMap<G::Api>:
+        TryFrom<&'a mut AnySwapchainMap, Error: std::fmt::Display>,
+    for<'a> &'a GraphicalSession: TryInto<&'a Session<G::Api>, Error: std::fmt::Display>,
+    G::Format: Eq,
+{
+    let Some(b_texture) = G::get_texture(&texture, vr::EVRSubmitFlags::Default) else {
+        debug!("received invalid overlay texture handle");
+        return Err(vr::EVROverlayError::InvalidTexture);
+    };
+    update_swapchain(
+        backend,
+        openxr,
+        session_data,
+        texture_bounds,
+        map,
+        key,
+        b_texture,
+        texture.eColorSpace,
+    )
+}
+
+/// Uploads the pixels into a texture of the backend's and shows that.
+#[macros::any_graphics(SupportedBackend)]
+fn set_swapchain_raw<G: GraphicsBackend>(
+    backend: &mut G,
+    openxr: &OpenXrData<Compositor>,
+    session_data: &SessionData,
+    texture_bounds: vr::VRTextureBounds_t,
+    map: &mut AnySwapchainMap,
+    key: OverlayKey,
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    color_space: vr::EColorSpace,
+) -> Result<xr::Extent2Di, vr::EVROverlayError>
+where
+    for<'a> &'a mut SwapchainMap<G::Api>:
+        TryFrom<&'a mut AnySwapchainMap, Error: std::fmt::Display>,
+    for<'a> &'a GraphicalSession: TryInto<&'a Session<G::Api>, Error: std::fmt::Display>,
+    G::Format: Eq,
+{
+    let Some(b_texture) = backend.raw_texture(pixels, width, height) else {
+        debug!("couldn't upload the raw overlay texture");
+        return Err(vr::EVROverlayError::RequestFailed);
+    };
+    update_swapchain(
+        backend,
+        openxr,
+        session_data,
+        texture_bounds,
+        map,
+        key,
+        b_texture,
+        color_space,
+    )
+}
+
+/// Copies `texture` into the overlay's swapchain in `map`, replacing the swapchain if the texture
+/// doesn't fit it, and returns the copied extent.
+#[allow(clippy::too_many_arguments)]
+fn update_swapchain<G: GraphicsBackend>(
+    backend: &mut G,
+    openxr: &OpenXrData<Compositor>,
+    session_data: &SessionData,
+    texture_bounds: vr::VRTextureBounds_t,
+    map: &mut AnySwapchainMap,
+    key: OverlayKey,
+    texture: G::OpenVrTexture,
+    color_space: vr::EColorSpace,
+) -> Result<xr::Extent2Di, vr::EVROverlayError>
+where
+    for<'a> &'a mut SwapchainMap<G::Api>:
+        TryFrom<&'a mut AnySwapchainMap, Error: std::fmt::Display>,
+    for<'a> &'a GraphicalSession: TryInto<&'a Session<G::Api>, Error: std::fmt::Display>,
+    G::Format: Eq,
+{
+    let map: &mut SwapchainMap<G::Api> = match map.try_into() {
+        Ok(map) => map,
+        Err(e) => {
+            crate::warn_once!(
+                "Received different texture type for overlay than current ({}) - {}",
+                std::any::type_name::<G::Api>(),
+                e
+            );
+            return Err(vr::EVROverlayError::InvalidTexture);
+        }
+    };
+    let mut info = backend.swapchain_info_for_texture(texture, texture_bounds, color_space);
+    // OpenComposite creates overlay swapchains with arraySize=1; some runtimes (e.g. Monado)
+    // do not render quad layers correctly when a multi-array swapchain is used.
+    info.array_size = 1;
+    // Runtimes may not support multisampled swapchains, and copies resolve the texture.
+    info.sample_count = 1;
+    // Degenerate bounds or a texture without storage.
+    if !is_valid_swapchain_info(&info) {
+        debug!(
+            "overlay texture region is empty ({}x{})",
+            info.width, info.height
+        );
+        return Err(vr::EVROverlayError::InvalidTexture);
+    }
+    let failed = |call: &'static str| {
+        move |e| {
+            openxr.handle_error(call, e);
+            vr::EVROverlayError::RequestFailed
+        }
+    };
+
+    if !map.get(key).is_some_and(|data| {
+        is_usable_swapchain(
+            &data.info,
+            G::from_openxr_format(data.initial_format),
+            &info,
+            G::from_openxr_format(info.format),
+        )
+    }) {
+        let initial_format = info.format;
+        session_data.check_format::<G>(&mut info);
+        let swapchain = session_data
+            .create_swapchain(&info)
+            .map_err(failed("Creating overlay swapchain"))?;
+        let images = swapchain
+            .enumerate_images()
+            .map_err(failed("Enumerating overlay swapchain images"))?;
+        backend.swapchain_created(&info);
+        backend.store_swapchain_images(images, G::from_openxr_format(info.format));
+        map.insert(
+            key,
+            SwapchainData {
+                swapchain,
+                info,
+                initial_format,
+            },
+        );
+    }
+
+    let swapchain = &mut map[key].swapchain;
+    let mut copy = || {
+        let idx = swapchain.acquire_image()?;
+        swapchain.wait_image(xr::Duration::INFINITE)?;
+        let extent =
+            backend.copy_overlay_to_swapchain(texture, color_space, texture_bounds, idx as usize);
+        swapchain.release_image()?;
+        Ok(extent)
+    };
+    copy().map_err(|e| {
+        // The swapchain might still hold an acquired image, so start over with a new one,
+        // once the copy into it has finished.
+        backend.wait_for_copies();
+        map.remove(key);
+        failed("Updating overlay swapchain")(e)
+    })
+}
+
+/// The RGBA8 pixels of a SetOverlayRaw buffer, which is trusted to hold `width` x `height` pixels
+/// of `bytes_per_pixel` like SteamVR trusts it. SteamVR doesn't document the depths it takes, and
+/// OpenComposite stubs the call: apps pass RGBA, and RGB is widened so they aren't left blank.
+fn raw_pixels<'a>(
+    buffer: *const c_void,
+    width: u32,
+    height: u32,
+    bytes_per_pixel: u32,
+) -> Result<Cow<'a, [u8]>, vr::EVROverlayError> {
+    if buffer.is_null() || width == 0 || height == 0 || !matches!(bytes_per_pixel, 3 | 4) {
+        return Err(vr::EVROverlayError::InvalidParameter);
+    }
+    let len = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(bytes_per_pixel as usize))
+        .filter(|len| *len <= isize::MAX as usize)
+        .ok_or(vr::EVROverlayError::InvalidParameter)?;
+    // SAFETY: The buffer holds `len` bytes, see above, which the app doesn't change during the
+    // call.
+    let bytes = unsafe { std::slice::from_raw_parts(buffer.cast::<u8>(), len) };
+    Ok(match bytes_per_pixel {
+        4 => Cow::Borrowed(bytes),
+        _ => Cow::Owned(
+            bytes
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .flat_map(|&[r, g, b]| [r, g, b, u8::MAX])
+                .collect(),
+        ),
+    })
+}
+
+/// How loading an overlay's image went, see VREvent_ImageLoaded.
+fn image_event(ty: vr::EVREventType, handle: vr::VROverlayHandle_t) -> vr::VREvent_t {
+    vr::VREvent_t {
+        eventType: ty.0,
+        trackedDeviceIndex: vr::k_unTrackedDeviceIndex_Hmd,
+        eventAgeSeconds: 0.0,
+        data: vr::VREvent_Data_t {
+            overlay: vr::VREvent_Overlay_t {
+                overlayHandle: handle,
+                devicePath: 0,
+                memoryBlockId: 0,
+                cursorIndex: 0,
+            },
+        },
+    }
+}
+
 impl OverlayMan {
+    /// SetOverlayRaw, without its events.
+    fn set_overlay_raw(
+        &self,
+        handle: vr::VROverlayHandle_t,
+        buffer: *const c_void,
+        width: u32,
+        height: u32,
+        bytes_per_pixel: u32,
+    ) -> Result<(), vr::EVROverlayError> {
+        let key = OverlayKey::from(KeyData::from_ffi(handle));
+        let has_backend = self
+            .overlays
+            .read()
+            .unwrap()
+            .get(key)
+            .ok_or(vr::EVROverlayError::UnknownOverlay)?
+            .compositor
+            .is_some();
+        let pixels = raw_pixels(buffer, width, height, bytes_per_pixel)?;
+        debug!(
+            "setting raw overlay texture of {width}x{height}, {bytes_per_pixel} bytes per pixel"
+        );
+
+        // The frame thread takes the overlay lock while holding the session's, so these come
+        // before it.
+        let session_data = self.get_existing_real_session_data()?;
+        let backend = if has_backend {
+            None
+        } else {
+            session_data
+                .comp_data
+                .overlay_backend(&self.openxr.instance)
+        };
+
+        let mut overlays = self.overlays.write().unwrap();
+        let overlay = overlays
+            .get_mut(key)
+            .ok_or(vr::EVROverlayError::UnknownOverlay)?;
+        match overlay.set_raw_texture(
+            &self.openxr,
+            key,
+            &session_data,
+            backend,
+            &pixels,
+            width,
+            height,
+        ) {
+            Ok(()) => {
+                debug!("set raw overlay texture for {:?}", overlay.name);
+                Ok(())
+            }
+            Err(e) => {
+                debug!(
+                    "failed to set raw overlay texture for {:?}: {e:?}",
+                    overlay.name
+                );
+                Err(e)
+            }
+        }
+    }
+
     /// Copies a string field of an overlay into `buf` and returns the size it needs, including
     /// the null terminator. Nothing is copied if `buf` is too small.
     fn copy_overlay_string(
@@ -1588,15 +1715,17 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         height: u32,
         bytes_per_pixel: u32,
     ) -> vr::EVROverlayError {
-        let session_data = self.openxr.session_data.get();
-        get_overlay!(self, handle, mut overlay);
-        let key = OverlayKey::from(KeyData::from_ffi(handle));
-        if let Err(error) =
-            overlay.set_raw_texture(key, &session_data, texture, width, height, bytes_per_pixel)
-        {
-            return error;
+        let result = self.set_overlay_raw(handle, texture, width, height, bytes_per_pixel);
+        // SteamVR tells the overlay how loading its image went.
+        let event = match result {
+            Ok(()) => vr::EVREventType::ImageLoaded,
+            Err(_) => vr::EVREventType::ImageFailed,
         };
-        vr::EVROverlayError::None
+        let key = OverlayKey::from(KeyData::from_ffi(handle));
+        if let Some(overlay) = self.overlays.write().unwrap().get_mut(key) {
+            overlay.events.push_back(image_event(event, handle));
+        }
+        result.err().unwrap_or(vr::EVROverlayError::None)
     }
     fn ClearOverlayTexture(&self, handle: vr::VROverlayHandle_t) -> vr::EVROverlayError {
         get_overlay!(self, handle, mut overlay);
@@ -3687,5 +3816,279 @@ mod tests {
             ),
             vr::EVROverlayError::UnknownOverlay
         );
+    }
+
+    fn expect_image_event(
+        ty: vr::EVREventType,
+        handle: vr::VROverlayHandle_t,
+    ) -> impl Fn(&vr::VREvent_t) {
+        move |event| {
+            assert_eq!(event.eventType, ty.0);
+            assert_eq!(unsafe { event.data.overlay.overlayHandle }, handle);
+        }
+    }
+
+    fn poll_overlay_event(
+        man: &OverlayMan,
+        handle: vr::VROverlayHandle_t,
+    ) -> Option<vr::VREvent_t> {
+        let mut event: vr::VREvent_t = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<vr::VREvent_t>() as u32;
+        man.PollNextOverlayEvent(handle, &mut event, size)
+            .then_some(event)
+    }
+
+    /// `width` x `height` RGBA pixels with distinct values.
+    fn rgba(width: u32, height: u32) -> Vec<u8> {
+        (0..width * height * 4).map(|i| i as u8).collect()
+    }
+
+    impl RealSessionFixture {
+        fn set_raw(
+            &self,
+            handle: vr::VROverlayHandle_t,
+            pixels: &[u8],
+            width: u32,
+            height: u32,
+            bytes_per_pixel: u32,
+        ) -> vr::EVROverlayError {
+            let buffer = pixels.as_ptr().cast_mut().cast();
+            self.man
+                .SetOverlayRaw(handle, buffer, width, height, bytes_per_pixel)
+        }
+
+        /// The size of the overlay's layer, if it has a texture.
+        fn extent(&self, handle: vr::VROverlayHandle_t) -> Option<(i32, i32)> {
+            let overlays = self.man.overlays.read().unwrap();
+            let rect = overlays[OverlayKey::from(KeyData::from_ffi(handle))].rect?;
+            Some((rect.extent.width, rect.extent.height))
+        }
+
+        fn image_event(&self, ty: vr::EVREventType, handle: vr::VROverlayHandle_t) {
+            expect_image_event(ty, handle)(&poll_overlay_event(&self.man, handle).unwrap());
+            assert!(poll_overlay_event(&self.man, handle).is_none());
+        }
+    }
+
+    #[test]
+    fn raw_texture_is_drawn() {
+        use crate::compositor::FakeGraphicsData;
+        let f = RealSessionFixture::new();
+        // Setting up the session takes a texture of the app's.
+        f.textured_overlay(c"textured");
+        let handle = create(&f.man, c"raw", c"raw");
+        let pixels = rgba(4, 2);
+        assert_eq!(
+            f.set_raw(handle, &pixels, 4, 2, 4),
+            vr::EVROverlayError::None
+        );
+        f.image_event(vr::EVREventType::ImageLoaded, handle);
+        assert_eq!(FakeGraphicsData::raw_uploads(), [(4, 2, pixels)]);
+        // Shown whole, like a gamma encoded RGBA8 texture.
+        assert_eq!(f.extent(handle), Some((4, 2)));
+        assert_eq!(
+            FakeGraphicsData::overlay_color_space(),
+            vr::EColorSpace::Auto
+        );
+        assert_eq!(f.man.ShowOverlay(handle), vr::EVROverlayError::None);
+        assert_eq!(f.layers(false).len(), 2);
+    }
+
+    #[test]
+    fn raw_texture_color_space_follows_overlay() {
+        use crate::compositor::FakeGraphicsData;
+        let f = RealSessionFixture::new();
+        let handle = f.textured_overlay(c"overlay");
+        for color_space in [
+            vr::EColorSpace::Linear,
+            vr::EColorSpace::Gamma,
+            vr::EColorSpace::Auto,
+        ] {
+            assert_eq!(
+                f.man.SetOverlayTextureColorSpace(handle, color_space),
+                vr::EVROverlayError::None
+            );
+            assert_eq!(
+                f.set_raw(handle, &rgba(2, 2), 2, 2, 4),
+                vr::EVROverlayError::None
+            );
+            assert_eq!(FakeGraphicsData::overlay_color_space(), color_space);
+        }
+    }
+
+    #[test]
+    fn raw_texture_parameters_are_checked() {
+        use crate::compositor::FakeGraphicsData;
+        let f = RealSessionFixture::new();
+        let handle = f.textured_overlay(c"overlay");
+        let pixels = rgba(2, 2);
+        let ptr = pixels.as_ptr().cast_mut().cast::<c_void>();
+        let null = std::ptr::null_mut();
+        for (buffer, width, height, bytes_per_pixel) in [
+            (null, 2, 2, 4),
+            (ptr, 0, 2, 4),
+            (ptr, 2, 0, 4),
+            (ptr, 2, 2, 2),
+            (ptr, 2, 2, 5),
+            // More bytes than can be counted.
+            (ptr, u32::MAX, u32::MAX, 4),
+        ] {
+            assert_eq!(
+                f.man
+                    .SetOverlayRaw(handle, buffer, width, height, bytes_per_pixel),
+                vr::EVROverlayError::InvalidParameter,
+                "{width}x{height}x{bytes_per_pixel}"
+            );
+            f.image_event(vr::EVREventType::ImageFailed, handle);
+        }
+        assert!(FakeGraphicsData::raw_uploads().is_empty());
+        // The app's texture stays up.
+        assert_eq!(f.extent(handle), Some((10, 10)));
+        assert_eq!(
+            f.man.SetOverlayRaw(handle + 1, ptr, 2, 2, 4),
+            vr::EVROverlayError::UnknownOverlay
+        );
+        assert!(poll_overlay_event(&f.man, handle).is_none());
+    }
+
+    #[test]
+    fn raw_rgb_is_widened_to_rgba() {
+        use crate::compositor::FakeGraphicsData;
+        let f = RealSessionFixture::new();
+        let handle = f.textured_overlay(c"overlay");
+        assert_eq!(
+            f.set_raw(handle, &[1, 2, 3, 4, 5, 6], 2, 1, 3),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(
+            FakeGraphicsData::raw_uploads(),
+            [(2, 1, vec![1, 2, 3, 255, 4, 5, 6, 255])]
+        );
+        assert_eq!(f.extent(handle), Some((2, 1)));
+    }
+
+    /// Raw pixels don't say which graphics API the app uses, so they can't set up the session.
+    #[test]
+    fn raw_texture_before_the_first_texture_fails() {
+        let f = RealSessionFixture::new();
+        let handle = create(&f.man, c"key", c"name");
+        let session = f.xr.session_data.get().session.as_raw();
+        assert_eq!(
+            f.set_raw(handle, &rgba(2, 2), 2, 2, 4),
+            vr::EVROverlayError::RequestFailed
+        );
+        f.image_event(vr::EVREventType::ImageFailed, handle);
+        assert_eq!(f.xr.session_data.get().session.as_raw(), session);
+        assert_eq!(f.extent(handle), None);
+
+        f.textured_overlay(c"textured");
+        assert_eq!(
+            f.set_raw(handle, &rgba(2, 2), 2, 2, 4),
+            vr::EVROverlayError::None
+        );
+        f.image_event(vr::EVREventType::ImageLoaded, handle);
+        assert_eq!(f.extent(handle), Some((2, 2)));
+    }
+
+    /// Headless sessions can't create swapchains, and moving a Background app to a graphics
+    /// session would take the display from the game.
+    #[test]
+    fn raw_texture_from_non_scene_app_fails() {
+        for (headless, app_type) in [
+            (true, vr::EVRApplicationType::Overlay),
+            (false, vr::EVRApplicationType::Background),
+        ] {
+            fakexr::set_headless_supported(headless);
+            let f = RealSessionFixture::with_app_type(app_type);
+            fakexr::set_headless_supported(false);
+            assert_eq!(f.xr.headless, headless);
+            let handle = create(&f.man, c"key", c"name");
+            assert_eq!(
+                f.set_raw(handle, &rgba(2, 2), 2, 2, 4),
+                vr::EVROverlayError::RequestFailed
+            );
+            f.image_event(vr::EVREventType::ImageFailed, handle);
+        }
+    }
+
+    /// Like GL copies, GL uploads need the app's context. The overlay keeps its backend for a
+    /// later try.
+    #[test]
+    fn raw_texture_without_graphics_context_fails() {
+        use crate::compositor::FakeGraphicsData;
+        let f = RealSessionFixture::new();
+        f.textured_overlay(c"textured");
+        let handle = create(&f.man, c"raw", c"raw");
+        FakeGraphicsData::set_context_current(false);
+        let result = f.set_raw(handle, &rgba(2, 2), 2, 2, 4);
+        FakeGraphicsData::set_context_current(true);
+        assert_eq!(result, vr::EVROverlayError::RequestFailed);
+        f.image_event(vr::EVREventType::ImageFailed, handle);
+        assert_eq!(f.extent(handle), None);
+        assert!(FakeGraphicsData::raw_uploads().is_empty());
+
+        assert_eq!(
+            f.set_raw(handle, &rgba(2, 2), 2, 2, 4),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(f.extent(handle), Some((2, 2)));
+    }
+
+    /// Raw pixels and the app's textures share the overlay's swapchain, which a clear keeps and
+    /// destroying the overlay frees.
+    #[test]
+    fn raw_and_app_textures_alternate() {
+        let f = RealSessionFixture::new();
+        let handle = f.textured_overlay(c"overlay");
+        let swapchains = || f.xr.session_data.get().overlay_data.swapchain_count();
+        assert_eq!(f.extent(handle), Some((10, 10)));
+        assert_eq!(
+            f.set_raw(handle, &rgba(4, 2), 4, 2, 4),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(f.extent(handle), Some((4, 2)));
+        assert_eq!(
+            f.man.SetOverlayTexture(handle, &f.texture()),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(f.extent(handle), Some((10, 10)));
+        assert_eq!(
+            f.set_raw(handle, &rgba(3, 3), 3, 3, 4),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(f.extent(handle), Some((3, 3)));
+        assert_eq!((swapchains(), f.layers(false).len()), (1, 1));
+
+        assert_eq!(f.man.ClearOverlayTexture(handle), vr::EVROverlayError::None);
+        assert_eq!((swapchains(), f.layers(false).len()), (1, 0));
+        assert_eq!(
+            f.set_raw(handle, &rgba(3, 3), 3, 3, 4),
+            vr::EVROverlayError::None
+        );
+        assert_eq!((swapchains(), f.layers(false).len()), (1, 1));
+        assert_eq!(f.man.DestroyOverlay(handle), vr::EVROverlayError::None);
+        assert_eq!(swapchains(), 0);
+    }
+
+    /// Like app textures, raw ones come back once they are set again after a session restart.
+    #[test]
+    fn raw_overlay_across_session_restart() {
+        let f = RealSessionFixture::new();
+        f.textured_overlay(c"textured");
+        let handle = create(&f.man, c"raw", c"raw");
+        assert_eq!(
+            f.set_raw(handle, &rgba(2, 2), 2, 2, 4),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(f.man.ShowOverlay(handle), vr::EVROverlayError::None);
+        assert_eq!(f.layers(false).len(), 2);
+
+        f.xr.restart_session().unwrap();
+        assert_eq!(f.layers(false).len(), 0);
+        assert_eq!(
+            f.set_raw(handle, &rgba(2, 2), 2, 2, 4),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(f.layers(false).len(), 1);
     }
 }
