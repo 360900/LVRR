@@ -3355,6 +3355,11 @@ impl<C: openxr_data::Compositor> Input<C> {
                 // Losing the profile keeps the device and its identity, see CONNECTION_GRACE.
                 // Getting the same one back changes nothing.
                 if profile_path != xr::Path::NULL && controller.last_profile_path != profile_path {
+                    // Another controller, or one in place of a hand tracked without a profile.
+                    if controller.last_profile_path != xr::Path::NULL || controller.recently_seen()
+                    {
+                        controller.replace();
+                    }
                     controller.last_profile_path = profile_path;
                     controller.reset_tracked_hand();
                     // The new device's skeleton may come from elsewhere, or not at all.
@@ -3582,7 +3587,23 @@ impl<C: openxr_data::Compositor> Input<C> {
         // the releases queued for it.
         let mut activations = 0;
         for (i, (device, current)) in devices.iter().zip(connected).enumerate() {
-            if device.has_connected_changed(current) {
+            let replaced = device.take_replaced();
+            if !device.has_connected_changed(current) {
+                // The app saw the old device, which goes, and the new one comes, like in SteamVR.
+                if replaced && current {
+                    debug!("sending {:?} replaced", device.get_type());
+                    for ty in [
+                        vr::EVREventType::TrackedDeviceDeactivated,
+                        vr::EVREventType::TrackedDeviceActivated,
+                    ] {
+                        events.push_back(InputEvent {
+                            ty,
+                            index: i as vr::TrackedDeviceIndex_t,
+                            data: Default::default(),
+                        });
+                    }
+                }
+            } else {
                 debug!(
                     "sending {:?} {}connected",
                     device.get_type(),

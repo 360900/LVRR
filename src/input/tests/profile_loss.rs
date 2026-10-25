@@ -259,6 +259,56 @@ fn profile_loss_disconnects_after_grace() {
 }
 
 #[test]
+fn profile_blip_with_another_controller_replaces_the_device() {
+    let mut b = Blip::new();
+    let button = b.action(c"/actions/main/in/button");
+    b.bind::<Knuckles>();
+    b.sync();
+    b.events();
+
+    b.unbind();
+    b.sync();
+    b.bind::<OculusTouch>();
+    b.sync();
+    // The app sees the Index controllers go and the Touch controllers come, at the same indices.
+    assert_eq!(
+        b.events(),
+        [
+            (Ev::TrackedDeviceDeactivated, 1),
+            (Ev::TrackedDeviceActivated, 1),
+            (Ev::TrackedDeviceDeactivated, 2),
+            (Ev::TrackedDeviceActivated, 2),
+        ]
+    );
+    b.assert_controllers("oculus_touch");
+
+    let touch_button = b.f.get_action::<bool>(button);
+    fakexr::set_action_state(touch_button, true.into(), LeftHand);
+    b.sync();
+    assert_eq!(b.digital(button), (true, true, true));
+}
+
+#[test]
+fn direct_profile_change_replaces_the_device() {
+    let mut b = Blip::new();
+    b.bind::<Knuckles>();
+    b.sync();
+    b.events();
+
+    b.f.set_interaction_profile::<OculusTouch>(LeftHand);
+    b.sync();
+    assert_eq!(
+        b.events(),
+        [
+            (Ev::TrackedDeviceDeactivated, 1),
+            (Ev::TrackedDeviceActivated, 1),
+        ]
+    );
+    assert_eq!(b.controller_type(1).as_deref(), Some("oculus_touch"));
+    assert_eq!(b.controller_type(2).as_deref(), Some("knuckles"));
+}
+
+#[test]
 fn input_focus_holds_off_disconnects() {
     let mut b = Blip::new();
     b.bind::<Knuckles>();
@@ -498,6 +548,39 @@ fn hand_tracking_without_any_profile() {
     b.f.input.expire_connection_grace();
     assert!(!b.connected(1));
     assert_eq!(b.events(), [(Ev::TrackedDeviceDeactivated, 1)]);
+}
+
+#[test]
+fn controller_replaces_hand_tracked_without_profile() {
+    use xr::HandTrackingDataSourceEXT as Source;
+
+    fakexr::set_hand_tracking_supported(true);
+    let mut b = Blip::new();
+    b.f.input
+        .openxr
+        .set_tracking_space(vr::ETrackingUniverseOrigin::Seated);
+    b.sync();
+    b.events();
+    fakexr::set_hand_tracked(b.f.raw_session(), LeftHand, Some(Source::UNOBSTRUCTED));
+    b.sync();
+    assert_eq!(b.events(), [(Ev::TrackedDeviceActivated, 1)]);
+
+    // Picking up the controller: the app sees the hand go and the controller come.
+    b.f.set_interaction_profile::<OculusTouch>(LeftHand);
+    b.sync();
+    assert_eq!(
+        b.events(),
+        [
+            (Ev::TrackedDeviceDeactivated, 1),
+            (Ev::TrackedDeviceActivated, 1),
+        ]
+    );
+    assert_eq!(b.controller_type(1).as_deref(), Some("oculus_touch"));
+
+    // A controller turned on while no hand was there just connects.
+    b.f.set_interaction_profile::<OculusTouch>(RightHand);
+    b.sync();
+    assert_eq!(b.events(), [(Ev::TrackedDeviceActivated, 2)]);
 }
 
 #[test]

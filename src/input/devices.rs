@@ -195,6 +195,8 @@ pub struct TrackedDevice {
     /// Kept connected while the runtime holds the input focus, see
     /// [TrackedDevice::hold_connection].
     held: AtomicBool,
+    /// Another controller took this one's place, so the app should see this one go.
+    replaced: AtomicBool,
     /// The connection state last reported to the app. Atomic so polling events only needs a read
     /// lock on the device list.
     previous_connected: AtomicBool,
@@ -498,6 +500,7 @@ impl TrackedDevice {
             device_type,
             last_seen: Mutex::default(),
             held: false.into(),
+            replaced: false.into(),
             previous_connected: false.into(),
             tracked_hand: false.into(),
             pose_cache: Mutex::default(),
@@ -700,6 +703,16 @@ impl TrackedDevice {
         } else if self.held.swap(false, Ordering::Relaxed) {
             self.seen();
         }
+    }
+
+    /// Marks the device as one the app should see go, and come back as a new one.
+    pub(super) fn replace(&self) {
+        self.replaced.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the device was replaced since the last call.
+    pub(super) fn take_replaced(&self) -> bool {
+        self.replaced.swap(false, Ordering::Relaxed)
     }
 
     /// Whether `connected` differs from the state last reported to the app, which it becomes.
