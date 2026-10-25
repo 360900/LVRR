@@ -271,9 +271,9 @@ impl vr::IVRApplications008_Interface for Applications {
             return vr::EVRApplicationError::InvalidParameter;
         }
         let key = unsafe { CStr::from_ptr(key) };
-        // Only this process is known here. Launchers identifying the apps they start are
-        // accepted, as nothing else would track them.
-        if pid == std::process::id() {
+        // Only this process is known here, which pid 0 also names. Launchers identifying the apps
+        // they start are accepted, as nothing else would track them.
+        if pid == 0 || pid == std::process::id() {
             info!("Application identified as {key:?}");
             *self.identity.lock().unwrap() = Some(key.to_owned());
             *IDENTIFIED_KEY.lock().unwrap() = Some(key.to_string_lossy().into_owned());
@@ -466,6 +466,13 @@ mod tests {
             vr::EVRApplicationError::None
         );
         assert_eq!(unsafe { CStr::from_ptr(buffer.as_ptr()) }, key);
+
+        // Another process's identity isn't ours, pid 0 is.
+        apps.IdentifyApplication(pid + 1, c"org.example.launched".as_ptr());
+        assert_eq!(apps.GetApplicationProcessId(key.as_ptr()), pid);
+        apps.IdentifyApplication(0, c"org.example.other".as_ptr());
+        assert_eq!(apps.GetApplicationProcessId(c"org.example.other".as_ptr()), pid);
+        assert_eq!(apps.GetApplicationProcessId(key.as_ptr()), 0);
 
         assert_eq!(
             apps.RemoveApplicationManifest(path.as_ptr()),
