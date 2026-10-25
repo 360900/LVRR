@@ -2,6 +2,8 @@
 
 use super::context::BindingsProfileLoadContext;
 use crate::input::action_manifest::context;
+use crate::input::custom_bindings::BoolBindingData;
+use crate::input::haptics::{BindingHaptic, BindingPress, Vibration};
 use crate::input::profiles::paths::DynComponent;
 use crate::input::profiles::{Component, DynInputPath, paths};
 use crate::input::{ActionData, BoundPoseType};
@@ -240,7 +242,7 @@ impl From<String> for MaybeInputPath {
 pub enum ActionBinding {
     None(IgnoredAny),
     Button(ActionBindingData<ButtonInput, ButtonParameters>),
-    ToggleButton(ActionBindingData<ButtonInput>),
+    ToggleButton(ActionBindingData<ButtonInput, ButtonParameters>),
     Dpad(ActionBindingData<DpadInput, DpadParameters>),
     /// Older name for a dpad with the click sub mode.
     DpadClick(ActionBindingData<DpadInput, DpadParameters>),
@@ -497,6 +499,9 @@ struct ButtonInput {
 pub struct ClickThresholdParams {
     pub click_activate_threshold: Option<StringOrTyped<f32>>,
     pub click_deactivate_threshold: Option<StringOrTyped<f32>>,
+    /// Played when an analog input crosses the thresholds.
+    #[serde(flatten)]
+    pub haptic: HapticParameters,
 }
 
 impl ClickThresholdParams {
@@ -504,7 +509,45 @@ impl ClickThresholdParams {
         Self {
             click_activate_threshold: Some(0.01f32.into()),
             click_deactivate_threshold: Some(0.005f32.into()),
+            ..Default::default()
         }
+    }
+}
+
+/// The haptic SteamVR plays where a click crosses its threshold. An amplitude of 0 turns it off.
+#[derive(Clone, Copy, Default, Deserialize)]
+pub struct HapticParameters {
+    haptic_amplitude: Option<StringOrTyped<f32>>,
+    /// Hz
+    haptic_frequency: Option<StringOrTyped<f32>>,
+    /// Seconds, 0 for a single pulse
+    haptic_duration: Option<StringOrTyped<f32>>,
+    /// Seconds
+    haptic_delay: Option<StringOrTyped<f32>>,
+    /// The release's, the press's when unset.
+    off_haptic_amplitude: Option<StringOrTyped<f32>>,
+    off_haptic_frequency: Option<StringOrTyped<f32>>,
+    off_haptic_duration: Option<StringOrTyped<f32>>,
+}
+
+impl HapticParameters {
+    /// The haptic, with `default_amplitude` if the binding doesn't set one. None if it's off.
+    fn haptic(&self, default_amplitude: f32) -> Option<BindingHaptic> {
+        let get = |value: Option<StringOrTyped<f32>>| value.map(|v| *v).filter(|v| v.is_finite());
+        let on = Vibration {
+            duration: get(self.haptic_duration).unwrap_or(0.0),
+            frequency: get(self.haptic_frequency).unwrap_or(BindingHaptic::DEFAULT_FREQUENCY),
+            amplitude: get(self.haptic_amplitude).unwrap_or(default_amplitude),
+        };
+        let off = Vibration {
+            duration: get(self.off_haptic_duration).unwrap_or(on.duration),
+            frequency: get(self.off_haptic_frequency).unwrap_or(on.frequency),
+            amplitude: get(self.off_haptic_amplitude).unwrap_or(on.amplitude),
+        };
+        let delay = get(self.haptic_delay)
+            .and_then(|delay| Duration::try_from_secs_f32(delay).ok())
+            .unwrap_or_default();
+        BindingHaptic::new(on, off, delay)
     }
 }
 
@@ -708,6 +751,8 @@ pub struct GrabParameters {
     pub value_release_threshold: Option<StringOrTyped<f32>>,
     pub force_hold_threshold: Option<StringOrTyped<f32>>,
     pub force_release_threshold: Option<StringOrTyped<f32>>,
+    #[serde(flatten)]
+    pub haptic: HapticParameters,
 }
 
 #[derive(Clone, Deserialize)]
@@ -769,6 +814,7 @@ impl Vector2Parameters {
                 click_deactivate_threshold: Some(
                     self.sticky_deactivate_threshold.unwrap_or(0.3f32.into()),
                 ),
+                ..Default::default()
             })
     }
 }
@@ -1918,6 +1964,194 @@ pub fn handle_haptic_bindings(
         let xr_path = instance.string_to_path(path).unwrap();
         context.push_binding(output.path.clone(), xr_path);
     }
+}
+
+/// SteamVR's haptics for clicks that come from an analog input crossing a threshold: a pulse on
+/// the press with the `haptic_*` parameters, and on the release with the `off_haptic_*` ones. They
+/// read the inputs of [handle_sources]' bindings on their own, as SteamVR plays them whether or
+/// not the game reads the action. Physical clicks have none.
+pub fn handle_binding_haptics(
+    validate_path: &dyn PathValidator,
+    context: &mut BindingsProfileLoadContext,
+    action_set_name: &str,
+    action_set: &xr::ActionSet,
+    sources: &[ActionBinding],
+) {
+    use DynComponent::{Click, Force, Value};
+    let is_bool = |context: &BindingsProfileLoadContext, output: &ActionPath| {
+        context
+            .actions
+            .get(&output.path)
+            .is_some_and(<bool as context::WithActionPattern>::check_match)
+    };
+    let analog_click = |path: DynInputPath| {
+        validate_path(path.with_component(Click))
+            .filter(|input| matches!(input.component, Some(Value | Force)))
+    };
+
+    for source in sources {
+        let (output, path, haptic, press) = match source {
+            ActionBinding::Button(ActionBindingData {
+                path: MaybeInputPath::Valid(path),
+                inputs:
+                    ButtonInput {
+                        click,
+                        grab,
+                        long,
+                        held,
+                        single,
+                        ..
+                    },
+                parameters,
+            }) => {
+                let Some(output) = [click, grab, long, held, single]
+                    .into_iter()
+                    .flatten()
+                    .find(|output| is_bool(context, &output.output))
+                else {
+                    continue;
+                };
+                let force_input = parameters.as_ref().and_then(|p| p.force_input);
+                let Some((press, false)) = button_press_input(*path, force_input, validate_path)
+                else {
+                    continue;
+                };
+                let thresholds = parameters.as_ref().map(|p| &p.click_threshold);
+                let haptic = thresholds
+                    .map_or_else(HapticParameters::default, |t| t.haptic)
+                    .haptic(BindingHaptic::DEFAULT_AMPLITUDE);
+                let Some(haptic) = haptic else {
+                    continue;
+                };
+                let Some(press) =
+                    threshold_press(press, thresholds, action_set_name, action_set, context)
+                else {
+                    continue;
+                };
+                (&output.output, path, haptic, BindingPress::Custom(press))
+            }
+            ActionBinding::ToggleButton(ActionBindingData {
+                path: MaybeInputPath::Valid(path),
+                inputs:
+                    ButtonInput {
+                        click: Some(output),
+                        ..
+                    },
+                parameters,
+            }) if is_bool(context, &output.output) => {
+                let Some(input) = analog_click(*path) else {
+                    continue;
+                };
+                let haptic = parameters
+                    .as_ref()
+                    .map_or_else(HapticParameters::default, |p| p.click_threshold.haptic)
+                    .haptic(BindingHaptic::DEFAULT_AMPLITUDE);
+                let (Some(haptic), Some(action)) = (
+                    haptic,
+                    context.input_action(action_set_name, action_set, input),
+                ) else {
+                    continue;
+                };
+                (&output.output, path, haptic, BindingPress::Runtime(action))
+            }
+            // The default is unclear: SteamVR's legacy Touch bindings set haptic_amplitude 0 here,
+            // but games that turn it off in button mode leave trigger mode alone. Only bindings
+            // that set one get it.
+            ActionBinding::Trigger(ActionBindingData {
+                path: MaybeInputPath::Valid(path),
+                inputs:
+                    TriggerInput {
+                        click: Some(output),
+                        ..
+                    },
+                parameters: Some(parameters),
+            }) if is_bool(context, &output.output) => {
+                let (Some(input), Some(haptic)) =
+                    (analog_click(*path), parameters.haptic.haptic(0.0))
+                else {
+                    continue;
+                };
+                let press = if parameters.click_activate_threshold.is_some()
+                    || parameters.click_deactivate_threshold.is_some()
+                {
+                    threshold_press(
+                        input,
+                        Some(parameters),
+                        action_set_name,
+                        action_set,
+                        context,
+                    )
+                    .map(BindingPress::Custom)
+                } else {
+                    context
+                        .input_action(action_set_name, action_set, input)
+                        .map(BindingPress::Runtime)
+                };
+                let Some(press) = press else {
+                    continue;
+                };
+                (&output.output, path, haptic, press)
+            }
+            // Off by default in the binding UI.
+            ActionBinding::Grab(ActionBindingData {
+                path: MaybeInputPath::Valid(path),
+                inputs: GrabInput { grab: output },
+                parameters: Some(parameters),
+            }) if is_bool(context, &output.output) => {
+                let Some(haptic) = parameters.haptic.haptic(0.0) else {
+                    continue;
+                };
+                let Some(value_path) = validate_path(path.with_component(Value)) else {
+                    continue;
+                };
+                let force_path = validate_path(path.with_component(Force))
+                    .filter(|p| p.component == Some(Force));
+                let force_action = match force_path {
+                    Some(force_path) => {
+                        match context.input_action(action_set_name, action_set, force_path) {
+                            Some(action) => Some(action),
+                            None => continue,
+                        }
+                    }
+                    None => None,
+                };
+                let Some(value_action) =
+                    context.input_action(action_set_name, action_set, value_path)
+                else {
+                    continue;
+                };
+                let grab = GrabBindingData::new(force_action, value_action, Some(parameters));
+                let press =
+                    BoolBindingData::new(BoolBindingType::Grab(grab), context.hand_path(path.hand));
+                (&output.output, path, haptic, BindingPress::Custom(press))
+            }
+            _ => continue,
+        };
+        trace!(
+            "haptic for {} on {path} ({action_set_name}): {haptic:?}",
+            output.path
+        );
+        context.add_binding_haptic(action_set_name, output, path.hand, press, haptic);
+    }
+}
+
+/// A click at `params`' thresholds on an analog input, or on a 2D one by its distance from the
+/// center.
+fn threshold_press(
+    input: DynInputPath,
+    params: Option<&ClickThresholdParams>,
+    action_set_name: &str,
+    action_set: &xr::ActionSet,
+    context: &mut BindingsProfileLoadContext,
+) -> Option<BoolBindingData> {
+    let ty = if input.component.is_none() {
+        let action = context.input_action(action_set_name, action_set, input)?;
+        BoolBindingType::ThresholdVec2(ThresholdBindingData::new(action, params))
+    } else {
+        let action = context.input_action(action_set_name, action_set, input)?;
+        BoolBindingType::ThresholdFloat(ThresholdBindingData::new(action, params))
+    };
+    Some(BoolBindingData::new(ty, context.hand_path(input.hand)))
 }
 
 pub fn handle_pose_bindings(context: &mut BindingsProfileLoadContext, bindings: &[PoseBinding]) {

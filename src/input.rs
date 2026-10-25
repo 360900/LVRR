@@ -2447,6 +2447,14 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         actions
             .pending_vibrations
             .start_due(&data.session, check_haptic);
+        haptics::sync_binding_haptics(
+            &data,
+            actions,
+            &self.active_sets.read().unwrap(),
+            hands.map(|(hand, profile, _)| (hand, profile)),
+            &masked,
+            check_haptic,
+        );
 
         for (key, action) in &actions.actions {
             if let ActionData::Vector2 {
@@ -3485,6 +3493,8 @@ struct ManifestLoadedActions {
     _info_action: xr::Action<bool>,
     haptic_set: xr::ActionSet,
     haptic_action: xr::Action<xr::Haptic>,
+    /// SteamVR's binding haptics, with the set and action of their binding.
+    binding_haptics: Vec<(ActionSetKey, ActionKey, haptics::BindingHapticData)>,
     pending_vibrations: haptics::PendingVibrations,
     /// The set each skeleton action belongs to.
     skeleton_sets: SecondaryMap<ActionKey, ActionSetKey>,

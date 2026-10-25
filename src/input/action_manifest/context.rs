@@ -4,6 +4,7 @@ use crate::input::custom_bindings::{
     BoolBindingData, BoolBindingType, DpadActions, ScalarConstantBinding, Vector2ActionData,
     Vector2BindingData, Vector2Transform,
 };
+use crate::input::haptics::{BindingHaptic, BindingHapticData, BindingPress};
 use crate::input::origins::BindingInfo;
 use crate::input::profiles::{DynInputPath, ProfileProperties, paths};
 use crate::input::skeletal::SkeletalInputActionData;
@@ -37,6 +38,8 @@ pub(super) struct BindingsLoadContext<'a> {
     /// The identity of the controller that converted bindings were made for, per interaction
     /// profile that shows it (see [InteractionProfile::SIMULATE_CONVERTED]).
     pub simulated_properties: HashMap<xr::Path, &'static ProfileProperties>,
+    /// SteamVR's binding haptics, with the set and action of their binding.
+    pub binding_haptics: Vec<(String, String, BindingHapticData)>,
     pub grip_action: &'a xr::Action<xr::Posef>,
     pub info_action: &'a xr::Action<bool>,
     pub haptic_action: &'a xr::Action<xr::Haptic>,
@@ -66,6 +69,7 @@ impl<'a> BindingsLoadContext<'a> {
             head_proximity: Default::default(),
             scalar_constants: Default::default(),
             simulated_properties: Default::default(),
+            binding_haptics: Default::default(),
             grip_action,
             info_action,
             haptic_action,
@@ -145,6 +149,7 @@ impl BindingsLoadContext<'_> {
             input_paths_out,
             binding_info_out,
             scalar_constants: &mut self.scalar_constants,
+            binding_haptics: &mut self.binding_haptics,
             grip_action: self.grip_action,
             info_action: self.info_action,
             haptic_action: self.haptic_action,
@@ -174,6 +179,7 @@ pub(super) struct BindingsProfileLoadContext<'a> {
     /// What GetActionBindingInfo reports for each action in the current profile.
     pub binding_info_out: &'a mut HashMap<String, Vec<BindingInfo>>,
     scalar_constants: &'a mut HashMap<String, Vec<ScalarConstantBinding>>,
+    binding_haptics: &'a mut Vec<(String, String, BindingHapticData)>,
     pub grip_action: &'a xr::Action<xr::Posef>,
     pub info_action: &'a xr::Action<bool>,
     pub haptic_action: &'a xr::Action<xr::Haptic>,
@@ -390,6 +396,23 @@ impl BindingsProfileLoadContext<'_> {
             .entry(output.path.clone())
             .or_default()
             .push(BoolBindingData::new(ty, hand_path));
+    }
+
+    /// Plays `haptic` when `press` changes on `hand`, for `output`'s binding in a set.
+    pub fn add_binding_haptic(
+        &mut self,
+        action_set_name: &str,
+        output: &ActionPath,
+        hand: Hand,
+        press: BindingPress,
+        haptic: BindingHaptic,
+    ) {
+        let hand = self.hand_path(hand);
+        self.binding_haptics.push((
+            action_set_name.to_owned(),
+            output.path.clone(),
+            BindingHapticData::new(self.interaction_profile, hand, press, haptic),
+        ));
     }
 
     pub fn add_vector2_binding(

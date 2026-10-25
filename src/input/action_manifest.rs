@@ -176,6 +176,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             head_proximity,
             scalar_constants,
             simulated_properties,
+            binding_haptics,
             ..
         } = binding_context;
 
@@ -313,6 +314,19 @@ impl<C: openxr_data::Compositor> Input<C> {
             })
             .collect();
 
+        let binding_haptics = binding_haptics
+            .into_iter()
+            .filter_map(|(set_name, action, haptic)| {
+                let set = set_guard
+                    .iter()
+                    .find_map(|(set, name)| (*name == set_name).then_some(set))?;
+                let action = act_guard
+                    .iter()
+                    .find_map(|(key, a)| (a.path == action).then_some(key))?;
+                Some((set, action, haptic))
+            })
+            .collect();
+
         let loaded = super::ManifestLoadedActions {
             sets,
             hand_restrictable_sets,
@@ -327,6 +341,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             info_set,
             haptic_action,
             haptic_set,
+            binding_haptics,
             pending_vibrations: Default::default(),
             skeleton_sets,
             head_proximity,
@@ -725,6 +740,13 @@ impl<C: openxr_data::Compositor> Input<C> {
             bindings::handle_skeleton_bindings(context, &bindings.skeleton);
 
             bindings::handle_sources(
+                &path_validator,
+                context,
+                action_set_name,
+                &set,
+                &bindings.sources,
+            );
+            bindings::handle_binding_haptics(
                 &path_validator,
                 context,
                 action_set_name,
