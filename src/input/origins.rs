@@ -2,13 +2,13 @@
 //! controller, the names GetOriginLocalizedName gives origins and the render model components
 //! GetOriginTrackedDeviceInfo names.
 
-use crate::input::profiles::paths::DynSubpath;
+use crate::input::profiles::{InputDevice, paths::DynSubpath};
 use crate::openxr_data::Hand;
 
 /// A binding as GetActionBindingInfo reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BindingInfo {
-    pub hand: Hand,
+    pub device: InputDevice,
     /// The input's OpenVR path on the controller, e.g. `/input/joystick`.
     pub input: String,
     /// The binding's mode, e.g. `dpad`. Empty for haptics.
@@ -20,10 +20,7 @@ pub struct BindingInfo {
 }
 
 pub fn hand_path(hand: Hand) -> &'static str {
-    match hand {
-        Hand::Left => "/user/hand/left",
-        Hand::Right => "/user/hand/right",
-    }
+    InputDevice::Hand(hand).path()
 }
 
 /// The OpenVR path of `subpath` on controllers of `controller_type`, as SteamVR's profiles of

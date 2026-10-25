@@ -23,7 +23,7 @@ use skeletal::HandSkeletonBone;
 use skeletal::SkeletalInputActionData;
 
 pub use crate::input::devices::ProfileData;
-use crate::input::profiles::ProfileProperties;
+use crate::input::profiles::{InputDevice, ProfileProperties};
 use crate::{
     openxr_data::{self, Hand, OpenXrData, RestartError, SessionData},
     tracy_span,
@@ -1431,7 +1431,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             recorded
                 .into_iter()
                 .map(|info| ReportedBinding {
-                    device: origins::hand_path(info.hand).to_owned(),
+                    device: info.device.path().to_owned(),
                     input: info.input.clone(),
                     mode: info.mode.to_owned(),
                     slot: info.slot.to_owned(),
@@ -1780,10 +1780,15 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
                 // The OpenVR path of the first input bound on each hand, e.g.
                 // /user/hand/left/input/grip rather than OpenXR's .../squeeze/value.
                 for info in recorded_bindings(loaded, active_profile, &related_action_keys) {
-                    let path = || format!("{}{}", origins::hand_path(info.hand), info.input);
-                    match info.hand {
-                        Hand::Left => left_path_str = left_path_str.or_else(|| Some(path())),
-                        Hand::Right => right_path_str = right_path_str.or_else(|| Some(path())),
+                    let path = || format!("{}{}", info.device.path(), info.input);
+                    match info.device {
+                        InputDevice::Hand(Hand::Left) => {
+                            left_path_str = left_path_str.or_else(|| Some(path()))
+                        }
+                        InputDevice::Hand(Hand::Right) => {
+                            right_path_str = right_path_str.or_else(|| Some(path()))
+                        }
+                        InputDevice::Gamepad => {}
                     }
                 }
 

@@ -10,7 +10,7 @@ pub(super) use bindings::{ClickThresholdParams, GrabParameters, StringOrTyped};
 use crate::input::InteractionProfile;
 use crate::input::action_manifest::context::BindingsLoadContext;
 use crate::input::binding_sources::{BindingChoices, BindingSources};
-use crate::input::profiles::{DynInputPath, LegalPathsT, paths::DynSubpath};
+use crate::input::profiles::{DynInputPath, InputDevice, LegalPathsT, paths::DynSubpath};
 use crate::input::steamvr_bindings::Category;
 use crate::input::{ActionKey, Input, profiles::RunWithProfile, skeletal::SkeletalInputActionData};
 use crate::openxr_data::{self, Hand, SessionData};
@@ -419,7 +419,7 @@ fn has_input<P: InteractionProfile>(hand: Hand, subpath: DynSubpath) -> bool {
         .into_iter()
         .any(|component| {
             validate_path::<P>(DynInputPath {
-                hand,
+                device: InputDevice::Hand(hand),
                 subpath,
                 component,
             })

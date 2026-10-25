@@ -4,7 +4,7 @@
 use super::actions::ControllerType;
 use super::bindings::{Bindings, MaybeInputPath};
 use crate::input::InteractionProfile;
-use crate::input::profiles::{DynInputPath, RunWithProfile, paths::DynSubpath};
+use crate::input::profiles::{DynInputPath, InputDevice, RunWithProfile, paths::DynSubpath};
 use crate::openxr_data::Hand;
 
 impl ControllerType {
@@ -123,8 +123,8 @@ pub fn convert(
                 Some(subpath) => {
                     input.subpath = subpath;
                     // Every menu binding on a hand goes to the same button, wherever it is.
-                    if !menu {
-                        taken.push((input.hand, subpath));
+                    if let (false, InputDevice::Hand(hand)) = (menu, input.device) {
+                        taken.push((hand, subpath));
                     }
                 }
                 None => {
@@ -145,7 +145,10 @@ fn convert_input(
     target_has: &impl Fn(Hand, DynSubpath) -> bool,
 ) -> Option<DynSubpath> {
     use DynSubpath::*;
-    let hand = input.hand;
+    // Only hand controllers' bindings convert.
+    let InputDevice::Hand(hand) = input.device else {
+        return None;
+    };
     // Without face buttons (the Frame's left hand), the d-pad stands in for them, like in
     // SteamVR's legacy bindings.
     let (lower_face, upper_face) = match hand {
@@ -192,7 +195,7 @@ mod tests {
         let vive = ControllerType::ViveController;
         let convert = |subpath, hand, source: &ControllerType, taken: &[(Hand, DynSubpath)]| {
             let input = DynInputPath {
-                hand,
+                device: InputDevice::Hand(hand),
                 subpath,
                 component: None,
             };
@@ -217,7 +220,7 @@ mod tests {
         use DynSubpath::*;
         let convert = |subpath, hand, source: &ControllerType| {
             let input = DynInputPath {
-                hand,
+                device: InputDevice::Hand(hand),
                 subpath,
                 component: None,
             };
@@ -251,7 +254,7 @@ mod tests {
         use DynSubpath::*;
         let convert = |subpath, hand, source: &ControllerType, target_has: &dyn Fn(_, _) -> _| {
             let input = DynInputPath {
-                hand,
+                device: InputDevice::Hand(hand),
                 subpath,
                 component: None,
             };

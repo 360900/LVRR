@@ -87,11 +87,11 @@ impl InteractionProfile for ViveCosmos {
                 ..
             } => Some(path.with_component(DynComponent::Click)),
             DynInputPath {
-                hand,
+                device,
                 subpath: DynSubpath::Bumper,
                 component: Some(DynComponent::Click),
             } => Some(DynInputPath {
-                hand,
+                device,
                 subpath: DynSubpath::Shoulder,
                 component: Some(DynComponent::Click),
             }),

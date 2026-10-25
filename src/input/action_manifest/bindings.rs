@@ -5,7 +5,7 @@ use crate::input::action_manifest::context;
 use crate::input::custom_bindings::BoolBindingData;
 use crate::input::haptics::{BindingHaptic, BindingPress, Vibration};
 use crate::input::profiles::paths::DynComponent;
-use crate::input::profiles::{Component, DynInputPath, paths};
+use crate::input::profiles::{Component, DynInputPath, InputDevice, paths};
 use crate::input::{ActionData, BoundPoseType};
 use crate::{
     input::custom_bindings::{
@@ -1121,7 +1121,7 @@ pub fn handle_dpad_binding(
     for (path, direction) in bound_actions {
         context.add_custom_binding(
             path,
-            parent_path.hand,
+            parent_path.device,
             parent_path,
             BoolBindingType::Dpad(DpadData::new(actions.clone(), direction, zones.clone())),
         );
@@ -1219,10 +1219,24 @@ fn handle_radial_binding(
         );
         context.add_custom_binding(
             output,
-            parent_path.hand,
+            parent_path.device,
             parent_path,
             BoolBindingType::Dpad(DpadData::new(actions.clone(), direction, zones.clone())),
         );
+    }
+}
+
+/// The speeds a grab on `device` drops with, and the hand they are measured for. Only a grab
+/// that the force held drops for moving, and speeds are measured for hands only.
+fn grab_speeds(
+    context: &mut BindingsProfileLoadContext,
+    force: bool,
+    device: InputDevice,
+) -> (Arc<custom_bindings::HandSpeeds>, Hand) {
+    match device {
+        InputDevice::Hand(hand) if force => (context.hand_speeds(), hand),
+        InputDevice::Hand(hand) => (Default::default(), hand),
+        InputDevice::Gamepad => (Default::default(), Hand::Left),
     }
 }
 
@@ -1270,7 +1284,7 @@ fn bind_threshold(
     if let Some(ty) = threshold_binding(output, input, params, action_set_name, action_set, context)
     {
         trace!("suggesting {input} for {} (threshold)", output.path);
-        context.add_custom_binding(output, input.hand, input, ty);
+        context.add_custom_binding(output, input.device, input, ty);
     }
 }
 
@@ -1369,7 +1383,7 @@ fn bind_bool_input(
     let Some(action) = context.input_action(action_set_name, action_set, input) else {
         return;
     };
-    context.add_custom_binding(output, input.hand, input, make(action));
+    context.add_custom_binding(output, input.device, input, make(action));
 }
 
 /// The touch that keeps a button mode click held (touchy_click), with its thresholds. It's the
@@ -1445,7 +1459,7 @@ fn bind_sticky_click(
         "suggesting {click_path} for {} (sticky click)",
         click.output.path
     );
-    context.add_custom_binding(&click.output, path.hand, click_path, ty);
+    context.add_custom_binding(&click.output, path.device, click_path, ty);
 }
 
 /// The OpenVR path of the headset's proximity sensor.
@@ -1637,7 +1651,7 @@ pub fn handle_sources(
                                 "suggesting {press} for {} (touchy click)",
                                 click.output.path
                             );
-                            context.add_custom_binding(&click.output, path.hand, press, ty);
+                            context.add_custom_binding(&click.output, path.device, press, ty);
                         }
                     } else if is_click {
                         // The runtime's click point is used for clicks.
@@ -1682,7 +1696,7 @@ pub fn handle_sources(
                     };
                     context.add_custom_binding(
                         &output.output,
-                        path.hand,
+                        path.device,
                         press,
                         BoolBindingType::Timed(TimedPressData::new(press_binding, kind)),
                     );
@@ -1892,21 +1906,17 @@ pub fn handle_sources(
                     force_path.is_some(),
                     grab.output.path
                 );
-                // Only a grab that the force held drops for moving.
-                let speeds = match force_action {
-                    Some(_) => context.hand_speeds(),
-                    None => Default::default(),
-                };
+                let (speeds, hand) = grab_speeds(context, force_action.is_some(), path.device);
                 context.add_custom_binding(
                     &grab.output,
-                    path.hand,
+                    path.device,
                     value_path,
                     BoolBindingType::Grab(GrabBindingData::new(
                         force_action,
                         value_action,
                         parameters,
                         speeds,
-                        path.hand,
+                        hand,
                     )),
                 );
             }
@@ -2100,14 +2110,14 @@ pub fn handle_chord_bindings(
                 ));
                 continue 'chords;
             };
-            parts.push((context.hand_path(path.hand), part));
+            parts.push((context.device_path(path.device), part));
         }
 
         trace!("binding chord for {}", output.path);
         // Owned by the hand of the last input, which usually completes the chord.
         context.add_custom_binding(
             output,
-            last.hand,
+            last.device,
             *last,
             BoolBindingType::Chord(ChordData::new(parts)),
         );
@@ -2335,19 +2345,18 @@ pub fn handle_binding_haptics(
                 else {
                     continue;
                 };
-                let speeds = match force_action {
-                    Some(_) => context.hand_speeds(),
-                    None => Default::default(),
-                };
+                let (speeds, hand) = grab_speeds(context, force_action.is_some(), path.device);
                 let grab = GrabBindingData::new(
                     force_action,
                     value_action,
                     Some(parameters),
                     speeds,
-                    path.hand,
+                    hand,
                 );
-                let press =
-                    BoolBindingData::new(BoolBindingType::Grab(grab), context.hand_path(path.hand));
+                let press = BoolBindingData::new(
+                    BoolBindingType::Grab(grab),
+                    context.device_path(path.device),
+                );
                 (&output.output, path, haptic, BindingPress::Custom(press))
             }
             _ => continue,
@@ -2356,7 +2365,7 @@ pub fn handle_binding_haptics(
             "haptic for {} on {path} ({action_set_name}): {haptic:?}",
             output.path
         );
-        context.add_binding_haptic(action_set_name, output, path.hand, press, haptic);
+        context.add_binding_haptic(action_set_name, output, path.device, press, haptic);
     }
 }
 
@@ -2376,7 +2385,7 @@ fn threshold_press(
         let action = context.input_action(action_set_name, action_set, input)?;
         BoolBindingType::ThresholdFloat(ThresholdBindingData::new(action, params))
     };
-    Some(BoolBindingData::new(ty, context.hand_path(input.hand)))
+    Some(BoolBindingData::new(ty, context.device_path(input.device)))
 }
 
 pub fn handle_pose_bindings(context: &mut BindingsProfileLoadContext, bindings: &[PoseBinding]) {
@@ -2543,7 +2552,7 @@ pub fn record_binding_info(
         let analog = validate_path(path.with_component(DynComponent::Value))
             .is_some_and(|path| path.component == Some(DynComponent::Value));
         BindingInfo {
-            hand: path.hand,
+            device: path.device,
             input: origins::openvr_input(controller_type, path.subpath),
             mode,
             slot,
@@ -2598,7 +2607,7 @@ pub fn record_binding_info(
                 _ => continue,
             };
             let info = BindingInfo {
-                hand,
+                device: InputDevice::Hand(hand),
                 input: "/output/haptic".to_owned(),
                 mode: "",
                 slot: "",

@@ -21,7 +21,7 @@ use crate::input::profiles::vive_tracker::ViveTracker;
 #[cfg(feature = "monado")]
 use openxr_mndx_xdev_space::{SessionXDevExtensionMNDX, XDev, XR_MNDX_XDEV_SPACE_EXTENSION_NAME};
 
-use crate::input::profiles::{PoseTransformations, ProfileProperties};
+use crate::input::profiles::{InputDevice, PoseTransformations, ProfileProperties};
 use crate::openxr_data::{self, Hand, OpenXrData, SessionData};
 use crate::tracy_span;
 use log::trace;
@@ -1035,21 +1035,33 @@ impl TrackedDevice {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct SubactionPaths {
     pub left: xr::Path,
     pub right: xr::Path,
+    pub gamepad: xr::Path,
 }
 
 impl SubactionPaths {
     pub fn new(instance: &xr::Instance) -> Self {
-        let left = instance
-            .string_to_path("/user/hand/left")
-            .expect("Failed to convert string to path");
-        let right = instance
-            .string_to_path("/user/hand/right")
-            .expect("Failed to convert string to path");
+        let path = |device: InputDevice| {
+            instance
+                .string_to_path(device.path())
+                .expect("Failed to convert string to path")
+        };
+        Self {
+            left: path(InputDevice::Hand(Hand::Left)),
+            right: path(InputDevice::Hand(Hand::Right)),
+            gamepad: path(InputDevice::Gamepad),
+        }
+    }
 
-        Self { left, right }
+    pub fn get(&self, device: InputDevice) -> xr::Path {
+        match device {
+            InputDevice::Hand(Hand::Left) => self.left,
+            InputDevice::Hand(Hand::Right) => self.right,
+            InputDevice::Gamepad => self.gamepad,
+        }
     }
 }
 

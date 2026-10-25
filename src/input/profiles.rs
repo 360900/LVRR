@@ -443,7 +443,7 @@ impl Component for () {
 #[diagnostic::on_unimplemented(message = "{Self} is not a legal component for {P}")]
 trait LegalComponentFor<P: Subpath>: Component {}
 
-/// Represents a complete input path: hand, subpath, and component
+/// Represents a complete input path: device, subpath, and component
 trait InputPath {
     const DYN: DynInputPath;
 }
@@ -454,7 +454,7 @@ where
     C: LegalComponentFor<S>,
 {
     const DYN: DynInputPath = DynInputPath {
-        hand: Hand::Left,
+        device: InputDevice::Hand(Hand::Left),
         subpath: S::DYN,
         component: C::DYN,
     };
@@ -466,10 +466,28 @@ where
     C: LegalComponentFor<S>,
 {
     const DYN: DynInputPath = DynInputPath {
-        hand: Hand::Right,
+        device: InputDevice::Hand(Hand::Right),
         subpath: S::DYN,
         component: C::DYN,
     };
+}
+
+/// The device an input is on, named by its top level path.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum InputDevice {
+    Hand(Hand),
+    /// `/user/gamepad`
+    Gamepad,
+}
+
+impl InputDevice {
+    pub fn path(self) -> &'static str {
+        match self {
+            Self::Hand(Hand::Left) => "/user/hand/left",
+            Self::Hand(Hand::Right) => "/user/hand/right",
+            Self::Gamepad => "/user/gamepad",
+        }
+    }
 }
 
 /// A dynamic representation of an input path, typically parsed from a string.
@@ -477,7 +495,7 @@ where
 /// This is not guaranteed to be an actually valid path!
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub struct DynInputPath {
-    pub hand: Hand,
+    pub device: InputDevice,
     pub subpath: paths::DynSubpath,
     pub component: Option<paths::DynComponent>,
 }
@@ -493,11 +511,7 @@ impl DynInputPath {
 
 impl std::fmt::Display for DynInputPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let hand = match self.hand {
-            Hand::Left => "/user/hand/left",
-            Hand::Right => "/user/hand/right",
-        };
-        write!(f, "{hand}/input/{}", self.subpath)?;
+        write!(f, "{}/input/{}", self.device.path(), self.subpath)?;
         if let Some(component) = &self.component {
             write!(f, "/{component}")?;
         }
@@ -523,21 +537,32 @@ impl std::str::FromStr for DynInputPath {
 
         verify_next!("");
         verify_next!("user");
-        verify_next!("hand");
 
-        let hand = match split
+        let device = match split
             .next()
-            .ok_or_else(|| "missing hand component".to_string())?
+            .ok_or_else(|| "missing device component".to_string())?
         {
-            "left" => Hand::Left,
-            "right" => Hand::Right,
-            other => return Err(format!("expected left or right hand, got {other}")),
+            "gamepad" => InputDevice::Gamepad,
+            "hand" => match split
+                .next()
+                .ok_or_else(|| "missing hand component".to_string())?
+            {
+                "left" => InputDevice::Hand(Hand::Left),
+                "right" => InputDevice::Hand(Hand::Right),
+                other => return Err(format!("expected left or right hand, got {other}")),
+            },
+            other => return Err(format!("expected hand or gamepad, got {other}")),
         };
 
         verify_next!("input");
 
         let subpath_str = split.next();
         let subpath = match subpath_str {
+            // SteamVR's names for the gamepad's view, menu and Xbox buttons
+            // (drivers/gamepad/resources/input/gamepad_profile.json).
+            Some("back") if device == InputDevice::Gamepad => paths::DynSubpath::View,
+            Some("start") if device == InputDevice::Gamepad => paths::DynSubpath::Menu,
+            Some("guide") if device == InputDevice::Gamepad => paths::DynSubpath::System,
             // Index finger curls have no OpenXR input. They follow the trigger and grip values,
             // which finger curl is estimated from anyway.
             Some("finger") => match split.next() {
@@ -563,7 +588,7 @@ impl std::str::FromStr for DynInputPath {
             .transpose()?;
 
         Ok(DynInputPath {
-            hand,
+            device,
             subpath,
             component,
         })
@@ -693,12 +718,21 @@ pub mod paths {
         Trackpad::<Click, Touch, Force, Vec2X, Vec2Y>,
         Thumbrest::<Touch>,
         PinchExt("pinch_ext")::<Value>,
-        GraspExt("grasp_ext")::<Value>
+        GraspExt("grasp_ext")::<Value>,
+        // The gamepad's.
+        ShoulderLeft::<Click>,
+        ShoulderRight::<Click>,
+        TriggerLeft::<Value>,
+        TriggerRight::<Value>,
+        ThumbstickLeft::<Click, Vec2X, Vec2Y>,
+        ThumbstickRight::<Click, Vec2X, Vec2Y>
     );
 
     // Vec2 impls
     impl LegalComponentFor<Thumbstick> for () {}
     impl LegalComponentFor<Trackpad> for () {}
+    impl LegalComponentFor<ThumbstickLeft> for () {}
+    impl LegalComponentFor<ThumbstickRight> for () {}
 
     impl DynSubpath {
         pub fn from_openvr_str(s: &str) -> Option<Self> {
@@ -720,8 +754,47 @@ pub mod paths {
                 "thumbstick" | "joystick" => Some(Self::Thumbstick),
                 "thumbrest" => Some(Self::Thumbrest),
                 "trackpad" => Some(Self::Trackpad),
+                "shoulder_left" => Some(Self::ShoulderLeft),
+                "shoulder_right" => Some(Self::ShoulderRight),
+                "trigger_left" => Some(Self::TriggerLeft),
+                "trigger_right" => Some(Self::TriggerRight),
+                "joystick_left" | "thumbstick_left" => Some(Self::ThumbstickLeft),
+                "joystick_right" | "thumbstick_right" => Some(Self::ThumbstickRight),
                 _ => None,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DynInputPath, InputDevice};
+    use crate::openxr_data::Hand;
+
+    #[test]
+    fn gamepad_paths() {
+        let parse = |path: &str| path.parse::<DynInputPath>();
+        let path = |path: &str| parse(path).unwrap().to_string();
+        assert!(parse("/user/gamepad/input/a/click").unwrap().device == InputDevice::Gamepad);
+        assert_eq!(
+            path("/user/gamepad/input/joystick_left/click"),
+            "/user/gamepad/input/thumbstick_left/click"
+        );
+        assert_eq!(
+            path("/user/gamepad/input/trigger_right/pull"),
+            "/user/gamepad/input/trigger_right/value"
+        );
+        // SteamVR's names for the view and menu buttons, only on the gamepad.
+        assert_eq!(path("/user/gamepad/input/back"), "/user/gamepad/input/view");
+        assert_eq!(
+            path("/user/gamepad/input/start/click"),
+            "/user/gamepad/input/menu/click"
+        );
+        assert!(parse("/user/hand/left/input/back").is_err());
+        assert!(
+            parse("/user/hand/right/input/a/click").unwrap().device
+                == InputDevice::Hand(Hand::Right)
+        );
+        assert!(parse("/user/head/input/a/click").is_err());
     }
 }
