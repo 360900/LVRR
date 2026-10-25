@@ -89,6 +89,22 @@ pub fn is_haptic_activated(action: xr::Action, hand: UserPath) -> bool {
     state
 }
 
+/// A vibration applied with xrApplyHapticFeedback.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HapticFeedback {
+    /// None when applied without a subaction path, to both hands.
+    pub hand: Option<UserPath>,
+    pub duration: xr::Duration,
+    pub frequency: f32,
+    pub amplitude: f32,
+}
+
+/// The vibrations applied to `action` since the last call, oldest first.
+pub fn take_haptic_feedback(action: xr::Action) -> Vec<HapticFeedback> {
+    let action = action.to_handle().unwrap();
+    std::mem::take(&mut *action.haptic_feedback.lock().unwrap())
+}
+
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum UserPath {
     /// /user/hand/left
@@ -812,8 +828,6 @@ struct Instance {
     paths: Mutex<SlotMap<DefaultKey, String>>,
     string_to_path: Mutex<HashMap<String, DefaultKey>>,
     action_sets: Mutex<HashSet<xr::ActionSet>>,
-    left_hand_key: DefaultKey,
-    right_hand_key: DefaultKey,
     lost: AtomicBool,
     enabled_extensions: Vec<CString>,
     rejected_profiles: Vec<String>,
@@ -1173,6 +1187,7 @@ struct Action {
     pending_state: AtomicCell<LeftRight<Option<(ActionState, xr::Time)>>>,
     suggested: Mutex<HashMap<xr::Path, Vec<xr::Path>>>,
     subaction_paths: Vec<xr::Path>,
+    haptic_feedback: Mutex<Vec<HapticFeedback>>,
 }
 
 impl Action {
@@ -1263,11 +1278,11 @@ extern "system" fn create_instance(
     );
     let mut paths = SlotMap::new();
     let mut string_to_path = HashMap::new();
-    let left_hand_key = paths.insert_with_key(|key| {
+    paths.insert_with_key(|key| {
         string_to_path.insert(left.clone(), key);
         left
     });
-    let right_hand_key = paths.insert_with_key(|key| {
+    paths.insert_with_key(|key| {
         string_to_path.insert(right.clone(), key);
         right
     });
@@ -1277,8 +1292,6 @@ extern "system" fn create_instance(
         paths: Mutex::new(paths),
         string_to_path: Mutex::new(string_to_path),
         action_sets: Default::default(),
-        left_hand_key,
-        right_hand_key,
         lost: false.into(),
         enabled_extensions,
         rejected_profiles: REJECTED_PROFILES.with_borrow(Clone::clone),
@@ -1555,6 +1568,7 @@ extern "system" fn create_action(
             }
             .to_vec()
         },
+        haptic_feedback: Mutex::default(),
     });
 
     set.pending_actions.write().unwrap().push(a.clone());
@@ -2675,20 +2689,30 @@ extern "system" fn apply_haptic_feedback(
     if unsafe { *(&raw const (*haptic_feedback).ty) } != xr::HapticVibration::TYPE {
         return xr::Result::ERROR_VALIDATION_FAILURE;
     }
+    let vibration = unsafe { *(haptic_feedback as *const xr::HapticVibration) };
 
     hand_state.state = ActionState::Haptic(true);
 
     let instance = session.instance.upgrade().unwrap();
 
-    match DefaultKey::from(KeyData::from_ffi(info.subaction_path.into_raw())) {
-        x if x == instance.left_hand_key => {
+    let Ok(hand) = instance.get_user_path(info.subaction_path) else {
+        return xr::Result::ERROR_PATH_INVALID;
+    };
+    match hand {
+        Some(UserPath::LeftHand) => action.state.left.store(hand_state),
+        Some(UserPath::RightHand) => action.state.right.store(hand_state),
+        // Without a subaction path, every hand vibrates.
+        None => {
             action.state.left.store(hand_state);
-        }
-        x if x == instance.right_hand_key => {
             action.state.right.store(hand_state);
         }
-        _ => unreachable!(),
     }
+    action.haptic_feedback.lock().unwrap().push(HapticFeedback {
+        hand,
+        duration: vibration.duration,
+        frequency: vibration.frequency,
+        amplitude: vibration.amplitude,
+    });
 
     xr::Result::SUCCESS
 }
