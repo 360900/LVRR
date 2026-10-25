@@ -87,6 +87,8 @@ pub struct VulkanData {
     pub memory_export: Option<DeviceIds>,
     /// Whether the device can export semaphores as opaque fds.
     pub semaphore_export: bool,
+    /// The image of the last raw overlay texture, see [GraphicsBackend::raw_texture].
+    raw: Option<RawTexture>,
 }
 
 /// Memory exported as an opaque fd can only be imported on the same device and driver.
@@ -105,7 +107,12 @@ struct ResolveImage {
 }
 
 impl ResolveImage {
-    fn new(vk: &VulkanData, format: vk::Format, extent: vk::Extent2D) -> Result<Self, vk::Result> {
+    fn new(
+        vk: &VulkanData,
+        format: vk::Format,
+        extent: vk::Extent2D,
+        usage: vk::ImageUsageFlags,
+    ) -> Result<Self, vk::Result> {
         let device = &vk.device;
         let image = unsafe {
             device.create_image(
@@ -121,36 +128,16 @@ impl ResolveImage {
                     .array_layers(1)
                     .samples(vk::SampleCountFlags::TYPE_1)
                     .tiling(vk::ImageTiling::OPTIMAL)
-                    .usage(vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST),
+                    .usage(usage),
                 None,
             )?
         };
         let requirements = unsafe { device.get_image_memory_requirements(image) };
-        let properties = unsafe {
-            vk.instance
-                .get_physical_device_memory_properties(vk.physical_device)
-        };
-        let allowed = |i: &u32| requirements.memory_type_bits & (1 << i) != 0;
-        let device_local = |i: &u32| {
-            properties.memory_types[*i as usize]
-                .property_flags
-                .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
-        };
-        let types = 0..properties.memory_type_count;
-        let memory = types
-            .clone()
-            .filter(allowed)
-            .find(device_local)
-            .or_else(|| types.clone().find(allowed))
+        let memory = vk
+            .memory_type(&requirements, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+            .or_else(|| vk.memory_type(&requirements, vk::MemoryPropertyFlags::empty()))
             .ok_or(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY)
-            .and_then(|memory_type| unsafe {
-                device.allocate_memory(
-                    &vk::MemoryAllocateInfo::default()
-                        .allocation_size(requirements.size)
-                        .memory_type_index(memory_type),
-                    None,
-                )
-            })
+            .and_then(|memory_type| vk.allocate(&requirements, memory_type))
             .inspect_err(|_| unsafe { device.destroy_image(image, None) })?;
         let image = Self {
             image,
@@ -171,6 +158,215 @@ impl ResolveImage {
         unsafe {
             device.destroy_image(self.image, None);
             device.free_memory(self.memory, None);
+        }
+    }
+}
+
+/// The image a raw overlay texture's pixels are uploaded into, and what uploads them. The copy
+/// into the swapchain gets it like an app's texture, in the layout those come in.
+struct RawTexture {
+    image: ResolveImage,
+    /// The pixels are written here and copied into the image on the queue.
+    staging: vk::Buffer,
+    staging_memory: vk::DeviceMemory,
+    /// Whether writes to the staging memory have to be flushed.
+    flush: bool,
+    pool: vk::CommandPool,
+    buf: vk::CommandBuffer,
+    /// Signaled once the last upload has finished.
+    fence: vk::Fence,
+    /// Describes `image` to the copy, which gets a pointer to it, so it's boxed to stay put when
+    /// the backend moves.
+    data: Box<TextureData>,
+}
+
+struct TextureData(vr::VRVulkanTextureData_t);
+// SAFETY: The pointers are the handles the backend holds anyway, which are only compared and
+// passed on, never dereferenced.
+unsafe impl Send for TextureData {}
+unsafe impl Sync for TextureData {}
+
+impl RawTexture {
+    /// SteamVR takes raw overlay data as 8-bit RGBA, which is sRGB encoded unless the overlay's
+    /// colour space says otherwise, like any UNORM texture.
+    const FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
+
+    /// The size of `extent` pixels of [Self::FORMAT], if it fits.
+    fn size(extent: vk::Extent2D) -> Option<usize> {
+        (extent.width as usize)
+            .checked_mul(extent.height as usize)?
+            .checked_mul(4)
+    }
+
+    fn new(vk: &VulkanData, extent: vk::Extent2D) -> Result<Self, vk::Result> {
+        let image = ResolveImage::new(
+            vk,
+            Self::FORMAT,
+            extent,
+            // Uploaded into, sampled by the overlay pipeline, and handed over in
+            // TRANSFER_SRC_OPTIMAL, which needs the usage.
+            vk::ImageUsageFlags::TRANSFER_DST
+                | vk::ImageUsageFlags::SAMPLED
+                | vk::ImageUsageFlags::TRANSFER_SRC,
+        )?;
+        let data = Box::new(TextureData(vr::VRVulkanTextureData_t {
+            m_nImage: image.image.as_raw(),
+            m_pDevice: vk.device.handle().as_raw() as _,
+            m_pPhysicalDevice: vk.physical_device.as_raw() as _,
+            m_pInstance: vk.instance.handle().as_raw() as _,
+            m_pQueue: vk.queue.as_raw() as _,
+            m_nQueueFamilyIndex: vk.queue_family_index,
+            m_nWidth: extent.width,
+            m_nHeight: extent.height,
+            m_nFormat: Self::FORMAT.as_raw() as u32,
+            m_nSampleCount: 1,
+        }));
+        let mut raw = Self {
+            image,
+            staging: vk::Buffer::null(),
+            staging_memory: vk::DeviceMemory::null(),
+            flush: false,
+            pool: vk::CommandPool::null(),
+            buf: vk::CommandBuffer::null(),
+            fence: vk::Fence::null(),
+            data,
+        };
+        if let Err(e) = raw.create_uploader(vk) {
+            // Null handles are skipped.
+            unsafe { raw.destroy(&vk.device) };
+            return Err(e);
+        }
+        Ok(raw)
+    }
+
+    /// The staging buffer, and what submits the copies out of it.
+    fn create_uploader(&mut self, vk: &VulkanData) -> Result<(), vk::Result> {
+        let device = &vk.device;
+        let size = Self::size(self.image.extent).ok_or(vk::Result::ERROR_OUT_OF_HOST_MEMORY)?;
+        unsafe {
+            self.staging = device.create_buffer(
+                &vk::BufferCreateInfo::default()
+                    .size(size as vk::DeviceSize)
+                    .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE),
+                None,
+            )?;
+            let requirements = device.get_buffer_memory_requirements(self.staging);
+            let visible = vk::MemoryPropertyFlags::HOST_VISIBLE;
+            let coherent = visible | vk::MemoryPropertyFlags::HOST_COHERENT;
+            let (memory_type, flush) = vk
+                .memory_type(&requirements, coherent)
+                .map(|t| (t, false))
+                .or_else(|| vk.memory_type(&requirements, visible).map(|t| (t, true)))
+                .ok_or(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY)?;
+            self.flush = flush;
+            self.staging_memory = vk.allocate(&requirements, memory_type)?;
+            device.bind_buffer_memory(self.staging, self.staging_memory, 0)?;
+
+            self.pool = device.create_command_pool(
+                &vk::CommandPoolCreateInfo::default()
+                    .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+                    .queue_family_index(vk.queue_family_index),
+                None,
+            )?;
+            self.buf = device.allocate_command_buffers(
+                &vk::CommandBufferAllocateInfo::default()
+                    .command_pool(self.pool)
+                    .level(vk::CommandBufferLevel::PRIMARY)
+                    .command_buffer_count(1),
+            )?[0];
+            self.fence = device.create_fence(
+                &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
+                None,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Copies `pixels`, which must be the image's size, into the image on `queue`, leaving it in
+    /// TRANSFER_SRC_OPTIMAL. The GPU must be done with the previous upload and the draws reading
+    /// the image.
+    fn upload(
+        &mut self,
+        device: &ash::Device,
+        queue: vk::Queue,
+        pixels: &[u8],
+    ) -> Result<(), vk::Result> {
+        unsafe {
+            let mapped = device.map_memory(
+                self.staging_memory,
+                0,
+                vk::WHOLE_SIZE,
+                vk::MemoryMapFlags::empty(),
+            )?;
+            std::ptr::copy_nonoverlapping(pixels.as_ptr(), mapped.cast::<u8>(), pixels.len());
+            let flushed = if self.flush {
+                device.flush_mapped_memory_ranges(&[vk::MappedMemoryRange::default()
+                    .memory(self.staging_memory)
+                    .offset(0)
+                    .size(vk::WHOLE_SIZE)])
+            } else {
+                Ok(())
+            };
+            device.unmap_memory(self.staging_memory);
+            flushed?;
+
+            let image = self.image.image;
+            let region = vk::BufferImageCopy {
+                buffer_offset: 0,
+                // Tightly packed rows.
+                buffer_row_length: 0,
+                buffer_image_height: 0,
+                image_subresource: vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+                image_offset: vk::Offset3D::default(),
+                image_extent: vk::Extent3D {
+                    width: self.image.extent.width,
+                    height: self.image.extent.height,
+                    depth: 1,
+                },
+            };
+            device.begin_command_buffer(
+                self.buf,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )?;
+            staging_barrier(device, self.buf, image, true);
+            device.cmd_copy_buffer_to_image(
+                self.buf,
+                self.staging,
+                image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[region],
+            );
+            staging_barrier(device, self.buf, image, false);
+            device.end_command_buffer(self.buf)?;
+            // The fence stays signaled up to here, so a failure doesn't block the next upload.
+            device.reset_fences(&[self.fence])?;
+            let submit = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&self.buf));
+            device
+                .queue_submit(queue, &[submit], self.fence)
+                .inspect_err(|_| {
+                    // A failed submit leaves the fence unsignaled, an empty one signals it after
+                    // the queue's earlier work.
+                    let _ = device.queue_submit(queue, &[], self.fence);
+                })
+        }
+    }
+
+    /// # Safety
+    /// The GPU must be done with the upload and the draws reading the image.
+    unsafe fn destroy(&self, device: &ash::Device) {
+        unsafe {
+            device.destroy_fence(self.fence, None);
+            device.destroy_command_pool(self.pool, None);
+            device.destroy_buffer(self.staging, None);
+            device.free_memory(self.staging_memory, None);
+            self.image.destroy(device);
         }
     }
 }
@@ -256,6 +452,12 @@ impl EyeCopy {
 
 impl Drop for VulkanData {
     fn drop(&mut self) {
+        if let Some(raw) = self.raw.take() {
+            // Leak rather than free what a stuck upload or draw may still use.
+            if self.raw_texture_idle(&raw) {
+                unsafe { raw.destroy(&self.device) };
+            }
+        }
         if let Some(data) = self.real_data.take() {
             data.destroy(&self.device);
         }
@@ -329,6 +531,61 @@ impl GraphicsBackend for VulkanData {
     fn is_texture_on_device(&self, texture: Self::OpenVrTexture) -> bool {
         let device = unsafe { (*texture).m_pDevice };
         vk::Device::from_raw(device as _) == self.device.handle()
+    }
+
+    fn new_on_same_device(&self, _: &xr::Instance) -> Option<Self> {
+        Some(Self {
+            _entry: self._entry.clone(),
+            instance: self.instance.clone(),
+            physical_device: self.physical_device,
+            device: self.device.clone(),
+            queue: self.queue,
+            queue_family_index: self.queue_family_index,
+            real_data: None,
+            // Whoever owns the device keeps it alive.
+            owns_device: false,
+            host_import_alignment: self.host_import_alignment,
+            memory_export: self.memory_export,
+            semaphore_export: self.semaphore_export,
+            raw: None,
+        })
+    }
+
+    fn raw_texture(
+        &mut self,
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Option<Self::OpenVrTexture> {
+        let extent = vk::Extent2D { width, height };
+        if pixels.len() != RawTexture::size(extent)? {
+            return None;
+        }
+        if let Some(raw) = &self.raw {
+            // Neither the staging buffer nor the image can be touched while the GPU reads them,
+            // and a GPU that never finishes isn't given more to do.
+            if !self.raw_texture_idle(raw) {
+                return None;
+            }
+            if raw.image.extent != extent {
+                unsafe { self.raw.take().unwrap().destroy(&self.device) };
+            }
+        }
+        if self.raw.is_none() {
+            let raw = RawTexture::new(self, extent)
+                .inspect_err(|e| {
+                    crate::warn_once!("Failed to create a raw overlay texture: {}", e);
+                })
+                .ok()?;
+            self.raw = Some(raw);
+        }
+        let raw = self.raw.as_mut().unwrap();
+        raw.upload(&self.device, self.queue, pixels)
+            .inspect_err(|e| {
+                crate::warn_once!("Failed to upload a raw overlay texture: {}", e);
+            })
+            .ok()?;
+        Some(&raw.data.0)
     }
 
     fn fallback_format(format: u32, offered: &[u32]) -> Option<u32> {
@@ -923,12 +1180,58 @@ impl VulkanData {
                 warn!("Leaking an image the GPU may still use");
             }
         }
-        ResolveImage::new(self, format, extent)
-            .inspect_err(|e| {
-                crate::warn_once!("Failed to create an image for the eye texture: {}", e)
-            })
-            .ok()
-            .map(|image| slot.insert(image).image)
+        ResolveImage::new(
+            self,
+            format,
+            extent,
+            vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST,
+        )
+        .inspect_err(|e| crate::warn_once!("Failed to create an image for the eye texture: {}", e))
+        .ok()
+        .map(|image| slot.insert(image).image)
+    }
+
+    /// Memory for `requirements` of type `memory_type`.
+    fn allocate(
+        &self,
+        requirements: &vk::MemoryRequirements,
+        memory_type: u32,
+    ) -> Result<vk::DeviceMemory, vk::Result> {
+        unsafe {
+            self.device.allocate_memory(
+                &vk::MemoryAllocateInfo::default()
+                    .allocation_size(requirements.size)
+                    .memory_type_index(memory_type),
+                None,
+            )
+        }
+    }
+
+    /// A memory type `requirements` allow that has all of `properties`.
+    fn memory_type(
+        &self,
+        requirements: &vk::MemoryRequirements,
+        properties: vk::MemoryPropertyFlags,
+    ) -> Option<u32> {
+        let available = unsafe {
+            self.instance
+                .get_physical_device_memory_properties(self.physical_device)
+        };
+        (0..available.memory_type_count).find(|&i| {
+            requirements.memory_type_bits & (1 << i) != 0
+                && available.memory_types[i as usize]
+                    .property_flags
+                    .contains(properties)
+        })
+    }
+
+    /// Whether the GPU is done with the raw texture's upload and the draws reading it, waiting for
+    /// them if not. False if it never finishes.
+    fn raw_texture_idle(&self, raw: &RawTexture) -> bool {
+        self.real_data
+            .as_ref()
+            .is_none_or(|data| wait_for_fences(&self.device, &data.fences))
+            && wait_for_fences(&self.device, &[raw.fence])
     }
 
     /// Records and submits `bufs[idx]` once its previous submission has finished, or skips the
@@ -997,6 +1300,7 @@ impl VulkanData {
             host_import_alignment: None,
             memory_export: None,
             semaphore_export: false,
+            raw: None,
         }
     }
 
@@ -1097,6 +1401,7 @@ impl VulkanData {
             host_import_alignment,
             memory_export,
             semaphore_export,
+            raw: None,
         })
     }
 

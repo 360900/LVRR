@@ -465,6 +465,16 @@ pub struct GlData {
     /// Copies flip rows, so the images read back top to bottom like Vulkan's, see [bridge].
     flip: bool,
     gpu_timer: timing::GpuTimer,
+    raw: RawGlTexture,
+}
+
+/// The texture a raw overlay texture's pixels are uploaded into, see
+/// [GraphicsBackend::raw_texture]. Name 0 until the first upload.
+#[derive(Default)]
+struct RawGlTexture {
+    name: GLuint,
+    width: GLint,
+    height: GLint,
 }
 
 /// A renderbuffer the app's texture is copied into on the way, see [GlData::resolve] and
@@ -517,6 +527,7 @@ impl GlData {
             eye_extents: Default::default(),
             flip: false,
             gpu_timer: Default::default(),
+            raw: Default::default(),
         })
     }
 }
@@ -723,6 +734,9 @@ impl Drop for GlData {
             unsafe {
                 gl::DeleteFramebuffers(2, [self.read_fbo, self.draw_fbo].as_ptr());
                 gl::DeleteRenderbuffers(2, renderbuffers.as_ptr());
+                if self.raw.name != 0 {
+                    gl::DeleteTextures(1, &self.raw.name);
+                }
             }
             self.gpu_timer.destroy();
         }
@@ -785,6 +799,108 @@ impl GraphicsBackend for GlData {
         Some(GlTexture {
             layer: Some(layer),
             ..texture
+        })
+    }
+
+    /// Textures are shared with the session's context, framebuffers aren't, so this needs the
+    /// session's context current rather than one sharing with it.
+    fn new_on_same_device(&self, instance: &xr::Instance) -> Option<Self> {
+        if !self.session_info.is_current() {
+            crate::warn_once!("Raw overlay textures need the app's OpenGL context current");
+            return None;
+        }
+        Self::new(instance)
+    }
+
+    fn raw_texture(&mut self, pixels: &[u8], width: u32, height: u32) -> Option<GlTexture> {
+        if !self.session_info.is_current() {
+            crate::warn_once!("Raw overlay textures need the app's OpenGL context current");
+            return None;
+        }
+        let (Ok(width), Ok(height)) = (GLint::try_from(width), GLint::try_from(height)) else {
+            return None;
+        };
+        let row = width as usize * 4;
+        if pixels.len() != row * height as usize {
+            return None;
+        }
+        // GL textures start with their bottom row, and the copies treat this one like the app's.
+        let bottom_up: Vec<u8> = pixels.chunks_exact(row).rev().flatten().copied().collect();
+
+        // Unpack state that would move or reshape the rows.
+        const UNPACK_STATE: [(GLenum, GLint); 6] = [
+            (gl::UNPACK_ROW_LENGTH, 0),
+            (gl::UNPACK_SKIP_ROWS, 0),
+            (gl::UNPACK_SKIP_PIXELS, 0),
+            (gl::UNPACK_ALIGNMENT, 4),
+            (gl::UNPACK_SWAP_BYTES, 0),
+            (gl::UNPACK_LSB_FIRST, 0),
+        ];
+        unsafe {
+            let mut bound = 0;
+            gl::GetIntegerv(gl::TEXTURE_BINDING_2D, &mut bound);
+            let mut unpack_buffer = 0;
+            gl::GetIntegerv(gl::PIXEL_UNPACK_BUFFER_BINDING, &mut unpack_buffer);
+            let saved = UNPACK_STATE.map(|(name, value)| {
+                let mut old = 0;
+                gl::GetIntegerv(name, &mut old);
+                gl::PixelStorei(name, value);
+                old
+            });
+            // With a buffer bound, the pixels would be an offset into it.
+            gl::BindBuffer(gl::PIXEL_UNPACK_BUFFER, 0);
+
+            let raw = &mut self.raw;
+            if raw.name == 0 {
+                gl::GenTextures(1, &mut raw.name);
+                gl::BindTexture(gl::TEXTURE_2D, raw.name);
+                // One level only, or the texture is incomplete and can't be copied from.
+                gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAX_LEVEL, 0);
+                gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as GLint);
+                gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as GLint);
+            } else {
+                gl::BindTexture(gl::TEXTURE_2D, raw.name);
+            }
+            let data = bottom_up.as_ptr().cast();
+            if (raw.width, raw.height) == (width, height) {
+                gl::TexSubImage2D(
+                    gl::TEXTURE_2D,
+                    0,
+                    0,
+                    0,
+                    width,
+                    height,
+                    gl::RGBA,
+                    gl::UNSIGNED_BYTE,
+                    data,
+                );
+            } else {
+                // Like Vulkan's, an RGBA8 UNORM texture: sRGB encoded unless the overlay's colour
+                // space says otherwise.
+                gl::TexImage2D(
+                    gl::TEXTURE_2D,
+                    0,
+                    gl::RGBA8 as GLint,
+                    width,
+                    height,
+                    0,
+                    gl::RGBA,
+                    gl::UNSIGNED_BYTE,
+                    data,
+                );
+                (raw.width, raw.height) = (width, height);
+            }
+
+            gl::BindBuffer(gl::PIXEL_UNPACK_BUFFER, unpack_buffer as GLuint);
+            for ((name, _), old) in UNPACK_STATE.into_iter().zip(saved) {
+                gl::PixelStorei(name, old);
+            }
+            gl::BindTexture(gl::TEXTURE_2D, bound as GLuint);
+        }
+        Some(GlTexture {
+            name: self.raw.name,
+            target: gl::TEXTURE_2D,
+            layer: None,
         })
     }
 
