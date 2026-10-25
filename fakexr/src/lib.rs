@@ -1184,7 +1184,7 @@ impl Session {
         if !instance.binding_activity {
             return (
                 action.get_hand_state(subaction_path),
-                action.active.load(Ordering::Relaxed) && self.is_bound(subaction_path),
+                action.is_active(subaction_path) && self.is_bound(subaction_path),
             );
         }
         let synced = set.synced_hands.load();
@@ -1192,6 +1192,7 @@ impl Session {
         let active = |hand: UserPath| {
             let prefix = format!("{}/", hand.as_path());
             synced[hand as usize]
+                && (hand != UserPath::Gamepad || action.gamepad_active.load(Ordering::Relaxed))
                 && suggested
                     .get(&get_hand_data(hand, self).profile.load())
                     .into_iter()
@@ -1394,6 +1395,9 @@ struct Action {
     suggested: Mutex<HashMap<xr::Path, Vec<xr::Path>>>,
     subaction_paths: Vec<xr::Path>,
     haptic_feedback: Mutex<Vec<HapticFeedback>>,
+    /// Whether the gamepad has a state: like a runtime without a gamepad connected, its inputs
+    /// are inactive until a test sets one.
+    gamepad_active: AtomicBool,
 }
 
 impl Action {
@@ -1407,6 +1411,9 @@ impl Action {
         *d.get_mut(hand) = Some((state, time));
         self.pending_state.store(d);
         self.active.store(true, Ordering::Relaxed);
+        if hand == UserPath::Gamepad {
+            self.gamepad_active.store(true, Ordering::Relaxed);
+        }
     }
 
     fn get_hand_state(&self, path: xr::Path) -> ActionStateData {
@@ -1415,6 +1422,14 @@ impl Action {
             None => self.combined_state(),
             Some(user_path) => self.state.get(user_path).load(),
         }
+    }
+
+    /// Whether the action is active on `path`, see [Action::gamepad_active].
+    fn is_active(&self, path: xr::Path) -> bool {
+        let instance = self.instance.upgrade().expect("Failed to get instance");
+        self.active.load(Ordering::Relaxed)
+            && (instance.get_user_path(path) != Ok(Some(UserPath::Gamepad))
+                || self.gamepad_active.load(Ordering::Relaxed))
     }
 
     /// Whether the state can be read with `path`: like Monado, a subaction path must be one the
@@ -1448,10 +1463,11 @@ impl Action {
             }
             _ => best,
         };
-        self.state
-            .all()
-            .map(AtomicCell::load)
+        let gamepad_active = self.gamepad_active.load(Ordering::Relaxed);
+        UserPath::ALL
             .into_iter()
+            .filter(|path| *path != UserPath::Gamepad || gamepad_active)
+            .map(|path| self.state.get(path).load())
             .reduce(combine)
             .unwrap()
     }
@@ -1825,6 +1841,7 @@ extern "system" fn create_action(
             .to_vec()
         },
         haptic_feedback: Mutex::default(),
+        gamepad_active: false.into(),
     });
 
     set.pending_actions.write().unwrap().push(a.clone());
