@@ -4759,3 +4759,173 @@ fn generic_hmd_controller_type() {
     assert_eq!("generic_hmd".parse::<ControllerType>(), Ok(ty.clone()));
     assert_eq!(ty.to_string(), "generic_hmd");
 }
+
+/// A fixture whose runtime reports actions active per hand like Monado, with both hands on `P`.
+fn stick_fixture<P: InteractionProfile>(actions: &CStr) -> Fixture {
+    fakexr::set_binding_activity(true);
+    let mut f = Fixture::new();
+    f.load_actions(actions);
+    f.set_interaction_profile::<P>(LeftHand);
+    f.set_interaction_profile::<P>(RightHand);
+    f
+}
+
+/// Moves a thumbstick: every action bound to it or its touch sees the change.
+fn move_stick(
+    f: &mut Fixture,
+    sets: &mut [vr::VRActiveActionSet_t],
+    hand: &str,
+    touched: bool,
+    [x, y]: [f32; 2],
+) {
+    let session = f.raw_session();
+    let input = format!("/user/hand/{hand}/input/thumbstick");
+    fakexr::set_input(
+        session,
+        &format!("{input}/touch"),
+        fakexr::InputValue::Bool(touched),
+    );
+    fakexr::set_input(session, &input, fakexr::InputValue::Vector2(x, y));
+    f.sync_sets(sets);
+}
+
+/// The unrestricted value of an analog action, rounded off.
+fn stick_value(f: &Fixture, name: &CStr) -> [f32; 2] {
+    let state = get_analog_state(f, f.get_action_handle(name), 0);
+    assert!(state.bActive, "{name:?} inactive");
+    [state.x, state.y].map(|v| (v * 100.0).round() / 100.0)
+}
+
+/// The boolean actions of `names` that are pressed, unrestricted.
+fn pressed_of(f: &Fixture, names: &[&CStr]) -> Vec<String> {
+    names
+        .iter()
+        .filter(|name| f.get_bool_state(f.get_action_handle(name)).unwrap().bState)
+        .map(|name| {
+            name.to_string_lossy()
+                .rsplit('/')
+                .next()
+                .unwrap()
+                .to_owned()
+        })
+        .collect()
+}
+
+/// Half-Life: Alyx turns, dashes and scrolls with the right stick: two touch dpads, a joystick
+/// with a deadzone and a plain joystick in another set, all on the same input (#321).
+fn turn_stick_bindings<P: InteractionProfile>() {
+    let mut f = stick_fixture::<P>(c"actions_turn_stick.json");
+    let mut sets = ["/actions/move", "/actions/scroll", "/actions/weapon"].map(|set| {
+        vr::VRActiveActionSet_t {
+            ulActionSet: f.get_action_set_handle(&std::ffi::CString::new(set).unwrap()),
+            ..Default::default()
+        }
+    });
+    let buttons = [
+        c"/actions/move/in/TurnLeft",
+        c"/actions/move/in/TurnRight",
+        c"/actions/move/in/WalkMantle",
+        c"/actions/move/in/ShiftDashJump",
+        c"/actions/move/in/MoveBack",
+        c"/actions/move/in/Teleport",
+        c"/actions/move/in/Walk",
+    ];
+    let turn = c"/actions/move/in/ContinuousTurn";
+    let teleport_turn = c"/actions/move/in/TeleportTurn";
+    let scroll = c"/actions/scroll/in/Scroll";
+    let right = f.get_input_source_handle(c"/user/hand/right");
+    let left = f.get_input_source_handle(c"/user/hand/left");
+
+    for (direction, [x, y], expected) in [
+        ("east", [1.0, 0.0], vec!["TurnRight"]),
+        ("west", [-1.0, 0.0], vec!["TurnLeft"]),
+        ("north", [0.0, 1.0], vec!["WalkMantle"]),
+        ("south", [0.0, -1.0], vec!["ShiftDashJump", "MoveBack"]),
+    ] {
+        move_stick(&mut f, &mut sets, "right", true, [x, y]);
+        assert_eq!(
+            pressed_of(&f, &buttons),
+            expected,
+            "right stick {direction}"
+        );
+        assert_eq!(stick_value(&f, turn), [x, y], "right stick {direction}");
+        assert_eq!(stick_value(&f, scroll), [x, y], "right stick {direction}");
+        assert_eq!(stick_value(&f, teleport_turn), [0.0, 0.0]);
+        let turn_right = f.get_action_handle(c"/actions/move/in/TurnRight");
+        assert_eq!(
+            [right, left].map(|hand| f.get_bool_state_hand(turn_right, hand).unwrap().bState),
+            [direction == "east", false]
+        );
+        // Sticky dpads let go in the middle.
+        move_stick(&mut f, &mut sets, "right", true, [0.0, 0.0]);
+        assert_eq!(pressed_of(&f, &buttons), Vec::<String>::new());
+    }
+
+    // Inside the 75% deadzone.
+    move_stick(&mut f, &mut sets, "right", true, [0.5, 0.0]);
+    assert_eq!(pressed_of(&f, &buttons), Vec::<String>::new());
+    assert_eq!(stick_value(&f, turn), [0.0, 0.0]);
+    assert_eq!(stick_value(&f, scroll), [0.5, 0.0]);
+    // The dpads need the stick touched, the joysticks don't.
+    move_stick(&mut f, &mut sets, "right", false, [1.0, 0.0]);
+    assert_eq!(pressed_of(&f, &buttons), Vec::<String>::new());
+    assert_eq!(stick_value(&f, turn), [1.0, 0.0]);
+    move_stick(&mut f, &mut sets, "right", false, [0.0, 0.0]);
+
+    // The left stick teleports and walks, and doesn't turn.
+    move_stick(&mut f, &mut sets, "left", true, [0.0, 1.0]);
+    assert_eq!(pressed_of(&f, &buttons), ["Teleport", "Walk"]);
+    assert_eq!(stick_value(&f, teleport_turn), [0.0, 1.0]);
+    assert_eq!(stick_value(&f, scroll), [0.0, 1.0]);
+    assert_eq!(stick_value(&f, turn), [0.0, 0.0]);
+}
+
+#[test]
+fn turn_stick_bindings_touch() {
+    turn_stick_bindings::<OculusTouch>();
+}
+
+#[test]
+fn turn_stick_bindings_touch_plus() {
+    turn_stick_bindings::<super::profiles::meta_touch_plus::MetaTouchPlus>();
+}
+
+/// The Unreal SteamVR Input plugin names a stick's action like
+/// "MoveForward_X,MoveForward_Y X Y_axis2d" and reads it unrestricted. The Walking Dead: Saints &
+/// Sinners turns with the right stick and inverts the left one's Y axis (#321).
+fn axis2d_bindings<P: InteractionProfile>() {
+    let mut f = stick_fixture::<P>(c"actions_axis2d.json");
+    let mut sets = [vr::VRActiveActionSet_t {
+        ulActionSet: f.get_action_set_handle(c"/actions/main"),
+        ..Default::default()
+    }];
+    let buttons = [
+        c"/actions/main/in/TurnAxisLeft",
+        c"/actions/main/in/TouchMovementActive",
+    ];
+    let turn = c"/actions/main/in/ConfigurableTurnAxis_X,ConfigurableTurnAxis_Y X Y_axis2d";
+    let movement = c"/actions/main/in/MoveForward_X,MoveForward_Y X Y_axis2d";
+
+    for [x, y] in [[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -0.5]] {
+        move_stick(&mut f, &mut sets, "right", true, [x, y]);
+        assert_eq!(stick_value(&f, turn), [x, y]);
+        assert_eq!(stick_value(&f, movement), [0.0, 0.0]);
+        assert_eq!(pressed_of(&f, &buttons), ["TurnAxisLeft"]);
+    }
+    move_stick(&mut f, &mut sets, "right", false, [0.0, 0.0]);
+
+    move_stick(&mut f, &mut sets, "left", true, [0.25, 1.0]);
+    assert_eq!(stick_value(&f, movement), [0.25, -1.0]);
+    assert_eq!(stick_value(&f, turn), [0.0, 0.0]);
+    assert_eq!(pressed_of(&f, &buttons), ["TouchMovementActive"]);
+}
+
+#[test]
+fn axis2d_bindings_touch() {
+    axis2d_bindings::<OculusTouch>();
+}
+
+#[test]
+fn axis2d_bindings_touch_plus() {
+    axis2d_bindings::<super::profiles::meta_touch_plus::MetaTouchPlus>();
+}

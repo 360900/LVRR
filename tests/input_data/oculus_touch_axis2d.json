@@ -1,0 +1,32 @@
+{
+	"controller_type": "oculus_touch",
+	"bindings": {
+		"/actions/main": {
+			"chords": [ {} ],
+			"sources": [
+				{
+					"inputs": {
+						"click": { "output": "/actions/main/in/sprinttogglemirror" },
+						"position": { "output": "/actions/main/in/moveforward_x,moveforward_y x y_axis2d" },
+						"touch": { "output": "/actions/main/in/touchmovementactive" }
+					},
+					"mode": "joystick",
+					"parameters": {
+						"invert": "y"
+					},
+					"path": "/user/hand/left/input/joystick"
+				},
+				{
+					"inputs": {
+						"click": { "output": "/actions/main/in/selectdialogue" },
+						"position": { "output": "/actions/main/in/configurableturnaxis_x,configurableturnaxis_y x y_axis2d" },
+						"touch": { "output": "/actions/main/in/turnaxisleft" }
+					},
+					"mode": "joystick",
+					"parameters": {},
+					"path": "/user/hand/right/input/joystick"
+				}
+			]
+		}
+	}
+}
