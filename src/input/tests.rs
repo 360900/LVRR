@@ -900,6 +900,217 @@ fn controllers_tracked_without_bindings() {
     }
 }
 
+/// A home directory in a temp dir with a Steam install where SteamVR left its settings, for the
+/// manifests this thread loads. Removed on drop.
+struct FakeSteam {
+    home: std::path::PathBuf,
+}
+
+impl FakeSteam {
+    const APP_KEY: &str = "steam.app.4242";
+
+    fn new(test: &str) -> Self {
+        let home =
+            std::env::temp_dir().join(format!("xrizer-steamvr-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join(".local/share/Steam/config")).unwrap();
+        set_test_env("HOME", home.to_str().unwrap());
+        set_test_env("SteamAppId", "4242");
+        Self { home }
+    }
+
+    fn root(&self) -> std::path::PathBuf {
+        self.home.join(".local/share/Steam")
+    }
+
+    /// Saves bindings choices for the app, as `(key, url)`.
+    fn choose(&self, choices: &[(&str, &str)]) {
+        let section: serde_json::Map<_, _> = choices
+            .iter()
+            .map(|(key, url)| (key.to_string(), (*url).into()))
+            .collect();
+        let settings = serde_json::json!({
+            "steamvr": { "enableHomeApp": false },
+            Self::APP_KEY: section,
+        });
+        std::fs::write(
+            self.root().join("config/steamvr.vrsettings"),
+            serde_json::to_string_pretty(&settings).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Puts a Workshop item of SteamVR's in a second library, like Steam downloads them.
+    fn add_workshop_item(&self, item: &str, file: &str, contents: &[u8]) {
+        let library = self.home.join("games/SteamLibrary");
+        let dir = library.join("steamapps/workshop/content/250820").join(item);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(file), contents).unwrap();
+        let root = self.root();
+        std::fs::create_dir_all(root.join("steamapps")).unwrap();
+        std::fs::write(
+            root.join("steamapps/libraryfolders.vdf"),
+            format!(
+                "\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t\t\"apps\"\n\t\t{{\n\t\t\t\"228980\"\t\t\"181169252\"\n\t\t}}\n\t}}\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t\t\"apps\"\n\t\t{{\n\t\t\t\"250820\"\t\t\"5636124391\"\n\t\t}}\n\t}}\n}}\n",
+                root.display(),
+                library.display()
+            ),
+        )
+        .unwrap();
+    }
+}
+
+impl Drop for FakeSteam {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.home);
+    }
+}
+
+fn input_data(file: &str) -> String {
+    format!("{}/tests/input_data/{file}", env!("CARGO_MANIFEST_DIR"))
+}
+
+#[test]
+fn steamvr_chosen_bindings() {
+    let steam = FakeSteam::new("chosen");
+    // A file the user picked, at a path SteamVR escapes in the URL.
+    let picked = steam.home.join("my bindings/vive.json");
+    std::fs::create_dir_all(picked.parent().unwrap()).unwrap();
+    std::fs::copy(input_data("vive_only_single.json"), &picked).unwrap();
+    let url = format!("file://{}", picked.display()).replace(' ', "%20");
+    steam.add_workshop_item(
+        "3822741892",
+        "4573893327432113271_legacy.bin",
+        &std::fs::read(input_data("steamvr_workshop_knuckles.json")).unwrap(),
+    );
+    steam.choose(&[
+        ("vive_controller_250820_CurrentURL_steamvrinput", &url),
+        // Older SteamVR's key loses to the current one.
+        (
+            "vive_controller_CurrentURL_steamvrinput",
+            "file:///nonexistent.json",
+        ),
+        // The game has no bindings for Index controllers.
+        (
+            "knuckles_250820_CurrentURL_steamvrinput",
+            "vr-input-workshop://3822741892",
+        ),
+        // A legacy app's choice.
+        (
+            "oculus_touch_250820_CurrentURL_legacy",
+            "vr-input-workshop://3822741892",
+        ),
+    ]);
+    let f = Fixture::new();
+    f.load_actions(c"actions_vive_only.json");
+
+    f.verify_bindings::<bool>(
+        ViveWands::profile_path(),
+        c"/actions/main/in/boolact",
+        ["/user/hand/left/input/trigger/click".into()],
+    );
+    f.verify_bindings::<bool>(
+        Knuckles::profile_path(),
+        c"/actions/main/in/boolact",
+        ["/user/hand/right/input/b/click".into()],
+    );
+    // Converted from the chosen bindings, which replace the game's like custom ones do.
+    f.verify_bindings::<bool>(
+        OculusTouch::profile_path(),
+        c"/actions/main/in/boolact",
+        ["/user/hand/left/input/trigger/value".into()],
+    );
+}
+
+#[test]
+fn custom_bindings_over_steamvr_choice() {
+    let steam = FakeSteam::new("custom");
+    steam.add_workshop_item(
+        "3822741892",
+        "1_legacy.bin",
+        &std::fs::read(input_data("steamvr_workshop_knuckles.json")).unwrap(),
+    );
+    steam.choose(&[(
+        "knuckles_250820_CurrentURL_steamvrinput",
+        "vr-input-workshop://3822741892",
+    )]);
+    set_test_env("XRIZER_CUSTOM_BINDINGS_DIR", &input_data("custom_bindings"));
+    let f = Fixture::new();
+    f.load_actions(c"actions_vive_only.json");
+
+    f.verify_bindings::<bool>(
+        Knuckles::profile_path(),
+        c"/actions/main/in/boolact",
+        ["/user/hand/left/input/a/click".into()],
+    );
+}
+
+#[test]
+fn unusable_steamvr_choice_uses_the_default() {
+    let steam = FakeSteam::new("unusable");
+    // The item is for another controller.
+    steam.add_workshop_item(
+        "3822741892",
+        "1_legacy.bin",
+        &std::fs::read(input_data("steamvr_workshop_knuckles.json")).unwrap(),
+    );
+    steam.choose(&[
+        (
+            "vive_controller_250820_CurrentURL_steamvrinput",
+            "file:///nonexistent/bindings.json",
+        ),
+        (
+            "oculus_touch_250820_CurrentURL_steamvrinput",
+            "vr-input-workshop://3822741892",
+        ),
+        (
+            "knuckles_250820_CurrentURL_steamvrinput",
+            "vr-input-workshop://111",
+        ),
+    ]);
+    let f = Fixture::new();
+    f.load_actions(c"actions_vive_only.json");
+
+    f.verify_bindings::<bool>(
+        ViveWands::profile_path(),
+        c"/actions/main/in/boolact",
+        [
+            "/user/hand/left/input/menu/click".into(),
+            "/user/hand/right/input/menu/click".into(),
+            "/user/hand/right/input/trigger/click".into(),
+        ],
+    );
+    f.verify_bindings::<bool>(
+        OculusTouch::profile_path(),
+        c"/actions/main/in/boolact",
+        [
+            "/user/hand/left/input/menu/click".into(),
+            "/user/hand/right/input/b/click".into(),
+            "/user/hand/right/input/trigger/value".into(),
+        ],
+    );
+}
+
+#[test]
+fn steamvr_choice_disabled() {
+    let steam = FakeSteam::new("disabled");
+    let url = format!("file://{}", input_data("vive_only_single.json"));
+    steam.choose(&[("vive_controller_250820_CurrentURL_steamvrinput", &url)]);
+    set_test_env("XRIZER_STEAMVR_BINDINGS", "0");
+    let f = Fixture::new();
+    f.load_actions(c"actions_vive_only.json");
+
+    f.verify_bindings::<bool>(
+        ViveWands::profile_path(),
+        c"/actions/main/in/boolact",
+        [
+            "/user/hand/left/input/menu/click".into(),
+            "/user/hand/right/input/menu/click".into(),
+            "/user/hand/right/input/trigger/click".into(),
+        ],
+    );
+}
+
 #[track_caller]
 pub fn compare_pose(expected: xr::Posef, actual: xr::Posef) {
     fn float_eq(a: f32, b: f32) -> bool {

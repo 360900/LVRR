@@ -1,0 +1,26 @@
+{
+	"action_manifest_version": 0,
+	"alias_info": {},
+	"app_key": "steam.app.4242",
+	"bindings": {
+		"/actions/main": {
+			"sources": [
+				{
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/boolact"
+						}
+					},
+					"mode": "button",
+					"path": "/user/hand/right/input/b"
+				}
+			]
+		}
+	},
+	"category": "steamvr_input",
+	"controller_type": "knuckles",
+	"description": "",
+	"name": "Saved from the binding UI",
+	"options": {},
+	"simulated_actions": []
+}

@@ -9,6 +9,7 @@ pub(super) use bindings::{ClickThresholdParams, GrabParameters};
 use crate::input::InteractionProfile;
 use crate::input::action_manifest::context::BindingsLoadContext;
 use crate::input::profiles::{DynInputPath, LegalPathsT, paths::DynSubpath};
+use crate::input::steamvr_bindings::{self, Category, SavedBindings};
 use crate::input::{ActionKey, Input, profiles::RunWithProfile, skeletal::SkeletalInputActionData};
 use crate::openxr_data::{self, Hand, SessionData};
 use log::{debug, error, info, warn};
@@ -385,6 +386,38 @@ thread_local! {
         Default::default();
 }
 
+/// Like [env_var], but tests only see what [TEST_ENV] sets, so the machine's own SteamVR config
+/// stays out of them.
+#[cfg(not(test))]
+fn isolated_env_var(name: &str) -> Option<OsString> {
+    std::env::var_os(name)
+}
+
+#[cfg(test)]
+fn isolated_env_var(name: &str) -> Option<OsString> {
+    TEST_ENV.with_borrow(|env| env.get(name).cloned())
+}
+
+/// The app key the app identified as. Other tests identify as their own apps.
+#[cfg(not(test))]
+fn identified_app_key() -> Option<String> {
+    crate::applications::identified_app_key()
+}
+
+#[cfg(test)]
+fn identified_app_key() -> Option<String> {
+    None
+}
+
+/// The bindings the user chose for this app in SteamVR, unless XRIZER_STEAMVR_BINDINGS=0.
+fn steamvr_saved_bindings() -> Option<SavedBindings> {
+    if env_var("XRIZER_STEAMVR_BINDINGS").is_some_and(|value| value == "0") {
+        return None;
+    }
+    let keys = steamvr_bindings::app_keys(&isolated_env_var, identified_app_key());
+    SavedBindings::load(&isolated_env_var, &keys)
+}
+
 /// Whether two paths name the same file, even if spelled differently.
 pub(super) fn same_file(a: &Path, b: &Path) -> bool {
     a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
@@ -400,6 +433,13 @@ impl<C: openxr_data::Compositor> Input<C> {
         let custom_bindings_dir = env_var("XRIZER_CUSTOM_BINDINGS_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| current_dir().unwrap_or_default().join("xrizer"));
+        // Custom bindings, then the ones chosen in SteamVR, then the game's.
+        let saved = steamvr_saved_bindings();
+        let saved_file = |controller_type: &actions::ControllerType| {
+            saved
+                .as_ref()?
+                .file_for(&controller_type.to_string(), Category::SteamVrInput)
+        };
 
         let mut bindings = bindings;
         if let Some(additional_bindings) =
@@ -436,11 +476,14 @@ impl<C: openxr_data::Compositor> Input<C> {
             }
 
             let custom_path = custom_bindings_dir.join(format!("{controller_type}.json"));
-            let bindings_path = match custom_path.exists() {
-                true => custom_path,
-                false => parent_path.join(binding_url),
+            let bindings = if custom_path.exists() {
+                read_bindings(&custom_path, &controller_type)
+            } else {
+                saved_file(&controller_type)
+                    .and_then(|path| read_bindings(&path, &controller_type))
+                    .or_else(|| read_bindings(&parent_path.join(binding_url), &controller_type))
             };
-            let Some(bindings) = read_bindings(&bindings_path, &controller_type) else {
+            let Some(bindings) = bindings else {
                 continue;
             };
 
@@ -493,6 +536,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             context,
             loaded: &loaded,
             custom_bindings_dir: &custom_bindings_dir,
+            saved_file: &saved_file,
         };
         super::profiles::run_for_all_profiles(&mut runner);
 
@@ -501,6 +545,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             context: &'b mut BindingsLoadContext<'c>,
             loaded: &'a [(actions::ControllerType, bindings::Bindings)],
             custom_bindings_dir: &'a Path,
+            saved_file: &'a dyn Fn(&actions::ControllerType) -> Option<PathBuf>,
         }
         impl<C: openxr_data::Compositor> RunWithProfile for FallbackRunner<'_, '_, '_, C> {
             fn run<P: super::InteractionProfile>(&mut self) {
@@ -527,13 +572,18 @@ impl<C: openxr_data::Compositor> Input<C> {
                     .conversion_sources()
                     .into_iter()
                     .find_map(|ty| self.loaded.iter().find(|(loaded, _)| *loaded == ty));
-                let bindings = if let Some(custom) = custom_path
-                    .exists()
-                    .then(|| read_bindings(&custom_path, &native))
-                    .flatten()
-                {
-                    info!("Using {} for {profile}", custom_path.display());
-                    custom
+                // Bindings chosen in SteamVR may be for controllers the game has none for.
+                let own_path = if custom_path.exists() {
+                    Some(custom_path)
+                } else {
+                    (self.saved_file)(&native)
+                };
+                let bindings = if let Some((path, own)) = own_path.and_then(|path| {
+                    let bindings = read_bindings(&path, &native)?;
+                    Some((path, bindings))
+                }) {
+                    info!("Using {} for {profile}", path.display());
+                    own
                 } else if let Some((source, bindings)) = source {
                     crate::log_unique!(
                         log::Level::Info,

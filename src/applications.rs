@@ -18,6 +18,14 @@ pub struct Applications {
     identity: Mutex<Option<CString>>,
 }
 
+/// The app key this process last identified as, for code without a handle to the interface.
+static IDENTIFIED_KEY: Mutex<Option<String>> = Mutex::new(None);
+
+/// The app key this process identified as with IdentifyApplication, if it did.
+pub fn identified_app_key() -> Option<String> {
+    IDENTIFIED_KEY.lock().unwrap().clone()
+}
+
 impl Applications {
     fn is_installed(&self, key: &CStr) -> bool {
         self.apps
@@ -268,6 +276,7 @@ impl vr::IVRApplications008_Interface for Applications {
         if pid == std::process::id() {
             info!("Application identified as {key:?}");
             *self.identity.lock().unwrap() = Some(key.to_owned());
+            *IDENTIFIED_KEY.lock().unwrap() = Some(key.to_string_lossy().into_owned());
         }
         vr::EVRApplicationError::None
     }
@@ -446,6 +455,8 @@ mod tests {
             vr::EVRApplicationError::None
         );
         assert_eq!(apps.GetApplicationProcessId(key.as_ptr()), pid);
+        // For finding the bindings chosen in SteamVR.
+        assert_eq!(identified_app_key().as_deref(), Some("org.example.app"));
         assert_eq!(
             apps.GetApplicationKeyByProcessId(pid, buffer.as_mut_ptr(), 4),
             vr::EVRApplicationError::BufferTooSmall

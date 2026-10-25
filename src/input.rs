@@ -5,6 +5,7 @@ mod legacy;
 mod probe;
 mod profiles;
 mod skeletal;
+mod steamvr_bindings;
 
 #[cfg(test)]
 mod tests;
