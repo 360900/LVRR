@@ -2297,9 +2297,10 @@ pub fn handle_binding_haptics(
                 };
                 (&output.output, path, haptic, BindingPress::Runtime(action))
             }
-            // The default is unclear: SteamVR's legacy Touch bindings set haptic_amplitude 0 here,
-            // but games that turn it off in button mode leave trigger mode alone. Only bindings
-            // that set one get it.
+            // Like button mode's. The binding UI has no settings for trigger mode, but every
+            // binding SteamVR ships that turns its haptic off does so with haptic_amplitude 0
+            // (legacy bindings of Touch, Pico, Focus 3 and Frame controllers, Half-Life: Alyx's
+            // menus), the same way as for button mode on the same inputs.
             ActionBinding::Trigger(ActionBindingData {
                 path: MaybeInputPath::Valid(path),
                 inputs:
@@ -2307,19 +2308,21 @@ pub fn handle_binding_haptics(
                         click: Some(output),
                         ..
                     },
-                parameters: Some(parameters),
+                parameters,
             }) if is_bool(context, &output.output) => {
-                let (Some(input), Some(haptic)) =
-                    (analog_click(*path), parameters.haptic.haptic(0.0))
-                else {
+                let haptic = parameters
+                    .as_ref()
+                    .map_or_else(HapticParameters::default, |p| p.haptic)
+                    .haptic(BindingHaptic::DEFAULT_AMPLITUDE);
+                let (Some(input), Some(haptic)) = (analog_click(*path), haptic) else {
                     continue;
                 };
-                let press = if parameters.click_activate_threshold.is_some()
-                    || parameters.click_deactivate_threshold.is_some()
-                {
+                let press = if parameters.as_ref().is_some_and(|p| {
+                    p.click_activate_threshold.is_some() || p.click_deactivate_threshold.is_some()
+                }) {
                     threshold_press(
                         input,
-                        Some(parameters),
+                        parameters.as_ref(),
                         action_set_name,
                         action_set,
                         context,

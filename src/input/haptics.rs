@@ -159,7 +159,8 @@ pub(super) struct BindingHaptic {
 
 impl BindingHaptic {
     /// The binding UI's defaults (dashboard controllerbindingui.js): 0.2 for button and toggle
-    /// button modes on analog inputs, 0 for grabs, 20 Hz, and a single pulse.
+    /// button modes on analog inputs, 0 for grabs, 20 Hz, and a single pulse. Trigger mode has
+    /// button mode's, see handle_binding_haptics.
     pub const DEFAULT_AMPLITUDE: f32 = 0.2;
     pub const DEFAULT_FREQUENCY: f32 = 20.0;
 
@@ -451,12 +452,26 @@ mod tests {
         step(&mut f, grip, ActionState::Float(0.8), LeftHand, &[press]);
         step(&mut f, grip, ActionState::Float(0.0), LeftHand, &[]);
 
-        // Physical buttons, an amplitude of 0, and trigger mode by default have none.
+        // Physical buttons and an amplitude of 0 have none.
         let x = f.get_action::<bool>(f.get_action_handle(c"/actions/set1/in/physical"));
         step(&mut f, x, ActionState::Bool(true), LeftHand, &[]);
         let silent = threshold_input(&f, c"/actions/set1/in/silent");
         step(&mut f, silent, ActionState::Float(1.0), RightHand, &[]);
         step(&mut f, silent, ActionState::Float(0.0), RightHand, &[]);
+
+        // Trigger mode's click has button mode's, here read off the trigger by the runtime.
+        let trig = f.get_action::<bool>(
+            f.get_action_handle(c"/user/hand/right/input/trigger/value-/actions/set1-bool"),
+        );
+        let default = pulse(RightHand, 10, 20.0, 0.2);
+        step(&mut f, trig, ActionState::Bool(true), RightHand, &[default]);
+        step(
+            &mut f,
+            trig,
+            ActionState::Bool(false),
+            RightHand,
+            &[default],
+        );
 
         // Toggle buttons follow the analog input, not the toggled state.
         let toggle = f.get_action_handle(c"/actions/set1/in/toggle");
