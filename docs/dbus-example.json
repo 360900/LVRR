@@ -74,6 +74,8 @@
       "super_sampling": "off",
       "usb_network": false
     },
+    "offline": false,
+    "pending": null,
     "permission_denied": [
       "eye_gaze"
     ],

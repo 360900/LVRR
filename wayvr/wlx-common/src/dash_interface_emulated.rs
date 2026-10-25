@@ -71,7 +71,7 @@ pub struct DashInterfaceEmulated {
 	debug_counter: u64,
 	// LVRR: None in tests
 	gfx: Option<Arc<WGfx>>,
-	// LVRR: LVRR_EMU=connected (default), absent or none
+	// LVRR: LVRR_EMU=connected (default), offline, absent or none
 	lvrr: Option<lvrr_common::emulator::LvrrEmulator>,
 	lvrr_perf_overlay: bool,
 }
@@ -153,6 +153,7 @@ impl DashInterfaceEmulated {
 			lvrr: match std::env::var("LVRR_EMU").as_deref() {
 				Ok("none") => None,
 				Ok("absent") => Some(lvrr_common::emulator::LvrrEmulator::new(false)),
+				Ok("offline") => Some(lvrr_common::emulator::LvrrEmulator::offline()),
 				_ => Some(lvrr_common::emulator::LvrrEmulator::new(true)),
 			},
 			lvrr_perf_overlay: false,

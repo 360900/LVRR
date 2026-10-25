@@ -56,6 +56,7 @@ private:
 	encryption_state state;
 
 	from_headset::headset_info_packet info_packet;
+	std::string public_key; // LVRR: the headset's, without PEM armor
 
 	void init(std::stop_token stop_token, std::function<void()> tick = []() {});
 
@@ -116,6 +117,11 @@ public:
 	const from_headset::headset_info_packet & info()
 	{
 		return info_packet;
+	}
+
+	const std::string & headset_public_key() const
+	{
+		return public_key;
 	}
 
 	template <typename T>

@@ -101,6 +101,7 @@ if (WIVRN_BUILD_SERVER)
 			avahi_publisher.cpp
 			hostname.cpp
 			lvrr_dbus.cpp
+			lvrr_offline.cpp
 			main.cpp
 			sleep_inhibitor.cpp
 			start_application.cpp
@@ -284,7 +285,7 @@ if (WIVRN_BUILD_SERVER)
 
 	# LVRR: tests for the LVRR packets and their D-Bus JSON
 	if (WIVRN_BUILD_TEST)
-		add_executable(lvrr-test lvrr_test.cpp lvrr_dbus.cpp)
+		add_executable(lvrr-test lvrr_test.cpp lvrr_dbus.cpp lvrr_offline.cpp)
 		target_compile_features(lvrr-test PRIVATE cxx_std_20)
 		target_include_directories(lvrr-test PRIVATE .)
 		target_link_libraries(lvrr-test PRIVATE wivrn-server-dbus wivrn-common wivrn-common-server wivrn-external nlohmann_json::nlohmann_json)

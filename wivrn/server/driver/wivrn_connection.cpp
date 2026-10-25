@@ -178,6 +178,7 @@ void wivrn::wivrn_connection::init(std::stop_token stop_token, std::function<voi
 	}
 
 	crypto::key headset_key = crypto::key::from_public_key(crypto_handshake.public_key);
+	public_key = clean_key(crypto_handshake.public_key);
 	bool is_public_key_known = std::ranges::any_of(
 	        wivrn::known_keys(),
 	        [key = clean_key(crypto_handshake.public_key)](const wivrn::headset_key & k) {

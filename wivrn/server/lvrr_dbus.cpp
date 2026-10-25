@@ -18,6 +18,7 @@
 #include "lvrr_dbus.h"
 
 #include "application.h"
+#include "lvrr_offline.h"
 #include "utils/load_icon.h"
 
 #include <algorithm>
@@ -49,6 +50,26 @@ struct pending_request
 std::map<uint32_t, pending_request> pending;
 uint32_t next_request_id = 1;
 const guint request_timeout_ms = 3000;
+
+// Changes made while the headset was away, sent when it connects: their request id until the
+// headset answers, and whether they need a session restart
+uint32_t offline_request_id = 0;
+bool offline_restart = false;
+
+uint32_t new_request_id()
+{
+	uint32_t id = next_request_id++;
+	if (next_request_id == 0)
+		next_request_id = 1;
+	return id;
+}
+
+// Without a headset, the last one's settings and the changes waiting for it
+void publish_offline()
+{
+	auto view = lvrr_offline::offline_view();
+	wivrn_server_set_headset_settings(dbus_server, view.is_null() ? "" : view.dump().c_str());
+}
 
 // headset_config fields with a plain JSON value; body_parts is a list of names
 #define LVRR_CONFIG_FIELDS(X)     \
@@ -230,18 +251,20 @@ const std::unordered_map<std::string, application> & applications()
 	return apps;
 }
 
-gboolean on_set_headset_settings(WivrnServer *, GDBusMethodInvocation * invocation, const gchar * patch, gpointer)
+gboolean on_set_headset_settings(WivrnServer * skeleton, GDBusMethodInvocation * invocation, const gchar * patch, gpointer)
 {
-	if (not session.headset_connected())
+	if (not session.headset_connected() and not lvrr_offline::known())
 	{
 		return_error(invocation, "NotConnected", "No headset is connected");
 		return TRUE;
 	}
 
+	json patch_json;
 	lvrr::headset_config config;
 	try
 	{
-		config = config_from_json(json::parse(patch));
+		patch_json = json::parse(patch);
+		config = config_from_json(patch_json);
 	}
 	catch (std::exception & e)
 	{
@@ -249,9 +272,16 @@ gboolean on_set_headset_settings(WivrnServer *, GDBusMethodInvocation * invocati
 		return TRUE;
 	}
 
-	uint32_t id = next_request_id++;
-	if (next_request_id == 0)
-		next_request_id = 1;
+	// Kept for the next connection
+	if (not session.headset_connected())
+	{
+		std::string text = lvrr_offline::stage(patch_json).dump();
+		wivrn_server_set_headset_settings(dbus_server, text.c_str());
+		wivrn_server_complete_set_headset_settings(skeleton, invocation, text.c_str());
+		return TRUE;
+	}
+
+	uint32_t id = new_request_id();
 
 	guint timeout = g_timeout_add(request_timeout_ms, [](void * data) -> gboolean {
 		if (auto it = pending.find(GPOINTER_TO_UINT(data)); it != pending.end())
@@ -377,6 +407,8 @@ json to_json(const lvrr::headset_settings & settings)
 	        {"server_input_forwarding", settings.server_input_forwarding},
 	        {"permission_pending", features_to_json(settings.permission_pending)},
 	        {"permission_denied", features_to_json(settings.permission_denied)},
+	        {"offline", false},
+	        {"pending", nullptr},
 	};
 }
 
@@ -441,13 +473,28 @@ void setup(WivrnServer * server, hooks h)
 	g_signal_connect(server, "handle-start-application", G_CALLBACK(on_start_application), nullptr);
 	g_signal_connect(server, "handle-stop-application", G_CALLBACK(on_stop_application), nullptr);
 
-	wivrn_server_set_headset_settings(server, "");
+	lvrr_offline::load(session.headsets_file);
+	publish_offline();
 	wivrn_server_set_headset_stats(server, "");
 }
 
 void on_headset_settings(const lvrr::headset_settings & settings)
 {
-	std::string text = to_json(settings).dump();
+	json value = to_json(settings);
+	lvrr_offline::remember(value);
+
+	// The changes made while the headset was away were applied
+	bool restart = false;
+	if (offline_request_id and settings.request_id == offline_request_id)
+	{
+		offline_request_id = 0;
+		lvrr_offline::clear_pending();
+		restart = offline_restart and settings.restart_required;
+	}
+
+	auto changes = lvrr_offline::pending();
+	value["pending"] = changes;
+	std::string text = value.dump();
 	wivrn_server_set_headset_settings(dbus_server, text.c_str());
 
 	if (auto it = pending.find(settings.request_id); it != pending.end())
@@ -455,6 +502,28 @@ void on_headset_settings(const lvrr::headset_settings & settings)
 		g_source_remove(it->second.timeout);
 		wivrn_server_complete_set_headset_settings(dbus_server, it->second.invocation, text.c_str());
 		pending.erase(it);
+	}
+
+	if (restart)
+	{
+		std::cerr << "Restarting the session for settings changed while the headset was away" << std::endl;
+		session.send_to_session(to_monado::restart_session{});
+	}
+	else if (not changes.is_null() and not offline_request_id)
+	{
+		try
+		{
+			offline_request_id = new_request_id();
+			offline_restart = lvrr_offline::needs_restart(changes);
+			session.send_to_session(lvrr::set_headset_settings{.request_id = offline_request_id, .config = config_from_json(changes)});
+		}
+		catch (std::exception & e)
+		{
+			// saved by an older server
+			std::cerr << "Dropping invalid headset settings changes: " << e.what() << std::endl;
+			offline_request_id = 0;
+			lvrr_offline::clear_pending();
+		}
 	}
 }
 
@@ -476,8 +545,27 @@ void on_headset_disconnected()
 		return_error(request.invocation, "NotConnected", "The headset disconnected");
 	}
 	pending.clear();
+	// not answered, sent again next time
+	offline_request_id = 0;
 
-	wivrn_server_set_headset_settings(dbus_server, "");
+	publish_offline();
 	wivrn_server_set_headset_stats(dbus_server, "");
+}
+
+void on_session_starting(const std::string & public_key)
+{
+	lvrr_offline::set_headset(public_key);
+}
+
+void on_session_ended()
+{
+	on_headset_disconnected();
+}
+
+void on_key_revoked(const std::string & public_key)
+{
+	lvrr_offline::forget(public_key);
+	if (not session.headset_connected())
+		publish_offline();
 }
 } // namespace lvrr_dbus

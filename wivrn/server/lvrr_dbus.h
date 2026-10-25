@@ -21,6 +21,7 @@
 #include "wivrn_packets.h"
 #include "wivrn_server_dbus.h"
 
+#include <filesystem>
 #include <functional>
 #include <nlohmann/json_fwd.hpp>
 #include <string>
@@ -36,6 +37,8 @@ struct hooks
 	std::function<void(to_monado::packets)> send_to_session;
 	// Starts an application from the list, or the configured one for an empty id; throws on failure
 	std::function<void(const std::string & app_id)> start_application;
+	// Where headset settings are kept while the headset is away
+	std::filesystem::path headsets_file;
 };
 
 void setup(WivrnServer *, hooks);
@@ -44,6 +47,10 @@ void on_headset_settings(const wivrn::lvrr::headset_settings &);
 void on_headset_stats(const wivrn::lvrr::headset_stats &);
 void on_server_message(const wivrn::to_headset::server_message &);
 void on_headset_disconnected();
+// A session starts for the headset with this public key
+void on_session_starting(const std::string & public_key);
+void on_session_ended();
+void on_key_revoked(const std::string & public_key);
 
 // Exposed for tests
 nlohmann::json to_json(const wivrn::lvrr::headset_settings &);

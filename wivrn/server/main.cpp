@@ -302,6 +302,7 @@ void start_server(configuration config)
 		wivrn_server_set_session_running(dbus_server, true);
 		server_watch = g_child_watch_add(server_pid, [](pid_t, int status, void *) {
 			wivrn_server_set_session_running(dbus_server, false);
+			lvrr_dbus::on_session_ended();
 			display_child_status(status, "Server");
 			g_source_remove(server_watch);
 			if (server_kill_watch)
@@ -446,6 +447,7 @@ gboolean headset_connected_success(void *)
 
 	expose_known_keys_on_dbus();
 
+	lvrr_dbus::on_session_starting(connection->headset_public_key());
 	configuration c;
 	start_server(c);
 	try
@@ -689,6 +691,7 @@ gboolean on_handle_revoke_key(WivrnServer * skeleton, GDBusMethodInvocation * in
 	g_variant_get_child(args, 0, "s", &publickey);
 
 	wivrn::remove_known_key(publickey);
+	lvrr_dbus::on_key_revoked(publickey);
 
 	g_free(publickey);
 
@@ -922,6 +925,7 @@ void on_name_acquired(GDBusConnection * connection, const gchar * name, gpointer
 	                         .session_running = [] { return server_watch != 0; },
 	                         .send_to_session = [](to_monado::packets packet) { std::visit([](auto && p) { wivrn_ipc_socket_main_loop->send(std::move(p)); }, std::move(packet)); },
 	                         .start_application = start_app_by_id,
+	                         .headsets_file = configuration::get_config_file().parent_path() / "lvrr-headsets.json",
 	                 });
 
 	wivrn_server_set_steam_command(dbus_server, steam_command().c_str());

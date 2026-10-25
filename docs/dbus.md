@@ -4,11 +4,11 @@ LVRR's server (`wivrn-server`) keeps WiVRn's session bus interface: name `io.git
 
 ## Headset settings
 
-- `HeadsetSettings` (property, `s`): JSON shown below, or `""` without a headset. Updated when a stream starts, after each change, and when the headset changes something on its own (for example a permission answer).
-- `SetHeadsetSettings(s patch) -> s settings`: `patch` is a JSON object with any `config` keys. It returns the updated `HeadsetSettings` once the headset applied and saved them.
+- `HeadsetSettings` (property, `s`): JSON shown below. Updated when a stream starts, after each change, and when the headset changes something on its own (for example a permission answer). Without a headset, the last headset's settings marked offline (see [Offline](#offline)), or `""` when no headset reported any yet.
+- `SetHeadsetSettings(s patch) -> s settings`: `patch` is a JSON object with any `config` keys. It returns the updated `HeadsetSettings` once the headset applied and saved them. Without a headset, it keeps the patch for the next connection and returns the offline settings right away.
 
   Errors:
-  - `io.github.wivrn.Server.NotConnected`: no headset is connected;
+  - `io.github.wivrn.Server.NotConnected`: no headset is connected, and none is known;
   - `io.github.wivrn.Server.InvalidSettings`: unknown key or wrong type;
   - `io.github.wivrn.Server.Timeout`: no answer within 3 s.
 
@@ -44,6 +44,19 @@ Other `HeadsetSettings` fields:
 - `capabilities`: what the headset supports. `refresh_rate_control` is false when the device's own settings pick the refresh rate. `eye_size` is the recommended render size per eye, before `resolution_scale`.
 - `server_input_forwarding`: false when the server refuses forwarded keyboard, mouse and gamepad.
 - `permission_pending`, `permission_denied`: features, named like the `config` keys, waiting for or refused an Android permission.
+- `offline`, `pending`: see below.
+
+### Offline
+
+The server keeps each headset's last settings, by public key, in `lvrr-headsets.json` next to its config file. Unpairing a headset forgets them.
+
+Without a headset, `HeadsetSettings` is the last headset's, with:
+- `offline`: true;
+- `config`: the last values with the pending changes applied;
+- `pending`: the `config` keys changed since, or null;
+- `restart_required`: false.
+
+When that headset connects, the server sends the pending changes. Once the headset applied them, `pending` is null. If they include "restart" settings, the server restarts the session once, as `RestartSession` does. Another headset connecting leaves them pending.
 
 ## Statistics
 

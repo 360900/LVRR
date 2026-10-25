@@ -162,6 +162,10 @@ pub struct HeadsetSettings {
 	pub server_input_forwarding: bool,
 	pub permission_pending: Vec<String>,
 	pub permission_denied: Vec<String>,
+	/// The headset isn't connected: the settings it had last time, with `pending` applied
+	pub offline: bool,
+	/// Config keys changed while offline, applied when the headset connects; null when none
+	pub pending: serde_json::Value,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -213,10 +217,26 @@ mod tests {
 		assert_eq!(settings.config.body_parts, ["chest", "hip"]);
 		assert_eq!(settings.permission_pending, ["microphone"]);
 		assert!(settings.restart_required);
+		assert!(!settings.offline);
+		assert!(settings.pending.is_null());
 
 		let stats: HeadsetStats = serde_json::from_value(example["HeadsetStats"].clone()).unwrap();
 		assert_eq!(stats.decoders.len(), 2);
 		assert_eq!(stats.latency_ms(), 22.0);
+	}
+
+	// Without a headset, the server sends the last one's settings with the changes waiting for it
+	#[test]
+	fn parses_offline_settings() {
+		let example: serde_json::Value = serde_json::from_str(EXAMPLE).unwrap();
+		let mut value = example["HeadsetSettings"].clone();
+		value["offline"] = true.into();
+		value["pending"] = serde_json::json!({"bitrate_bps": 30_000_000});
+		value["config"]["bitrate_bps"] = 30_000_000.into();
+		let settings: HeadsetSettings = serde_json::from_value(value).unwrap();
+		assert!(settings.offline);
+		assert_eq!(settings.pending["bitrate_bps"], 30_000_000);
+		assert_eq!(settings.config.bitrate_bps, 30_000_000);
 	}
 
 	// Every config key the dashboard may send is one the server reports

@@ -16,10 +16,13 @@
  */
 
 #include "lvrr_dbus.h"
+#include "lvrr_offline.h"
 #include "wivrn_serialization.h"
 
 #include <cstring>
+#include <filesystem>
 #include <iostream>
+#include <unistd.h>
 #include <nlohmann/json.hpp>
 
 // Run without arguments to test; with --example, prints example D-Bus JSON (see docs/dbus.md).
@@ -194,6 +197,32 @@ int main(int argc, char ** argv)
 	check(rejects(R"({"hand_tracking": 1})"), "number for a boolean");
 	check(rejects(R"({"body_parts": ["tail"]})"), "unknown body part");
 	check(rejects(R"([1, 2])"), "not an object");
+
+	// Settings kept while the headset is away
+	auto store = std::filesystem::temp_directory_path() / ("lvrr-test-" + std::to_string(getpid()) + ".json");
+	lvrr_offline::load(store);
+	check(not lvrr_offline::known() and lvrr_offline::offline_view().is_null(), "no headset known at first");
+	lvrr_offline::set_headset("key-a");
+	lvrr_offline::remember(lvrr_dbus::to_json(example_settings()));
+	auto changes = json::parse(R"({"bitrate_bps": 30000000, "codec": "h265"})");
+	auto view = lvrr_offline::stage(changes);
+	check(view["offline"] == true and view["pending"] == changes, "offline view has the changes");
+	check(view["config"]["bitrate_bps"] == 30000000 and view["config"]["codec"] == "h265" and view["config"]["preferred_refresh_rate"] == 90, "offline config is the last one with the changes");
+	check(view["restart_required"] == false, "offline view never asks for a restart");
+	lvrr_offline::load(store);
+	check(lvrr_offline::offline_view() == view, "offline settings survive a restart");
+	check(lvrr_offline::pending().is_null(), "no changes before the session knows its headset");
+	lvrr_offline::set_headset("key-b");
+	check(lvrr_offline::pending().is_null(), "another headset has no changes");
+	lvrr_offline::set_headset("key-a");
+	check(lvrr_offline::pending() == changes, "the headset gets its changes");
+	check(lvrr_offline::needs_restart(changes) and not lvrr_offline::needs_restart(json::parse(R"({"bitrate_bps": 1})")), "restart settings are told apart");
+	lvrr_offline::clear_pending();
+	check(lvrr_offline::pending().is_null() and lvrr_offline::offline_view()["pending"].is_null(), "applied changes are cleared");
+	lvrr_offline::forget("key-a");
+	check(not lvrr_offline::known(), "an unpaired headset is forgotten");
+	std::filesystem::remove(store);
+	check(lvrr_dbus::to_json(settings)["offline"] == false and lvrr_dbus::to_json(settings)["pending"].is_null(), "live settings are not offline");
 
 	if (failures)
 		return 1;

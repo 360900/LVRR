@@ -1,5 +1,6 @@
 //! A stand-in for the LVRR server, for working on the dashboard without one (uidev).
-//! `LVRR_EMU=absent` emulates a server that isn't running.
+//! `LVRR_EMU=absent` emulates a server that isn't running, `LVRR_EMU=offline` one whose
+//! headset is away, with a change waiting for it.
 
 use std::time::Instant;
 
@@ -19,6 +20,8 @@ pub struct LvrrEmulator {
 	started: Instant,
 	last_stats: Instant,
 	notices: Vec<Notice>,
+	/// The headset is away; settings changes wait for it
+	offline: bool,
 }
 
 impl LvrrEmulator {
@@ -61,7 +64,22 @@ impl LvrrEmulator {
 			started: Instant::now(),
 			last_stats: Instant::now(),
 			notices: Vec::new(),
+			offline: false,
 		}
+	}
+
+	/// A running server without a headset, which knows the last one's settings
+	pub fn offline() -> Self {
+		let mut emulator = Self::new(true);
+		emulator.offline = true;
+		emulator.state.headset_connected = false;
+		emulator.state.session_running = false;
+		emulator.state.bitrate_bps = 0;
+		emulator.settings["offline"] = true.into();
+		emulator.settings["restart_required"] = false.into();
+		emulator.settings["pending"] = serde_json::Value::Null;
+		emulator.set_settings(&serde_json::json!({"bitrate_bps": 80_000_000}));
+		emulator
 	}
 
 	fn message(&mut self, text: &str) {
@@ -80,6 +98,18 @@ impl LvrrEmulator {
 		for (key, value) in patch {
 			config.insert(key.clone(), value.clone());
 		}
+		if self.offline {
+			// kept for the next connection, like the server does
+			if !self.settings["pending"].is_object() {
+				self.settings["pending"] = serde_json::json!({});
+			}
+			if let Some(pending) = self.settings["pending"].as_object_mut() {
+				pending.extend(patch.clone());
+			}
+			self.state.headset = serde_json::from_value(self.settings.clone()).ok();
+			self.state.changed();
+			return;
+		}
 		let mut settings: HeadsetSettings = serde_json::from_value(self.settings.clone()).unwrap_or_default();
 		settings.restart_required = ["resolution_scale", "foveation", "codec", "bit_depth", "microphone"]
 			.iter()
@@ -93,7 +123,8 @@ impl LvrrEmulator {
 
 impl LvrrBackend for LvrrEmulator {
 	fn poll(&mut self) -> Vec<Notice> {
-		if self.state.link == Link::Online && self.last_stats.elapsed().as_secs_f32() >= 1.0 {
+		if self.state.link == Link::Online && self.state.headset_connected && self.last_stats.elapsed().as_secs_f32() >= 1.0
+		{
 			self.last_stats = Instant::now();
 			let t = self.started.elapsed().as_secs_f32();
 			let wave = |base: f32, amplitude: f32, period: f32| base + amplitude * (t * std::f32::consts::TAU / period).sin();
@@ -174,5 +205,32 @@ impl LvrrBackend for LvrrEmulator {
 			LvrrRequest::StopApplication(id) => self.message(&format!("Stopping client {id}")),
 		}
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn offline_keeps_changes() {
+		let mut emulator = LvrrEmulator::offline();
+		let headset = emulator.state().headset.clone().unwrap();
+		assert!(headset.offline && !headset.restart_required);
+		assert!(!emulator.state().headset_connected);
+		assert_eq!(headset.pending, serde_json::json!({"bitrate_bps": 80_000_000}));
+		assert_eq!(headset.config.bitrate_bps, 80_000_000);
+
+		emulator
+			.request(LvrrRequest::SetHeadsetSettings(serde_json::json!({"codec": "h265"})))
+			.unwrap();
+		let headset = emulator.state().headset.clone().unwrap();
+		assert!(headset.offline && !headset.restart_required);
+		assert_eq!(
+			headset.pending,
+			serde_json::json!({"bitrate_bps": 80_000_000, "codec": "h265"})
+		);
+		assert!(emulator.poll().is_empty());
+		assert!(emulator.state().stats.is_empty());
 	}
 }
