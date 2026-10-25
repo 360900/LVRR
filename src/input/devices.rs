@@ -1198,9 +1198,12 @@ impl TrackedDeviceList {
             return Ok(());
         }
 
-        self.devices.retain(|device| {
-            !matches!(device.device_type, TrackedDeviceType::GenericTracker { .. })
-        });
+        fn tracker_serial(device: &TrackedDevice) -> Option<&[u8]> {
+            match &device.device_type {
+                TrackedDeviceType::GenericTracker { serial, .. } => Some(serial.to_bytes()),
+                _ => None,
+            }
+        }
 
         // Trackers identify as Vive Trackers, which some games sniff to pick a
         // controller scheme (e.g. SUPERHOT VR switches to its Vive scheme when
@@ -1214,7 +1217,14 @@ impl TrackedDeviceList {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(default_max)
-            .min(vr::k_unMaxTrackedDeviceCount as usize - self.devices.len());
+            .min(
+                vr::k_unMaxTrackedDeviceCount as usize
+                    - self
+                        .devices
+                        .iter()
+                        .filter(|device| tracker_serial(device).is_none())
+                        .count(),
+            );
         let extra_tracker_serials = std::env::var("XRIZER_TRACKER_SERIALS")
             .map_or(vec![], |trackers| {
                 trackers.split(";").map(|t| t.to_string()).collect()
@@ -1233,6 +1243,23 @@ impl TrackedDeviceList {
             .collect();
 
         xdevs.truncate(max_generic_trackers);
+
+        // Listed again on every interaction profile change. Trackers seen before keep their device
+        // and index, like in SteamVR, and stay there disconnected once they aren't listed.
+        for device in &mut self.devices {
+            let listed = tracker_serial(device)
+                .map(|serial| xdevs.iter().any(|xdev| xdev.serial().as_bytes() == serial));
+            if let Some(listed) = listed {
+                device.connected = listed;
+            }
+        }
+        xdevs.retain(|xdev| {
+            !self
+                .devices
+                .iter()
+                .any(|device| tracker_serial(device) == Some(xdev.serial().as_bytes()))
+        });
+        xdevs.truncate(vr::k_unMaxTrackedDeviceCount as usize - self.devices.len());
 
         // Checked on every interaction profile change, which mostly finds none.
         let level = if xdevs.is_empty() {

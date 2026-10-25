@@ -609,3 +609,38 @@ fn hand_tracking_with_unbound_hand_interaction_profile() {
         Some("svl_hand_interaction_augmented")
     );
 }
+
+#[test]
+#[cfg_attr(not(feature = "monado"), ignore)]
+fn profile_changes_keep_generic_trackers() {
+    let mut b = Blip::new();
+    fakexr::add_trackers(b.f.raw_session());
+    b.bind::<Knuckles>();
+    b.sync();
+    assert_eq!(
+        b.events(),
+        [
+            (Ev::TrackedDeviceActivated, 0),
+            (Ev::TrackedDeviceActivated, 1),
+            (Ev::TrackedDeviceActivated, 2),
+            (Ev::TrackedDeviceActivated, 3),
+        ]
+    );
+
+    // Trackers are listed again on every profile change, but they're the same devices.
+    b.unbind();
+    b.sync();
+    b.bind::<OculusTouch>();
+    b.sync();
+    let events = b.events();
+    assert!(
+        !events.iter().any(|(_, index)| *index == 3),
+        "tracker events: {events:?}"
+    );
+    assert!(b.connected(3));
+    assert_eq!(
+        b.f.input.device_index_to_tracked_device_class(3),
+        Some(vr::ETrackedDeviceClass::GenericTracker)
+    );
+    assert_eq!(b.f.input.device_index_to_tracked_device_class(4), None);
+}
