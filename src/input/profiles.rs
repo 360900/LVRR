@@ -51,6 +51,11 @@ pub trait InteractionProfile: SupportedProfile + Sized + 'static {
     const LEGACY_TRIGGER_CLICK: Option<(f32, f32)> = None;
     /// Likewise for k_EButton_Grip and the legacy squeeze value.
     const LEGACY_GRIP_CLICK: Option<(f32, f32)> = None;
+    /// Whether a game whose bindings for this controller were converted from another
+    /// controller's sees that controller, like SteamVR's remapping layouts do with
+    /// `simulate_controller_type`, `simulate_render_model` and `simulate_HMD`. Only for profiles
+    /// games rarely know, so far: the others keep reporting themselves.
+    const SIMULATE_CONVERTED: bool = false;
     type LegalPaths: LegalPathsT;
     fn profile_path() -> &'static str;
     fn has_required_extensions(enabled_extensions: &xr::ExtensionSet) -> bool;
@@ -121,6 +126,23 @@ impl ControllerType {
             }
             Self::GenericHmd | Self::Unknown(_) => {}
         }
+    }
+
+    /// The identity SteamVR gives controllers that simulate this type, from the
+    /// `simulation_settings` of its input profile, e.g. the Quest 2 for oculus_touch.
+    pub fn simulated_properties(&self) -> Option<&'static ProfileProperties> {
+        Some(match self {
+            Self::ViveController => ViveWands::properties(),
+            Self::OculusTouch => OculusTouch::properties(),
+            Self::Knuckles => Knuckles::properties(),
+            Self::FrameController => FrameController::properties(),
+            Self::ViveFocus3 => ViveFocus3::properties(),
+            Self::HolographicController => HolographicController::properties(),
+            Self::HPMotionController => ReverbG2Controller::properties(),
+            Self::ViveCosmosController => ViveCosmos::properties(),
+            Self::PicoController => Pico4::properties(),
+            Self::GenericHmd | Self::Unknown(_) => return None,
+        })
     }
 }
 

@@ -64,6 +64,7 @@ const PICO4_PROPERTIES: ProfileProperties = ProfileProperties {
 pub struct Pico4;
 
 impl InteractionProfile for Pico4 {
+    const SIMULATE_CONVERTED: bool = true;
     type LegalPaths = legal_paths![
         Both::<
             (Squeeze, Value),
@@ -165,6 +166,7 @@ impl InteractionProfile for Pico4 {
 pub struct PicoNeo3;
 
 impl InteractionProfile for PicoNeo3 {
+    const SIMULATE_CONVERTED: bool = true;
     type LegalPaths = legal_paths![
         Both::<
             (Squeeze, Value),

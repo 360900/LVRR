@@ -1005,6 +1005,88 @@ fn bindings_converted_from_cosmos() {
 }
 
 #[test]
+fn converted_bindings_simulate_their_controller() {
+    use super::profiles::{
+        pico::Pico4, touch_pro::TouchPro, vive_cosmos::ViveCosmos, vive_focus3::ViveFocus3,
+    };
+    use vr::ETrackedDeviceProperty as Prop;
+
+    let get = |f: &Fixture, index, prop| {
+        f.input
+            .get_device_string_tracked_property(index, prop)
+            .map(|s| s.into_string().unwrap())
+    };
+    let identity = |f: &Fixture| {
+        [
+            get(f, 1, Prop::ControllerType_String),
+            get(f, 2, Prop::RenderModelName_String),
+            get(
+                f,
+                vr::k_unTrackedDeviceIndex_Hmd,
+                Prop::ControllerType_String,
+            ),
+        ]
+        .map(Option::unwrap)
+    };
+    fn connect<P: InteractionProfile>(f: &mut Fixture, set: &CStr) {
+        f.set_interaction_profile::<P>(LeftHand);
+        f.set_interaction_profile::<P>(RightHand);
+        let set = f.get_action_set_handle(set);
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: set,
+            ..Default::default()
+        });
+    }
+
+    // Converted from the Vive's bindings, the Pico and Cosmos controllers look like the Vive's,
+    // headset included.
+    let mut f = Fixture::new();
+    f.load_actions(c"actions_vive_only.json");
+    let vive = ["vive_controller", "vr_controller_vive_1_5", "vive"];
+    connect::<Pico4>(&mut f, c"/actions/main");
+    assert_eq!(identity(&f), vive);
+    connect::<ViveCosmos>(&mut f, c"/actions/main");
+    assert_eq!(identity(&f), vive);
+    // The other profiles show themselves.
+    connect::<ViveFocus3>(&mut f, c"/actions/main");
+    assert_eq!(
+        identity(&f),
+        [
+            "vive_focus3_controller",
+            "vive_focus3_controller_right",
+            "vive_focus3"
+        ]
+    );
+    connect::<TouchPro>(&mut f, c"/actions/main");
+    assert_eq!(
+        identity(&f),
+        ["oculus_touch", "oculus_quest_pro_controller_right", "rift"]
+    );
+
+    // With bindings of their own, they show themselves.
+    let mut f = Fixture::new();
+    f.load_actions(c"actions.json");
+    connect::<Pico4>(&mut f, c"/actions/set1");
+    assert_eq!(
+        identity(&f),
+        ["pico_controller", "pico_4_controller_right", "rift"]
+    );
+    assert_eq!(
+        get(&f, 1, Prop::ModelNumber_String).as_deref(),
+        Some("PICO 4 (Left Controller)")
+    );
+    connect::<ViveCosmos>(&mut f, c"/actions/set1");
+    assert_eq!(
+        identity(&f),
+        [
+            "vive_cosmos_controller",
+            "vive_cosmos_controller_right",
+            "vive_cosmos"
+        ]
+    );
+}
+
+#[test]
 fn controllers_tracked_without_bindings() {
     let f = Fixture::new();
     f.load_actions(c"actions_no_bindings.json");

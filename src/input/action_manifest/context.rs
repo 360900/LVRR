@@ -5,7 +5,7 @@ use crate::input::custom_bindings::{
     Vector2BindingData, Vector2Transform,
 };
 use crate::input::origins::BindingInfo;
-use crate::input::profiles::{DynInputPath, paths};
+use crate::input::profiles::{DynInputPath, ProfileProperties, paths};
 use crate::input::skeletal::SkeletalInputActionData;
 use crate::input::{ActionData, BoundPose, Input, InteractionProfile};
 use crate::openxr_data::{self, Hand};
@@ -34,6 +34,9 @@ pub(super) struct BindingsLoadContext<'a> {
     /// The scalar_constant bindings of analog actions that aren't bound to their input directly,
     /// in every profile.
     pub scalar_constants: HashMap<String, Vec<ScalarConstantBinding>>,
+    /// The identity of the controller that converted bindings were made for, per interaction
+    /// profile that shows it (see [InteractionProfile::SIMULATE_CONVERTED]).
+    pub simulated_properties: HashMap<xr::Path, &'static ProfileProperties>,
     pub grip_action: &'a xr::Action<xr::Posef>,
     pub info_action: &'a xr::Action<bool>,
     pub haptic_action: &'a xr::Action<xr::Haptic>,
@@ -62,6 +65,7 @@ impl<'a> BindingsLoadContext<'a> {
             per_profile_binding_info: Default::default(),
             head_proximity: Default::default(),
             scalar_constants: Default::default(),
+            simulated_properties: Default::default(),
             grip_action,
             info_action,
             haptic_action,

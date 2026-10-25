@@ -3220,7 +3220,14 @@ impl<C: openxr_data::Compositor> Input<C> {
                 }
             };
 
-            if let Some(data) = ProfileData::for_profile_name(&profile_name) {
+            if let Some(mut data) = ProfileData::for_profile_name(&profile_name) {
+                if let Some(properties) = session_data
+                    .input_data
+                    .get_loaded_actions()
+                    .and_then(|loaded| loaded.simulated_properties.get(&profile_path))
+                {
+                    data.properties = properties;
+                }
                 {
                     // simple_controller says nothing about the headset, so don't let it replace a
                     // real controller (e.g. when switching to hand tracking).
@@ -3460,6 +3467,9 @@ struct ManifestLoadedActions {
     head_proximity: SecondaryMap<ActionKey, HeadProximity>,
     /// The variant of each profile's bindings, see [Input::binding_variant].
     binding_variants: HashMap<xr::Path, String>,
+    /// The identity of the controller that converted bindings were made for, per interaction
+    /// profile that shows it instead of its own, like SteamVR.
+    simulated_properties: HashMap<xr::Path, &'static ProfileProperties>,
 }
 
 /// A boolean action bound to the headset's proximity sensor, which has no OpenXR input. It reads

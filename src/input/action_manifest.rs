@@ -175,6 +175,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             per_profile_binding_info,
             head_proximity,
             scalar_constants,
+            simulated_properties,
             ..
         } = binding_context;
 
@@ -329,6 +330,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             skeleton_sets,
             head_proximity,
             binding_variants,
+            simulated_properties,
         };
 
         session_data
@@ -649,6 +651,14 @@ impl<C: openxr_data::Compositor> Input<C> {
                     );
                     let mut bindings = bindings.clone();
                     fallback::convert(&mut bindings, source, has_input::<P>);
+                    if let Some(properties) = source
+                        .simulated_properties()
+                        .filter(|_| P::SIMULATE_CONVERTED)
+                    {
+                        self.context
+                            .simulated_properties
+                            .insert(profile_path, properties);
+                    }
                     bindings
                 } else {
                     info!("No bindings to convert for {profile}");

@@ -16,6 +16,7 @@ use openvr::EVRButtonId as btn;
 pub struct ViveCosmos;
 
 impl InteractionProfile for ViveCosmos {
+    const SIMULATE_CONVERTED: bool = true;
     type LegalPaths = legal_paths![
         Both::<
             (Squeeze, Click),
