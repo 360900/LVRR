@@ -12,6 +12,7 @@ use glam::{EulerRot, Mat4, Quat, Vec3};
 pub struct MetaTouchPlus;
 
 impl InteractionProfile for MetaTouchPlus {
+    const LEFT_MENU_IS_SYSTEM: bool = true;
     type LegalPaths = legal_paths![
         Both::<
             (Squeeze, Value),

@@ -12,6 +12,7 @@ use openvr::EVRButtonId as btn;
 pub struct ViveFocus3;
 
 impl InteractionProfile for ViveFocus3 {
+    const LEFT_MENU_IS_SYSTEM: bool = true;
     type LegalPaths = legal_paths![
         Both::<
             (Squeeze, Value),

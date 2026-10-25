@@ -420,6 +420,17 @@ fn read_bindings(
 
 /// The path to bind for `path` on `P`: the path itself, or what the profile translates it to.
 fn validate_path<P: InteractionProfile>(path: DynInputPath) -> Option<DynInputPath> {
+    let path = match path {
+        DynInputPath {
+            device: InputDevice::Hand(Hand::Left),
+            subpath: DynSubpath::System,
+            ..
+        } if P::LEFT_MENU_IS_SYSTEM => DynInputPath {
+            subpath: DynSubpath::Menu,
+            ..path
+        },
+        path => path,
+    };
     let legal = <P::LegalPaths as LegalPathsT>::is_legal;
     // A translation that isn't legal either would fail the whole profile's suggestion.
     legal(path)

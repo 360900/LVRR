@@ -65,6 +65,7 @@ pub struct Pico4;
 
 impl InteractionProfile for Pico4 {
     const SIMULATE_CONVERTED: bool = true;
+    const LEFT_MENU_IS_SYSTEM: bool = true;
     type LegalPaths = legal_paths![
         Both::<
             (Squeeze, Value),
@@ -167,6 +168,7 @@ pub struct PicoNeo3;
 
 impl InteractionProfile for PicoNeo3 {
     const SIMULATE_CONVERTED: bool = true;
+    const LEFT_MENU_IS_SYSTEM: bool = true;
     type LegalPaths = legal_paths![
         Both::<
             (Squeeze, Value),

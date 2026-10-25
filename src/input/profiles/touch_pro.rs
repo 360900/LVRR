@@ -14,6 +14,7 @@ use glam::Mat4;
 pub struct TouchPro;
 
 impl InteractionProfile for TouchPro {
+    const LEFT_MENU_IS_SYSTEM: bool = true;
     // The Touch inputs, and some (proximity, curl, stylus) xrizer doesn't use.
     type LegalPaths = <OculusTouch as InteractionProfile>::LegalPaths;
     fn properties() -> &'static ProfileProperties {

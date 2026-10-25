@@ -5413,3 +5413,33 @@ fn gamepad_controller_type() {
     assert_eq!("gamepad".parse::<ControllerType>(), Ok(ty.clone()));
     assert_eq!(ty.to_string(), "gamepad");
 }
+
+/// SteamVR's profiles of these controllers name the left menu button `/input/system`, so game
+/// bindings on it go to OpenXR's left menu button. The right one stays the system button.
+#[test]
+fn left_system_binds_the_menu_button() {
+    use super::profiles::{
+        meta_touch_plus::MetaTouchPlus,
+        pico::{Pico4, PicoNeo3},
+        vive_focus3::ViveFocus3,
+    };
+
+    fn check<P: InteractionProfile>(f: &Fixture) {
+        f.verify_bindings::<bool>(
+            P::profile_path(),
+            c"/actions/main/in/menu",
+            [
+                "/user/hand/left/input/menu/click".to_owned(),
+                "/user/hand/right/input/system/click".to_owned(),
+            ],
+        );
+    }
+
+    let f = Fixture::new();
+    f.load_actions(c"actions_left_system.json");
+    check::<OculusTouch>(&f);
+    check::<MetaTouchPlus>(&f);
+    check::<ViveFocus3>(&f);
+    check::<Pico4>(&f);
+    check::<PicoNeo3>(&f);
+}
