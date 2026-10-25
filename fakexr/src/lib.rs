@@ -6,7 +6,7 @@ pub use hand_tracking::{
     hand_joints_located, hand_trackers_created, set_hand_joints, set_hand_tracked,
     set_hand_tracking_supported,
 };
-pub use monado_xdev::add_trackers;
+pub use monado_xdev::{add_tracker, add_trackers};
 
 use crossbeam_utils::atomic::AtomicCell;
 use glam::{Affine3A, Quat, Vec3};
@@ -793,7 +793,7 @@ pub unsafe extern "system" fn get_instance_proc_addr(
                     (GetInputSourceLocalizedName),
                     GetVisibilityMaskKHR,
                     GetDisplayRefreshRateFB,
-                    (EnumerateDisplayRefreshRatesFB),
+                    EnumerateDisplayRefreshRatesFB,
                     (RequestDisplayRefreshRateFB),
                     CreateHandTrackerEXT,
                     DestroyHandTrackerEXT,
@@ -1066,6 +1066,8 @@ struct Session {
     frames: Mutex<Frames>,
     last_layer_count: AtomicCell<u32>,
     with_trackers: AtomicBool,
+    /// Trackers added by name and serial, see [add_tracker].
+    extra_trackers: Mutex<Vec<(CString, CString)>>,
     stage_bounds: AtomicCell<Option<xr::Extent2Df>>,
     view_pose: AtomicCell<xr::Posef>,
     stage_pose: AtomicCell<xr::Posef>,
@@ -1624,6 +1626,7 @@ extern "system" fn create_session(
         frames: Mutex::default(),
         last_layer_count: 0.into(),
         with_trackers: false.into(),
+        extra_trackers: Mutex::default(),
         stage_bounds: None.into(),
         view_pose: xr::Posef::IDENTITY.into(),
         stage_pose: xr::Posef::IDENTITY.into(),
@@ -2088,6 +2091,33 @@ extern "system" fn get_display_refresh_rate_f_b(
     let session = get_session!(session);
     session.refresh_rate_queries.fetch_add(1, Ordering::Relaxed);
     unsafe { *rate = session.refresh_rate.load() };
+    xr::Result::SUCCESS
+}
+
+/// The refresh rates xrEnumerateDisplayRefreshRatesFB lists, a Quest's.
+pub const DISPLAY_REFRESH_RATES: [f32; 4] = [72.0, 80.0, 90.0, 120.0];
+
+extern "system" fn enumerate_display_refresh_rates_f_b(
+    session: xr::Session,
+    capacity: u32,
+    count: *mut u32,
+    rates: *mut f32,
+) -> xr::Result {
+    let _ = get_session!(session);
+    unsafe { *count = DISPLAY_REFRESH_RATES.len() as u32 };
+    if capacity == 0 {
+        return xr::Result::SUCCESS;
+    }
+    if (capacity as usize) < DISPLAY_REFRESH_RATES.len() {
+        return xr::Result::ERROR_SIZE_INSUFFICIENT;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            DISPLAY_REFRESH_RATES.as_ptr(),
+            rates,
+            DISPLAY_REFRESH_RATES.len(),
+        )
+    };
     xr::Result::SUCCESS
 }
 

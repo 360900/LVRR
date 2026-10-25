@@ -55,6 +55,9 @@ const PICO4_PROPERTIES: ProfileProperties = ProfileProperties {
         model: c"PICO 4",
         controller_type: c"rift",
         serial_number: c"PICO_HMD",
+        render_model_name: c"generic_hmd",
+        registered_device_type: c"",
+        input_profile_path: c"{oculus}/input/rift_profile.json",
     },
 };
 

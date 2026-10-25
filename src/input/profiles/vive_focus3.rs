@@ -65,6 +65,9 @@ impl InteractionProfile for ViveFocus3 {
                 model: c"VIVE Focus 3",
                 controller_type: c"vive_focus3",
                 serial_number: c"HMD",
+                render_model_name: c"generic_hmd",
+                registered_device_type: c"",
+                input_profile_path: c"",
             },
         };
         &DEVICE_PROPERTIES
