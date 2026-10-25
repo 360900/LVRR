@@ -1,4 +1,7 @@
+mod timing;
+
 use super::GraphicsBackend;
+use crate::compositor::GpuDone;
 use ash::vk::{self, Handle};
 use log::warn;
 use openvr as vr;
@@ -21,6 +24,8 @@ struct RealSessionData {
     resolve_images: Mutex<[Option<ResolveImage>; 2]>,
     /// Per eye, for textures whose data has to be reinterpreted on the way, see [EyeCopy].
     staging_images: Mutex<[Option<ResolveImage>; 2]>,
+    /// Set up with the first frame, and kept when the swapchain is recreated.
+    gpu_timer: Option<timing::GpuTimer>,
 }
 
 impl RealSessionData {
@@ -343,6 +348,10 @@ impl GraphicsBackend for VulkanData {
             .collect();
 
         let eye_extents = Mutex::new(vec![[None; 2]; images.len()]);
+        let gpu_timer = self
+            .real_data
+            .as_mut()
+            .and_then(|data| data.gpu_timer.take());
         if let Some(data) = self.real_data.replace(RealSessionData {
             images,
             format: vk::Format::from_raw(format as _),
@@ -353,6 +362,7 @@ impl GraphicsBackend for VulkanData {
             eye_extents,
             resolve_images: Default::default(),
             staging_images: Default::default(),
+            gpu_timer,
         }) {
             data.destroy(&self.device);
         }
@@ -838,6 +848,15 @@ impl GraphicsBackend for VulkanData {
         if let Some(data) = &self.real_data {
             wait_for_fences(&self.device, &data.fences);
         }
+    }
+
+    fn frame_submitted(&mut self, done: GpuDone) {
+        let Some(data) = self.real_data.as_mut() else {
+            return;
+        };
+        data.gpu_timer
+            .get_or_insert_with(|| timing::GpuTimer::new(self.device.clone()))
+            .frame_submitted(self.queue, done);
     }
 }
 impl VulkanData {

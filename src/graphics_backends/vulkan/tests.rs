@@ -1592,3 +1592,58 @@ fn reject_null_image() {
     data.m_nImage = 1;
     assert!(VulkanData::get_texture(&texture(&mut data), flags).is_some());
 }
+
+fn reporter(
+    frame: u32,
+    reports: &std::sync::mpsc::Sender<(u32, std::time::Instant)>,
+) -> crate::compositor::GpuDone {
+    let reports = reports.clone();
+    crate::compositor::GpuDone::new(move |done| reports.send((frame, done)).unwrap())
+}
+
+#[test]
+fn gpu_timer_reports_frames_in_order() {
+    let vk = fake_vulkan();
+    let mut timer = timing::GpuTimer::without_thread(vk.device.clone());
+    let (send, reports) = std::sync::mpsc::channel();
+    for frame in 0..3 {
+        timer.frame_submitted(vk.queue, reporter(frame, &send));
+    }
+    for _ in 0..3 {
+        assert!(timer.wait_next());
+    }
+    let reports: Vec<_> = reports.try_iter().collect();
+    assert_eq!(
+        reports.iter().map(|(frame, _)| *frame).collect::<Vec<_>>(),
+        [0, 1, 2]
+    );
+    assert!(reports.windows(2).all(|pair| pair[0].1 <= pair[1].1));
+
+    // Signaled fences are reset and submitted again.
+    let fences = gpu(|gpu| gpu.live.len());
+    timer.frame_submitted(vk.queue, reporter(3, &send));
+    assert!(timer.wait_next());
+    assert_eq!(gpu(|gpu| gpu.live.len()), fences);
+    drop(timer);
+    finish(vk);
+}
+
+#[test]
+fn gpu_timer_skips_frames_while_the_gpu_hangs() {
+    let vk = fake_vulkan();
+    let mut timer = timing::GpuTimer::without_thread(vk.device.clone());
+    let (send, reports) = std::sync::mpsc::channel();
+    gpu(|gpu| gpu.hung = true);
+    for frame in 0..6 {
+        timer.frame_submitted(vk.queue, reporter(frame, &send));
+    }
+    assert!(timer.wait_next());
+    assert!(reports.try_recv().is_err());
+    // Frames past the fence limit aren't waited for, and the pending fences are leaked.
+    assert_eq!(gpu(|gpu| gpu.live.len()), 4);
+    drop(timer);
+    gpu(|gpu| {
+        assert_eq!(gpu.errors, Vec::<String>::new());
+        assert_eq!(gpu.live.len(), 4);
+    });
+}

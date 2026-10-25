@@ -36,17 +36,15 @@ pub struct FrameTimer {
 
 /// Lets a graphics backend report when the GPU finished the work the app submitted for a frame,
 /// up to its last Submit.
-pub struct GpuDone {
-    timer: Arc<FrameTimer>,
-    seq: u64,
-}
+pub struct GpuDone(Box<dyn FnOnce(Instant) + Send>);
 
 impl GpuDone {
+    pub fn new(report: impl FnOnce(Instant) + Send + 'static) -> Self {
+        Self(Box::new(report))
+    }
+
     pub fn report(self, done: Instant) {
-        let done = self.timer.nanos(done);
-        if let Some(frame) = self.timer.state().frame_mut(self.seq) {
-            frame.gpu_done = Some(done);
-        }
+        (self.0)(done)
     }
 }
 
@@ -384,10 +382,15 @@ impl FrameTimer {
         let mut state = self.state();
         let frame = state.begun.as_mut().filter(|frame| !frame.gpu_marked)?;
         frame.gpu_marked = true;
-        Some(GpuDone {
-            timer: self.clone(),
-            seq: frame.seq,
-        })
+        let (timer, seq) = (self.clone(), frame.seq);
+        Some(GpuDone::new(move |done| timer.gpu_done(seq, done)))
+    }
+
+    fn gpu_done(&self, seq: u64, done: Instant) {
+        let done = self.nanos(done);
+        if let Some(frame) = self.state().frame_mut(seq) {
+            frame.gpu_done = Some(done);
+        }
     }
 
     /// A Submit call on the begun frame took from `start` to `end`.
@@ -615,11 +618,7 @@ mod tests {
         assert_near(timing(&timer, 0).m_flTotalRenderGpuMs, 6.0);
         // A report that arrives later replaces it.
         let seq = timer.state().history.back().unwrap().seq;
-        GpuDone {
-            timer: timer.clone(),
-            seq,
-        }
-        .report(at(&timer, 120.1 + 7.0));
+        timer.gpu_done(seq, at(&timer, 120.1 + 7.0));
         assert_near(timing(&timer, 0).m_flTotalRenderGpuMs, 7.0);
     }
 
