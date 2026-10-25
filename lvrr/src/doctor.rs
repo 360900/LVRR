@@ -8,6 +8,10 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, ExitCode};
 
+use crate::bus::{self, Server};
+use crate::checks;
+use crate::server::{self, State};
+
 /// The WiVRn server's port, TCP and UDP
 const PORT: u16 = 9757;
 /// mDNS, which the headset uses to find the server
@@ -22,7 +26,7 @@ description=LVRR VR streaming server and headset discovery
 ports=9757|5353/udp
 ";
 
-const FIX: &str = "lvrr doctor --fix";
+pub const FIX: &str = "lvrr doctor --fix";
 /// Written once the first start asked to open the firewall, so it asks only once
 const ASKED_FILE: &str = "firewall-asked";
 
@@ -55,15 +59,6 @@ pub struct Check {
 enum Firewall {
     Ufw,
     Firewalld,
-}
-
-impl Firewall {
-    fn name(self) -> &'static str {
-        match self {
-            Firewall::Ufw => "ufw",
-            Firewall::Firewalld => "firewalld",
-        }
-    }
 }
 
 /// What the firewall lets in
@@ -139,11 +134,14 @@ fn ufw_open(rules: &str) -> Open {
     open
 }
 
-/// Ports and services of a firewalld zone file
+/// Ports and services of a firewalld zone file. A zone that accepts
+/// everything is open.
 fn firewalld_zone_open(xml: &str) -> Open {
     let mut open = Open::default();
     for element in xml.split('<').skip(1) {
-        if element.starts_with("port ") {
+        if element.starts_with("zone ") && attribute(element, "target") == Some("ACCEPT") {
+            open.add("any", "any");
+        } else if element.starts_with("port ") {
             if let (Some(port), Some(protocol)) =
                 (attribute(element, "port"), attribute(element, "protocol"))
             {
@@ -179,60 +177,213 @@ fn active_firewall() -> Option<Firewall> {
     firewalld.then_some(Firewall::Firewalld)
 }
 
-fn read_open(firewall: Firewall) -> Result<Open, String> {
-    match firewall {
-        Firewall::Ufw => {
-            let mut rules = String::new();
-            for path in UFW_RULES {
-                match fs::read_to_string(path) {
-                    Ok(text) => rules.push_str(&text),
-                    Err(e) => return Err(format!("{path}: {e}")),
-                }
-            }
-            Ok(ufw_open(&rules))
-        }
-        Firewall::Firewalld => {
-            let zone = fs::read_to_string("/etc/firewalld/firewalld.conf")
-                .ok()
-                .and_then(|c| {
-                    c.lines()
-                        .find_map(|l| l.strip_prefix("DefaultZone=").map(|z| z.trim().to_string()))
-                })
-                .unwrap_or_else(|| "public".to_string());
-            let path = [
-                format!("/etc/firewalld/zones/{zone}.xml"),
-                format!("/usr/lib/firewalld/zones/{zone}.xml"),
-            ]
-            .into_iter()
-            .find(|p| Path::new(p).exists())
-            .ok_or_else(|| format!("no file for zone {zone}"))?;
-            let xml = fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
-            Ok(firewalld_zone_open(&xml))
+fn read_ufw() -> Result<Open, String> {
+    let mut rules = String::new();
+    for path in UFW_RULES {
+        match fs::read_to_string(path) {
+            Ok(text) => rules.push_str(&text),
+            Err(e) => return Err(format!("{path}: {e}")),
         }
     }
+    Ok(ufw_open(&rules))
+}
+
+fn default_zone() -> String {
+    fs::read_to_string("/etc/firewalld/firewalld.conf")
+        .ok()
+        .and_then(|c| {
+            c.lines()
+                .find_map(|l| l.strip_prefix("DefaultZone=").map(|z| z.trim().to_string()))
+        })
+        .filter(|z| !z.is_empty())
+        .unwrap_or_else(|| "public".to_string())
+}
+
+/// The zones `firewall-cmd --get-active-zones` lists, with their interfaces
+fn active_zones(text: &str) -> Vec<(String, Vec<String>)> {
+    let mut zones: Vec<(String, Vec<String>)> = Vec::new();
+    for line in text.lines() {
+        if !line.starts_with(char::is_whitespace) {
+            if let Some(zone) = line.split_whitespace().next() {
+                zones.push((zone.to_string(), Vec::new()));
+            }
+        } else if let (Some(interfaces), Some((_, list))) =
+            (line.trim().strip_prefix("interfaces:"), zones.last_mut())
+        {
+            list.extend(interfaces.split_whitespace().map(str::to_string));
+        }
+    }
+    zones
+}
+
+/// Interfaces with a default route, from /proc/net/route and ipv6_route: the
+/// ones the headset's network is on
+fn default_route_interfaces(ipv4: &str, ipv6: &str) -> Vec<String> {
+    let v4 = ipv4.lines().skip(1).filter_map(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        (fields.get(1) == Some(&"00000000") && fields.get(7) == Some(&"00000000"))
+            .then(|| fields[0].to_string())
+    });
+    let v6 = ipv6.lines().filter_map(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let default = fields.first().is_some_and(|d| d.bytes().all(|b| b == b'0'))
+            && fields.get(1) == Some(&"00");
+        default
+            .then(|| fields.last().map(|i| i.to_string()))
+            .flatten()
+    });
+    let mut interfaces: Vec<String> = v4.chain(v6).filter(|i| i != "lo").collect();
+    interfaces.sort();
+    interfaces.dedup();
+    interfaces
+}
+
+/// The firewalld zones of the interfaces with a default route. firewalld puts
+/// an interface no zone names in the default zone.
+fn firewalld_zones() -> Vec<String> {
+    let default = default_zone();
+    let active = Command::new("firewall-cmd")
+        .arg("--get-active-zones")
+        .output()
+        .map(|o| active_zones(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default();
+    let interfaces = default_route_interfaces(
+        &fs::read_to_string("/proc/net/route").unwrap_or_default(),
+        &fs::read_to_string("/proc/net/ipv6_route").unwrap_or_default(),
+    );
+    let mut zones: Vec<String> = interfaces
+        .iter()
+        .map(|interface| {
+            active
+                .iter()
+                .find(|(_, interfaces)| interfaces.contains(interface))
+                .map_or_else(|| default.clone(), |(zone, _)| zone.clone())
+        })
+        .collect();
+    if zones.is_empty() {
+        zones.push(default);
+    }
+    zones.sort();
+    zones.dedup();
+    zones
+}
+
+fn read_zone(zone: &str) -> Result<Open, String> {
+    let path = [
+        format!("/etc/firewalld/zones/{zone}.xml"),
+        format!("/usr/lib/firewalld/zones/{zone}.xml"),
+    ]
+    .into_iter()
+    .find(|p| Path::new(p).exists())
+    .ok_or_else(|| format!("no file for zone {zone}"))?;
+    let xml = fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+    Ok(firewalld_zone_open(&xml))
+}
+
+/// Firewall services with hand-written rules, which only root can read
+fn rules_services() -> Vec<&'static str> {
+    ["nftables", "iptables", "ip6tables"]
+        .into_iter()
+        .filter(|service| {
+            Command::new("systemctl")
+                .args(["--quiet", "is-active", &format!("{service}.service")])
+                .status()
+                .is_ok_and(|s| s.success())
+        })
+        .collect()
+}
+
+/// What to add to hand-written rules. Inserted first, so a reject rule
+/// before the end doesn't win.
+fn rules_lines(services: &[&str]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for service in services {
+        match *service {
+            "nftables" => {
+                lines.push(format!(
+                    "nft insert rule inet filter input tcp dport {PORT} accept"
+                ));
+                lines.push(format!(
+                    "nft insert rule inet filter input udp dport {{ {PORT}, {MDNS} }} accept"
+                ));
+            }
+            tool => {
+                lines.push(format!("{tool} -I INPUT -p tcp --dport {PORT} -j ACCEPT"));
+                lines.push(format!("{tool} -I INPUT -p udp --dport {PORT} -j ACCEPT"));
+                lines.push(format!("{tool} -I INPUT -p udp --dport {MDNS} -j ACCEPT"));
+            }
+        }
+    }
+    lines
 }
 
 pub fn firewall() -> Check {
-    let (status, message) = match active_firewall() {
-        None => (
-            Status::Ok,
-            "Neither ufw nor firewalld is on, nothing to open.".to_string(),
-        ),
-        Some(firewall) => match read_open(firewall) {
+    let (status, message, fixable) = match active_firewall() {
+        None => match rules_services()[..] {
+            [] => (
+                Status::Ok,
+                "Neither ufw nor firewalld is on, nothing to open.".to_string(),
+                false,
+            ),
+            ref services => (
+                Status::Warn,
+                format!(
+                    "{} is on, and its rules can't be read without admin rights. Make sure they let in TCP and UDP port {PORT} and UDP port {MDNS} (mDNS), for example with the default table and chain names:\n{}",
+                    services.join(" and "),
+                    rules_lines(services).join("\n")
+                ),
+                false,
+            ),
+        },
+        Some(Firewall::Firewalld) => {
+            let mut blocked = Vec::new();
+            let mut error = None;
+            let zones = firewalld_zones();
+            for zone in &zones {
+                match read_zone(zone) {
+                    Ok(open) if open.missing().is_empty() => (),
+                    Ok(open) => {
+                        blocked.push(format!("zone {zone} blocks {}", open.missing().join(", ")))
+                    }
+                    Err(e) => error = Some(e),
+                }
+            }
+            match (blocked.is_empty(), error) {
+                (true, None) => (
+                    Status::Ok,
+                    format!(
+                        "firewalld lets the headset in on port {PORT} and mDNS (zone {}).",
+                        zones.join(", ")
+                    ),
+                    false,
+                ),
+                (true, Some(e)) => (
+                    Status::Warn,
+                    format!("Could not read the firewalld rules: {e}"),
+                    true,
+                ),
+                (false, _) => (
+                    Status::Fail,
+                    format!("firewalld {}.", blocked.join(", ")),
+                    true,
+                ),
+            }
+        }
+        Some(Firewall::Ufw) => match read_ufw() {
             Ok(open) if open.missing().is_empty() => (
                 Status::Ok,
-                format!(
-                    "{} lets the headset in on port {PORT} and mDNS.",
-                    firewall.name()
-                ),
+                format!("ufw lets the headset in on port {PORT} and mDNS."),
+                false,
             ),
             Ok(open) => (
                 Status::Fail,
-                format!("{} blocks {}.", firewall.name(), open.missing().join(", ")),
+                format!("ufw blocks {}.", open.missing().join(", ")),
+                true,
             ),
             Err(e) => (
                 Status::Warn,
-                format!("Could not read the {} rules: {e}", firewall.name()),
+                format!("Could not read the ufw rules: {e}"),
+                true,
             ),
         },
     };
@@ -241,7 +392,7 @@ pub fn firewall() -> Check {
         title: "Firewall",
         status,
         message,
-        fix: (status != Status::Ok).then_some(FIX),
+        fix: fixable.then_some(FIX),
     }
 }
 
@@ -260,10 +411,13 @@ pub fn setup_firewall() -> Result<(), String> {
         Some(Firewall::Firewalld) => {
             let tcp = format!("--add-port={PORT}/tcp");
             let udp = format!("--add-port={PORT}/udp");
-            run(
-                "firewall-cmd",
-                &["--permanent", &tcp, &udp, "--add-service=mdns"],
-            )?;
+            for zone in firewalld_zones() {
+                let zone = format!("--zone={zone}");
+                run(
+                    "firewall-cmd",
+                    &["--permanent", &zone, &tcp, &udp, "--add-service=mdns"],
+                )?;
+            }
             run("firewall-cmd", &["--reload"])
         }
     }
@@ -308,31 +462,51 @@ fn fix_firewall() -> Result<(), String> {
 }
 
 /// On the first start, opens the firewall if it blocks the headset. Asks only once; after
-/// that, `lvrr doctor` reports it.
+/// that, `lvrr doctor` reports it. Hand-written nftables or iptables rules are left alone.
 pub fn first_start(config_dir: &Path) {
     let asked = config_dir.join(ASKED_FILE);
     if asked.exists() {
         return;
     }
     let check = firewall();
-    if check.status == Status::Ok {
+    if check.status == Status::Ok || check.fix.is_none() {
         return;
     }
     if let Err(e) = fs::write(&asked, "") {
         eprintln!("lvrr: writing {}: {e}", asked.display());
         return;
     }
-    eprintln!(
-        "lvrr: {} Opening it, which asks for an admin password.",
-        check.message
+    crate::report(
+        "Opening the firewall for LVRR",
+        &format!("{} This asks for an admin password.", check.message),
     );
     if let Err(e) = fix_firewall() {
-        eprintln!("lvrr: {e}. Run `{FIX}` to try again.");
+        crate::report(
+            "LVRR could not open the firewall",
+            &format!("{e}. Run `{FIX}` to try again."),
+        );
     }
 }
 
-fn checks() -> Vec<Check> {
-    vec![firewall()]
+fn checks(root: &Path) -> Vec<Check> {
+    let config = crate::read_config();
+    let session_running = bus::session().is_ok_and(|conn| {
+        matches!(server::state(&conn, root), State::Ours)
+            && Server::new(&conn)
+                .get::<bool>("SessionRunning")
+                .unwrap_or(false)
+    });
+    vec![
+        firewall(),
+        checks::avahi(&config),
+        checks::port(root, &config),
+        checks::vulkan(),
+        checks::openxr(root, session_running),
+        checks::openvr(root, &config),
+        checks::steam(root),
+        checks::uinput(&config),
+        checks::pipewire(),
+    ]
 }
 
 /// `lvrr doctor [--json] [--fix]`
@@ -349,28 +523,47 @@ pub fn main(args: &[String]) -> ExitCode {
             }
         }
     }
-    let mut checks = checks();
-    if fix
-        && checks
-            .iter()
-            .any(|c| c.id == "firewall" && c.status != Status::Ok)
-    {
-        if let Err(e) = fix_firewall() {
+    let root = match crate::install_root() {
+        Ok(root) => root,
+        Err(e) => {
             eprintln!("lvrr: {e}");
+            return ExitCode::FAILURE;
         }
-        checks = self::checks();
+    };
+    let mut report = checks(&root);
+    if fix {
+        let mut fixed = false;
+        for c in report
+            .iter()
+            .filter(|c| c.status != Status::Ok && c.fix.is_some())
+        {
+            let result = match c.id {
+                "firewall" => fix_firewall(),
+                "avahi" => checks::fix_avahi(),
+                "steam" => checks::fix_steam(&root),
+                _ => continue,
+            };
+            if let Err(e) = result {
+                eprintln!("lvrr: {e}");
+            }
+            fixed = true;
+        }
+        if fixed {
+            report = checks(&root);
+        }
     }
     if json {
-        println!("{}", to_json(&checks));
+        println!("{}", to_json(&report));
     } else {
-        for c in &checks {
-            println!("{:4}  {}: {}", c.status.name(), c.title, c.message);
+        for c in &report {
+            let message = c.message.replace('\n', "\n      ");
+            println!("{:4}  {}: {message}", c.status.name(), c.title);
             if let Some(fix) = c.fix {
                 println!("      fix: {fix}");
             }
         }
     }
-    if checks.iter().any(|c| c.status == Status::Fail) {
+    if report.iter().any(|c| c.status == Status::Fail) {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
@@ -462,6 +655,52 @@ mod tests {
             firewalld_zone_open(service).missing(),
             ["mDNS (UDP port 5353)"]
         );
+        let trusted = r#"<zone target="ACCEPT"><short>Trusted</short></zone>"#;
+        assert!(firewalld_zone_open(trusted).missing().is_empty());
+        let drop = r#"<zone target="DROP"><service name="ssh"/></zone>"#;
+        assert_eq!(firewalld_zone_open(drop).missing().len(), 3);
+    }
+
+    #[test]
+    fn firewalld_active_zones() {
+        let text = "home (default)\n  interfaces: wlp2s0 enp3s0\ndocker\n  interfaces: docker0\nlibvirt\n  sources: 192.168.122.0/24\n";
+        assert_eq!(
+            active_zones(text),
+            [
+                (
+                    "home".to_string(),
+                    vec!["wlp2s0".to_string(), "enp3s0".to_string()]
+                ),
+                ("docker".to_string(), vec!["docker0".to_string()]),
+                ("libvirt".to_string(), vec![]),
+            ]
+        );
+    }
+
+    #[test]
+    fn default_routes() {
+        let ipv4 =
+            "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT
+wlp2s0\t00000000\t0101A8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0
+wlp2s0\t0001A8C0\t00000000\t0001\t0\t0\t600\t00FFFFFF\t0\t0\t0
+docker0\t000011AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0
+";
+        let ipv6 = "00000000000000000000000000000000 00 00000000000000000000000000000000 00 fe800000000000000000000000000001 00000258 00000002 00000000 00000003 enp3s0
+00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 ffffffff 00000001 00000000 00200200       lo
+fe800000000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000001 00000000 00000001 wlp2s0
+";
+        assert_eq!(default_route_interfaces(ipv4, ipv6), ["enp3s0", "wlp2s0"]);
+    }
+
+    #[test]
+    fn hand_written_rules() {
+        let lines = rules_lines(&["nftables", "ip6tables"]);
+        assert_eq!(
+            lines[1],
+            "nft insert rule inet filter input udp dport { 9757, 5353 } accept"
+        );
+        assert_eq!(lines[4], "ip6tables -I INPUT -p udp --dport 5353 -j ACCEPT");
+        assert_eq!(lines.len(), 5);
     }
 
     #[test]
