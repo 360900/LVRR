@@ -1,0 +1,24 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/main",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/main/in/grab",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/grab_firmly",
+			"type": "boolean"
+		}
+	],
+	"default_bindings": [
+		{
+			"controller_type": "knuckles",
+			"binding_url": "knuckles_grab_force.json"
+		}
+	]
+}

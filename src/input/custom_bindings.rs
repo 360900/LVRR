@@ -698,7 +698,11 @@ pub(super) struct GrabBindingData {
     value_action: xr::Action<f32>,
     hold_threshold: f32,
     release_threshold: f32,
+    force_hold_threshold: f32,
+    force_release_threshold: f32,
     last_state: AtomicBool,
+    /// The force passed its hold threshold and hasn't dropped below its release threshold since.
+    force_engaged: AtomicBool,
 }
 
 impl GrabBindingData {
@@ -707,6 +711,11 @@ impl GrabBindingData {
     const DEFAULT_GRAB_THRESHOLD: f32 = 0.70;
     /// How much the value component needs to be to release the grab.
     const DEFAULT_RELEASE_THRESHOLD: f32 = 0.65;
+    /// The pressure from which the force counts, on top of the value, so a light touch on the
+    /// force sensor doesn't grab.
+    const DEFAULT_FORCE_HOLD_THRESHOLD: f32 = 0.1;
+    /// The pressure below which the force stops counting.
+    const DEFAULT_FORCE_RELEASE_THRESHOLD: f32 = 0.05;
 
     pub fn new(
         force_action: Option<xr::Action<f32>>,
@@ -716,6 +725,9 @@ impl GrabBindingData {
         let hold_threshold = params
             .and_then(|p| p.value_hold_threshold.as_deref().copied())
             .unwrap_or(Self::DEFAULT_GRAB_THRESHOLD);
+        let force_hold_threshold = params
+            .and_then(|p| p.force_hold_threshold.as_deref().copied())
+            .unwrap_or(Self::DEFAULT_FORCE_HOLD_THRESHOLD);
         Self {
             force_action,
             value_action,
@@ -725,7 +737,13 @@ impl GrabBindingData {
                 .unwrap_or(Self::DEFAULT_RELEASE_THRESHOLD)
                 // Releasing above the grab point would flip the state at every sync between them.
                 .min(hold_threshold),
+            force_hold_threshold,
+            force_release_threshold: params
+                .and_then(|p| p.force_release_threshold.as_deref().copied())
+                .unwrap_or(Self::DEFAULT_FORCE_RELEASE_THRESHOLD)
+                .min(force_hold_threshold),
             last_state: false.into(),
+            force_engaged: false.into(),
         }
     }
 
@@ -742,12 +760,25 @@ impl GrabBindingData {
         let value_state = self.value_action.state(session, subaction_path)?;
         if !value_state.is_active || force_state.is_some_and(|s| !s.is_active) {
             self.last_state.store(false, Ordering::Relaxed);
+            self.force_engaged.store(false, Ordering::Relaxed);
             return Ok(None);
         }
 
         let prev_grabbed = self.last_state.load(Ordering::Relaxed);
+        // The value and the force share one scale for the grab thresholds: the value (proximity)
+        // is 0 to 1, a force that counts is 1 to 2.
+        let force_engaged = force_state.is_some_and(|force| {
+            let force = force.current_state;
+            force > 0.0
+                && if self.force_engaged.load(Ordering::Relaxed) {
+                    force > self.force_release_threshold
+                } else {
+                    force >= self.force_hold_threshold
+                }
+        });
+        self.force_engaged.store(force_engaged, Ordering::Relaxed);
         let value = match force_state {
-            Some(force) if force.current_state > 0.0 => force.current_state + 1.0,
+            Some(force) if force_engaged => force.current_state + 1.0,
             _ => value_state.current_state,
         };
 
@@ -1615,6 +1646,50 @@ mod tests {
         f.sync(set);
         assert!(f.get_bool_state(after).unwrap().bState);
         assert!(!f.get_bool_state(radial).unwrap().bActive);
+    }
+
+    #[test]
+    fn grab_force_thresholds() {
+        let mut f = Fixture::new();
+        let set = vr::VRActiveActionSet_t {
+            ulActionSet: f.get_action_set_handle(c"/actions/main"),
+            ..Default::default()
+        };
+        let grab = f.get_action_handle(c"/actions/main/in/grab");
+        let grab_firmly = f.get_action_handle(c"/actions/main/in/grab_firmly");
+        let [left, right] =
+            [c"/user/hand/left", c"/user/hand/right"].map(|hand| f.get_input_source_handle(hand));
+        f.load_actions(c"actions_grab_force.json");
+        f.set_interaction_profile::<Knuckles>(LeftHand);
+        f.set_interaction_profile::<Knuckles>(RightHand);
+
+        let mut check = |handle, hand, restrict, force, value, state| {
+            let (force_action, value_action) = grab_actions_hand(&f, handle, Some(hand));
+            let user_path = match hand {
+                Hand::Left => LeftHand,
+                Hand::Right => RightHand,
+            };
+            fakexr::set_action_state(force_action, ActionState::Float(force), user_path);
+            fakexr::set_action_state(value_action, ActionState::Float(value), user_path);
+            f.sync(set);
+            let s = f.get_bool_state_hand(handle, restrict).unwrap();
+            assert!(s.bActive);
+            assert_eq!(s.bState, state, "force {force}, value {value}");
+        };
+
+        // A light touch on the force sensor isn't a grab, a press is, until it's let go.
+        check(grab, Hand::Left, left, 0.05, 0.0, false);
+        check(grab, Hand::Left, left, 0.1, 0.0, true);
+        check(grab, Hand::Left, left, 0.06, 0.0, true);
+        check(grab, Hand::Left, left, 0.04, 0.0, false);
+        // The value grabs alone.
+        check(grab, Hand::Left, left, 0.0, 0.7, true);
+
+        // VRChat's grab: only a firm press counts, even with a closed hand.
+        check(grab_firmly, Hand::Right, right, 0.12, 1.0, false);
+        check(grab_firmly, Hand::Right, right, 0.15, 1.0, true);
+        check(grab_firmly, Hand::Right, right, 0.0, 1.0, true);
+        check(grab_firmly, Hand::Right, right, 0.0, 0.6, false);
     }
 
     #[test]

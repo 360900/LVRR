@@ -663,6 +663,8 @@ struct GrabInput {
 pub struct GrabParameters {
     pub value_hold_threshold: Option<StringOrTyped<f32>>,
     pub value_release_threshold: Option<StringOrTyped<f32>>,
+    pub force_hold_threshold: Option<StringOrTyped<f32>>,
+    pub force_release_threshold: Option<StringOrTyped<f32>>,
 }
 
 #[derive(Clone, Deserialize)]
