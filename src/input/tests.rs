@@ -1291,6 +1291,92 @@ fn unusable_steamvr_choice_uses_the_default() {
     );
 }
 
+/// Puts custom bindings for the app key in the per-app directory under `config`.
+fn add_app_bindings(config: &std::path::Path, key: &str, file: &str, from: &str) {
+    let dir = config.join("xrizer/bindings").join(key);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::copy(input_data(from), dir.join(file)).unwrap();
+}
+
+#[test]
+fn per_app_custom_bindings() {
+    let steam = FakeSteam::new("per-app");
+    let url = format!("file://{}", input_data("knuckles.json"));
+    steam.choose(&[("knuckles_250820_CurrentURL_steamvrinput", &url)]);
+    add_app_bindings(
+        &steam.home.join(".config"),
+        FakeSteam::APP_KEY,
+        "knuckles.json",
+        "steamvr_workshop_knuckles.json",
+    );
+    let f = Fixture::new();
+    f.load_actions(c"actions_vive_only.json");
+
+    // Over the choice in SteamVR.
+    f.verify_bindings::<bool>(
+        Knuckles::profile_path(),
+        c"/actions/main/in/boolact",
+        ["/user/hand/right/input/b/click".into()],
+    );
+}
+
+#[test]
+fn per_app_custom_bindings_in_xdg_config_home() {
+    let steam = FakeSteam::new("per-app-xdg");
+    let xdg = steam.home.join("xdg");
+    set_test_env("XDG_CONFIG_HOME", xdg.to_str().unwrap());
+    add_app_bindings(
+        &xdg,
+        FakeSteam::APP_KEY,
+        "knuckles.json",
+        "steamvr_workshop_knuckles.json",
+    );
+    // Not where XDG_CONFIG_HOME points.
+    add_app_bindings(
+        &steam.home.join(".config"),
+        FakeSteam::APP_KEY,
+        "oculus_touch.json",
+        "steamvr_workshop_knuckles.json",
+    );
+    let f = Fixture::new();
+    f.load_actions(c"actions_vive_only.json");
+
+    f.verify_bindings::<bool>(
+        Knuckles::profile_path(),
+        c"/actions/main/in/boolact",
+        ["/user/hand/right/input/b/click".into()],
+    );
+    f.verify_bindings::<bool>(
+        OculusTouch::profile_path(),
+        c"/actions/main/in/boolact",
+        [
+            "/user/hand/left/input/menu/click".into(),
+            "/user/hand/right/input/b/click".into(),
+            "/user/hand/right/input/trigger/value".into(),
+        ],
+    );
+}
+
+#[test]
+fn custom_bindings_dir_over_per_app_bindings() {
+    let steam = FakeSteam::new("dir-over-per-app");
+    add_app_bindings(
+        &steam.home.join(".config"),
+        FakeSteam::APP_KEY,
+        "knuckles.json",
+        "steamvr_workshop_knuckles.json",
+    );
+    set_test_env("XRIZER_CUSTOM_BINDINGS_DIR", &input_data("custom_bindings"));
+    let f = Fixture::new();
+    f.load_actions(c"actions_vive_only.json");
+
+    f.verify_bindings::<bool>(
+        Knuckles::profile_path(),
+        c"/actions/main/in/boolact",
+        ["/user/hand/left/input/a/click".into()],
+    );
+}
+
 #[test]
 fn steamvr_choice_disabled() {
     let steam = FakeSteam::new("disabled");

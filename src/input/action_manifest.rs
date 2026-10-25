@@ -9,7 +9,8 @@ pub(super) use bindings::{ClickThresholdParams, GrabParameters};
 use crate::input::InteractionProfile;
 use crate::input::action_manifest::context::BindingsLoadContext;
 use crate::input::profiles::{DynInputPath, LegalPathsT, paths::DynSubpath};
-use crate::input::steamvr_bindings::{self, Category, SavedBindings};
+use crate::input::binding_sources::BindingSources;
+use crate::input::steamvr_bindings::Category;
 use crate::input::{ActionKey, Input, profiles::RunWithProfile, skeletal::SkeletalInputActionData};
 use crate::openxr_data::{self, Hand, SessionData};
 use log::{debug, error, info, warn};
@@ -17,7 +18,6 @@ use openvr as vr;
 use openxr as xr;
 use slotmap::{KeyData, SecondaryMap, SlotMap};
 use std::collections::{HashMap, HashSet};
-use std::env::current_dir;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -403,7 +403,7 @@ fn has_input<P: InteractionProfile>(hand: Hand, subpath: DynSubpath) -> bool {
 
 /// An environment variable, or in tests the value [TEST_ENV] gives it on this thread, since the
 /// process environment is shared by the tests running alongside.
-fn env_var(name: &str) -> Option<OsString> {
+pub(super) fn env_var(name: &str) -> Option<OsString> {
     #[cfg(test)]
     if let Some(value) = TEST_ENV.with_borrow(|env| env.get(name).cloned()) {
         return Some(value);
@@ -420,12 +420,12 @@ thread_local! {
 /// Like [env_var], but tests only see what [TEST_ENV] sets, so the machine's own SteamVR config
 /// stays out of them.
 #[cfg(not(test))]
-fn isolated_env_var(name: &str) -> Option<OsString> {
+pub(super) fn isolated_env_var(name: &str) -> Option<OsString> {
     std::env::var_os(name)
 }
 
 #[cfg(test)]
-fn isolated_env_var(name: &str) -> Option<OsString> {
+pub(super) fn isolated_env_var(name: &str) -> Option<OsString> {
     TEST_ENV.with_borrow(|env| env.get(name).cloned())
 }
 
@@ -438,15 +438,6 @@ fn identified_app_key() -> Option<String> {
 #[cfg(test)]
 fn identified_app_key() -> Option<String> {
     None
-}
-
-/// The bindings the user chose for this app in SteamVR, unless XRIZER_STEAMVR_BINDINGS=0.
-fn steamvr_saved_bindings() -> Option<SavedBindings> {
-    if env_var("XRIZER_STEAMVR_BINDINGS").is_some_and(|value| value == "0") {
-        return None;
-    }
-    let keys = steamvr_bindings::app_keys(&isolated_env_var, identified_app_key());
-    SavedBindings::load(&isolated_env_var, &keys)
 }
 
 impl<C: openxr_data::Compositor> Input<C> {
@@ -501,16 +492,8 @@ impl<C: openxr_data::Compositor> Input<C> {
         bindings: Vec<actions::DefaultBindings>,
         context: &mut context::BindingsLoadContext,
     ) -> HashMap<xr::Path, String> {
-        let custom_bindings_dir = env_var("XRIZER_CUSTOM_BINDINGS_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| current_dir().unwrap_or_default().join("xrizer"));
         // Custom bindings, then the ones chosen in SteamVR, then the game's.
-        let saved = steamvr_saved_bindings();
-        let saved_file = |controller_type: &actions::ControllerType| {
-            saved
-                .as_ref()?
-                .file_for(&controller_type.to_string(), Category::SteamVrInput)
-        };
+        let sources = BindingSources::new(identified_app_key(), Category::SteamVrInput);
         let mut variants = HashMap::new();
 
         let mut bindings = bindings;
@@ -547,14 +530,11 @@ impl<C: openxr_data::Compositor> Input<C> {
                 continue;
             }
 
-            let custom_path = custom_bindings_dir.join(format!("{controller_type}.json"));
-            let bindings = if custom_path.exists() {
-                read_bindings(&custom_path, &controller_type)
-            } else {
-                saved_file(&controller_type)
-                    .and_then(|path| read_bindings(&path, &controller_type))
-                    .or_else(|| read_bindings(&parent_path.join(binding_url), &controller_type))
-            };
+            // Like SteamVR, the default is used if the chosen bindings don't load.
+            let bindings = sources
+                .file_for(&controller_type)
+                .and_then(|path| read_bindings(&path, &controller_type))
+                .or_else(|| read_bindings(&parent_path.join(binding_url), &controller_type));
             let Some(bindings) = bindings else {
                 continue;
             };
@@ -609,8 +589,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             input: self,
             context,
             loaded: &loaded,
-            custom_bindings_dir: &custom_bindings_dir,
-            saved_file: &saved_file,
+            sources: &sources,
             variants: &mut variants,
         };
         super::profiles::run_for_all_profiles(&mut runner);
@@ -619,8 +598,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             input: &'a Input<C>,
             context: &'b mut BindingsLoadContext<'c>,
             loaded: &'a [(actions::ControllerType, bindings::Bindings)],
-            custom_bindings_dir: &'a Path,
-            saved_file: &'a dyn Fn(&actions::ControllerType) -> Option<PathBuf>,
+            sources: &'a BindingSources,
             variants: &'a mut HashMap<xr::Path, String>,
         }
         impl<C: openxr_data::Compositor> RunWithProfile for FallbackRunner<'_, '_, '_, C> {
@@ -643,17 +621,13 @@ impl<C: openxr_data::Compositor> Input<C> {
                     return;
                 };
 
-                let custom_path = self.custom_bindings_dir.join(format!("{native}.json"));
                 let source = native
                     .conversion_sources()
                     .into_iter()
                     .find_map(|ty| self.loaded.iter().find(|(loaded, _)| *loaded == ty));
-                // Bindings chosen in SteamVR may be for controllers the game has none for.
-                let own_path = if custom_path.exists() {
-                    Some(custom_path)
-                } else {
-                    (self.saved_file)(&native)
-                };
+                // Custom bindings and those chosen in SteamVR may be for controllers the game has
+                // none for.
+                let own_path = self.sources.file_for(&native);
                 let bindings = if let Some((path, own)) = own_path.and_then(|path| {
                     let bindings = read_bindings(&path, &native)?;
                     Some((path, bindings))

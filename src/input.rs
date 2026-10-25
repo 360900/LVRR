@@ -1,4 +1,5 @@
 mod action_manifest;
+mod binding_sources;
 mod custom_bindings;
 mod devices;
 mod haptics;
