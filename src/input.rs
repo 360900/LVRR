@@ -2324,7 +2324,98 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         let Some(actions) = data.input_data.get_loaded_actions() else {
             return vr::EVRInputError::InvalidParam;
         };
+        self.sync_action_sets(&data, actions, active_sets)
+    }
 
+    fn GetInputSourceHandle(
+        &self,
+        input_source_path: *const c_char,
+        handle: *mut vr::VRInputValueHandle_t,
+    ) -> vr::EVRInputError {
+        if input_source_path.is_null() {
+            return vr::EVRInputError::InvalidParam;
+        }
+        let path = unsafe { CStr::from_ptr(input_source_path) };
+
+        let ret = self.get_or_create_input_source_handle(path);
+        if let Some(handle) = unsafe { handle.as_mut() } {
+            debug!("requested handle for path {path:?}: {ret}");
+            *handle = ret;
+            vr::EVRInputError::None
+        } else {
+            vr::EVRInputError::InvalidParam
+        }
+    }
+
+    fn GetActionHandle(
+        &self,
+        action_name: *const c_char,
+        handle: *mut vr::VRActionHandle_t,
+    ) -> vr::EVRInputError {
+        if action_name.is_null() {
+            return vr::EVRInputError::InvalidParam;
+        }
+        let name = unsafe { CStr::from_ptr(action_name) }
+            .to_string_lossy()
+            .to_lowercase();
+        let val = find_or_insert(
+            &self.action_map,
+            |action| action.path == name,
+            || Action { path: name.clone() },
+        )
+        .data()
+        .as_ffi();
+
+        if let Some(handle) = unsafe { handle.as_mut() } {
+            *handle = val;
+            vr::EVRInputError::None
+        } else {
+            vr::EVRInputError::InvalidParam
+        }
+    }
+
+    fn GetActionSetHandle(
+        &self,
+        action_set_name: *const c_char,
+        handle: *mut vr::VRActionSetHandle_t,
+    ) -> vr::EVRInputError {
+        if action_set_name.is_null() {
+            return vr::EVRInputError::InvalidParam;
+        }
+        let name = unsafe { CStr::from_ptr(action_set_name) }
+            .to_string_lossy()
+            .to_lowercase();
+        let val = find_or_insert(&self.set_map, |set| *set == name, || name.clone())
+            .data()
+            .as_ffi();
+
+        if let Some(handle) = unsafe { handle.as_mut() } {
+            *handle = val;
+            vr::EVRInputError::None
+        } else {
+            vr::EVRInputError::InvalidParam
+        }
+    }
+
+    fn SetActionManifestPath(&self, path: *const c_char) -> vr::EVRInputError {
+        if path.is_null() {
+            return vr::EVRInputError::InvalidParam;
+        }
+        let path = unsafe { CStr::from_ptr(path) }.to_string_lossy();
+        let path = Path::new(&*path);
+        info!("loading action manifest from {path:?}");
+        self.set_action_manifest(path, true)
+    }
+}
+
+impl<C: openxr_data::Compositor> Input<C> {
+    /// Syncs the actions of `active_sets`, see UpdateActionState.
+    fn sync_action_sets(
+        &self,
+        data: &SessionData,
+        actions: &ManifestLoadedActions,
+        active_sets: &[vr::VRActiveActionSet_t],
+    ) -> vr::EVRInputError {
         let set_map = self.set_map.read().unwrap();
         let mut sync_sets = Vec::with_capacity(active_sets.len() + 3);
         // The sets synced below and their hand, for the skeletal actions
@@ -2457,7 +2548,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             )
         });
         let masked = self.mask_by_priority(
-            &data,
+            data,
             actions,
             &set_map,
             &set_priorities,
@@ -2472,7 +2563,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             .pending_vibrations
             .start_due(&data.session, check_haptic);
         haptics::sync_binding_haptics(
-            &data,
+            data,
             actions,
             &self.active_sets.read().unwrap(),
             hands.map(|(hand, profile, _)| (hand, profile)),
@@ -2545,12 +2636,12 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
                 input_only: false,
             } = action
             {
-                self.sync_vector1(&data, actions, key, action, state, masked_hands(key));
+                self.sync_vector1(data, actions, key, action, state, masked_hands(key));
             }
         }
         for (key, action) in &actions.actions {
             if let ActionData::Vector3 { state } = action {
-                self.sync_vector3(&data, actions, key, state, masked_hands(key));
+                self.sync_vector3(data, actions, key, state, masked_hands(key));
             }
         }
 
@@ -2560,88 +2651,6 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         vr::EVRInputError::None
     }
 
-    fn GetInputSourceHandle(
-        &self,
-        input_source_path: *const c_char,
-        handle: *mut vr::VRInputValueHandle_t,
-    ) -> vr::EVRInputError {
-        if input_source_path.is_null() {
-            return vr::EVRInputError::InvalidParam;
-        }
-        let path = unsafe { CStr::from_ptr(input_source_path) };
-
-        let ret = self.get_or_create_input_source_handle(path);
-        if let Some(handle) = unsafe { handle.as_mut() } {
-            debug!("requested handle for path {path:?}: {ret}");
-            *handle = ret;
-            vr::EVRInputError::None
-        } else {
-            vr::EVRInputError::InvalidParam
-        }
-    }
-
-    fn GetActionHandle(
-        &self,
-        action_name: *const c_char,
-        handle: *mut vr::VRActionHandle_t,
-    ) -> vr::EVRInputError {
-        if action_name.is_null() {
-            return vr::EVRInputError::InvalidParam;
-        }
-        let name = unsafe { CStr::from_ptr(action_name) }
-            .to_string_lossy()
-            .to_lowercase();
-        let val = find_or_insert(
-            &self.action_map,
-            |action| action.path == name,
-            || Action { path: name.clone() },
-        )
-        .data()
-        .as_ffi();
-
-        if let Some(handle) = unsafe { handle.as_mut() } {
-            *handle = val;
-            vr::EVRInputError::None
-        } else {
-            vr::EVRInputError::InvalidParam
-        }
-    }
-
-    fn GetActionSetHandle(
-        &self,
-        action_set_name: *const c_char,
-        handle: *mut vr::VRActionSetHandle_t,
-    ) -> vr::EVRInputError {
-        if action_set_name.is_null() {
-            return vr::EVRInputError::InvalidParam;
-        }
-        let name = unsafe { CStr::from_ptr(action_set_name) }
-            .to_string_lossy()
-            .to_lowercase();
-        let val = find_or_insert(&self.set_map, |set| *set == name, || name.clone())
-            .data()
-            .as_ffi();
-
-        if let Some(handle) = unsafe { handle.as_mut() } {
-            *handle = val;
-            vr::EVRInputError::None
-        } else {
-            vr::EVRInputError::InvalidParam
-        }
-    }
-
-    fn SetActionManifestPath(&self, path: *const c_char) -> vr::EVRInputError {
-        if path.is_null() {
-            return vr::EVRInputError::InvalidParam;
-        }
-        let path = unsafe { CStr::from_ptr(path) }.to_string_lossy();
-        let path = Path::new(&*path);
-        info!("loading action manifest from {path:?}");
-        self.set_action_manifest(path, true)
-    }
-}
-
-impl<C: openxr_data::Compositor> Input<C> {
     /// Loads the action manifest at `path`. With `defer`, a session restart that can't happen on
     /// this thread is left for [Self::load_pending_manifest].
     fn set_action_manifest(&self, path: &Path, defer: bool) -> vr::EVRInputError {
