@@ -1716,7 +1716,7 @@ impl ActionBinding {
             ]
         }
         let (mode, path, slots) = match self {
-            Self::None(_) => return None,
+            Self::None(_) | Self::Radial(_) | Self::RadialMenu(_) => return None,
             Self::Button(data) => {
                 let inputs = &data.inputs;
                 let slots = vec![
