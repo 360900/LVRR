@@ -1583,6 +1583,41 @@ mod tests {
     }
 
     #[test]
+    fn radial_menus_are_skipped() {
+        let mut f = Fixture::new();
+        let set = vr::VRActiveActionSet_t {
+            ulActionSet: f.get_action_set_handle(c"/actions/main"),
+            ..Default::default()
+        };
+        let radial = f.get_action_handle(c"/actions/main/in/radial");
+        let after = f.get_action_handle(c"/actions/main/in/after");
+        f.load_actions(c"actions_dpad_zones.json");
+        f.set_interaction_profile::<Knuckles>(RightHand);
+
+        let profile = f
+            .input
+            .openxr
+            .instance
+            .string_to_path(Knuckles::profile_path())
+            .unwrap();
+        assert!(fakexr::check_no_suggested_bindings(
+            f.get_action::<bool>(radial),
+            profile
+        ));
+        f.verify_custom_bindings(Knuckles::profile_path(), c"/actions/main/in/radial", []);
+        // The rest of the file still loads.
+        f.verify_bindings::<bool>(
+            Knuckles::profile_path(),
+            c"/actions/main/in/after",
+            ["/user/hand/right/input/a/click".into()],
+        );
+        fakexr::set_action_state(f.get_action::<bool>(after), true.into(), RightHand);
+        f.sync(set);
+        assert!(f.get_bool_state(after).unwrap().bState);
+        assert!(!f.get_bool_state(radial).unwrap().bActive);
+    }
+
+    #[test]
     fn dpad_input_different_sets_have_different_actions() {
         let f = Fixture::new();
 

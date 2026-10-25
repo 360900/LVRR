@@ -37,6 +37,14 @@
 		{
 			"name": "/actions/main/in/pad_north",
 			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/radial",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/after",
+			"type": "boolean"
 		}
 	],
 	"default_bindings": [

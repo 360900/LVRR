@@ -253,12 +253,15 @@ pub enum ActionBinding {
     Scroll(ActionBindingData<ScrollInput, ScrollParameters>),
     Trackpad(ActionBindingData<Vector2Input, Vector2Parameters>),
     Joystick(ActionBindingData<Vector2Input, Vector2Parameters>),
+    /// Radial menus (named "radial" by the binding UI), whose format isn't known.
+    Radial(IgnoredAny),
+    RadialMenu(IgnoredAny),
 }
 
 impl ActionBinding {
     fn path_mut(&mut self) -> Option<&mut MaybeInputPath> {
         match self {
-            Self::None(_) => None,
+            Self::None(_) | Self::Radial(_) | Self::RadialMenu(_) => None,
             Self::Button(data) => Some(&mut data.path),
             Self::ToggleButton(data) => Some(&mut data.path),
             Self::Dpad(data) | Self::DpadClick(data) | Self::DpadTouch(data) => {
@@ -1030,6 +1033,9 @@ pub fn handle_sources(
     for mode in sources {
         match mode {
             ActionBinding::None(_) => {}
+            ActionBinding::Radial(_) | ActionBinding::RadialMenu(_) => {
+                crate::warn_once!("Radial menu bindings aren't supported, ignoring them");
+            }
             ActionBinding::ToggleButton(data) => {
                 let Some(ValidActionBindingData {
                     path,
