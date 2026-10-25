@@ -1880,16 +1880,13 @@ mod tests {
             fakexr::UserPath::RightHand
         ));
 
-        // The pulse length is the strength.
+        // A full strength pulse, whatever its length.
         let feedback = fakexr::take_haptic_feedback(haptic);
         assert_eq!(feedback.len(), 2, "{feedback:?}");
         let hands = [fakexr::UserPath::LeftHand, fakexr::UserPath::RightHand];
         for (feedback, hand) in feedback.iter().zip(hands) {
             assert_eq!(feedback.hand, Some(hand));
-            assert!(
-                (feedback.amplitude - 3000.0 / 3999.0).abs() < 0.001,
-                "{feedback:?}"
-            );
+            assert_eq!(feedback.amplitude, 1.0);
             assert_eq!(
                 feedback.duration.as_nanos(),
                 Vibration::MIN_DURATION.as_nanos() as i64
@@ -1953,12 +1950,7 @@ mod tests {
 
         let feedback = fakexr::take_haptic_feedback(haptic);
         assert_eq!(feedback.len(), 2, "{feedback:?}");
-        assert!(
-            feedback
-                .iter()
-                .all(|f| (f.amplitude - 3000.0 / 3999.0).abs() < 0.001),
-            "{feedback:?}"
-        );
+        assert!(feedback.iter().all(|f| f.amplitude == 1.0), "{feedback:?}");
     }
 
     fn legacy_bindings_for<P: crate::input::InteractionProfile>(

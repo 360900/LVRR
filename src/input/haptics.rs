@@ -30,18 +30,18 @@ impl Vibration {
     const MAX_DURATION: f32 = 10.0;
     const MIN_FREQUENCY: f32 = 1_000_000.0 / 65535.0;
     const MAX_FREQUENCY: f32 = 1_000_000.0 / 300.0;
-    /// The longest pulse a Vive wand plays, which legacy games scale their strength to (e.g.
-    /// `Mathf.Lerp(0, 3999, strength)`).
-    const FULL_LEGACY_PULSE_US: f32 = 3999.0;
 
-    /// A legacy `TriggerHapticPulse`. Games call it every frame with a pulse of up to 3999 us,
-    /// whose length is the strength on a Vive wand. Amplitudes are what scale on other
-    /// controllers, so the length becomes the amplitude.
+    /// A legacy `TriggerHapticPulse`: a pulse of that length at full strength, like Valve's Unity
+    /// Interaction System turns it into a vibration (Hand.TriggerHapticPulse). A Vive wand plays
+    /// the length as strength (games scale it to 3999 us); controllers that vibrate by amplitude
+    /// play every pulse at full strength, as with SteamVR. Its frequency there, one pulse per
+    /// length (which the drivers' 1e6/65535 to 1e6/300 Hz range is made for), is a wand's pulse
+    /// rate rather than OpenXR's waveform frequency, so that's left to the runtime.
     pub fn legacy_pulse(duration_us: u16) -> Option<Self> {
         (duration_us > 0).then(|| Self {
             duration: f32::from(duration_us) / 1_000_000.0,
             frequency: xr::FREQUENCY_UNSPECIFIED,
-            amplitude: (f32::from(duration_us) / Self::FULL_LEGACY_PULSE_US).min(1.0),
+            amplitude: 1.0,
         })
     }
 
@@ -332,14 +332,14 @@ mod tests {
     }
 
     #[test]
-    fn legacy_pulse_strength() {
+    fn legacy_pulses() {
         assert_eq!(Vibration::legacy_pulse(0), None);
         let values = |us| xr_values(Vibration::legacy_pulse(us).unwrap()).unwrap();
-        assert_eq!(values(3999), (MIN_NANOS, xr::FREQUENCY_UNSPECIFIED, 1.0));
-        let (_, _, quarter) = values(1000);
-        assert!((quarter - 0.25).abs() < 0.001, "{quarter}");
-        // Past what a wand plays, the length is kept at full strength.
-        assert_eq!(values(20000), (20_000_000, xr::FREQUENCY_UNSPECIFIED, 1.0));
+        // At full strength, whatever the length.
+        let unspecified = xr::FREQUENCY_UNSPECIFIED;
+        assert_eq!(values(3999), (MIN_NANOS, unspecified, 1.0));
+        assert_eq!(values(500), (MIN_NANOS, unspecified, 1.0));
+        assert_eq!(values(20000), (20_000_000, unspecified, 1.0));
     }
 
     #[test]
