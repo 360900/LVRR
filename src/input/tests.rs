@@ -2903,6 +2903,17 @@ fn action_origins() {
     let info = get_origin_info(&f, origins[0]);
     assert_eq!(info.trackedDeviceIndex, Hand::Left as u32);
     assert_eq!(buf_str(&info.rchRenderModelComponentName), "trigger");
+    // The device, not the input, which Unity looks up to find the hand.
+    assert_ne!(origins[0], f.get_input_source_handle(c"/user/hand/left"));
+    assert_eq!(
+        info.devicePath,
+        f.get_input_source_handle(c"/user/hand/left")
+    );
+    let proximity = f.get_input_source_handle(c"/user/head/proximity");
+    assert_eq!(
+        get_origin_info(&f, proximity).devicePath,
+        f.get_input_source_handle(c"/user/head")
+    );
 
     let mut name = [0 as std::ffi::c_char; 256];
     assert_eq!(

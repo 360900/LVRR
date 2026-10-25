@@ -1593,12 +1593,15 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         };
 
         let hand = self.hand_from_key(key);
-        let index = match hand {
-            Some(hand) => hand as u32,
-            None if self.is_head_source(handle) => vr::k_unTrackedDeviceIndex_Hmd,
+        // The device the origin is on, not the origin: apps look the device's handle up to
+        // find the hand (Unity's activeDevice).
+        let (index, device) = match hand {
+            Some(Hand::Left) => (Hand::Left as u32, self.left_hand_key),
+            Some(Hand::Right) => (Hand::Right as u32, self.right_hand_key),
+            None if self.is_head_source(handle) => (vr::k_unTrackedDeviceIndex_Hmd, self.head_key),
             // The gamepad has no tracked device.
             None if self.device_from_key(key) == Some(InputDevice::Gamepad) => {
-                vr::k_unTrackedDeviceIndexInvalid
+                (vr::k_unTrackedDeviceIndexInvalid, self.gamepad_key)
             }
             None => {
                 debug!(
@@ -1634,7 +1637,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
 
         unsafe {
             *info = vr::InputOriginInfo_t {
-                devicePath: handle,
+                devicePath: device.data().as_ffi(),
                 trackedDeviceIndex: index,
                 rchRenderModelComponentName: render_model_component,
             };
