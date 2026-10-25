@@ -55,39 +55,6 @@
 					"parameters": {
 						"sub_mode": "click"
 					}
-				},
-				{
-					"mode": "radial",
-					"path": "/user/hand/right/input/trackpad",
-					"inputs": {
-						"button_0": {
-							"output": "/actions/main/in/radial"
-						}
-					},
-					"parameters": {
-						"num_buttons": "4"
-					}
-				},
-				{
-					"mode": "radial_menu",
-					"path": "/user/hand/right/input/trackpad",
-					"inputs": {
-						"button_0": {
-							"output": "/actions/main/in/radial"
-						}
-					},
-					"parameters": {
-						"num_buttons": "4"
-					}
-				},
-				{
-					"mode": "button",
-					"path": "/user/hand/right/input/a",
-					"inputs": {
-						"click": {
-							"output": "/actions/main/in/after"
-						}
-					}
 				}
 			]
 		}

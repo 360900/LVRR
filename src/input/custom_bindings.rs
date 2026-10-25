@@ -519,6 +519,8 @@ pub(super) enum DpadDirection {
     South,
     West,
     Center,
+    /// A radial menu button, numbered clockwise from the one at the north.
+    Button(usize),
 }
 
 #[derive(Clone)]
@@ -528,13 +530,14 @@ pub(super) struct DpadActions {
     pub haptic: Option<xr::Action<Haptic>>,
 }
 
-/// How a dpad splits its input into north, east, south and west zones.
+/// How a dpad splits its input into north, east, south and west zones. A radial menu splits it
+/// into more, like SteamVR's dpad, which is a radial menu of four buttons.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct DpadZones {
     /// Fraction of full deflection to pass before a direction engages.
     pub deadzone: f32,
     /// Fraction of side to side overlap of neighbouring zones: 0 gives 90 degree zones, 1 gives
-    /// 180 degree zones.
+    /// 180 degree zones (for a dpad).
     pub overlap: f32,
     /// An engaged direction stays engaged until the input returns to the deadzone or is released.
     pub sticky: bool,
@@ -553,30 +556,34 @@ impl Default for DpadZones {
 
 impl DpadZones {
     // Hysteresis around the zone edges, from VapoR's reimplementation of SteamVR's dpad. The
-    // angle is 3% of a turn, like the radius is 3% of full deflection.
+    // angle is 3% of a turn for a dpad's zones, like the radius is 3% of full deflection.
     const RADIUS_HYSTERESIS: f32 = 0.03;
     const ANGLE_HYSTERESIS: f32 = 10.8;
 
-    /// Updates which directions (north, east, south, west) are engaged at `x`, `y`. Updating
+    /// Updates which zones are engaged at `x`, `y`: as many as `engaged` has, the first centered
+    /// on the north and the others clockwise (a dpad's north, east, south and west). Updating
     /// again with the same input changes nothing, so every output of a dpad can update it.
-    fn update(&self, engaged: &mut [bool; 4], x: f32, y: f32) {
+    fn update(&self, engaged: &mut [bool], x: f32, y: f32) {
         let radius = x.hypot(y);
         // Never engaged at rest, even without a deadzone.
         let hold_radius = (self.deadzone - Self::RADIUS_HYSTERESIS).max(0.0);
         if self.sticky && engaged.contains(&true) && radius > hold_radius {
             return;
         }
-        // Half the angle a zone spans
-        let boundary = 45.0 + 45.0 * self.overlap;
-        // Degrees off the axis of each direction
-        let off_axis = [x.atan2(y), y.atan2(x), x.atan2(-y), y.atan2(-x)];
-        for (engaged, angle) in engaged.iter_mut().zip(off_axis) {
-            let angle = angle.abs().to_degrees();
+        // Half the angle a zone spans without overlap
+        let half = 180.0 / engaged.len() as f32;
+        let boundary = half + half * self.overlap;
+        // In proportion for the narrower zones of radial menus, so they still engage.
+        let hysteresis = Self::ANGLE_HYSTERESIS * half / 45.0;
+        // Degrees clockwise from the north
+        let direction = x.atan2(y).to_degrees();
+        for (zone, engaged) in engaged.iter_mut().enumerate() {
+            let off_center = (direction - zone as f32 * 2.0 * half).rem_euclid(360.0);
+            let angle = off_center.min(360.0 - off_center);
             *engaged = if *engaged {
-                radius > hold_radius && angle < boundary + Self::ANGLE_HYSTERESIS
+                radius > hold_radius && angle < boundary + hysteresis
             } else {
-                radius > self.deadzone + Self::RADIUS_HYSTERESIS
-                    && angle < boundary - Self::ANGLE_HYSTERESIS
+                radius > self.deadzone + Self::RADIUS_HYSTERESIS && angle < boundary - hysteresis
             };
         }
     }
@@ -589,19 +596,26 @@ pub(super) struct DpadZoneState {
     engaged: Mutex<DpadEngaged>,
 }
 
-#[derive(Default)]
 struct DpadEngaged {
     /// The click or touch that activates the dpad is held.
     pressed: bool,
-    /// North, east, south, west
-    directions: [bool; 4],
+    /// North, east, south, west, or a radial menu's buttons
+    directions: Vec<bool>,
 }
 
 impl DpadZoneState {
     pub fn new(zones: DpadZones) -> Self {
+        Self::radial(zones, 4)
+    }
+
+    /// The zones of a radial menu with `buttons` buttons.
+    pub fn radial(zones: DpadZones, buttons: usize) -> Self {
         Self {
             zones,
-            engaged: Default::default(),
+            engaged: Mutex::new(DpadEngaged {
+                pressed: false,
+                directions: vec![false; buttons],
+            }),
         }
     }
 }
@@ -743,17 +757,18 @@ impl DpadData {
         let in_bounds = if active {
             let xr::Vector2f { x, y } = parent_state.current_state;
             self.zones.zones.update(&mut shared.directions, x, y);
-            let [north, east, south, west] = shared.directions;
+            let engaged = |zone: usize| shared.directions.get(zone).copied().unwrap_or(false);
             match self.direction {
-                DpadDirection::North => north,
-                DpadDirection::East => east,
-                DpadDirection::South => south,
-                DpadDirection::West => west,
-                DpadDirection::Center => !(north || east || south || west),
+                DpadDirection::North => engaged(0),
+                DpadDirection::East => engaged(1),
+                DpadDirection::South => engaged(2),
+                DpadDirection::West => engaged(3),
+                DpadDirection::Button(button) => engaged(button),
+                DpadDirection::Center => !shared.directions.contains(&true),
             }
         } else {
             // Still bound, so the release edge is reported like any other button.
-            shared.directions = [false; 4];
+            shared.directions.fill(false);
             false
         };
         drop(shared);
@@ -1884,38 +1899,76 @@ mod tests {
     }
 
     #[test]
-    fn radial_menus_are_skipped() {
+    fn radial_menu() {
         let mut f = Fixture::new();
         let set = vr::VRActiveActionSet_t {
-            ulActionSet: f.get_action_set_handle(c"/actions/main"),
+            ulActionSet: f.get_action_set_handle(c"/actions/menu"),
             ..Default::default()
         };
-        let radial = f.get_action_handle(c"/actions/main/in/radial");
-        let after = f.get_action_handle(c"/actions/main/in/after");
-        f.load_actions(c"actions_dpad_zones.json");
+        let [item0, item1, item3, center, unnumbered] = [
+            c"/actions/menu/in/item0",
+            c"/actions/menu/in/item1",
+            c"/actions/menu/in/item3",
+            c"/actions/menu/in/center",
+            c"/actions/menu/in/unnumbered",
+        ]
+        .map(|name| f.get_action_handle(name));
+        f.load_actions(c"actions_radial.json");
+        f.set_interaction_profile::<Knuckles>(LeftHand);
         f.set_interaction_profile::<Knuckles>(RightHand);
 
-        let profile = f
-            .input
-            .openxr
-            .instance
-            .string_to_path(Knuckles::profile_path())
-            .unwrap();
-        assert!(fakexr::check_no_suggested_bindings(
-            f.get_action::<bool>(radial),
-            profile
-        ));
-        f.verify_custom_bindings(Knuckles::profile_path(), c"/actions/main/in/radial", []);
-        // The rest of the file still loads.
-        f.verify_bindings::<bool>(
-            Knuckles::profile_path(),
-            c"/actions/main/in/after",
-            ["/user/hand/right/input/a/click".into()],
+        let profile = Knuckles::profile_path();
+        f.verify_custom_bindings(
+            profile,
+            c"/actions/menu/in/item0",
+            [
+                "/user/hand/right/input/thumbstick".into(),
+                "/user/hand/right/input/thumbstick/touch".into(),
+            ],
         );
-        fakexr::set_action_state(f.get_action::<bool>(after), true.into(), RightHand);
-        f.sync(set);
-        assert!(f.get_bool_state(after).unwrap().bState);
-        assert!(!f.get_bool_state(radial).unwrap().bActive);
+        // Without num_buttons, or beyond it, nothing is bound.
+        f.verify_custom_bindings(profile, c"/actions/menu/in/unnumbered", []);
+        f.verify_custom_bindings(profile, c"/actions/menu/in/beyond", []);
+
+        let (zones, actions) = dpad_of(&f, item0, profile);
+        assert_eq!(
+            zones,
+            DpadZones {
+                deadzone: 0.25,
+                overlap: 0.0,
+                sticky: false,
+            }
+        );
+        // Every button of a menu shares its zones.
+        let (_, item3_actions) = dpad_of(&f, item3, profile);
+        assert_eq!(actions.xy.as_raw(), item3_actions.xy.as_raw());
+
+        let touch = actions.click_or_touch.as_ref().unwrap().as_raw();
+        let mut input = |(x, y): (f32, f32), touched: bool| {
+            let touched = if touched { 1.0 } else { 0.0 };
+            fakexr::set_action_state(touch, ActionState::Float(touched), RightHand);
+            fakexr::set_action_state(actions.xy.as_raw(), ActionState::Vector2(x, y), RightHand);
+            f.sync(set);
+            [item0, item1, item3, center].map(|handle| f.get_bool_state(handle).unwrap().bState)
+        };
+        // Points at a distance of 0.9, `degrees` clockwise from north.
+        let at = |degrees: f32| {
+            let (sin, cos) = degrees.to_radians().sin_cos();
+            (0.9 * sin, 0.9 * cos)
+        };
+
+        // Six buttons of 60 degrees, the first at the north.
+        assert_eq!(input((0.0, 0.0), true), [false, false, false, true]);
+        assert_eq!(input(at(0.0), true), [true, false, false, false]);
+        assert_eq!(input(at(60.0), true), [false, true, false, false]);
+        assert_eq!(input(at(180.0), true), [false, false, true, false]);
+        // A button stays engaged a little past its edge.
+        assert_eq!(input(at(0.0), true), [true, false, false, false]);
+        assert_eq!(input(at(35.0), true), [true, false, false, false]);
+        assert_eq!(input(at(40.0), true), [false, true, false, false]);
+        // Engaged by touch.
+        assert_eq!(input(at(60.0), false), [false; 4]);
+        assert!(!f.get_bool_state(unnumbered).unwrap().bActive);
     }
 
     #[test]

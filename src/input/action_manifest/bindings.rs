@@ -276,15 +276,18 @@ pub enum ActionBinding {
     Scroll(ActionBindingData<ScrollInput, ScrollParameters>),
     Trackpad(ActionBindingData<Vector2Input, Vector2Parameters>),
     Joystick(ActionBindingData<Vector2Input, Vector2Parameters>),
-    /// Radial menus (named "radial" by the binding UI), whose format isn't known.
-    Radial(IgnoredAny),
-    RadialMenu(IgnoredAny),
+    /// A radial menu, as the binding UI names it. It offers no inputs for it, so its bindings
+    /// have none.
+    Radial(ActionBindingData<Option<RadialInput>, RadialParameters>),
+    /// A radial menu, as SteamVR's runtime names it (see [handle_radial_binding]).
+    RadialMenu(ActionBindingData<Option<RadialInput>, RadialParameters>),
 }
 
 impl ActionBinding {
     fn path_mut(&mut self) -> Option<&mut MaybeInputPath> {
         match self {
-            Self::None(_) | Self::Radial(_) | Self::RadialMenu(_) => None,
+            Self::None(_) => None,
+            Self::Radial(data) | Self::RadialMenu(data) => Some(&mut data.path),
             Self::Button(data) => Some(&mut data.path),
             Self::ToggleButton(data) => Some(&mut data.path),
             Self::Dpad(data) | Self::DpadClick(data) | Self::DpadTouch(data) => {
@@ -738,6 +741,46 @@ pub enum DpadSubMode {
     Touch,
 }
 
+/// The outputs of a radial menu: `button_<n>` for its buttons, and `center`.
+#[derive(Clone, Deserialize)]
+#[serde(transparent)]
+struct RadialInput(HashMap<String, ActionBindingOutput<Custom>>);
+
+#[derive(Clone, Deserialize)]
+struct RadialParameters {
+    #[serde(default, deserialize_with = "lenient")]
+    num_buttons: Option<StringOrTyped<u32>>,
+    // Like a dpad's, which SteamVR's radial menu shares its code with.
+    #[serde(default, deserialize_with = "lenient")]
+    sub_mode: Option<DpadSubMode>,
+    #[serde(default, deserialize_with = "lenient")]
+    deadzone_pct: Option<StringOrTyped<f32>>,
+    #[serde(default, deserialize_with = "lenient")]
+    overlap_pct: Option<StringOrTyped<f32>>,
+    #[serde(default, deserialize_with = "lenient")]
+    sticky: Option<StringOrTyped<bool>>,
+}
+
+impl RadialParameters {
+    /// The most buttons SteamVR's radial menu takes is unknown. Steam Input's radial menus,
+    /// which it seems to come from, take 20.
+    const MAX_BUTTONS: u32 = 20;
+
+    fn zones(&self) -> custom_bindings::DpadZones {
+        let fraction = |pct: Option<StringOrTyped<f32>>, default: f32| {
+            pct.map(|pct| *pct / 100.0)
+                .filter(|f| f.is_finite())
+                .map_or(default, |f| f.clamp(0.0, 1.0))
+        };
+        custom_bindings::DpadZones {
+            deadzone: fraction(self.deadzone_pct, 0.25),
+            // A menu picks one button.
+            overlap: fraction(self.overlap_pct, 0.0),
+            sticky: self.sticky.is_some_and(|sticky| *sticky),
+        }
+    }
+}
+
 #[derive(Clone, Deserialize)]
 struct TriggerInput {
     pull: Option<ActionBindingOutput<paths::Value>>,
@@ -998,6 +1041,29 @@ fn dpad_zone_parameters() {
     }
 }
 
+#[cfg(test)]
+#[test]
+fn radial_parameters_parse() {
+    use custom_bindings::DpadZones;
+    let parameters: RadialParameters =
+        serde_json::from_str(r#"{"num_buttons": "6", "overlap_pct": 50, "sticky": "true"}"#)
+            .unwrap();
+    assert_eq!(parameters.num_buttons.map(|n| *n), Some(6));
+    assert_eq!(
+        parameters.zones(),
+        DpadZones {
+            deadzone: 0.25,
+            overlap: 0.5,
+            sticky: true,
+        }
+    );
+    // An invalid count doesn't take the other parameters with it.
+    let parameters: RadialParameters =
+        serde_json::from_str(r#"{"num_buttons": "six", "deadzone_pct": "50"}"#).unwrap();
+    assert!(parameters.num_buttons.is_none());
+    assert_eq!(parameters.zones().deadzone, 0.5);
+}
+
 pub fn handle_dpad_binding(
     validate_path: &dyn PathValidator,
     parent_path: DynInputPath,
@@ -1055,6 +1121,104 @@ pub fn handle_dpad_binding(
     for (path, direction) in bound_actions {
         context.add_custom_binding(
             path,
+            parent_path.hand,
+            parent_path,
+            BoolBindingType::Dpad(DpadData::new(actions.clone(), direction, zones.clone())),
+        );
+    }
+}
+
+/// A radial menu: a dpad with `num_buttons` zones. SteamVR's runtime has one (vrclient's
+/// CInputFilter_RadialMenu, named radial_menu), whose processing its dpad shares. It reads the
+/// input's x and y, requires num_buttons and caps it. The rest is guessed: the buttons are
+/// `button_<n>` from 0, the first at the north and the others clockwise like a dpad's
+/// directions, with the dpad's parameters and zones that don't overlap.
+fn handle_radial_binding(
+    validate_path: &dyn PathValidator,
+    path: DynInputPath,
+    action_set_name: &str,
+    action_set: &xr::ActionSet,
+    context: &mut BindingsProfileLoadContext,
+    inputs: Option<&RadialInput>,
+    parameters: Option<&RadialParameters>,
+) {
+    // What the binding UI writes.
+    let Some(RadialInput(outputs)) = inputs.filter(|inputs| !inputs.0.is_empty()) else {
+        debug!("Radial menu without outputs on {path} in {action_set_name}");
+        return;
+    };
+    let Some((parameters, buttons)) =
+        parameters.and_then(|p| p.num_buttons.map(|buttons| (p, *buttons)))
+    else {
+        crate::log_unique!(
+            log::Level::Warn,
+            "Ignoring radial menu on {path} in {action_set_name}: num_buttons is missing"
+        );
+        return;
+    };
+    if !(1..=RadialParameters::MAX_BUTTONS).contains(&buttons) {
+        crate::log_unique!(
+            log::Level::Warn,
+            "Ignoring radial menu on {path} in {action_set_name}: {buttons} buttons"
+        );
+        return;
+    }
+
+    let mut bound_actions = Vec::new();
+    for (slot, output) in outputs {
+        let direction = match slot.as_str() {
+            "center" => DpadDirection::Center,
+            button => match button.strip_prefix("button_").map(str::parse::<u32>) {
+                Some(Ok(button)) if button < buttons => DpadDirection::Button(button as usize),
+                _ => {
+                    crate::log_unique!(
+                        log::Level::Warn,
+                        "Ignoring unknown radial menu input {slot} on {path}"
+                    );
+                    continue;
+                }
+            },
+        };
+        if context.accepts_custom_binding(&output.output) {
+            bound_actions.push((&output.output, direction));
+        }
+    }
+    if bound_actions.is_empty() {
+        return;
+    }
+
+    let Some(parent_path) = validate_path(path) else {
+        for (output, _) in &bound_actions {
+            InvalidActionPath(path, &output.path).report(context);
+        }
+        return;
+    };
+    // Engaged by touch like a dpad, unless the binding says otherwise.
+    let dpad_parameters = DpadParameters {
+        sub_mode: parameters.sub_mode.unwrap_or(DpadSubMode::Touch),
+        ..Default::default()
+    };
+    let Some(actions) = context.get_dpad_actions(
+        validate_path,
+        parent_path,
+        action_set_name,
+        action_set,
+        Some(&dpad_parameters),
+    ) else {
+        return;
+    };
+
+    let zones = Arc::new(custom_bindings::DpadZoneState::radial(
+        parameters.zones(),
+        buttons as usize,
+    ));
+    for (output, direction) in bound_actions {
+        trace!(
+            "suggesting {parent_path} for {} (radial menu {direction:?})",
+            output.path
+        );
+        context.add_custom_binding(
+            output,
             parent_path.hand,
             parent_path,
             BoolBindingType::Dpad(DpadData::new(actions.clone(), direction, zones.clone())),
@@ -1322,8 +1486,24 @@ pub fn handle_sources(
     for mode in sources {
         match mode {
             ActionBinding::None(_) => {}
-            ActionBinding::Radial(_) | ActionBinding::RadialMenu(_) => {
-                crate::warn_once!("Radial menu bindings aren't supported, ignoring them");
+            ActionBinding::Radial(data) | ActionBinding::RadialMenu(data) => {
+                let Some(ValidActionBindingData {
+                    path,
+                    inputs,
+                    parameters,
+                }) = data.validate_path(context)
+                else {
+                    continue;
+                };
+                handle_radial_binding(
+                    validate_path,
+                    path,
+                    action_set_name,
+                    action_set,
+                    context,
+                    inputs.as_ref(),
+                    parameters,
+                );
             }
             ActionBinding::ToggleButton(data) => {
                 let Some(ValidActionBindingData {
@@ -2257,6 +2437,7 @@ impl ActionBinding {
             ]
         }
         let (mode, path, slots) = match self {
+            // What SteamVR reports for radial menu buttons isn't known.
             Self::None(_) | Self::Radial(_) | Self::RadialMenu(_) => return None,
             Self::Button(data) => {
                 let inputs = &data.inputs;
