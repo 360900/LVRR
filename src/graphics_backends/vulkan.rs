@@ -300,6 +300,13 @@ impl GraphicsBackend for VulkanData {
         vk::Device::from_raw(device as _) == self.device.handle()
     }
 
+    fn fallback_format(format: u32, offered: &[u32]) -> Option<u32> {
+        fallback_formats(vk::Format::from_raw(format as _))
+            .iter()
+            .map(|format| format.as_raw() as u32)
+            .find(|format| offered.contains(format))
+    }
+
     fn store_swapchain_images(&mut self, images: Vec<u64>, format: Self::Format) {
         let images: Vec<vk::Image> = images.into_iter().map(vk::Image::from_raw).collect();
         let pool = unsafe {
@@ -1536,6 +1543,44 @@ fn swapchain_format(format: vk::Format, color_space: vr::EColorSpace) -> vk::For
         );
     }
     swapchain
+}
+
+/// Formats to use when the runtime lacks a swapchain's format, best first: ones keeping the data's
+/// encoding and precision. The eye copy converts into any of them.
+pub(super) fn fallback_formats(format: vk::Format) -> &'static [vk::Format] {
+    use vk::Format as F;
+    if unorm_variant(format).is_some() {
+        // 8-bit linear storage of sRGB data bands in the dark.
+        &[
+            F::R8G8B8A8_SRGB,
+            F::B8G8R8A8_SRGB,
+            F::A8B8G8R8_SRGB_PACK32,
+            F::R16G16B16A16_SFLOAT,
+            F::A2B10G10R10_UNORM_PACK32,
+            F::R8G8B8A8_UNORM,
+            F::B8G8R8A8_UNORM,
+        ]
+    } else if srgb_variant(format).is_some() {
+        &[
+            F::R8G8B8A8_UNORM,
+            F::B8G8R8A8_UNORM,
+            F::A8B8G8R8_UNORM_PACK32,
+            F::A2B10G10R10_UNORM_PACK32,
+            F::R16G16B16A16_SFLOAT,
+            F::R8G8B8A8_SRGB,
+            F::B8G8R8A8_SRGB,
+        ]
+    } else {
+        &[
+            F::R16G16B16A16_SFLOAT,
+            F::R32G32B32A32_SFLOAT,
+            F::A2B10G10R10_UNORM_PACK32,
+            F::R8G8B8A8_SRGB,
+            F::B8G8R8A8_SRGB,
+            F::R8G8B8A8_UNORM,
+            F::B8G8R8A8_UNORM,
+        ]
+    }
 }
 
 /// Barriers for one of our own single layer images. `write` makes it a transfer destination,

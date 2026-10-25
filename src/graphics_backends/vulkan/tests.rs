@@ -1165,6 +1165,50 @@ fn swapchain_formats() {
     }
 }
 
+/// Without the format a swapchain wants, the runtime's closest one keeps the data's encoding.
+#[test]
+fn fallback_formats_keep_the_encoding() {
+    use vk::Format as F;
+    let fallback = |format: F, offered: &[F]| {
+        let offered: Vec<u32> = offered.iter().map(|f| f.as_raw() as u32).collect();
+        VulkanData::fallback_format(format.as_raw() as u32, &offered).map(|f| F::from_raw(f as i32))
+    };
+    // Monado's order puts 16-bit UNORM first.
+    let monado = [
+        F::R16G16B16A16_UNORM,
+        F::R16G16B16A16_SFLOAT,
+        F::R8G8B8A8_SRGB,
+        F::B8G8R8A8_SRGB,
+        F::R8G8B8A8_UNORM,
+        F::B8G8R8A8_UNORM,
+    ];
+    assert_eq!(
+        fallback(F::A8B8G8R8_SRGB_PACK32, &monado),
+        Some(F::R8G8B8A8_SRGB)
+    );
+    assert_eq!(
+        fallback(F::A8B8G8R8_UNORM_PACK32, &monado),
+        Some(F::R8G8B8A8_UNORM)
+    );
+    assert_eq!(
+        fallback(F::R32G32B32A32_SFLOAT, &monado),
+        Some(F::R16G16B16A16_SFLOAT)
+    );
+    // sRGB data rather goes into a float format than into 8-bit linear storage.
+    let no_srgb = [F::R8G8B8A8_UNORM, F::R16G16B16A16_SFLOAT];
+    assert_eq!(
+        fallback(F::R8G8B8A8_SRGB, &no_srgb),
+        Some(F::R16G16B16A16_SFLOAT)
+    );
+    // Linear data in an sRGB format, which a blit encodes.
+    assert_eq!(
+        fallback(F::R8G8B8A8_UNORM, &[F::B8G8R8A8_SRGB]),
+        Some(F::B8G8R8A8_SRGB)
+    );
+    // None of ours: the runtime's first.
+    assert_eq!(fallback(F::R8G8B8A8_SRGB, &[F::R16G16B16A16_UNORM]), None);
+}
+
 /// A multisampled texture in the swapchain's format is resolved straight into the eye's layer.
 #[test]
 fn multisampled_eye_resolves_into_the_swapchain() {

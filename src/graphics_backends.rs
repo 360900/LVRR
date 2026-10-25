@@ -72,6 +72,12 @@ pub trait GraphicsBackend: Into<SupportedBackend> {
         info
     }
 
+    /// The format to use when the runtime doesn't offer `format`, out of the `offered` ones in the
+    /// runtime's order of preference. None takes the runtime's first.
+    fn fallback_format(_format: Self::Format, _offered: &[Self::Format]) -> Option<Self::Format> {
+        None
+    }
+
     /// Called with the create info of a new swapchain, before its images are stored.
     fn swapchain_created(&mut self, _info: &xr::SwapchainCreateInfo<Self::Api>) {}
 

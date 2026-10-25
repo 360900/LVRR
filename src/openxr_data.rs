@@ -1506,8 +1506,9 @@ impl SessionData {
             .map(G::from_openxr_format)
             .collect();
 
-        if !formats.contains(&G::from_openxr_format(info.format)) {
-            let new_format = formats[0];
+        let requested = G::from_openxr_format(info.format);
+        if !formats.contains(&requested) {
+            let new_format = G::fallback_format(requested, &formats).unwrap_or(formats[0]);
             warn!(
                 "Requested to init swapchain with unsupported format {:?} - instead using {:?}",
                 G::to_nice_format(G::from_openxr_format(info.format)),

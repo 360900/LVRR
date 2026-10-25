@@ -860,6 +860,15 @@ impl GraphicsBackend for GlBridgeData {
         self.device.vk.session_create_info()
     }
 
+    fn fallback_format(format: u32, offered: &[u32]) -> Option<u32> {
+        // GlData's copies convert into any of these.
+        crate::graphics_backends::vulkan::fallback_formats(vk::Format::from_raw(format as _))
+            .iter()
+            .filter(|format| FORMATS.iter().any(|f| f.vk == **format))
+            .map(|format| format.as_raw() as u32)
+            .find(|format| offered.contains(format))
+    }
+
     fn get_texture(texture: &vr::Texture_t, flags: vr::EVRSubmitFlags) -> Option<GlTexture> {
         GlData::get_texture(texture, flags)
     }
