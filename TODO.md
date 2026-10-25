@@ -7,29 +7,28 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
 ## 1. Breaks games now
 
 1. Binding modes and options (S-M each)
-   - radial mode: format unknown (vrclient has `radial_menu`, `num_buttons`, `button_`), entries are skipped
-   - grab `downgrade_speed`, `drop_speed` (need controller velocity), `capsense_enable_threshold`
-   - Index trackpad force (#208): Alyx's weapon wheel opening on a light touch is unexplained, needs a log
+   - radial: output names (`button_<n>`), layout and defaults guessed; needs vrclient disassembly
+   - grab `drop_speed`/`downgrade_speed` read from SteamVR's tooltips, needs an Index test; pinch ignores `capsense_enable_threshold` and the trackpad force SteamVR adds
+   - Index trackpad force (#208): Alyx's binding reads trackpad force at 0.38 (tested); if the wheel still opens on a light touch, the runtime reports force on touch, needs Monado's "Trackpad force" debug output
+   - right stick dead on Quest 2 + WiVRn (#321, WiVRn #874): not reproduced with Alyx and TWD bindings, needs a headset capture (xrizer input trace, `OXR_DEBUG_BINDINGS=1`, wivrn-server `XRT_LOG=debug`)
 2. Controller profiles (M)
-   - Xbox gamepad (core profile): every action needs a `/user/gamepad` subaction path; WiVRn 26.9+ exposes one
-   - PSVR2 Sense: no Khronos profile, Monado's `XR_MNDX_psvr2_interaction` is a preview; works as Touch today
-   - Pico 4 tilt (#97): 4 and 4 Ultra need different offsets, WiVRn reports both as `pico4_controller`
-   - Cosmos identity strings are guesses; `gamepad` and `vive_tracker_*` default bindings still ignored (trackers: 21)
-3. Binding sources (M-L)
-   - remappable legacy input (Skyrim VR, Fallout 4 VR use a fixed mapping): load `legacy_actions.json` with per-controller legacy bindings
-   - Vivecraft's SteamVR binding choice isn't found: it loads its manifest before `IdentifyApplication`
+   - Pico 4 tilt (#97): WiVRn reports the 4 and 4 Ultra as `pico4_controller` and SteamVR has no grip offset for the Ultra; needs the Ultra's OpenXR system name on WiVRn and a measured offset
+   - PSVR2 Sense: `XR_MNDX_psvr2_interaction` is a preview in Monado main only, WiVRn builds without it; works as Touch today
+   - Cosmos registered device type, serials and render model names unverified; Focus 3 tracking system may be `vive_eyes` like the Cosmos; `vive_tracker_*` default bindings still ignored (trackers: 21)
+   - gamepad has no tracked device or binding variant; untested on a headset
+3. Binding sources (S)
+   - legacy: controllers without a chosen binding keep the fixed mapping, not SteamVR's per-controller defaults; `Head_Proximity`, `simulate_rendermodel`, `simulate_hmd`, tracker and `generic` legacy bindings ignored
 4. Frame timing (S)
    - `XR_META_performance_metrics` unused (no Linux runtime has it)
-   - `VSyncsReadyForUse`, `VSyncsToFirstView`, `TransferLatencyMs`, `WaitForPresentCpuMs` stay 0
 5. Haptics (S)
-   - SteamVR's legacy pulse conversion unverified (amplitude scales with length here)
-   - trigger mode click haptic off by default, unverified; dpad haptic may be faint on Quest
+   - force_sensor mode haptic not played (Alyx zeroes it, so SteamVR likely has one)
+   - dpad ticks only on Index trackpads; unverified whether SteamVR ticks on joystick dpads
 6. Origin names (S)
-   - `activeOrigin` of action data is the hand, so Unity's `localizedOriginName` lacks the input part
-   - HP, Focus 3 and Cosmos controller names are guesses
+   - Focus 3 and Cosmos controller names are guesses (drivers not public)
+   - several native bindings on one hand report the first, as OpenXR merges them; skeleton actions report the hand
 7. Color space (S)
-   - Outer Wilds with NomaiVR reportedly too dark (#441); `XRIZER_LINEAR_UNORM=1` is the workaround
-   - `A2R10G10B10_UINT` unhandled
+   - Outer Wilds (NomaiVR) quirk rests on one report (#441), needs a headset check
+   - D3D11 `R16G16B16A16_TYPELESS` arrives through Proton as UNORM, wrong if rendered as float
 
 ## 2. Fake success and crash insurance
 
@@ -54,6 +53,7 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
 11. Device presence (S)
     - pre-created hand slots report `Controller` and are returned by `GetTrackedDeviceIndexForControllerRole` while disconnected; SteamVR answers Invalid
     - trackers: `GetControllerRoleForTrackedDeviceIndex` and `ControllerRoleHint` disagree
+    - hands taking over from a controller without a profile (Quest 1 on WiVRn) keep the controller's identity
 
 ## 3. Overlay apps and interactive overlays
 
@@ -117,7 +117,9 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
     - compressed bone data calls unimplemented
     - tracked bones ignore motion range (`XR_EXT_hand_joints_motion_range`)
     - finger splay constant, summary type ignored
-23. Legacy input (S)
+    - Steam Frame thumb curl from joints unverified
+    - without `XR_EXT_hand_tracking_data_source`, joints derived from a controller count as optical
+23. Legacy input without chosen bindings (S)
     - only six buttons; no DPad or System
     - only the main axis on controllers with a stick and a trackpad (Index, WMR)
 24. Dominant hand (S-M)
