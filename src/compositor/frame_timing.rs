@@ -195,6 +195,34 @@ impl Frame {
         self.poses_ready.unwrap_or(self.wait_end)
     }
 
+    /// When the runtime had the frame: handed over, and rendered if the GPU's finish is known.
+    fn ready(&self) -> Nanos {
+        let handed_over = self.end_call.map_or(self.ended, |(_, end)| end);
+        self.gpu_done
+            .map_or(handed_over, |done| done.max(handed_over))
+    }
+
+    /// Vsyncs from the frame's start until it could be shown, which is at least the next one.
+    fn vsyncs_ready(&self) -> u32 {
+        if self.period <= 0 {
+            return 0;
+        }
+        let periods = (self.ready() - self.start) as f64 / self.period as f64;
+        (periods.ceil() as u32).max(1)
+    }
+
+    /// Vsyncs from the frame's start until it was first shown: at its predicted display time, or
+    /// at the first vsync it was ready for if that was later. Frames are never shown before their
+    /// predicted time, so this exceeds the vsyncs until ready when the runtime predicts further
+    /// ahead, which streaming runtimes do by their latency.
+    fn vsyncs_to_first_view(&self) -> u32 {
+        if self.period <= 0 {
+            return 0;
+        }
+        let predicted = ((self.display - self.start) as f64 / self.period as f64).round();
+        (predicted as u32).max(self.vsyncs_ready())
+    }
+
     /// From the frame's poses to its last Submit.
     fn app_cpu_time(&self) -> Nanos {
         self.frame_ready
@@ -230,7 +258,7 @@ impl Frame {
             m_nFrameIndex: self.index,
             m_nNumFramePresents: self.repeats.saturating_add(1),
             // Only frames finished after their display time are sure to have missed it.
-            m_nNumMisPresented: u32::from(self.gpu_done.unwrap_or(update_end) > self.display),
+            m_nNumMisPresented: u32::from(self.ready() > self.display),
             m_nNumDroppedFrames: self.missed_before,
             m_nReprojectionFlags: flags,
             m_flSystemTimeInSeconds: self.start as f64 / 1e9,
@@ -244,6 +272,8 @@ impl Frame {
             m_flCompositorIdleCpuMs: ms(self.wait_end - self.wait_start),
             m_flClientFrameIntervalMs: ms(self.interval.unwrap_or(self.period)),
             m_flPresentCallCpuMs: self.end_call.map_or(0.0, |(start, end)| ms(end - start)),
+            // How long SteamVR's compositor spins when its vsync wait fails. xrWaitFrame blocks
+            // instead, which is the idle time above.
             m_flWaitForPresentCpuMs: 0.0,
             m_flSubmitFrameMs: ms(self.submitting),
             m_flWaitGetPosesCalledMs: since_start(self.called),
@@ -254,7 +284,11 @@ impl Frame {
             // The runtime can start composing once it has the frame.
             m_flCompositorRenderStartMs: since_start(update_end),
             m_HmdPose: self.pose.unwrap_or_default(),
-            ..Default::default()
+            m_nNumVSyncsReadyForUse: self.vsyncs_ready(),
+            m_nNumVSyncsToFirstView: self.vsyncs_to_first_view(),
+            // SteamVR fills it only for Steam Link. OpenXR doesn't tell how much of the time until
+            // the display time a streaming runtime spends on the transfer.
+            m_flTransferLatencyMs: 0.0,
         }
     }
 }
@@ -514,10 +548,21 @@ mod tests {
 
     const PERIOD: i64 = 10_000_000;
 
-    /// Runs a frame waited for at `start` ms, displayed `lead` ms after that, with its last Submit
-    /// `submit` ms after the poses and the GPU done `gpu` ms after them.
+    /// Runs a frame waited for at `start` ms and displayed 15 ms after that, with its last Submit
+    /// 3.5 ms after that and the GPU done `gpu` ms after the poses.
     fn frame(timer: &Arc<FrameTimer>, index: u32, start: f64, missed: u32, gpu: Option<f64>) {
-        let lead = 15.0;
+        frame_with_lead(timer, index, start, 15.0, missed, gpu);
+    }
+
+    /// Like [frame], displayed `lead` ms after `start`.
+    fn frame_with_lead(
+        timer: &Arc<FrameTimer>,
+        index: u32,
+        start: f64,
+        lead: f64,
+        missed: u32,
+        gpu: Option<f64>,
+    ) {
         timer.wait_get_poses_called(at(timer, start - 2.0));
         timer.frame_waited(WaitedFrame {
             display_time: xr::Time::from_nanos(((start + lead) * 1e6) as i64),
@@ -591,6 +636,11 @@ mod tests {
         assert_near(t.m_flCompositorRenderCpuMs, 0.5);
         assert_near(t.m_flPreSubmitGpuMs, 5.0);
         assert_near(t.m_flTotalRenderGpuMs, 5.0);
+        // Handed over 3.4 ms after its start, and shown at the next vsync.
+        assert_eq!({ t.m_nNumVSyncsReadyForUse }, 1);
+        assert_eq!({ t.m_nNumVSyncsToFirstView }, 1);
+        assert_eq!({ t.m_flWaitForPresentCpuMs }, 0.0);
+        assert_eq!({ t.m_flTransferLatencyMs }, 0.0);
         // The oldest frame is the one past the history too.
         assert_eq!({ timing(&timer, 1).m_nFrameIndex }, 0);
         assert_eq!({ timing(&timer, 5).m_nFrameIndex }, 0);
@@ -665,7 +715,35 @@ mod tests {
     fn frames_done_after_their_display_time_are_mispresented() {
         let timer = Arc::new(FrameTimer::new());
         frame(&timer, 0, 100.0, 0, Some(16.0));
-        assert_eq!({ timing(&timer, 0).m_nNumMisPresented }, 1);
+        let t = timing(&timer, 0);
+        assert_eq!({ t.m_nNumMisPresented }, 1);
+        // Done 11.1 ms after its start at 105, so first shown a vsync after its display time.
+        assert_eq!({ t.m_nNumVSyncsReadyForUse }, 2);
+        assert_eq!({ t.m_nNumVSyncsToFirstView }, 2);
+    }
+
+    #[test]
+    fn frames_predicted_further_ahead_are_shown_later_than_ready() {
+        let timer = Arc::new(FrameTimer::new());
+        // Shown 35 ms after its release, like a streaming runtime's frames.
+        frame_with_lead(&timer, 0, 100.0, 35.0, 0, Some(5.0));
+        let t = timing(&timer, 0);
+        assert!(({ t.m_flSystemTimeInSeconds } - 0.105).abs() < 1e-6);
+        assert_eq!({ t.m_nNumVSyncsReadyForUse }, 1);
+        assert_eq!({ t.m_nNumVSyncsToFirstView }, 3);
+        assert_eq!({ t.m_nNumMisPresented }, 0);
+    }
+
+    /// The runtime can only use a frame once it was handed over, however early the GPU finished.
+    #[test]
+    fn frames_are_ready_once_handed_over() {
+        let timer = Arc::new(FrameTimer::new());
+        frame_with_lead(&timer, 0, 100.0, 5.0, 0, Some(1.0));
+        let t = timing(&timer, 0);
+        // Due at 105, handed over at 108.4.
+        assert_eq!({ t.m_nNumMisPresented }, 1);
+        assert_eq!({ t.m_nNumVSyncsReadyForUse }, 1);
+        assert_eq!({ t.m_nNumVSyncsToFirstView }, 1);
     }
 
     #[test]
@@ -712,5 +790,6 @@ mod tests {
         assert!(({ t.m_flSystemTimeInSeconds } - 0.1).abs() < 1e-6);
         assert_near(t.m_flWaitGetPosesCalledMs, -1.0);
         assert_eq!({ t.m_nNumMisPresented }, 0);
+        assert_eq!({ t.m_nNumVSyncsToFirstView }, 1);
     }
 }

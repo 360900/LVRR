@@ -3127,7 +3127,7 @@ mod tests {
         assert!(f.comp.GetFrameTiming(buf.ptr(), 0));
         let timing = unsafe { buf.ptr().read() };
         assert_eq!({ timing.m_nNumDroppedFrames }, 0);
-        assert_eq!({ timing.m_nNumVSyncsReadyForUse }, 0);
+        assert_eq!({ timing.m_flWaitForPresentCpuMs }, 0.0);
         assert_eq!({ timing.m_flTransferLatencyMs }, 0.0);
         assert_eq!(buf.pose_valid(), 1);
         assert_eq!(buf.canary, u32::MAX);
@@ -4686,6 +4686,9 @@ mod tests {
             assert!({ t.m_flSubmitFrameMs } > 0.0);
             assert!({ t.m_flCompositorRenderCpuMs } > 0.0);
             assert!({ t.m_flCompositorIdleCpuMs } >= 0.0);
+            // Shown at its display time, up to 2.5 periods after the release, and ready before.
+            assert!((1..=3).contains(&{ t.m_nNumVSyncsToFirstView }));
+            assert!((1..=t.m_nNumVSyncsToFirstView).contains(&{ t.m_nNumVSyncsReadyForUse }));
         }
 
         let stats = cumulative_stats(&f);
@@ -4741,6 +4744,12 @@ mod tests {
         assert_eq!(f.wait_get_poses(), None);
         for frame in frame_timings::<2>(&f) {
             assert_eq!({ frame.m_nNumMisPresented }, 1);
+            // Shown when ready, which is after the vsync it was due at.
+            assert!({ frame.m_nNumVSyncsReadyForUse } >= 1);
+            assert_eq!(
+                { frame.m_nNumVSyncsToFirstView },
+                frame.m_nNumVSyncsReadyForUse
+            );
         }
     }
 
