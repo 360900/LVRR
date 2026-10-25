@@ -888,7 +888,12 @@ impl Context {
 		}))
 	}
 
-	fn query_dmabuf_image_support(&self, format: Format, modifier: u64) -> anyhow::Result<bool> {
+	fn query_dmabuf_image_support(
+		&self,
+		format: Format,
+		modifier: u64,
+		usage: vk::ImageUsageFlags,
+	) -> anyhow::Result<bool> {
 		if !self.caps.external_memory_dma_buf || !self.caps.image_drm_format_modifier {
 			return Ok(false);
 		}
@@ -906,7 +911,7 @@ impl Context {
 			.format(format_to_vk(format))
 			.ty(vk::ImageType::TYPE_2D)
 			.tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
-			.usage(vk::ImageUsageFlags::SAMPLED)
+			.usage(usage)
 			.flags(vk::ImageCreateFlags::empty())
 			.push_next(&mut drm_info)
 			.push_next(&mut external_info);
@@ -972,7 +977,7 @@ impl Context {
 			{
 				continue;
 			}
-			if self.query_dmabuf_image_support(format, prop.drm_format_modifier)? {
+			if self.query_dmabuf_image_support(format, prop.drm_format_modifier, vk::ImageUsageFlags::SAMPLED)? {
 				modifiers.push(prop.drm_format_modifier);
 			}
 		}
@@ -989,7 +994,7 @@ impl Context {
 			bail!("explicit DMA-buf modifiers require VK_EXT_image_drm_format_modifier");
 		}
 		if let Some(modifier) = info.modifier
-			&& !self.query_dmabuf_image_support(info.format, modifier)?
+			&& !self.query_dmabuf_image_support(info.format, modifier, image_usage_to_vk(info.usage))?
 		{
 			bail!(
 				"Vulkan reports DMA-buf import unsupported for format {:?}, modifier {modifier:#x}",
@@ -1037,7 +1042,7 @@ impl Context {
 			} else {
 				vk::ImageTiling::OPTIMAL
 			})
-			.usage(vk::ImageUsageFlags::SAMPLED)
+			.usage(image_usage_to_vk(info.usage))
 			.sharing_mode(vk::SharingMode::EXCLUSIVE)
 			.initial_layout(vk::ImageLayout::UNDEFINED);
 

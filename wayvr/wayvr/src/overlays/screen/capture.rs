@@ -24,7 +24,7 @@ use wlx_capture::{
 use wlx_common::{config::GeneralConfig, overlays::StereoMode};
 
 use crate::{
-    graphics::dmabuf::{ExportedDmabufImage, WGfxDmabuf, export_dmabuf_image, fourcc_to_vk},
+    graphics::dmabuf::{ExportedDmabufImage, export_dmabuf_image, fourcc_to_vk},
     state::AppState,
     windowing::backend::{FrameMeta, RenderResources},
 };
@@ -33,6 +33,9 @@ const CURSOR_SIZE: f32 = 16. / 1440.;
 
 // synchronize queue shared by the WlxCapture worker threads
 static CAPTURE_QUEUE_MUTEX: Mutex<()> = Mutex::new(());
+
+// LVRR: DMA-buf frames are copied before the compositor gets them back
+mod lvrr_dmabuf;
 
 struct BufPass {
     pass: WGfxPass<Vert2Uv>,
@@ -726,7 +729,8 @@ pub(super) fn receive_callback(me: &WlxCaptureIn, frame: WlxFrame) -> Option<Wlx
             }
             log::trace!("{}: New DMA-buf frame", me.name);
             let format = frame.format;
-            match me.gfx.dmabuf_texture(frame) {
+            // LVRR: copied, the compositor may draw into the buffer again once this returns
+            match lvrr_dmabuf::frame_image(me, frame) {
                 Ok(image) => Some(WlxCaptureOut {
                     image: me.gfx.create_image_view(image).ok()?,
                     format,

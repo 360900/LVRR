@@ -1,14 +1,26 @@
 use std::sync::Arc;
 
-use wgui::gfx::{DmabufImportInfo, DmabufPlaneLayout, Format, Image, ImageView, WGfx};
+use wgui::gfx::{DmabufImportInfo, DmabufPlaneLayout, Format, Image, ImageUsage, ImageView, WGfx};
 use wlx_capture::{DrmFormat, DrmFourcc, DrmModifier, frame::DmabufFrame};
 
 pub trait WGfxDmabuf {
-    fn dmabuf_texture(&self, frame: DmabufFrame) -> anyhow::Result<Arc<Image>>;
+    fn dmabuf_texture(&self, frame: DmabufFrame) -> anyhow::Result<Arc<Image>> {
+        self.dmabuf_texture_with_usage(frame, ImageUsage::SAMPLED)
+    }
+    // LVRR: TRANSFER_SRC to copy captured frames, see overlays/screen/capture/lvrr_dmabuf.rs
+    fn dmabuf_texture_with_usage(
+        &self,
+        frame: DmabufFrame,
+        usage: ImageUsage,
+    ) -> anyhow::Result<Arc<Image>>;
 }
 
 impl WGfxDmabuf for WGfx {
-    fn dmabuf_texture(&self, frame: DmabufFrame) -> anyhow::Result<Arc<Image>> {
+    fn dmabuf_texture_with_usage(
+        &self,
+        frame: DmabufFrame,
+        usage: ImageUsage,
+    ) -> anyhow::Result<Arc<Image>> {
         let format = fourcc_to_vk(frame.format.drm_format.code)?;
         let modifier = (!matches!(frame.format.drm_format.modifier, DrmModifier::Invalid))
             .then(|| u64::from(frame.format.drm_format.modifier));
@@ -41,6 +53,7 @@ impl WGfxDmabuf for WGfx {
             fd,
             modifier,
             plane_layouts,
+            usage,
         })
     }
 }

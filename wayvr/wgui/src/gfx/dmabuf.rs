@@ -15,6 +15,8 @@ pub struct DmabufImportInfo {
 	pub fd: RawFd,
 	pub modifier: Option<u64>,
 	pub plane_layouts: Vec<DmabufPlaneLayout>,
+	/// LVRR: `SAMPLED`, plus `TRANSFER_SRC` to copy from the image
+	pub usage: ImageUsage,
 }
 
 pub struct ExportedDmabufImage {
@@ -39,7 +41,7 @@ impl WGfx {
 			raw,
 			info.extent,
 			info.format,
-			ImageUsage::SAMPLED,
+			info.usage,
 			if info.modifier.is_some() {
 				ImageTiling::DrmFormatModifier
 			} else {
