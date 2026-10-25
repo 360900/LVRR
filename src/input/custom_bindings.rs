@@ -306,6 +306,7 @@ impl Vector2ActionData {
         session: &xr::Session<xr::AnyGraphics>,
         hands: [(xr::Path, xr::Path, vr::VRInputValueHandle_t); 2],
         masked: [bool; 2],
+        constants: &[ScalarConstantBinding],
         update_time: impl Fn(bool, xr::Time) -> f32,
     ) {
         if self.input_only {
@@ -354,6 +355,12 @@ impl Vector2ActionData {
                 state.current_state = binding.transform.apply(state.current_state, session, hand);
                 consider(state);
             }
+            if let Some(constant) =
+                scalar_constants_state(constants, session, hand, profile, origin, &update_time)
+                && prefer(&constant, &next[index])
+            {
+                next[index] = constant;
+            }
         }
         next[2] = if prefer(&next[1], &next[0]) {
             next[1]
@@ -368,6 +375,81 @@ impl Vector2ActionData {
         }
         *previous = next;
     }
+}
+
+/// A scalar_constant binding: an analog value that is one constant while its input is pressed and
+/// another one otherwise. Axes the action doesn't have are 0.
+pub(super) struct ScalarConstantBinding {
+    pub press: BoolBindingType,
+    pub profile: xr::Path,
+    pub hand: xr::Path,
+    pub on: [f32; 3],
+    pub off: [f32; 3],
+}
+
+impl ScalarConstantBinding {
+    /// The value on `hand` with `profile`, if the binding is for them and its input is active.
+    fn state(
+        &self,
+        session: &xr::Session<xr::AnyGraphics>,
+        hand: xr::Path,
+        profile: xr::Path,
+        origin: vr::VRInputValueHandle_t,
+        update_time: &impl Fn(bool, xr::Time) -> f32,
+    ) -> Option<vr::InputAnalogActionData_t> {
+        if self.hand != hand || self.profile != profile {
+            return None;
+        }
+        let press = self
+            .press
+            .state(session, hand)
+            .ok()
+            .flatten()
+            .filter(|press| press.is_active)?;
+        let [x, y, z] = if press.current_state {
+            self.on
+        } else {
+            self.off
+        };
+        let changed = press.changed_since_last_sync && self.on != self.off;
+        Some(vr::InputAnalogActionData_t {
+            bActive: true,
+            activeOrigin: origin,
+            x,
+            y,
+            z,
+            fUpdateTime: update_time(changed, press.last_change_time),
+            ..Default::default()
+        })
+    }
+}
+
+/// The value of an action's scalar_constant bindings on a hand: the largest one, like OpenXR
+/// combines the bindings of an action. The first one wins ties.
+pub(super) fn scalar_constants_state(
+    constants: &[ScalarConstantBinding],
+    session: &xr::Session<xr::AnyGraphics>,
+    hand: xr::Path,
+    profile: xr::Path,
+    origin: vr::VRInputValueHandle_t,
+    update_time: &impl Fn(bool, xr::Time) -> f32,
+) -> Option<vr::InputAnalogActionData_t> {
+    // Every binding is read, as their inputs keep their own state between syncs.
+    constants
+        .iter()
+        .filter_map(|constant| constant.state(session, hand, profile, origin, update_time))
+        .reduce(|best, state| {
+            if analog_magnitude(&state) > analog_magnitude(&best) {
+                state
+            } else {
+                best
+            }
+        })
+}
+
+/// The squared length of an analog state.
+pub(super) fn analog_magnitude(state: &vr::InputAnalogActionData_t) -> f32 {
+    state.x * state.x + state.y * state.y + state.z * state.z
 }
 
 /// A custom binding: a boolean OpenVR state that xrizer computes from OpenXR actions, each of
@@ -2932,7 +3014,8 @@ mod tests {
             c"/actions/main/in/alternateuse",
             ["/user/hand/right/input/a/click".into()],
         );
-        // Other constants than 1 can't be reported, so they aren't bound.
+        // Other values than 1 read the input through a scalar constant binding instead (see
+        // input::tests::scalar_constant_values).
         let reverse = c"/actions/main/in/reverse";
         let profile = f
             .input

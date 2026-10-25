@@ -3626,6 +3626,115 @@ fn analog_action_update_time() {
 }
 
 #[test]
+fn scalar_constant_values() {
+    let mut f = Fixture::new();
+    let main = f.get_action_set_handle(c"/actions/main");
+    let [reverse, offset, throttle, steer] = [
+        c"/actions/main/in/reverse",
+        c"/actions/main/in/offset",
+        c"/actions/main/in/throttle",
+        c"/actions/main/in/steer",
+    ]
+    .map(|name| f.get_action_handle(name));
+    let [left, right] =
+        [c"/user/hand/left", c"/user/hand/right"].map(|hand| f.get_input_source_handle(hand));
+    f.load_actions(c"actions_scalar_constant.json");
+    f.set_interaction_profile::<OculusTouch>(LeftHand);
+    f.set_interaction_profile::<OculusTouch>(RightHand);
+
+    let input = |path: &CStr| f.get_action::<f32>(f.get_action_handle(path));
+    let x = input(c"/user/hand/left/input/x/click-/actions/main");
+    let y = input(c"/user/hand/left/input/y/click-/actions/main");
+    let b = input(c"/user/hand/right/input/b/click-/actions/main");
+    let grip = input(c"/user/hand/left/input/squeeze/value-/actions/main");
+    let trigger = f.get_action::<f32>(throttle);
+    let stick = f.get_action::<xr::Vector2f>(steer);
+    let set = |action, hand, value| {
+        fakexr::set_action_state(action, fakexr::ActionState::Float(value), hand)
+    };
+    for (action, hand) in [
+        (x, LeftHand),
+        (y, LeftHand),
+        (grip, LeftHand),
+        (b, RightHand),
+        (trigger, RightHand),
+    ] {
+        set(action, hand, 0.0);
+    }
+    fakexr::set_action_state(stick, fakexr::ActionState::Vector2(0.3, 0.0), LeftHand);
+    let sync = |f: &mut Fixture| {
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: main,
+            ..Default::default()
+        })
+    };
+    let xyz = |f: &Fixture, action, restrict| {
+        let s = get_analog_state(f, action, restrict);
+        assert!(s.bActive);
+        (s.x, s.y, s.z)
+    };
+
+    // Released inputs report the off values.
+    sync(&mut f);
+    assert_eq!(xyz(&f, reverse, left), (0.0, 0.0, 0.0));
+    assert_eq!(xyz(&f, offset, left), (0.25, 0.0, 0.0));
+
+    // Pressed ones the on values: -1 reverses.
+    set(x, LeftHand, 1.0);
+    set(y, LeftHand, 1.0);
+    sync(&mut f);
+    assert_eq!(xyz(&f, reverse, left), (-1.0, 0.0, 0.0));
+    assert_eq!(xyz(&f, reverse, 0), (-1.0, 0.0, 0.0));
+    assert_eq!(xyz(&f, offset, left), (0.5, 0.0, 0.0));
+
+    // The largest value wins among an action's bindings, like OpenXR's own.
+    set(b, RightHand, 1.0);
+    set(trigger, RightHand, 0.3);
+    sync(&mut f);
+    assert_eq!(xyz(&f, throttle, right), (-0.5, 0.0, 0.0));
+    set(trigger, RightHand, 0.8);
+    sync(&mut f);
+    assert_eq!(xyz(&f, throttle, right), (0.8, 0.0, 0.0));
+    set(b, RightHand, 0.0);
+    sync(&mut f);
+    assert_eq!(xyz(&f, throttle, right), (0.8, 0.0, 0.0));
+
+    // Vector2 actions get every axis, 1 by default.
+    assert_eq!(xyz(&f, steer, left), (0.3, 0.0, 0.0));
+    set(grip, LeftHand, 1.0);
+    sync(&mut f);
+    assert_eq!(xyz(&f, steer, left), (-1.0, 1.0, 0.0));
+    fakexr::set_action_state(stick, fakexr::ActionState::Vector2(0.0, -1.0), LeftHand);
+    set(grip, LeftHand, 0.0);
+    sync(&mut f);
+    let steer_state = get_analog_state(&f, steer, left);
+    assert_eq!(
+        (
+            steer_state.x,
+            steer_state.y,
+            steer_state.deltaX,
+            steer_state.deltaY
+        ),
+        (0.0, -1.0, 1.0, -2.0)
+    );
+
+    // Deltas and update times follow the presses.
+    let secs = |secs: f64| xr::Time::from_nanos((secs * 1e9) as i64);
+    f.input.openxr.set_display_time(secs(10.0));
+    fakexr::set_action_state_with_time(x, fakexr::ActionState::Float(0.0), LeftHand, secs(9.75));
+    sync(&mut f);
+    let s = get_analog_state(&f, reverse, left);
+    assert_eq!((s.x, s.deltaX, s.fUpdateTime), (0.0, 1.0, -0.25));
+    sync(&mut f);
+    let s = get_analog_state(&f, reverse, left);
+    assert_eq!((s.x, s.deltaX, s.fUpdateTime), (0.0, 0.0, 0.0));
+    fakexr::set_action_state_with_time(x, fakexr::ActionState::Float(1.0), LeftHand, secs(9.5));
+    sync(&mut f);
+    let s = get_analog_state(&f, reverse, left);
+    assert_eq!((s.x, s.deltaX, s.fUpdateTime), (-1.0, -1.0, -0.5));
+}
+
+#[test]
 fn skeletal_tracking_level_follows_hand_tracking() {
     use vr::EVRSkeletalTrackingLevel::*;
     use xr::HandTrackingDataSourceEXT as Source;

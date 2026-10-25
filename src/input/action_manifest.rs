@@ -174,6 +174,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             per_profile_input_paths,
             per_profile_binding_info,
             head_proximity,
+            scalar_constants,
             ..
         } = binding_context;
 
@@ -279,6 +280,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             .into_iter()
             .map(|(k, v)| (k, action_map_to_secondary(&mut act_guard, v)))
             .collect();
+        let scalar_constants = action_map_to_secondary(&mut act_guard, scalar_constants);
 
         // An action belongs to the set its path starts with, e.g. /actions/main/in/hand_left.
         let skeleton_sets = actions
@@ -317,6 +319,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             per_profile_pose_bindings,
             per_profile_input_paths,
             per_profile_binding_info,
+            scalar_constants,
             _info_action: info_action,
             info_set,
             haptic_action,

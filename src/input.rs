@@ -26,7 +26,7 @@ use crate::{
     openxr_data::{self, Hand, OpenXrData, RestartError, SessionData},
     tracy_span,
 };
-use custom_bindings::{BoolBindingData, Vector2ActionData};
+use custom_bindings::{BoolBindingData, ScalarConstantBinding, Vector2ActionData};
 use glam::Quat;
 use legacy::LegacyActionData;
 use log::{debug, info, trace, warn};
@@ -541,6 +541,12 @@ impl<C: openxr_data::Compositor> Input<C> {
                     ..Default::default()
                 };
             }
+            if let Some(constant) =
+                self.scalar_constant_state(session_data, loaded, key, path, hand_key)
+                && (!slot.bActive || constant.x.abs() > slot.x.abs())
+            {
+                *slot = constant;
+            }
         }
         // Like OpenXR, report the largest value when unrestricted. Left wins ties.
         next[2] = if next[1].bActive && (!next[0].bActive || next[1].x.abs() > next[0].x.abs()) {
@@ -554,6 +560,30 @@ impl<C: openxr_data::Compositor> Input<C> {
             next.deltaX = next.x - previous.x;
         }
         *previous = next;
+    }
+
+    /// The value of an action's scalar_constant bindings on a hand, if any is active.
+    fn scalar_constant_state(
+        &self,
+        session_data: &SessionData,
+        loaded: &ManifestLoadedActions,
+        key: ActionKey,
+        hand: xr::Path,
+        hand_key: InputSourceKey,
+    ) -> Option<vr::InputAnalogActionData_t> {
+        let constants = loaded.scalar_constants.get(key)?;
+        let profile = session_data
+            .session
+            .current_interaction_profile(hand)
+            .ok()?;
+        custom_bindings::scalar_constants_state(
+            constants,
+            &session_data.session,
+            hand,
+            profile,
+            hand_key.data().as_ffi(),
+            &|changed, time| self.update_time(changed, time),
+        )
     }
 
     /// Emulates action set priorities. On each hand, an action is masked if every input source
@@ -2357,6 +2387,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
                     &data.session,
                     hands,
                     masked_hands(key),
+                    actions.scalar_constants.get(key).map_or(&[], Vec::as_slice),
                     |changed, time| self.update_time(changed, time),
                 );
             }
@@ -3359,6 +3390,8 @@ struct ManifestLoadedActions {
     per_profile_input_paths: HashMap<xr::Path, SecondaryMap<ActionKey, Vec<xr::Path>>>,
     /// What GetActionBindingInfo reports, per interaction profile.
     per_profile_binding_info: HashMap<xr::Path, SecondaryMap<ActionKey, Vec<origins::BindingInfo>>>,
+    /// The scalar_constant bindings of analog actions that aren't bound to their input directly.
+    scalar_constants: SecondaryMap<ActionKey, Vec<ScalarConstantBinding>>,
     info_set: xr::ActionSet,
     _info_action: xr::Action<bool>,
     haptic_set: xr::ActionSet,

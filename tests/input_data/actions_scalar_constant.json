@@ -17,6 +17,18 @@
 		{
 			"name": "/actions/main/in/reverse",
 			"type": "vector1"
+		},
+		{
+			"name": "/actions/main/in/offset",
+			"type": "vector1"
+		},
+		{
+			"name": "/actions/main/in/throttle",
+			"type": "vector1"
+		},
+		{
+			"name": "/actions/main/in/steer",
+			"type": "vector2"
 		}
 	],
 	"default_bindings": [

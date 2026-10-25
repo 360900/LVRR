@@ -508,10 +508,46 @@ impl ClickThresholdParams {
     }
 }
 
+/// The value while pressed (on) and released (off), per axis.
 #[derive(Clone, Deserialize)]
 struct ScalarConstantParameters {
     #[serde(rename = "on/x")]
     on_x: Option<StringOrTyped<f32>>,
+    #[serde(rename = "on/y")]
+    on_y: Option<StringOrTyped<f32>>,
+    #[serde(rename = "on/z")]
+    on_z: Option<StringOrTyped<f32>>,
+    #[serde(rename = "off/x")]
+    off_x: Option<StringOrTyped<f32>>,
+    #[serde(rename = "off/y")]
+    off_y: Option<StringOrTyped<f32>>,
+    #[serde(rename = "off/z")]
+    off_z: Option<StringOrTyped<f32>>,
+}
+
+impl ScalarConstantParameters {
+    /// The on and off values, with the binding UI's defaults (1 and 0) for missing or invalid ones.
+    fn values(parameters: Option<&Self>) -> ([f32; 3], [f32; 3]) {
+        let value = |get: fn(&Self) -> Option<StringOrTyped<f32>>, default: f32| {
+            parameters
+                .and_then(get)
+                .map(|value| *value)
+                .filter(|value| value.is_finite())
+                .unwrap_or(default)
+        };
+        (
+            [
+                value(|p| p.on_x, 1.0),
+                value(|p| p.on_y, 1.0),
+                value(|p| p.on_z, 1.0),
+            ],
+            [
+                value(|p| p.off_x, 0.0),
+                value(|p| p.off_y, 0.0),
+                value(|p| p.off_z, 0.0),
+            ],
+        )
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -814,6 +850,27 @@ fn sticky_click_parse() {
         thresholds(r#"{"sticky_click": true, "sticky_activate_threshold": "0.6"}"#),
         Some((0.6, 0.3))
     );
+}
+
+#[cfg(test)]
+#[test]
+fn scalar_constant_values_parse() {
+    assert_eq!(ScalarConstantParameters::values(None), ([1.0; 3], [0.0; 3]));
+    for (json, expected) in [
+        (r#"{}"#, ([1.0; 3], [0.0; 3])),
+        (
+            r#"{"on/x": "-1", "off/y": 0.5, "on/z": 0}"#,
+            ([-1.0, 1.0, 0.0], [0.0, 0.5, 0.0]),
+        ),
+        (r#"{"on/x": "NaN"}"#, ([1.0; 3], [0.0; 3])),
+    ] {
+        let parameters: ScalarConstantParameters = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            ScalarConstantParameters::values(Some(&parameters)),
+            expected,
+            "{json}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1482,15 +1539,27 @@ pub fn handle_sources(
                 else {
                     continue;
                 };
-                // Only 1.0 can be reported. Other values (like -1 to reverse) would come out
-                // wrong, which is worse than not binding them.
-                if let Some(on) = parameters.and_then(|p| p.on_x.as_deref().copied())
-                    && on != 1.0
-                {
-                    warn!(
-                        "Ignoring {path} setting {} to {on}, only 1.0 is supported",
-                        value.output.path
-                    );
+                let (on, off) = ScalarConstantParameters::values(parameters);
+                if context.is_custom_scalar_constant(&value.output, on, off) {
+                    let Some((press, _)) = button_press_input(path, None, validate_path) else {
+                        InvalidActionPath(path, &value.output.path).report(context);
+                        continue;
+                    };
+                    if let Some(press_binding) =
+                        input_threshold(press, None, action_set_name, action_set, context)
+                    {
+                        trace!(
+                            "suggesting {press} for {} (scalar constant {on:?}, {off:?})",
+                            value.output.path
+                        );
+                        context.add_scalar_constant_binding(
+                            &value.output,
+                            press,
+                            press_binding,
+                            on,
+                            off,
+                        );
+                    }
                     continue;
                 }
 

@@ -1,8 +1,8 @@
 use super::actions::{LoadedActionDataMap, XrNames};
 use super::bindings::{ActionPath, DpadParameters, DpadSubMode};
 use crate::input::custom_bindings::{
-    BoolBindingData, BoolBindingType, DpadActions, Vector2ActionData, Vector2BindingData,
-    Vector2Transform,
+    BoolBindingData, BoolBindingType, DpadActions, ScalarConstantBinding, Vector2ActionData,
+    Vector2BindingData, Vector2Transform,
 };
 use crate::input::origins::BindingInfo;
 use crate::input::profiles::{DynInputPath, paths};
@@ -31,6 +31,9 @@ pub(super) struct BindingsLoadContext<'a> {
     pub per_profile_binding_info: HashMap<xr::Path, HashMap<String, Vec<BindingInfo>>>,
     /// Boolean actions bound to the headset's proximity sensor.
     pub head_proximity: HashSet<String>,
+    /// The scalar_constant bindings of analog actions that aren't bound to their input directly,
+    /// in every profile.
+    pub scalar_constants: HashMap<String, Vec<ScalarConstantBinding>>,
     pub grip_action: &'a xr::Action<xr::Posef>,
     pub info_action: &'a xr::Action<bool>,
     pub haptic_action: &'a xr::Action<xr::Haptic>,
@@ -58,6 +61,7 @@ impl<'a> BindingsLoadContext<'a> {
             per_profile_input_paths: Default::default(),
             per_profile_binding_info: Default::default(),
             head_proximity: Default::default(),
+            scalar_constants: Default::default(),
             grip_action,
             info_action,
             haptic_action,
@@ -136,6 +140,7 @@ impl BindingsLoadContext<'_> {
             pose_bindings,
             input_paths_out,
             binding_info_out,
+            scalar_constants: &mut self.scalar_constants,
             grip_action: self.grip_action,
             info_action: self.info_action,
             haptic_action: self.haptic_action,
@@ -164,6 +169,7 @@ pub(super) struct BindingsProfileLoadContext<'a> {
     pub input_paths_out: &'a mut HashMap<String, Vec<xr::Path>>,
     /// What GetActionBindingInfo reports for each action in the current profile.
     pub binding_info_out: &'a mut HashMap<String, Vec<BindingInfo>>,
+    scalar_constants: &'a mut HashMap<String, Vec<ScalarConstantBinding>>,
     pub grip_action: &'a xr::Action<xr::Posef>,
     pub info_action: &'a xr::Action<bool>,
     pub haptic_action: &'a xr::Action<xr::Haptic>,
@@ -418,6 +424,63 @@ impl BindingsProfileLoadContext<'_> {
             hand,
             transform,
         });
+    }
+
+    /// Whether `output` needs a scalar_constant binding with these values rather than a direct
+    /// one: a vector1 action can be bound to its input when it's 1 while pressed and 0 otherwise,
+    /// like a button.
+    pub fn is_custom_scalar_constant(
+        &self,
+        output: &ActionPath,
+        on: [f32; 3],
+        off: [f32; 3],
+    ) -> bool {
+        match self.actions.get(&output.path) {
+            Some(ActionData::Vector1 { .. }) => on[0] != 1.0 || off[0] != 0.0,
+            Some(ActionData::Vector2 { .. }) => true,
+            // The direct binding reports what's wrong with it.
+            _ => false,
+        }
+    }
+
+    /// Adds a scalar_constant binding for `output`, an analog action, that reads `input` through
+    /// `press`.
+    pub fn add_scalar_constant_binding(
+        &mut self,
+        output: &ActionPath,
+        input: DynInputPath,
+        press: BoolBindingType,
+        mut on: [f32; 3],
+        mut off: [f32; 3],
+    ) {
+        let axes = match self.actions.get(&output.path) {
+            Some(ActionData::Vector1 { .. }) => 1,
+            Some(ActionData::Vector2 { .. }) => 2,
+            _ => {
+                warn!(
+                    "{} can't get a scalar constant, it isn't an analog action",
+                    output.path
+                );
+                return;
+            }
+        };
+        for values in [&mut on, &mut off] {
+            values[axes..].fill(0.0);
+        }
+        if let Ok(path) = self.instance.string_to_path(&input.to_string()) {
+            self.push_input_path(&output.path, path);
+        }
+        let hand = self.hand_path(input.hand);
+        self.scalar_constants
+            .entry(output.path.clone())
+            .or_default()
+            .push(ScalarConstantBinding {
+                press,
+                profile: self.interaction_profile,
+                hand,
+                on,
+                off,
+            });
     }
 
     pub fn push_binding(&mut self, action: String, path: xr::Path) {
