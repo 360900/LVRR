@@ -222,13 +222,13 @@ fn build_wivrn(b: &Build, ver: &str) -> Result {
         .args([
             "-DCMAKE_INSTALL_LIBDIR=lib",
             "-DWIVRN_BUILD_SERVER=ON",
-            "-DWIVRN_BUILD_DASHBOARD=ON",
+            "-DWIVRN_BUILD_DASHBOARD=OFF",
             "-DWIVRN_BUILD_CLIENT=OFF",
             "-DWIVRN_BUILD_WIVRNCTL=ON",
             "-DWIVRN_BUILD_TEST=ON",
         ])
         // WiVRn would describe the LVRR checkout anyway; passing it keeps the
-        // server, dashboard and APK on the same string.
+        // server and APK on the same string.
         .arg(format!("-DGIT_DESC={ver}"))
         .arg(format!("-DGIT_COMMIT={}", git(&["rev-parse", "HEAD"])?))
         .arg(format!("-DOVR_COMPAT_SEARCH_PATH={compat}"));
@@ -327,6 +327,12 @@ fn install(args: &[String]) -> Result {
         0o755,
     )?;
 
+    // WiVRn's dashboard installed the icon; LVRR doesn't build it.
+    copy(
+        &root().join("packaging/logo/lvrr.svg"),
+        &prefix.join("share/icons/hicolor/scalable/apps/io.github.lvrr.svg"),
+        0o644,
+    )?;
     let template = root().join("packaging/lvrr.desktop.in");
     let desktop = fs::read_to_string(&template)
         .map_err(|e| format!("{}: {e}", template.display()))?

@@ -3,7 +3,16 @@ Name=LVRR
 Comment=Stream VR to a standalone headset, play SteamVR games and use your desktop in VR
 GenericName=VR streaming
 Exec=@PREFIX@/bin/lvrr
-Icon=@PREFIX@/share/icons/hicolor/scalable/apps/io.github.wivrn.wivrn.svg
+Icon=@PREFIX@/share/icons/hicolor/scalable/apps/io.github.lvrr.svg
 Type=Application
 Categories=Network;Game;
 Keywords=VR;Virtual reality;OpenVR;OpenXR;WiVRn;
+Actions=Pair;Stop;
+
+[Desktop Action Pair]
+Name=Pair headset
+Exec=@PREFIX@/bin/lvrr pair
+
+[Desktop Action Stop]
+Name=Stop LVRR
+Exec=@PREFIX@/bin/lvrr stop
