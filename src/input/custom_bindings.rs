@@ -1543,6 +1543,46 @@ mod tests {
     }
 
     #[test]
+    fn index_trackpad_dpad_clicks_by_force() {
+        let mut f = Fixture::new();
+        let set = vr::VRActiveActionSet_t {
+            ulActionSet: f.get_action_set_handle(c"/actions/main"),
+            ..Default::default()
+        };
+        let pad_north = f.get_action_handle(c"/actions/main/in/pad_north");
+        f.load_actions(c"actions_dpad_zones.json");
+        f.set_interaction_profile::<Knuckles>(LeftHand);
+
+        let (_, pad) = dpad_of(&f, pad_north, Knuckles::profile_path());
+        let force = pad.click_or_touch.as_ref().unwrap().as_raw();
+        assert_eq!(
+            force,
+            f.get_action::<f32>(
+                f.get_action_handle(c"/user/hand/left/input/trackpad/force-/actions/main")
+            )
+        );
+        let haptic = pad.haptic.as_ref().expect("no dpad haptic").as_raw();
+
+        fakexr::set_action_state(pad.xy.as_raw(), ActionState::Vector2(0.0, 0.8), LeftHand);
+        let mut check = |pressure, state| {
+            fakexr::set_action_state(force, ActionState::Float(pressure), LeftHand);
+            f.sync(set);
+            assert_eq!(
+                f.get_bool_state(pad_north).unwrap().bState,
+                state,
+                "{pressure}"
+            );
+        };
+        check(0.3, false);
+        assert!(!fakexr::is_haptic_activated(haptic, LeftHand));
+        check(0.4, true);
+        // Engaging a direction plays a tick.
+        assert!(fakexr::is_haptic_activated(haptic, LeftHand));
+        check(0.25, true);
+        check(0.15, false);
+    }
+
+    #[test]
     fn dpad_input_different_sets_have_different_actions() {
         let f = Fixture::new();
 

@@ -43,6 +43,18 @@
 					"parameters": {
 						"sub_mode": "touch"
 					}
+				},
+				{
+					"mode": "dpad",
+					"path": "/user/hand/left/input/trackpad",
+					"inputs": {
+						"north": {
+							"output": "/actions/main/in/pad_north"
+						}
+					},
+					"parameters": {
+						"sub_mode": "click"
+					}
 				}
 			]
 		}

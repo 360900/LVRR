@@ -33,6 +33,10 @@
 		{
 			"name": "/actions/main/in/left_center",
 			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/pad_north",
+			"type": "boolean"
 		}
 	],
 	"default_bindings": [
