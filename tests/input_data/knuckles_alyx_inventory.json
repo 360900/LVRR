@@ -1,0 +1,40 @@
+{
+	"bindings": {
+		"/actions/scroll": {
+			"sources": [
+				{
+					"inputs": {
+						"scroll": {
+							"output": "/actions/scroll/in/scrolltouchpad"
+						}
+					},
+					"mode": "scroll",
+					"parameters": {
+						"scroll_mode": "smooth",
+						"smooth_scroll_multiplier": "70.5"
+					},
+					"path": "/user/hand/right/input/trackpad"
+				}
+			]
+		},
+		"/actions/weapon": {
+			"sources": [
+				{
+					"inputs": {
+						"click": {
+							"output": "/actions/weapon/in/showinventory"
+						}
+					},
+					"mode": "button",
+					"parameters": {
+						"click_activate_threshold": "0.38",
+						"click_deactivate_threshold": "0.3",
+						"force_input": "force"
+					},
+					"path": "/user/hand/right/input/trackpad"
+				}
+			]
+		}
+	},
+	"controller_type": "knuckles"
+}

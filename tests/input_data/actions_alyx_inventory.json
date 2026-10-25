@@ -1,0 +1,29 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/scroll",
+			"usage": "leftright"
+		},
+		{
+			"name": "/actions/weapon",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/scroll/in/ScrollTouchPad",
+			"type": "vector2"
+		},
+		{
+			"name": "/actions/weapon/in/ShowInventory",
+			"requirement": "mandatory",
+			"type": "boolean"
+		}
+	],
+	"default_bindings": [
+		{
+			"controller_type": "knuckles",
+			"binding_url": "knuckles_alyx_inventory.json"
+		}
+	]
+}

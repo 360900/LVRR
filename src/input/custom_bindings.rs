@@ -1754,6 +1754,59 @@ mod tests {
         check(0.15, false);
     }
 
+    /// Half-Life: Alyx opens its weapon wheel (#208) with a press of the right Index trackpad: a
+    /// button mode click read from the trackpad's force at 0.38, released at 0.3. Touching the
+    /// trackpad, or scrolling on it, doesn't open it.
+    #[test]
+    fn alyx_inventory_opens_by_trackpad_force() {
+        let mut f = Fixture::new();
+        let mut sets =
+            [c"/actions/weapon", c"/actions/scroll"].map(|name| vr::VRActiveActionSet_t {
+                ulActionSet: f.get_action_set_handle(name),
+                ..Default::default()
+            });
+        let inventory = f.get_action_handle(c"/actions/weapon/in/showinventory");
+        f.load_actions(c"actions_alyx_inventory.json");
+        f.set_interaction_profile::<Knuckles>(RightHand);
+
+        let profile = Knuckles::profile_path();
+        f.verify_custom_bindings(
+            profile,
+            c"/actions/weapon/in/showinventory",
+            ["/user/hand/right/input/trackpad/force".into()],
+        );
+        // Not bound to the trackpad directly, which would leave the click point to the runtime.
+        let profile_path = f.input.openxr.instance.string_to_path(profile).unwrap();
+        assert!(fakexr::check_no_suggested_bindings(
+            f.get_action::<bool>(inventory),
+            profile_path
+        ));
+
+        let force = f.get_action::<f32>(
+            f.get_action_handle(c"/user/hand/right/input/trackpad/force-/actions/weapon"),
+        );
+        let touch = f.get_action::<f32>(
+            f.get_action_handle(c"/user/hand/right/input/trackpad/touch-/actions/scroll"),
+        );
+        let mut check = |touched: bool, pressure: f32, open: bool| {
+            let touched_value = if touched { 1.0 } else { 0.0 };
+            fakexr::set_action_state(touch, ActionState::Float(touched_value), RightHand);
+            fakexr::set_action_state(force, ActionState::Float(pressure), RightHand);
+            f.sync_sets(&mut sets);
+            let state = f.get_bool_state(inventory).unwrap();
+            assert!(state.bActive);
+            assert_eq!(state.bState, open, "touched {touched}, force {pressure}");
+        };
+
+        check(true, 0.0, false);
+        check(true, 0.2, false);
+        check(true, 0.37, false);
+        check(true, 0.38, true);
+        check(true, 0.31, true);
+        check(true, 0.29, false);
+        check(false, 0.0, false);
+    }
+
     #[test]
     fn radial_menus_are_skipped() {
         let mut f = Fixture::new();
