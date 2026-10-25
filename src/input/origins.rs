@@ -212,8 +212,9 @@ const OTHER_CONTROLLER_TYPES: &[(&str, &str)] = &[
     ("indexhmd", "Index Headset"),
     ("rift", "Oculus Headset"),
     ("pico_controller", "Pico Controller"),
-    // Not named in SteamVR's files.
+    // Not named in SteamVR's files. Users quote SteamVR's binding settings showing this one.
     ("hpmotioncontroller", "HP Motion Controller"),
+    // Guesses: their drivers (HTC's, Steam Link's) aren't public or don't name them.
     ("vive_focus3_controller", "Vive Focus 3 Controller"),
     ("vive_cosmos_controller", "Vive Cosmos Controller"),
 ];
@@ -496,6 +497,20 @@ mod tests {
                 "/input/application_menu",
             ),
             ("frame_controller", DynSubpath::Menu, "/input/menu"),
+            // As bindings SteamVR's binding UI exported (e.g. ParaView's), Half-Life: Alyx's
+            // Cosmos bindings and Steam Link's Focus 3 profile name them.
+            (
+                "hpmotioncontroller",
+                DynSubpath::Menu,
+                "/input/application_menu",
+            ),
+            ("vive_cosmos_controller", DynSubpath::Menu, "/input/menu"),
+            (
+                "vive_cosmos_controller",
+                DynSubpath::Shoulder,
+                "/input/bumper",
+            ),
+            ("vive_focus3_controller", DynSubpath::Menu, "/input/system"),
             ("frame_controller", DynSubpath::DpadUp, "/input/dpad_up"),
             ("knuckles", DynSubpath::A, "/input/a"),
         ] {
