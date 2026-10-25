@@ -46,7 +46,7 @@ impl<T: 'static> Frontend<T> {
 		Ok(())
 	}
 
-	/// The desktop window has no VR pages, power menu or clock, and closes like any window
+	/// The desktop window has no VR pages, power menu or clock; its close button closes the window
 	fn lvrr_desktop_layout(&mut self) -> anyhow::Result<()> {
 		let mut hidden = vec![
 			self.state.get_widget_id("side_separator")?,
@@ -57,7 +57,6 @@ impl<T: 'static> Frontend<T> {
 			"btn_side_apps",
 			"btn_side_running",
 			"btn_side_settings",
-			"btn_close",
 		] {
 			hidden.push(self.state.fetch_component_as::<ComponentButton>(id)?.base().get_id());
 		}

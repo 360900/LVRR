@@ -55,9 +55,9 @@ impl UiInterface {
 		toasts: Rc<RefCell<Vec<String>>>,
 		proxy: EventLoopProxy<UserEvent>,
 	) -> Self {
-		// serde defaults, not WayVR's config: nothing here is saved
-		let mut general_config: GeneralConfig = serde_json::from_str("{}").unwrap();
-		general_config.opaque_background = true;
+		// serde defaults, not WayVR's config: nothing here is saved. The panel is see-through
+		// like in VR.
+		let general_config: GeneralConfig = serde_json::from_str("{}").unwrap();
 		Self {
 			lvrr,
 			desktop_finder: DesktopFinder::new(locale),

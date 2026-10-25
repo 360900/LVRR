@@ -22,6 +22,7 @@ use wgui::{
 	i18n::{Locale, Translation},
 	renderer_vk::context::{Context, SharedContext},
 	theme::WguiTheme,
+	widget::EventResult,
 };
 use winit::{
 	application::ApplicationHandler,
@@ -32,7 +33,7 @@ use winit::{
 		startup_notify::{EventLoopExtStartupNotify, WindowAttributesExtStartupNotify},
 		wayland::WindowAttributesExtWayland,
 	},
-	window::{ActivationToken, Window, WindowId},
+	window::{ActivationToken, CursorIcon, ResizeDirection, Window, WindowId},
 };
 use wlx_common::{
 	async_executor::AsyncExecutor,
@@ -53,8 +54,11 @@ const APP_ID: &str = "io.github.lvrr";
 const FRAME: Duration = Duration::from_micros(16_667);
 /// How often the tray follows the server while the window is closed
 const TRAY_INTERVAL: Duration = Duration::from_millis(500);
-// linear, so about #191a1f
-const CLEAR: [f32; 4] = [0.01, 0.011, 0.014, 1.0];
+/// Around the dashboard the desktop shows, like the world in VR
+const CLEAR: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+/// How close to the window's edge the pointer resizes it, in logical pixels. There's no title
+/// bar or frame: the dashboard draws everything, and a press where nothing reacts moves the window.
+const RESIZE_EDGE: f32 = 6.0;
 
 /// The window and what draws into it, dropped when it closes
 struct Surface {
@@ -159,6 +163,8 @@ impl App {
 	fn create_surface(&mut self, event_loop: &ActiveEventLoop, token: Option<ActivationToken>) -> anyhow::Result<()> {
 		let mut attributes = Window::default_attributes()
 			.with_title("LVRR")
+			.with_decorations(false)
+			.with_transparent(true)
 			.with_inner_size(LogicalSize::new(1180.0, 820.0))
 			.with_min_inner_size(LogicalSize::new(860.0, 600.0))
 			// sets the X11 class too
@@ -241,10 +247,15 @@ impl App {
 		}
 	}
 
-	fn push_event(&mut self, event: &wgui::event::Event) {
-		if let Err(e) = self.frontend.layout.push_event(event, &mut (), &mut ()) {
-			log::warn!("{e:?}");
-		}
+	fn push_event(&mut self, event: &wgui::event::Event) -> EventResult {
+		self
+			.frontend
+			.layout
+			.push_event(event, &mut (), &mut ())
+			.unwrap_or_else(|e| {
+				log::warn!("{e:?}");
+				EventResult::Consumed
+			})
 	}
 
 	fn redraw(&mut self) -> anyhow::Result<()> {
@@ -362,6 +373,8 @@ impl ApplicationHandler<UserEvent> for App {
 			WindowEvent::CursorMoved { position, .. } => {
 				surface.mouse = vec2(position.x as f32, position.y as f32);
 				let pos = surface.mouse / scale;
+				let icon = resize_direction(surface).map_or(CursorIcon::Default, CursorIcon::from);
+				surface.window.set_cursor(icon);
 				self.push_event(&wgui::event::Event::MouseMotion(MouseMotionEvent { pos, device }));
 			}
 			WindowEvent::MouseInput {
@@ -369,16 +382,29 @@ impl ApplicationHandler<UserEvent> for App {
 				button: MouseButton::Left,
 				..
 			} => {
+				if state == ElementState::Pressed
+					&& let Some(direction) = resize_direction(surface)
+				{
+					let _ = surface.window.drag_resize_window(direction);
+					return;
+				}
 				let event = MouseButtonEvent {
 					pos: surface.mouse / scale,
 					index: MouseButtonIndex::Left,
 					device,
 				};
-				self.push_event(&if state == ElementState::Pressed {
+				let pressed = state == ElementState::Pressed;
+				let result = self.push_event(&if pressed {
 					wgui::event::Event::MouseDown(event)
 				} else {
 					wgui::event::Event::MouseUp(event)
 				});
+				if pressed
+					&& matches!(result, EventResult::NoHit)
+					&& let Some(surface) = &self.surface
+				{
+					let _ = surface.window.drag_window();
+				}
 			}
 			WindowEvent::MouseWheel { delta, .. } => {
 				let delta = match delta {
@@ -422,4 +448,26 @@ impl ApplicationHandler<UserEvent> for App {
 		};
 		event_loop.set_control_flow(ControlFlow::WaitUntil(wake));
 	}
+}
+
+/// The edge or corner under the pointer, if it is close enough to resize the window
+fn resize_direction(surface: &Surface) -> Option<ResizeDirection> {
+	let size = surface.window.inner_size();
+	let edge = RESIZE_EDGE * surface.scale;
+	let (x, y) = (surface.mouse.x, surface.mouse.y);
+	let left = x < edge;
+	let right = x > size.width as f32 - edge;
+	let top = y < edge;
+	let bottom = y > size.height as f32 - edge;
+	Some(match (left, right, top, bottom) {
+		(true, _, true, _) => ResizeDirection::NorthWest,
+		(_, true, true, _) => ResizeDirection::NorthEast,
+		(true, _, _, true) => ResizeDirection::SouthWest,
+		(_, true, _, true) => ResizeDirection::SouthEast,
+		(true, ..) => ResizeDirection::West,
+		(_, true, ..) => ResizeDirection::East,
+		(_, _, true, _) => ResizeDirection::North,
+		(.., true) => ResizeDirection::South,
+		_ => return None,
+	})
 }
