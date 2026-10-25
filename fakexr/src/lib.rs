@@ -216,6 +216,13 @@ pub fn set_aim(session: xr::Session, path: UserPath, pose: xr::Posef) {
     get_hand_data(path, &session).aim_pose.store(pose);
 }
 
+/// Sets the linear velocity that xrLocateSpace reports for spaces on the hand's grip pose, or
+/// reports none again with None.
+pub fn set_grip_velocity(session: xr::Session, path: UserPath, velocity: Option<xr::Vector3f>) {
+    let session = session.to_handle().unwrap();
+    get_hand_data(path, &session).grip_velocity.store(velocity);
+}
+
 #[track_caller]
 pub fn check_no_suggested_bindings(action: xr::Action, profile: xr::Path) -> bool {
     let action = xr::Action::to_handle(action).unwrap();
@@ -893,6 +900,7 @@ struct HandData {
     profile: AtomicCell<xr::Path>,
     grip_pose: AtomicCell<xr::Posef>,
     aim_pose: AtomicCell<xr::Posef>,
+    grip_velocity: AtomicCell<Option<xr::Vector3f>>,
 }
 
 impl Default for HandData {
@@ -902,6 +910,7 @@ impl Default for HandData {
             profile: Default::default(),
             grip_pose: xr::Posef::IDENTITY.into(),
             aim_pose: xr::Posef::IDENTITY.into(),
+            grip_velocity: Default::default(),
         }
     }
 }
@@ -1082,6 +1091,26 @@ struct Space {
 }
 
 impl Space {
+    /// The velocity set with set_grip_velocity, for an action space bound to a hand's grip.
+    fn grip_velocity(&self) -> Option<xr::Vector3f> {
+        let SpaceType::Action { hand, action } = &self.ty else {
+            return None;
+        };
+        let session = self.session.upgrade()?;
+        let hand = hand.unwrap_or(UserPath::LeftHand);
+        let hand_data = get_hand_data(hand, &session);
+        let velocity = hand_data.grip_velocity.load()?;
+        let instance = session.instance.upgrade()?;
+        let action = action.upgrade()?;
+        let grip = format!("{}/input/grip/pose", hand.as_path());
+        let bindings = action.suggested.lock().unwrap();
+        bindings
+            .get(&hand_data.profile.load())?
+            .iter()
+            .any(|&path| instance.get_path_value(path).ok().flatten().as_ref() == Some(&grip))
+            .then_some(velocity)
+    }
+
     fn get_pose_relative_to_local(&self) -> Result<xr::SpaceLocation, xr::Result> {
         let default = || xr::SpaceLocation {
             ty: xr::SpaceLocation::TYPE,
@@ -2278,6 +2307,7 @@ extern "system" fn locate_space(
         pose: xr::Posef::IDENTITY,
     };
 
+    let mut velocity_out = None;
     if !next.is_null() {
         let header = next as *mut xr::BaseOutStructure;
         unsafe {
@@ -2291,6 +2321,7 @@ extern "system" fn locate_space(
                     angular_velocity: Default::default(),
                 });
                 out_loc.next = velo as _;
+                velocity_out = Some(velo);
             }
         }
     }
@@ -2325,6 +2356,17 @@ extern "system" fn locate_space(
 
             let out_mat = base_mat.inverse() * target_mat;
             out_loc.pose = mat_to_pose(out_mat);
+        }
+    }
+
+    // Reference spaces don't move, so a velocity's length is the same in all of them.
+    if let Some(velo) = velocity_out
+        && out_loc.location_flags.contains(*LOCATION_FLAGS_TRACKED)
+        && let Some(velocity) = space.grip_velocity()
+    {
+        unsafe {
+            (*velo).velocity_flags = xr::SpaceVelocityFlags::LINEAR_VALID;
+            (*velo).linear_velocity = velocity;
         }
     }
 
