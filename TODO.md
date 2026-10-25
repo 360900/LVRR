@@ -32,28 +32,14 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
 
 ## 2. Fake success and crash insurance
 
-8. Calls that succeed without doing anything (S, `SetOverlayRaw` M)
-   - `GetBindingVariant`, `GetComponentStateForBinding` leave output buffers unwritten
-   - `ShowMessageOverlay` returns `ButtonPress_0` without showing anything; `CouldntFindSystemOverlay` is the honest answer
-   - `SetOverlayRaw` returns success but draws nothing
-   - `HookScreenshot` succeeds but `VREvent_RequestScreenshot` is never sent
-   - `SetOverlayInputMethod(Mouse)` succeeds with no effect
-9. Interfaces not served at all, null for apps that don't check (S)
-   - IVRTrackedCamera, IVRResources, IVRNotifications, IVRDriverManager, IVRSpatialAnchors, IVRIOBuffer, IVRIPCResourceManagerClient, IVRControlPanel_001
-   - serve stubs that report nothing available
+8. Calls that succeed without doing anything (S)
+   - `SetOverlayRaw` fails before the app's first frame (nothing says which graphics API to upload with yet) and from a thread without the app's GL context; the pixels could be kept until a backend exists
 10. Device properties (S)
-    - `SecondsFromVsyncToPhotons_Float`
-    - `DisplaySupportsRuntimeFramerateChange_Bool`, `DisplayAvailableFrameRates_Float_Array`
-    - `CurrentUniverseId_Uint64`, `DashboardScale_Float`
-    - HMD `RenderModelName`, `ResourceRoot`, `InputProfilePath`, `RegisteredDeviceType`
-    - `Has*Component_Bool`
-    - all Matrix34 properties (`CameraToHeadTransform`)
-    - role specific tracker `ControllerType`
-    - wrong-type getters should return `WrongDataType`, not `UnknownProperty`
+    - HMD `RegisteredDeviceType` and `InputProfilePath` unknown for WMR, Steam Link, Pico, Cosmos, Focus 3 and Frame headsets (reported as unknown and as the tracking system name)
+    - `SecondsFromVsyncToPhotons` is 0, as `GetTimeSinceLastVsync` counts from the display time; SteamVR's drivers report ~11 ms before an earlier vsync
+    - tracker roles only from WiVRn's body tracking names; `vive_tracker_<role>` bindings still ignored (trackers: 21)
 11. Device presence (S)
-    - pre-created hand slots report `Controller` and are returned by `GetTrackedDeviceIndexForControllerRole` while disconnected; SteamVR answers Invalid
-    - trackers: `GetControllerRoleForTrackedDeviceIndex` and `ControllerRoleHint` disagree
-    - hands taking over from a controller without a profile (Quest 1 on WiVRn) keep the controller's identity
+    - `GetControllerRoleForTrackedDeviceIndex` keeps a disconnected controller's hand; whether SteamVR does is unverified
 
 ## 3. Overlay apps and interactive overlays
 
