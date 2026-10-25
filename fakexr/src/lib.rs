@@ -222,6 +222,7 @@ thread_local! {
     static VISIBILITY_MASK: RefCell<Option<(Vec<xr::Vector2f>, Vec<u32>)>> = const { RefCell::new(None) };
     static HEADLESS_SUPPORTED: Cell<bool> = const { Cell::new(false) };
     static BINDING_ACTIVITY: Cell<bool> = const { Cell::new(false) };
+    static ACTIONS_NEED_PROFILE: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Makes instances created on this thread report input actions active on a hand only like
@@ -230,6 +231,12 @@ thread_local! {
 /// both hands once a test set its state.
 pub fn set_binding_activity(enabled: bool) {
     BINDING_ACTIVITY.set(enabled);
+}
+
+/// Makes actions read on this thread inactive for a hand without an interaction profile, like a
+/// real runtime. Off by default, so tests can set action states without binding a profile.
+pub fn set_actions_need_profile(need: bool) {
+    ACTIONS_NEED_PROFILE.set(need);
 }
 
 /// Sets the vertices and indices xrGetVisibilityMaskKHR returns on this thread. Without one, it
@@ -1124,6 +1131,22 @@ impl Session {
         xr
     }
 
+    /// Whether actions read for `subaction_path` can be active: with [set_actions_need_profile],
+    /// only while that hand (or either hand, for NULL) has an interaction profile, like a real
+    /// runtime binds actions through one.
+    fn is_bound(&self, subaction_path: xr::Path) -> bool {
+        if !ACTIONS_NEED_PROFILE.get() {
+            return true;
+        }
+        let instance = self.instance.upgrade().unwrap();
+        let has_profile = |hand: &HandData| hand.profile.load() != xr::Path::NULL;
+        match instance.get_user_path(subaction_path) {
+            Ok(Some(UserPath::LeftHand)) => has_profile(&self.left_hand),
+            Ok(Some(UserPath::RightHand)) => has_profile(&self.right_hand),
+            _ => has_profile(&self.left_hand) || has_profile(&self.right_hand),
+        }
+    }
+
     fn get_action_if_attached(
         &self,
         info: *const xr::ActionStateGetInfo,
@@ -1157,7 +1180,7 @@ impl Session {
         if !instance.binding_activity {
             return (
                 action.get_hand_state(subaction_path),
-                action.active.load(Ordering::Relaxed),
+                action.active.load(Ordering::Relaxed) && self.is_bound(subaction_path),
             );
         }
         let synced = set.synced_hands.load();
