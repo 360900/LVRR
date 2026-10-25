@@ -3171,6 +3171,8 @@ fn names_on<P: InteractionProfile>(paths: &[(&CStr, &str)]) {
 fn origin_names_per_controller() {
     use crate::input::profiles::{
         meta_touch_plus::MetaTouchPlus,
+        pico::Pico4,
+        vive_cosmos::ViveCosmos,
         vive_focus3::ViveFocus3,
         wmr::{
             hp_motion_controller::ReverbG2Controller, ms_motion_controller::HolographicController,
@@ -3247,6 +3249,14 @@ fn origin_names_per_controller() {
             "Right Hand Oculus Touch Haptics",
         ),
     ]);
+    names_on::<Pico4>(&[(
+        c"/user/hand/left/input/joystick",
+        "Left Hand Pico Controller Joystick",
+    )]);
+    names_on::<ViveCosmos>(&[(
+        c"/user/hand/right/input/bumper",
+        "Right Hand Vive Cosmos Controller Bumper Button",
+    )]);
     names_on::<MetaTouchPlus>(&[(
         c"/user/hand/left/input/trigger",
         "Left Hand Oculus Touch Trigger",

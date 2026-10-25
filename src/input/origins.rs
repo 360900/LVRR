@@ -37,6 +37,8 @@ pub fn openvr_input(controller_type: &str, subpath: DynSubpath) -> String {
             "thumbstick"
         }
         DynSubpath::Thumbstick => "joystick",
+        // OpenXR's name for the Cosmos bumpers.
+        DynSubpath::Shoulder => "bumper",
         DynSubpath::Menu => match controller_type {
             "vive_controller" | "holographic_controller" | "hpmotioncontroller" => {
                 "application_menu"
@@ -157,6 +159,7 @@ const OTHER_CONTROLLER_TYPES: &[(&str, &str)] = &[
     // Not named in SteamVR's files.
     ("hpmotioncontroller", "HP Motion Controller"),
     ("vive_focus3_controller", "Vive Focus 3 Controller"),
+    ("vive_cosmos_controller", "Vive Cosmos Controller"),
 ];
 
 /// Names of inputs no driver names, from SteamVR's
