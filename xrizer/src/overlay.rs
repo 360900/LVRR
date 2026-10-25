@@ -977,6 +977,7 @@ impl Overlay {
                 let images = swapchain
                     .enumerate_images()
                     .map_err(failed("Enumerating overlay swapchain images"))?;
+                backend.swapchain_created(&info);
                 backend.store_swapchain_images(images, G::from_openxr_format(info.format));
                 map.insert(
                     key,

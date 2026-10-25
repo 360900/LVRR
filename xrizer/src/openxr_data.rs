@@ -18,7 +18,7 @@ use parking_lot::{RwLock, RwLockReadGuard};
 use std::collections::HashSet;
 use std::mem::ManuallyDrop;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 /// How long to wait for the runtime to move the session to a requested state.
@@ -60,6 +60,9 @@ pub struct OpenXrData<C: Compositor> {
     /// [Self::get_display_time].
     display_time: AtomicXrTime,
     pub display_period_nanos: AtomicI64,
+    /// The runtime's refresh rate in Hz as f32 bits, 0 until it's known. Cached, as games ask
+    /// every frame and each query is a round trip to the runtime's server.
+    refresh_rate: AtomicU32,
     pub enabled_extensions: xr::ExtensionSet,
     /// The interaction profiles that were bound when we probed at init - see
     /// [crate::input::probe_interaction_profiles].
@@ -72,9 +75,13 @@ pub struct OpenXrData<C: Compositor> {
     /// Set once the application was told to quit because the runtime stopped or lost the session.
     /// No new session is started afterwards, so this and `lost` are never cleared.
     exiting: AtomicBool,
-    /// Set once the runtime lost the session or instance. Every call on the session fails from
-    /// then on, so callers skip them.
+    /// Kills the application if it doesn't quit in time after the runtime stopped the session.
+    pub quit_watchdog: crate::quit_watchdog::QuitWatchdog,
+    /// Set once the runtime lost the session or instance, or stopped the session and we ended it.
+    /// Every call on the session fails or is pointless from then on, so callers skip them.
     lost: AtomicBool,
+    /// Set when the runtime stops the session, until [Self::poll_events] ends it.
+    runtime_stopped: AtomicBool,
     /// Set when creating the real session failed, so Submit doesn't tear down the temporary
     /// session for another attempt every frame.
     session_creation_failed: AtomicBool,
@@ -329,13 +336,16 @@ impl<C: Compositor> OpenXrData<C> {
             session_data,
             display_time: AtomicXrTime(1.into()), // This will get replaced on the first WaitGetPoses
             display_period_nanos: 11111111.into(), // This will get replaced on the first WaitGetPoses
+            refresh_rate: 0.into(),
             enabled_extensions: exts,
             probed_profiles,
             application_type,
             headless,
             exit_requested: false.into(),
             exiting: false.into(),
+            quit_watchdog: Default::default(),
             lost: false.into(),
+            runtime_stopped: false.into(),
             session_creation_failed: false.into(),
             max_layer_count,
             logged_errors: Mutex::default(),
@@ -407,6 +417,9 @@ impl<C: Compositor> OpenXrData<C> {
                 data.state = state;
             }
         }
+        if self.runtime_stopped.load(Ordering::Relaxed) {
+            self.end_stopped_session(session);
+        }
         if self.is_lost() {
             return;
         }
@@ -455,7 +468,10 @@ impl<C: Compositor> OpenXrData<C> {
                         xr::SessionState::STOPPING if exit_requested => {
                             debug!("session stopping at our request, not pushing Quit");
                         }
-                        xr::SessionState::STOPPING => self.push_quit(false),
+                        xr::SessionState::STOPPING => {
+                            self.push_quit(false);
+                            self.runtime_stopped.store(true, Ordering::Relaxed);
+                        }
                         xr::SessionState::LOSS_PENDING => self.mark_lost("session loss pending"),
                         // We only end the session ourselves, so the runtime ended it.
                         xr::SessionState::EXITING if !exit_requested => {
@@ -493,8 +509,9 @@ impl<C: Compositor> OpenXrData<C> {
                     if is_stale(event.session(), &present) {
                         continue;
                     }
-                    info!("User present: {present}");
+                    // Monado reports the presence when a session begins too, changed or not.
                     if self.user_present.swap(present, Ordering::Relaxed) != present {
+                        info!("User present: {present}");
                         self.push_event(
                             if present {
                                 vr::EVREventType::TrackedDeviceUserInteractionStarted
@@ -505,13 +522,52 @@ impl<C: Compositor> OpenXrData<C> {
                         );
                     }
                 }
-                _ => {
-                    info!("unknown event");
+                xr::Event::DisplayRefreshRateChangedFB(event) => {
+                    let (from, to) = (
+                        event.from_display_refresh_rate(),
+                        event.to_display_refresh_rate(),
+                    );
+                    info!("Display refresh rate changed from {from} Hz to {to} Hz");
+                    // A rate that isn't positive is unknown, so it's queried again.
+                    let to = if to.is_finite() && to > 0.0 { to } else { 0.0 };
+                    self.refresh_rate.store(to.to_bits(), Ordering::Relaxed);
                 }
+                // Hidden area meshes are fetched from the runtime whenever the app asks.
+                xr::Event::VisibilityMaskChangedKHR(_) => debug!("visibility mask changed"),
+                xr::Event::EventsLost(event) => {
+                    warn!("The runtime dropped {} events", event.lost_event_count())
+                }
+                _ => debug!("unhandled event"),
             }
         }
 
         state
+    }
+
+    /// Ends the session the runtime stopped, as OpenXR asks of apps: some runtimes keep the app's
+    /// last frame up meanwhile, and WiVRn loses the session only after 10 seconds. The app was told
+    /// to quit and no new session follows, so the session is done with like a lost one. Frame
+    /// calls must not run concurrently with xrEndSession, so this tries again on the next poll
+    /// while one is in progress.
+    fn end_stopped_session(&self, session: xr::sys::Session) {
+        let Some(mut data) = self.session_data.0.try_write() else {
+            return;
+        };
+        if !self.runtime_stopped.swap(false, Ordering::Relaxed) || self.is_lost() {
+            return;
+        }
+        // Another thread restarted the session in between, which isn't stopped then.
+        if data.session.as_raw() != session || data.state != xr::SessionState::STOPPING {
+            return;
+        }
+        match data.session.end() {
+            Ok(_) => {
+                info!("The runtime stopped the session, ended it");
+                data.state = xr::SessionState::IDLE;
+                self.lost.store(true, Ordering::Relaxed);
+            }
+            Err(e) => self.handle_error("xrEndSession", e),
+        }
     }
 
     /// Mirrors SteamVR's dashboard taking input focus when the runtime does (e.g. its system menu
@@ -648,7 +704,9 @@ impl<C: Compositor> OpenXrData<C> {
         self.push_quit(true);
     }
 
-    /// Sends the application VREvent_Quit, at most once.
+    /// Sends the application VREvent_Quit, at most once. Like SteamVR, an app that doesn't quit
+    /// when asked to is killed, but not when the connection was lost, as SteamVR's server can't
+    /// kill apps once it's gone.
     fn push_quit(&self, connection_lost: bool) {
         if self.exiting.swap(true, Ordering::Relaxed) {
             return;
@@ -670,6 +728,9 @@ impl<C: Compositor> OpenXrData<C> {
                 },
             },
         });
+        if !connection_lost {
+            self.quit_watchdog.start();
+        }
     }
 
     /// Why [Self::restart_session] would refuse to start a new session, if it would.
@@ -892,26 +953,29 @@ impl<C: Compositor> OpenXrData<C> {
         self.check("xrLocateSpace", located).flatten()
     }
 
+    /// The display's refresh rate in Hz: the runtime's while it reports one, otherwise from the
+    /// frame period.
     pub fn get_refresh_rate(&self) -> f32 {
-        let get_fallback_rate = || {
-            Duration::from_nanos(
-                self.display_period_nanos
-                    .load(Ordering::Relaxed)
-                    .try_into()
-                    .unwrap(),
-            )
-            .as_secs_f32()
-            .recip()
+        let cached = f32::from_bits(self.refresh_rate.load(Ordering::Relaxed));
+        if cached > 0.0 {
+            return cached;
+        }
+        let get_fallback_rate = || match self.display_period().as_secs_f32() {
+            period if period > 0.0 => period.recip(),
+            _ => 90.0,
         };
-        if !self.enabled_extensions.fb_display_refresh_rate {
+        if !self.enabled_extensions.fb_display_refresh_rate || self.is_lost() {
             return get_fallback_rate();
         }
 
-        self.session_data
-            .get()
-            .session
-            .get_display_refresh_rate()
-            .unwrap_or_else(|_| get_fallback_rate())
+        let rate = self.session_data.get().session.get_display_refresh_rate();
+        match self.check("xrGetDisplayRefreshRateFB", rate) {
+            Some(rate) if rate.is_finite() && rate > 0.0 => {
+                self.refresh_rate.store(rate.to_bits(), Ordering::Relaxed);
+                rate
+            }
+            _ => get_fallback_rate(),
+        }
     }
 
     /// Time since the most recent vsync and a running vsync count, extrapolated from the last
@@ -1105,6 +1169,7 @@ impl std::fmt::Display for GraphicalSession {
         match self {
             GraphicalSession::Vulkan(_) => f.write_str("GraphicalSession::Vulkan"),
             GraphicalSession::OpenGL(_) => f.write_str("GraphicalSession::OpenGL"),
+            GraphicalSession::GlBridge(_) => f.write_str("GraphicalSession::GlBridge"),
             GraphicalSession::Headless(_) => f.write_str("GraphicalSession::Headless"),
             #[cfg(test)]
             GraphicalSession::Fake(_) => f.write_str("GraphicalSession::Fake"),
@@ -2139,6 +2204,76 @@ mod tests {
             head_pose(&data, Origin::Seated),
             pitch_only(pitch, [0.0, 0.0, 0.0]),
         );
+    }
+
+    /// Games ask for the refresh rate every frame, so the runtime's is only queried again when it
+    /// reports a change, and not at all once the session is lost.
+    #[test]
+    fn refresh_rate_cached() {
+        crate::init_logging();
+        fakexr::advertise_extension(xr::sys::FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+        let data = OpenXrData::<FakeCompositor>::new(
+            &Injector::default(),
+            openvr::EVRApplicationType::Other,
+        )
+        .unwrap();
+        assert!(data.enabled_extensions.fb_display_refresh_rate);
+        let session = data.session_data.get().session.as_raw();
+        let queries = || fakexr::display_refresh_rate_queries(session);
+
+        assert_eq!(data.get_refresh_rate(), 90.0);
+        assert_eq!(data.get_refresh_rate(), 90.0);
+        assert_eq!(queries(), 1);
+        fakexr::set_display_refresh_rate(session, 120.0);
+        data.poll_events();
+        assert_eq!(data.get_refresh_rate(), 120.0);
+        assert_eq!(queries(), 1);
+
+        // An unknown rate is queried again, and the frame period stands in for it.
+        fakexr::set_display_refresh_rate(session, 0.0);
+        data.poll_events();
+        data.set_frame_timing(xr::Time::from_nanos(1), 12_500_000);
+        assert_eq!(data.get_refresh_rate(), 80.0);
+        assert_eq!(queries(), 2);
+        data.set_frame_timing(xr::Time::from_nanos(1), 0);
+        assert_eq!(data.get_refresh_rate(), 90.0);
+
+        fakexr::lose_session(session);
+        data.poll_events();
+        assert!(data.is_lost());
+        assert_eq!(data.get_refresh_rate(), 90.0);
+        assert_eq!(queries(), 3);
+    }
+
+    /// A session the runtime stops is ended, but never while another thread is in a frame call
+    /// on it: that thread holds the session, so ending waits for the next poll.
+    #[test]
+    fn stopped_session_ended_between_frame_calls() {
+        crate::init_logging();
+        let data = OpenXrData::<FakeCompositor>::new(
+            &Injector::default(),
+            openvr::EVRApplicationType::Other,
+        )
+        .unwrap();
+        let session = data.session_data.get().session.as_raw();
+        let (tx, rx) = std::sync::mpsc::channel();
+        fakexr::on_next_end(session, move || {
+            let _ = tx.send(());
+        });
+        data.session_data.get().session.request_exit().unwrap();
+        let state = data.poll_events_impl(&data.session_data.get());
+        data.session_data.0.write().state = state.unwrap();
+
+        let frame_call = data.session_data.get();
+        data.end_stopped_session(session);
+        assert!(!data.is_lost());
+        assert!(rx.try_recv().is_err());
+        drop(frame_call);
+
+        data.poll_events();
+        assert!(data.is_lost());
+        assert!(rx.try_recv().is_ok());
+        assert_eq!(data.session_data.get().state, xr::SessionState::IDLE);
     }
 
     /// Ending the session ourselves isn't the runtime taking input focus, and focus the runtime

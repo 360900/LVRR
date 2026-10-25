@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString, c_char};
 use std::sync::{
     Arc, LazyLock, Mutex, MutexGuard, OnceLock, RwLock, Weak,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     mpsc,
 };
 
@@ -412,6 +412,29 @@ pub fn last_views_time(session: xr::Session) -> xr::Time {
     session.views_time.load()
 }
 
+/// Changes the refresh rate xrGetDisplayRefreshRateFB reports for `session` and queues
+/// XrEventDataDisplayRefreshRateChangedFB, like WiVRn when the headset changes it.
+pub fn set_display_refresh_rate(session: xr::Session, hz: f32) {
+    let s = session.to_handle().unwrap();
+    let from = s.refresh_rate.swap(hz);
+    send_event(
+        &s.event_sender,
+        xr::EventDataDisplayRefreshRateChangedFB {
+            ty: xr::EventDataDisplayRefreshRateChangedFB::TYPE,
+            next: std::ptr::null(),
+            from_display_refresh_rate: from,
+            to_display_refresh_rate: hz,
+        },
+        None,
+    );
+}
+
+/// How often xrGetDisplayRefreshRateFB was called on `session`.
+pub fn display_refresh_rate_queries(session: xr::Session) -> usize {
+    let s = session.to_handle().unwrap();
+    s.refresh_rate_queries.load(Ordering::Relaxed)
+}
+
 /// Loses `session` like Monado does when the connection drops: LOSS_PENDING is queued and the
 /// session's calls fail with ERROR_SESSION_LOST from now on.
 pub fn lose_session(session: xr::Session) {
@@ -639,6 +662,9 @@ pub unsafe extern "system" fn get_instance_proc_addr(
                     (EnumerateBoundSourcesForAction),
                     (GetInputSourceLocalizedName),
                     GetVisibilityMaskKHR,
+                    GetDisplayRefreshRateFB,
+                    (EnumerateDisplayRefreshRatesFB),
+                    (RequestDisplayRefreshRateFB),
                     CreateHandTrackerEXT,
                     DestroyHandTrackerEXT,
                     LocateHandJointsEXT,
@@ -910,6 +936,8 @@ struct Session {
     views: Mutex<Option<[(xr::Posef, xr::Fovf); 2]>>,
     views_time: AtomicCell<xr::Time>,
     last_projection_layer: Mutex<Option<ProjectionLayer>>,
+    refresh_rate: AtomicCell<f32>,
+    refresh_rate_queries: AtomicUsize,
 }
 
 impl Session {
@@ -1323,6 +1351,8 @@ extern "system" fn create_session(
         views: Mutex::default(),
         views_time: AtomicCell::new(xr::Time::from_nanos(0)),
         last_projection_layer: Mutex::default(),
+        refresh_rate: 90.0.into(),
+        refresh_rate_queries: 0.into(),
     });
 
     DEFAULT_PROFILES.with_borrow(|profiles| {
@@ -1758,6 +1788,16 @@ extern "system" fn path_to_string(
         out[0..buf.len()].copy_from_slice(&buf);
     }
 
+    xr::Result::SUCCESS
+}
+
+extern "system" fn get_display_refresh_rate_f_b(
+    session: xr::Session,
+    rate: *mut f32,
+) -> xr::Result {
+    let session = get_session!(session);
+    session.refresh_rate_queries.fetch_add(1, Ordering::Relaxed);
+    unsafe { *rate = session.refresh_rate.load() };
     xr::Result::SUCCESS
 }
 

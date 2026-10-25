@@ -394,7 +394,7 @@ impl vr::IVRRenderModels006_Interface for RenderModels {
         _: *const std::ffi::c_char,
         _: *const std::ffi::c_char,
     ) -> u64 {
-        crate::warn_unimplemented!("GetComponentButtonMask");
+        // Models only have the whole model and pose components here, none of which are buttons.
         0
     }
     fn GetComponentName(

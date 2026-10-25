@@ -285,6 +285,8 @@ impl IVRClientCore003_Interface for ClientCore {
             warn!("ClientCore::Cleanup called without a prior successful Init");
             return;
         };
+        // The app shut down, so it's no longer killed if it keeps running after a quit.
+        data.quit_watchdog.stop();
 
         // Panicking here would abort the app, so just report it. Whatever is still holding a
         // reference keeps the OpenXR data alive until it lets go; the data gets destroyed then.
@@ -571,7 +573,10 @@ mod tests {
         let outstanding = core.openxr.read().unwrap().as_ref().unwrap().clone();
         assert_eq!(Arc::strong_count(&outstanding), 2);
 
+        // An app shutting down after a quit isn't killed, even while the data lives on.
+        outstanding.quit_watchdog.start();
         core.clone().Cleanup();
+        assert_eq!(outstanding.quit_watchdog.deadline(), None);
 
         // We must have let go of our reference, but not destroyed data that is still in use.
         assert!(core.openxr.read().unwrap().is_none());

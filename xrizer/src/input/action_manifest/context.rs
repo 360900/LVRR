@@ -8,7 +8,7 @@ use crate::input::profiles::{DynInputPath, paths};
 use crate::input::skeletal::SkeletalInputActionData;
 use crate::input::{ActionData, BoundPose, Input, InteractionProfile};
 use crate::openxr_data::{self, Hand};
-use log::{info, trace, warn};
+use log::{debug, info, trace, warn};
 use openxr as xr;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -118,6 +118,8 @@ impl BindingsLoadContext<'_> {
             .or_default();
         Some(BindingsProfileLoadContext {
             interaction_profile,
+            profile_name: P::profile_path(),
+            adapted: false,
             action_sets: self.action_sets,
             actions: &mut self.actions,
             names: &mut self.names,
@@ -139,6 +141,10 @@ impl BindingsLoadContext<'_> {
 
 pub(super) struct BindingsProfileLoadContext<'a> {
     interaction_profile: xr::Path,
+    profile_name: &'static str,
+    /// The bindings were made for another controller, so they're expected to have inputs this
+    /// one lacks.
+    pub adapted: bool,
     pub action_sets: &'a HashMap<String, xr::ActionSet>,
     pub actions: &'a mut LoadedActionDataMap,
     names: &'a mut XrNames,
@@ -239,6 +245,17 @@ fn hand_to_path(hand: Hand) -> &'static str {
 }
 
 impl BindingsProfileLoadContext<'_> {
+    /// Logs a binding this controller can't use, which SteamVR ignores silently: binding files
+    /// often list inputs that only other models of the controller have. Expected in bindings
+    /// adapted from another controller, so those only show at debug level.
+    pub fn unusable_binding(&self, message: std::fmt::Arguments) {
+        if self.adapted {
+            debug!("{}: {message}", self.profile_name);
+        } else {
+            crate::log_unique!(log::Level::Info, "{}: {message}", self.profile_name);
+        }
+    }
+
     pub fn hand_path(&self, hand: Hand) -> xr::Path {
         match hand {
             Hand::Left => self.hands[0],

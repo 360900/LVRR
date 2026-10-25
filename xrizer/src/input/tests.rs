@@ -735,6 +735,12 @@ fn index_finger_curls() {
             ],
         );
     }
+    // The Index's pinch gesture (Blade & Sorcery grabs with it) follows the trigger.
+    f.verify_custom_bindings(
+        path,
+        c"/actions/hands/in/grabpinch",
+        ["/user/hand/left/input/trigger/value".into()],
+    );
 }
 
 #[test]

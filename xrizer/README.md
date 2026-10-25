@@ -87,6 +87,8 @@ If a launcher strips `RUST_LOG`, put the same filter string in a file named `log
 
 `XRIZER_RECENTER_STANDING` - `1` makes the runtime's recenter (e.g. holding the Quest system button) recenter standing games too, not just seated ones. Off by default, since on a room-scale setup the standing origin is the calibrated play area.
 
+`XRIZER_KILL_ON_QUIT` - `0` keeps a game running when it doesn't quit after the runtime asks it to (e.g. WiVRn's stop button). By default, like SteamVR, it's killed 5 seconds later, or 30 if it acknowledges the quit.
+
 # Reporting bugs
 
 Attach a log. Logs are in `$XDG_STATE_HOME/xrizer` (or `~/.local/state/xrizer`), one file per process named `xrizer-<timestamp>-<pid>.txt`. The newest is usually the one you want; launchers often start a short-lived process first to check for a headset. Logs older than two days are deleted on startup.

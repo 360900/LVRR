@@ -1698,6 +1698,7 @@ impl<G: GraphicsBackend> FrameController<G> {
         let images = swapchain.enumerate_images()?;
 
         let format = G::from_openxr_format(create_info.format);
+        backend.swapchain_created(create_info);
         backend.store_swapchain_images(images, format);
         debug!(
             "Created new swapchain: {}x{}, format = {:?}",
@@ -4600,6 +4601,7 @@ mod tests {
         f.comp.PostPresentHandoff();
         assert_eq!(f.wait_get_poses(), DoNotHaveFocus);
         assert_eq!(quit_events(&system), [true]);
+        assert!(f.comp.openxr.quit_watchdog.deadline().is_none());
     }
 
     /// xrWaitFrame fails on a lost session, so WaitGetPoses has to keep a game that ignores Quit
@@ -4694,14 +4696,21 @@ mod tests {
         assert_eq!(quit_events(&system), [true]);
     }
 
-    /// WiVRn stops the app and loses its session if it doesn't quit in time. The app is only told
-    /// to quit once.
+    /// WiVRn stops the app (e.g. from its app list) and loses its session if it doesn't quit in
+    /// time. The session is ended right away, so no more frames are waited for, and the app is
+    /// only told to quit once.
     #[test]
     fn session_stopped_then_lost() {
         let f = Fixture::new();
         let system = f.system();
         f.ensure_real_session(false);
+        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
 
+        let (tx, rx) = std::sync::mpsc::channel();
+        fakexr::on_next_end(f.raw_session(), move || {
+            let _ = tx.send(());
+        });
         f.comp
             .openxr
             .session_data
@@ -4709,11 +4718,15 @@ mod tests {
             .session
             .request_exit()
             .unwrap();
-        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(f.wait_get_poses(), DoNotHaveFocus);
+        assert!(rx.try_recv().is_ok(), "stopped session wasn't ended");
+        assert!(f.comp.openxr.is_lost());
+        assert_eq!(f.submit(vr::EVREye::Left), DoNotHaveFocus);
+        f.comp.PostPresentHandoff();
         fakexr::lose_session(f.raw_session());
         assert_eq!(f.wait_get_poses(), DoNotHaveFocus);
-        assert!(f.comp.openxr.is_lost());
         assert_eq!(quit_events(&system), [false]);
+        assert!(f.comp.openxr.quit_watchdog.deadline().is_some());
     }
 
     /// A loss first seen when the frame's views are located at the end of the frame, because
@@ -4761,16 +4774,16 @@ mod tests {
             .session
             .request_exit()
             .unwrap();
-        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(f.wait_get_poses(), DoNotHaveFocus);
         assert_eq!(quit_events(&system), [false]);
         assert_eq!(f.submit(vr::EVREye::Left), DoNotHaveFocus);
         assert!(!f.comp.openxr.session_data.get().is_real_session());
 
         // No frame is ever waited, so WaitGetPoses has to keep a game ignoring Quit from spinning:
         // a call right after another one waits for the next frame.
-        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(f.wait_get_poses(), DoNotHaveFocus);
         let start = Instant::now();
-        assert_eq!(f.wait_get_poses(), None);
+        assert_eq!(f.wait_get_poses(), DoNotHaveFocus);
         assert!(start.elapsed() >= std::time::Duration::from_millis(1));
     }
 
