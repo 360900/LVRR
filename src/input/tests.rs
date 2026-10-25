@@ -2855,8 +2855,17 @@ fn binding_info_modes() {
             "button"
         ]]
     );
-    // Not bound, see scalar_constant_bindings.
-    assert!(scalar(c"/actions/main/in/reverse").is_empty());
+    // Values other than 1 are bound too.
+    assert_eq!(
+        scalar(c"/actions/main/in/reverse"),
+        [[
+            "/user/hand/left",
+            "/input/x",
+            "scalar_constant",
+            "value",
+            "button"
+        ]]
+    );
 }
 
 #[test]
