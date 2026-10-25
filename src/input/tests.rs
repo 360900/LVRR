@@ -2505,10 +2505,7 @@ fn action_origins() {
         ),
         vr::EVRInputError::None
     );
-    assert_eq!(
-        buf_str(&name),
-        "Left Hand / touch controller / /user/hand/left/input/trigger/touch"
-    );
+    assert_eq!(buf_str(&name), "Left Hand Oculus Touch Trigger");
 
     // IVRInput_004 has no section mask and gets the whole name.
     let mut name_004 = [0 as std::ffi::c_char; 256];
@@ -2927,6 +2924,416 @@ fn binding_info_of_converted_bindings() {
             "click",
             "trigger"
         ]]
+    );
+}
+
+/// GetOriginLocalizedName's result and name.
+fn origin_name(
+    f: &Fixture,
+    origin: vr::VRInputValueHandle_t,
+    sections: i32,
+) -> (vr::EVRInputError, String) {
+    let mut name = [0x55 as std::ffi::c_char; 256];
+    let err = vr::IVRInput011_Interface::GetOriginLocalizedName(
+        f.input.as_ref(),
+        origin,
+        name.as_mut_ptr(),
+        name.len() as u32,
+        sections,
+    );
+    (err, buf_str(&name))
+}
+
+#[track_caller]
+fn names_on<P: InteractionProfile>(paths: &[(&CStr, &str)]) {
+    let f = fixture_with::<P>(c"actions.json", c"/actions/set1");
+    for (path, expected) in paths {
+        let origin = f.get_input_source_handle(path);
+        assert_eq!(
+            origin_name(&f, origin, -1),
+            (vr::EVRInputError::None, expected.to_string()),
+            "{path:?} on {}",
+            P::profile_path()
+        );
+    }
+}
+
+#[test]
+fn origin_names_per_controller() {
+    use crate::input::profiles::{
+        meta_touch_plus::MetaTouchPlus,
+        vive_focus3::ViveFocus3,
+        wmr::{
+            hp_motion_controller::ReverbG2Controller, ms_motion_controller::HolographicController,
+        },
+    };
+
+    names_on::<Knuckles>(&[
+        (
+            c"/user/hand/left/input/thumbstick",
+            "Left Hand Index Controller Thumb Stick",
+        ),
+        (
+            c"/user/hand/right/input/a",
+            "Right Hand Index Controller A Button",
+        ),
+        (
+            c"/user/hand/right/input/b/click",
+            "Right Hand Index Controller B Button",
+        ),
+        (
+            c"/user/hand/left/input/trigger",
+            "Left Hand Index Controller Trigger",
+        ),
+        (
+            c"/user/hand/left/input/trackpad",
+            "Left Hand Index Controller Trackpad",
+        ),
+        (
+            c"/user/hand/left/input/grip",
+            "Left Hand Index Controller Grip",
+        ),
+        (
+            c"/user/hand/left/input/system",
+            "Left Hand Index Controller System",
+        ),
+        (
+            c"/user/hand/left/input/finger/index",
+            "Left Hand Index Controller Index Finger",
+        ),
+        (
+            c"/user/hand/left/input/pinch",
+            "Left Hand Index Controller Pinch Gesture",
+        ),
+    ]);
+    names_on::<OculusTouch>(&[
+        (
+            c"/user/hand/left/input/joystick",
+            "Left Hand Oculus Touch Joystick",
+        ),
+        (c"/user/hand/left/input/grip", "Left Hand Oculus Touch Grip"),
+        (
+            c"/user/hand/left/input/x",
+            "Left Hand Oculus Touch X Button",
+        ),
+        (
+            c"/user/hand/right/input/b",
+            "Right Hand Oculus Touch B Button",
+        ),
+        (
+            c"/user/hand/left/input/system",
+            "Left Hand Oculus Touch System",
+        ),
+        (
+            c"/user/hand/left/input/thumbrest",
+            "Left Hand Oculus Touch Thumbrest",
+        ),
+        // OpenXR's spelling.
+        (
+            c"/user/hand/left/input/squeeze/value",
+            "Left Hand Oculus Touch Grip",
+        ),
+        (
+            c"/user/hand/right/output/haptic",
+            "Right Hand Oculus Touch Haptics",
+        ),
+    ]);
+    names_on::<MetaTouchPlus>(&[(
+        c"/user/hand/left/input/trigger",
+        "Left Hand Oculus Touch Trigger",
+    )]);
+    names_on::<ViveWands>(&[
+        (
+            c"/user/hand/left/input/trackpad",
+            "Left Hand Vive Controller Trackpad",
+        ),
+        (
+            c"/user/hand/left/input/trigger",
+            "Left Hand Vive Controller Trigger",
+        ),
+        (
+            c"/user/hand/left/input/grip",
+            "Left Hand Vive Controller Grip",
+        ),
+        (
+            c"/user/hand/left/input/application_menu",
+            "Left Hand Vive Controller Menu",
+        ),
+        (
+            c"/user/hand/left/input/system",
+            "Left Hand Vive Controller System",
+        ),
+    ]);
+    names_on::<FrameController>(&[
+        (
+            c"/user/hand/left/input/system",
+            "Left Hand Frame Controller Steam Button",
+        ),
+        (
+            c"/user/hand/left/input/thumbstick",
+            "Left Hand Frame Controller Thumb Stick",
+        ),
+        (
+            c"/user/hand/left/input/dpad_up",
+            "Left Hand Frame Controller Dpad Up",
+        ),
+        (
+            c"/user/hand/right/input/bumper",
+            "Right Hand Frame Controller Bumper",
+        ),
+    ]);
+    names_on::<HolographicController>(&[
+        (
+            c"/user/hand/left/input/joystick",
+            "Left Hand Windows Mixed Reality Controller Joystick",
+        ),
+        (
+            c"/user/hand/left/input/application_menu",
+            "Left Hand Windows Mixed Reality Controller Menu",
+        ),
+    ]);
+    names_on::<ReverbG2Controller>(&[(
+        c"/user/hand/right/input/a",
+        "Right Hand HP Motion Controller A Button",
+    )]);
+    names_on::<ViveFocus3>(&[(
+        c"/user/hand/left/input/joystick",
+        "Left Hand Vive Focus 3 Controller Joystick",
+    )]);
+    // Inputs and controllers SteamVR has no name for.
+    names_on::<OculusTouch>(&[(
+        c"/user/hand/left/input/pinch_ext/value",
+        "Left Hand Oculus Touch Pinch Ext",
+    )]);
+    names_on::<SimpleController>(&[(
+        c"/user/hand/left/input/select/click",
+        "Left Hand Controller Select",
+    )]);
+}
+
+#[test]
+fn origin_name_sections() {
+    use vr::EVRInputError::*;
+    let f = fixture_with::<OculusTouch>(c"actions.json", c"/actions/set1");
+    let trigger = f.get_input_source_handle(c"/user/hand/left/input/trigger");
+    for (sections, expected) in [
+        (0x1, "Left Hand"),
+        (0x2, "Oculus Touch"),
+        (0x3, "Left Hand Oculus Touch"),
+        (0x4, "Trigger"),
+        (0x5, "Left Hand Trigger"),
+        (0x6, "Oculus Touch Trigger"),
+        (0x7, "Left Hand Oculus Touch Trigger"),
+        (-1, "Left Hand Oculus Touch Trigger"),
+        // Unknown bits are ignored.
+        (0x9, "Left Hand"),
+    ] {
+        assert_eq!(
+            origin_name(&f, trigger, sections),
+            (None, expected.to_owned()),
+            "0x{sections:x}"
+        );
+    }
+    // No sections.
+    assert_eq!(origin_name(&f, trigger, 0), (InvalidParam, String::new()));
+    assert_eq!(origin_name(&f, trigger, 0x8), (InvalidParam, String::new()));
+
+    // A whole hand has no input.
+    let left = f.get_input_source_handle(c"/user/hand/left");
+    assert_eq!(
+        origin_name(&f, left, -1),
+        (None, "Left Hand Oculus Touch".into())
+    );
+    assert_eq!(origin_name(&f, left, 0x4), (None, "Left Hand".into()));
+
+    // The headset has no hand.
+    let head = f.get_input_source_handle(c"/user/head");
+    assert_eq!(origin_name(&f, head, -1), (None, "Oculus Headset".into()));
+    let proximity = f.get_input_source_handle(c"/user/head/proximity");
+    assert_eq!(
+        origin_name(&f, proximity, -1),
+        (None, "Oculus Headset Proximity Sensor".into())
+    );
+    assert_eq!(
+        origin_name(&f, proximity, 0x1),
+        (None, "Oculus Headset".into())
+    );
+
+    assert_eq!(origin_name(&f, 0, -1), (InvalidHandle, String::new()));
+    assert_eq!(
+        origin_name(&f, 0xdead_beef, -1),
+        (InvalidHandle, String::new())
+    );
+    let gamepad = f.get_input_source_handle(c"/user/gamepad/input/a");
+    assert_eq!(origin_name(&f, gamepad, -1), (InvalidDevice, String::new()));
+}
+
+#[test]
+fn origin_name_buffer() {
+    use vr::EVRInputError::*;
+    let f = fixture_with::<OculusTouch>(c"actions.json", c"/actions/set1");
+    let trigger = f.get_input_source_handle(c"/user/hand/left/input/trigger");
+    let get = |size: usize| {
+        let mut name = vec![0x55 as std::ffi::c_char; size + 1];
+        let err = vr::IVRInput011_Interface::GetOriginLocalizedName(
+            f.input.as_ref(),
+            trigger,
+            name.as_mut_ptr(),
+            size as u32,
+            -1,
+        );
+        // Nothing is written past the buffer.
+        assert_eq!(name[size], 0x55);
+        let name = (size > 0 && name[size - 1] != 0x55).then(|| buf_str(&name));
+        (err, name)
+    };
+
+    let full = "Left Hand Oculus Touch Trigger";
+    assert_eq!(get(full.len() + 1), (None, Some(full.into())));
+    assert_eq!(
+        get(full.len()),
+        (BufferTooSmall, Some(full[..full.len() - 1].into()))
+    );
+    assert_eq!(get(10), (BufferTooSmall, Some("Left Hand".into())));
+    assert_eq!(get(1), (BufferTooSmall, Some(String::new())));
+    assert_eq!(get(0), (InvalidParam, Option::None));
+    assert_eq!(
+        vr::IVRInput011_Interface::GetOriginLocalizedName(
+            f.input.as_ref(),
+            trigger,
+            std::ptr::null_mut(),
+            64,
+            -1
+        ),
+        InvalidParam
+    );
+}
+
+#[track_caller]
+fn origin_path(f: &Fixture, origin: vr::VRInputValueHandle_t) -> String {
+    f.input.input_source_map.read().unwrap()[super::InputSourceKey::from(KeyData::from_ffi(origin))]
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[test]
+fn action_origins_are_openvr_inputs() {
+    let f = fixture_with::<OculusTouch>(c"actions.json", c"/actions/set1");
+    let set1 = f.get_action_set_handle(c"/actions/set1");
+    let origins_of = |action| {
+        let action = f.get_action_handle(action);
+        get_action_origins(&f, set1, action)
+            .into_iter()
+            .map(|origin| {
+                let info = get_origin_info(&f, origin);
+                (
+                    origin_path(&f, origin),
+                    origin_name(&f, origin, -1).1,
+                    buf_str(&info.rchRenderModelComponentName),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let owned = |list: &[(&str, &str, &str)]| {
+        list.iter()
+            .map(|(a, b, c)| (a.to_string(), b.to_string(), c.to_string()))
+            .collect::<Vec<_>>()
+    };
+
+    // Bound to the grip's value in OpenXR. The other hand is reported whole.
+    assert_eq!(
+        origins_of(c"/actions/set1/in/boolact2"),
+        owned(&[
+            (
+                "/user/hand/left/input/grip",
+                "Left Hand Oculus Touch Grip",
+                "button_grip"
+            ),
+            ("/user/hand/right", "Right Hand Oculus Touch", ""),
+        ])
+    );
+    // Bound to /input/thumbstick, which SteamVR's Touch calls a joystick.
+    assert_eq!(
+        origins_of(c"/actions/set1/in/vec2act"),
+        owned(&[
+            (
+                "/user/hand/left/input/joystick",
+                "Left Hand Oculus Touch Joystick",
+                "thumbstick"
+            ),
+            (
+                "/user/hand/right/input/joystick",
+                "Right Hand Oculus Touch Joystick",
+                "thumbstick"
+            ),
+        ])
+    );
+    assert_eq!(
+        origins_of(c"/actions/set1/in/boolact"),
+        owned(&[
+            (
+                "/user/hand/left/input/x",
+                "Left Hand Oculus Touch X Button",
+                "button_x"
+            ),
+            (
+                "/user/hand/right/input/a",
+                "Right Hand Oculus Touch A Button",
+                "button_a"
+            ),
+        ])
+    );
+}
+
+#[test]
+fn origin_render_model_components() {
+    let components = |f: &Fixture, paths: &[&CStr]| {
+        paths
+            .iter()
+            .map(|path| {
+                let origin = f.get_input_source_handle(path);
+                buf_str(&get_origin_info(f, origin).rchRenderModelComponentName)
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let f = fixture_with::<Knuckles>(c"actions.json", c"/actions/set1");
+    assert_eq!(
+        components(
+            &f,
+            &[
+                c"/user/hand/left/input/grip",
+                c"/user/hand/left/input/thumbstick",
+                c"/user/hand/right/input/a",
+                c"/user/hand/right/input/system",
+                c"/user/hand/right/input/trackpad",
+            ]
+        ),
+        [
+            "squeeze",
+            "thumbstick",
+            "button_a",
+            "sys_button",
+            "trackpad"
+        ]
+    );
+    let f = fixture_with::<ViveWands>(c"actions.json", c"/actions/set1");
+    assert_eq!(
+        components(
+            &f,
+            &[
+                c"/user/hand/left/input/grip",
+                c"/user/hand/left/input/application_menu",
+                c"/user/hand/left/input/system",
+            ]
+        ),
+        ["lgrip", "button", "sys_button"]
+    );
+    // Models SteamVR has no components for keep the input's name.
+    let f = fixture_with::<SimpleController>(c"actions.json", c"/actions/set1");
+    assert_eq!(
+        components(&f, &[c"/user/hand/left/input/select"]),
+        ["select"]
     );
 }
 

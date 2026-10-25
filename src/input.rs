@@ -1038,6 +1038,12 @@ struct ReportedBinding {
     source_type: String,
 }
 
+/// The rest of `path` after `device`, if it's on that device.
+fn strip_device<'a>(path: &'a str, device: &str) -> Option<&'a str> {
+    path.strip_prefix(device)
+        .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
 /// The bindings recorded for `keys` in `profile`, or in every profile if there is none.
 fn recorded_bindings<'a>(
     loaded: &'a ManifestLoadedActions,
@@ -1064,6 +1070,17 @@ fn recorded_bindings<'a>(
 }
 
 impl<C: openxr_data::Compositor> Input<C> {
+    /// A string property of the controller in `hand`.
+    fn controller_string_property(
+        &self,
+        hand: Hand,
+        property: vr::ETrackedDeviceProperty,
+    ) -> Option<String> {
+        let index = self.get_controller_device_index(hand)?;
+        self.get_device_string_tracked_property(index, property)
+            .map(|value| value.to_string_lossy().into_owned())
+    }
+
     /// Bindings guessed from the OpenXR paths bound to `keys`, for actions with none recorded.
     fn bindings_from_input_paths(
         &self,
@@ -1364,7 +1381,8 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
                 .unwrap_or_default()
         };
 
-        let index = match self.hand_from_key(key) {
+        let hand = self.hand_from_key(key);
+        let index = match hand {
             Some(hand) => hand as u32,
             None if self.is_head_source(handle) => vr::k_unTrackedDeviceIndex_Hmd,
             None => {
@@ -1380,7 +1398,16 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         };
 
         let (_, _, raw_component, _) = parse_input_path(&source_path);
-        let component_name = normalize_component(raw_component);
+        // The part of the controller's SteamVR render model that shows the input.
+        let render_model = hand.and_then(|hand| {
+            self.controller_string_property(
+                hand,
+                vr::ETrackedDeviceProperty::RenderModelName_String,
+            )
+        });
+        let component_name = render_model
+            .and_then(|model| origins::render_model_component(&model, raw_component))
+            .unwrap_or_else(|| normalize_component(raw_component));
 
         let mut render_model_component: [c_char; 128] = [0; 128];
         copy_cstr(&mut render_model_component, component_name);
@@ -1409,79 +1436,95 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         if name_array.is_null() || name_array_size == 0 {
             return vr::EVRInputError::InvalidParam;
         }
+        let out = unsafe {
+            std::slice::from_raw_parts_mut(name_array.cast::<u8>(), name_array_size as usize)
+        };
+        out[0] = 0;
+
+        // EVRInputStringBits. SteamVR fails without any of them.
+        const HAND: u32 = 0x01;
+        const CONTROLLER_TYPE: u32 = 0x02;
+        const INPUT_SOURCE: u32 = 0x04;
+        let sections = strings_to_get as u32 & (HAND | CONTROLLER_TYPE | INPUT_SOURCE);
+        if sections == 0 {
+            debug!("GetOriginLocalizedName: no sections in 0x{strings_to_get:x}");
+            return vr::EVRInputError::InvalidParam;
+        }
 
         let key = InputSourceKey::from(KeyData::from_ffi(origin));
-        let hand = self.hand_from_key(key);
-
-        let source_path = {
-            let map = self.input_source_map.read().unwrap();
-            map.get(key)
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default()
+        let Some(source_path) = self
+            .input_source_map
+            .read()
+            .unwrap()
+            .get(key)
+            .map(|path| path.to_string_lossy().into_owned())
+        else {
+            debug!("GetOriginLocalizedName: invalid handle 0x{origin:x}");
+            return vr::EVRInputError::InvalidHandle;
         };
 
-        let mut parts: Vec<String> = Vec::new();
-
-        // k_VRInputString_Hand = 0x01
-        if strings_to_get & 0x01 != 0
-            && let Some(h) = hand
+        let (hand, input) = if let Some((hand, input)) = [Hand::Left, Hand::Right]
+            .into_iter()
+            .find_map(|hand| Some((hand, strip_device(&source_path, origins::hand_path(hand))?)))
         {
-            parts.push(
-                match h {
-                    Hand::Left => "Left Hand",
-                    Hand::Right => "Right Hand",
-                }
-                .into(),
-            );
-        }
-        // k_VRInputString_ControllerType = 0x02
-        if strings_to_get & 0x02 != 0 {
-            let session_data = self.openxr.session_data.get();
-            let friendly = hand
-                .and_then(|h| {
-                    session_data
-                        .session
-                        .current_interaction_profile(self.get_subaction_path(h))
-                        .ok()
-                        .filter(|p| *p != xr::Path::NULL)
-                        .and_then(|p| self.openxr.instance.path_to_string(p).ok())
-                })
-                .and_then(|s| s.rsplit('/').next().map(|n| n.replace('_', " ")))
-                .unwrap_or_default();
-            if !friendly.is_empty() {
-                parts.push(friendly);
-            }
-        }
-        // k_VRInputString_InputSource = 0x04
-        if strings_to_get & 0x04 != 0 {
-            if !source_path.is_empty() {
-                parts.push(source_path);
-            } else if let Some(h) = hand {
-                parts.push(
-                    match h {
-                        Hand::Left => "/user/hand/left",
-                        Hand::Right => "/user/hand/right",
-                    }
-                    .into(),
-                );
-            }
-        }
-
-        let display = parts.join(" / ");
-
-        let out = unsafe {
-            std::slice::from_raw_parts_mut(name_array as *mut u8, name_array_size as usize)
+            (Some(hand), input)
+        } else if let Some(input) = strip_device(&source_path, "/user/head") {
+            (None, input)
+        } else {
+            debug!("GetOriginLocalizedName: {source_path} isn't on a device");
+            return vr::EVRInputError::InvalidDevice;
         };
-        let bytes = display.as_bytes();
-        let n = bytes.len().min(out.len() - 1);
-        out[..n].copy_from_slice(&bytes[..n]);
-        out[n] = 0;
+        let controller_type = match hand {
+            Some(hand) => self.controller_string_property(
+                hand,
+                vr::ETrackedDeviceProperty::ControllerType_String,
+            ),
+            None => self
+                .get_device_string_tracked_property(
+                    vr::k_unTrackedDeviceIndex_Hmd,
+                    vr::ETrackedDeviceProperty::ControllerType_String,
+                )
+                .map(|ty| ty.to_string_lossy().into_owned()),
+        };
+
+        // Like SteamVR's "%1$s %2$s %3$s" (webhelper_english.json), skipping what the origin
+        // doesn't have.
+        let hand_name = hand.map(origins::hand_name).map(str::to_owned);
+        let controller_name = controller_type.as_deref().map(origins::controller_name);
+        let input_name =
+            (!input.is_empty()).then(|| origins::input_name(controller_type.as_deref(), input));
+        let parts = [
+            (HAND, hand_name.clone()),
+            (CONTROLLER_TYPE, controller_name.clone()),
+            (INPUT_SOURCE, input_name),
+        ];
+        let mut name = parts
+            .into_iter()
+            .filter(|(section, _)| sections & section != 0)
+            .filter_map(|(_, part)| part)
+            .collect::<Vec<_>>()
+            .join(" ");
+        if name.is_empty() {
+            // Only an input asked for, of an origin that is a whole device.
+            name = hand_name
+                .or(controller_name)
+                .unwrap_or_else(|| "Headset".to_owned());
+        }
+
+        // Cut at a character boundary, keeping room for the terminator.
+        let mut len = name.len().min(out.len() - 1);
+        while !name.is_char_boundary(len) {
+            len -= 1;
+        }
+        out[..len].copy_from_slice(&name.as_bytes()[..len]);
+        out[len] = 0;
 
         debug!(
-            "GetOriginLocalizedName: origin=0x{:x} strings_to_get=0x{:x} result={:?}",
-            origin, strings_to_get, display
+            "GetOriginLocalizedName: origin=0x{origin:x} path={source_path} strings_to_get=0x{strings_to_get:x} result={name:?}"
         );
-
+        if len < name.len() {
+            return vr::EVRInputError::BufferTooSmall;
+        }
         vr::EVRInputError::None
     }
     fn GetActionOrigins(
@@ -1581,7 +1624,19 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
                 let (mut left_path_str, mut right_path_str): (Option<String>, Option<String>) =
                     (None, None);
 
-                let profile_maps: Vec<_> = if let Some(ap) = active_profile {
+                // The OpenVR path of the first input bound on each hand, e.g.
+                // /user/hand/left/input/grip rather than OpenXR's .../squeeze/value.
+                for info in recorded_bindings(loaded, active_profile, &related_action_keys) {
+                    let path = || format!("{}{}", origins::hand_path(info.hand), info.input);
+                    match info.hand {
+                        Hand::Left => left_path_str = left_path_str.or_else(|| Some(path())),
+                        Hand::Right => right_path_str = right_path_str.or_else(|| Some(path())),
+                    }
+                }
+
+                let profile_maps: Vec<_> = if left_path_str.is_some() || right_path_str.is_some() {
+                    Vec::new()
+                } else if let Some(ap) = active_profile {
                     loaded
                         .per_profile_input_paths
                         .get(&ap)
