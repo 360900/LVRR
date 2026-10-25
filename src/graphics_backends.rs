@@ -200,7 +200,7 @@ impl SupportedBackend {
             }
             vr::ETextureType::OpenGL => {
                 let gl = GlData::new(instance)?;
-                if gl.on_runtime_device(instance) && gl.runtime_accepts_context() {
+                if gl.on_runtime_device(instance) {
                     Some(Self::OpenGL(gl))
                 } else {
                     GlBridgeData::new(gl, instance).map(Self::GlBridge)
@@ -212,5 +212,18 @@ impl SupportedBackend {
             )),
             _ => None,
         }
+    }
+
+    /// The GL bridge for the context current on this thread, for when the runtime rejected a
+    /// session with it, e.g. Monado based ones with no-error EGL contexts on NVIDIA.
+    pub fn gl_bridge(instance: &xr::Instance) -> Option<Self> {
+        let gl = GlData::new(instance)?;
+        let kind = if gl.is_no_error_egl() {
+            "no-error EGL context"
+        } else {
+            "OpenGL context"
+        };
+        log::warn!("The runtime rejected the app's {kind}, copying frames through Vulkan instead");
+        GlBridgeData::new(gl, instance).map(Self::GlBridge)
     }
 }

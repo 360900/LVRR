@@ -750,6 +750,12 @@ impl<C: Compositor> OpenXrData<C> {
         }
     }
 
+    /// Lets [Self::restart_session] try once more after the runtime rejected a session, with
+    /// another graphics backend.
+    pub fn retry_session_creation(&self) {
+        self.session_creation_failed.store(false, Ordering::Relaxed);
+    }
+
     /// Why [Self::restart_session] would refuse to start a new session, if it would.
     pub fn restart_blocked(&self) -> Option<RestartError> {
         if self.exiting.load(Ordering::Relaxed) {

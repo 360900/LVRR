@@ -290,6 +290,7 @@ impl Compositor {
         }
         let backend = SupportedBackend::new(texture, &self.openxr.instance)
             .ok_or(vr::EVRCompositorError::InvalidTexture)?;
+        let direct_gl = matches!(backend, SupportedBackend::OpenGL(_));
 
         // Submit and the overlay calls can race to get here. Restarting again would destroy the
         // swapchains created in the first real session.
@@ -334,7 +335,22 @@ impl Compositor {
         *self.tmp_backend.lock().unwrap() = Some(tmp_backend);
 
         info!("Creating real backend for texture type {:?}", texture.eType);
-        self.openxr.restart_session().map_err(|e| {
+        let mut result = self.openxr.restart_session();
+        if result == Err(RestartError::CreationFailed) && direct_gl {
+            // The rejected backend's GL objects are freed while the app's context is current.
+            self.tmp_backend.lock().unwrap().take();
+            let bridge = SupportedBackend::gl_bridge(&self.openxr.instance).and_then(|backend| {
+                backend
+                    .with_any_graphics_owned::<swapchain_info>((texture, bounds, submit_flags))
+                    .ok()
+            });
+            if let Some(bridge) = bridge {
+                *self.tmp_backend.lock().unwrap() = Some(bridge);
+                self.openxr.retry_session_creation();
+                result = self.openxr.restart_session();
+            }
+        }
+        result.map_err(|e| {
             // No session will be created with it anymore.
             self.tmp_backend.lock().unwrap().take();
             restart_error(e)

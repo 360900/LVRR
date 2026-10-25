@@ -632,31 +632,15 @@ impl GlData {
         same_device_as_runtime(instance, &self.session_info)
     }
 
-    /// Whether the runtime can create a session with this context. For EGL ones, Monado based
-    /// runtimes create a context sharing with it, which EGL refuses for no-error contexts (e.g.
-    /// Sodium's) as theirs isn't one. `XRIZER_NO_ERROR_BRIDGE=0` is for runtimes that can.
-    pub(crate) fn runtime_accepts_context(&self) -> bool {
+    /// Whether this is a no-error EGL context (e.g. Sodium's). Monado based runtimes create a
+    /// context sharing with EGL ones, which NVIDIA refuses for these as theirs isn't one.
+    pub(crate) fn is_no_error_egl(&self) -> bool {
         if !matches!(self.session_info, SessionCreateInfo::Egl { .. }) {
-            return true;
+            return false;
         }
         let mut flags = 0;
         unsafe { gl::GetIntegerv(gl::CONTEXT_FLAGS, &mut flags) };
-        if flags & CONTEXT_FLAG_NO_ERROR_BIT == 0 {
-            return true;
-        }
-        if crate::quirks::env_override("XRIZER_NO_ERROR_BRIDGE") == Some(false) {
-            crate::log_unique!(
-                log::Level::Info,
-                "The app's EGL context is a no-error one, which the runtime is trusted to share \
-                 (XRIZER_NO_ERROR_BRIDGE=0)"
-            );
-            return true;
-        }
-        crate::warn_once!(
-            "The app's EGL context is a no-error one, which the runtime can't share. Copying \
-             frames through Vulkan instead, XRIZER_NO_ERROR_BRIDGE=0 turns this off."
-        );
-        false
+        flags & CONTEXT_FLAG_NO_ERROR_BIT != 0
     }
 
     /// Starts reading the bottom-left `extent` of layer `layer` of swapchain image `image_index`

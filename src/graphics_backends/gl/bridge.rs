@@ -1,7 +1,7 @@
 //! OpenGL apps whose context the runtime can't use: on another GPU than the runtime, e.g. the
 //! iGPU of a hybrid laptop, whose images the runtime can't import, or with a context the runtime
-//! can't share (see [GlData::runtime_accepts_context]). The session is a Vulkan one on the
-//! runtime's device instead: [GlData] copies the app's textures into textures of ours, which are
+//! rejects (see [GlData::is_no_error_egl]). The session is a Vulkan one on the runtime's device
+//! instead: [GlData] copies the app's textures into textures of ours, which are
 //! read into memory that the runtime's device copies into the swapchain images. On the same GPU
 //! that's device memory GL imports, otherwise host memory.
 
