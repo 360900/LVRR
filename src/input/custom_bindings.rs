@@ -376,6 +376,7 @@ pub enum BoolBindingType {
     Dpad(DpadData),
     DoubleTap(DoubleTapData),
     Toggle(ToggleData),
+    Latch(LatchData),
     Grab(GrabBindingData),
     ThresholdFloat(ThresholdBindingData<f32>),
     ThresholdVec2(ThresholdBindingData<xr::Vector2f>),
@@ -393,6 +394,7 @@ impl BoolBindingType {
             Self::Dpad(dpad) => dpad.state(session, subaction_path),
             Self::DoubleTap(double) => double.state(session, subaction_path),
             Self::Toggle(toggle) => toggle.state(session, subaction_path),
+            Self::Latch(latch) => latch.state(session, subaction_path),
             Self::Grab(grab) => grab.state(session, subaction_path),
             Self::ThresholdFloat(threshold) => threshold.state(session, subaction_path),
             Self::ThresholdVec2(threshold) => threshold.state(session, subaction_path),
@@ -410,6 +412,10 @@ impl BoolBindingType {
                 .collect(),
             Self::DoubleTap(double) => vec![double.action.as_raw()],
             Self::Toggle(toggle) => vec![toggle.action.as_raw()],
+            Self::Latch(latch) => [&latch.press, &latch.hold]
+                .into_iter()
+                .flat_map(|part| part.actions())
+                .collect(),
             Self::Grab(grab) => grab
                 .force_action
                 .iter()
@@ -841,6 +847,59 @@ impl ToggleData {
             current_state,
             changed_since_last_sync,
             last_change_time: state.last_change_time,
+            is_active: true,
+        }))
+    }
+}
+
+/// A press that stays held while another input is, once the press set it: touchy_click keeps a
+/// click while the input is touched, sticky_click while the stick is deflected.
+pub(super) struct LatchData {
+    press: Box<BoolBindingType>,
+    hold: Box<BoolBindingType>,
+    last_state: AtomicBool,
+}
+
+impl LatchData {
+    pub fn new(press: BoolBindingType, hold: BoolBindingType) -> Self {
+        Self {
+            press: press.into(),
+            hold: hold.into(),
+            last_state: false.into(),
+        }
+    }
+
+    fn state(
+        &self,
+        session: &xr::Session<xr::AnyGraphics>,
+        subaction_path: xr::Path,
+    ) -> xr::Result<Option<xr::ActionState<bool>>> {
+        // Both are read, as they keep their own state between syncs.
+        let press = self.press.state(session, subaction_path)?;
+        let hold = self
+            .hold
+            .state(session, subaction_path)?
+            .filter(|hold| hold.is_active);
+        let Some(press) = press.filter(|press| press.is_active) else {
+            self.last_state.store(false, Ordering::Relaxed);
+            return Ok(None);
+        };
+
+        let last_state = self.last_state.load(Ordering::Relaxed);
+        let held = hold.is_some_and(|hold| hold.current_state);
+        let current_state = press.current_state || (last_state && held);
+        self.last_state.store(current_state, Ordering::Relaxed);
+        // Whichever changed last changed the state.
+        let last_change_time = match hold {
+            Some(hold) if hold.last_change_time.as_nanos() > press.last_change_time.as_nanos() => {
+                hold.last_change_time
+            }
+            _ => press.last_change_time,
+        };
+        Ok(Some(xr::ActionState {
+            current_state,
+            changed_since_last_sync: current_state != last_state,
+            last_change_time,
             is_active: true,
         }))
     }
@@ -2904,6 +2963,104 @@ mod tests {
             assert!(data.bActive);
             assert_eq!(data.x, expected, "{pull}");
         }
+    }
+
+    #[test]
+    fn touchy_click_vrchat_grip() {
+        // VRChat's Index bindings drag with a squeeze of the grip that lasts while the hand stays
+        // on it. The grip has no touch in OpenXR, so the slightest pull stands in for it.
+        let mut f = Fixture::new();
+        let set = vr::VRActiveActionSet_t {
+            ulActionSet: f.get_action_set_handle(c"/actions/Menu"),
+            ..Default::default()
+        };
+        let drag = f.get_action_handle(c"/actions/Menu/in/Drag");
+        let left = f.get_input_source_handle(c"/user/hand/left");
+        f.load_actions(c"actions_touchy.json");
+        f.verify_custom_bindings(
+            Knuckles::profile_path(),
+            c"/actions/menu/in/drag",
+            [
+                "/user/hand/left/input/squeeze/force".into(),
+                "/user/hand/left/input/squeeze/value".into(),
+                "/user/hand/right/input/squeeze/force".into(),
+                "/user/hand/right/input/squeeze/value".into(),
+            ],
+        );
+        f.set_interaction_profile::<Knuckles>(LeftHand);
+
+        let input = |path: &CStr| f.get_action::<f32>(f.get_action_handle(path));
+        let force = input(c"/user/hand/left/input/squeeze/force-/actions/menu");
+        let value = input(c"/user/hand/left/input/squeeze/value-/actions/menu");
+        let mut check = |squeeze, grip, state, changed| {
+            fakexr::set_action_state(force, ActionState::Float(squeeze), LeftHand);
+            fakexr::set_action_state(value, ActionState::Float(grip), LeftHand);
+            f.sync(set);
+            let s = f.get_bool_state_hand(drag, left).unwrap();
+            assert!(s.bActive);
+            assert_eq!(
+                (s.bState, s.bChanged),
+                (state, changed),
+                "force {squeeze}, value {grip}"
+            );
+        };
+        // Holding the grip doesn't drag, squeezing it does.
+        check(0.0, 0.8, false, false);
+        check(0.3, 1.0, true, true);
+        // Relaxing the squeeze with the hand still on the grip keeps dragging.
+        check(0.0, 0.8, true, false);
+        check(0.0, 0.01, true, false);
+        // Letting go ends it, and touching again doesn't start it.
+        check(0.0, 0.0, false, true);
+        check(0.0, 0.8, false, false);
+        // Letting go of both at once ends it too.
+        check(0.3, 1.0, true, true);
+        check(0.0, 0.0, false, true);
+    }
+
+    #[test]
+    fn touchy_click_touch_sensor() {
+        let mut f = Fixture::new();
+        let set = vr::VRActiveActionSet_t {
+            ulActionSet: f.get_action_set_handle(c"/actions/main"),
+            ..Default::default()
+        };
+        let grab = f.get_action_handle(c"/actions/main/in/grab");
+        let left = f.get_input_source_handle(c"/user/hand/left");
+        f.load_actions(c"actions_touchy.json");
+        f.verify_custom_bindings(
+            Knuckles::profile_path(),
+            c"/actions/main/in/grab",
+            [
+                "/user/hand/left/input/a/click".into(),
+                "/user/hand/left/input/a/touch".into(),
+            ],
+        );
+        // Without a touch, the click is bound as usual.
+        f.verify_bindings::<bool>(
+            ViveWands::profile_path(),
+            c"/actions/main/in/grab",
+            ["/user/hand/left/input/menu/click".into()],
+        );
+        f.verify_custom_bindings(ViveWands::profile_path(), c"/actions/main/in/grab", []);
+
+        f.set_interaction_profile::<Knuckles>(LeftHand);
+        let input = |path: &CStr| f.get_action::<f32>(f.get_action_handle(path));
+        let click = input(c"/user/hand/left/input/a/click-/actions/main");
+        let touch = input(c"/user/hand/left/input/a/touch-/actions/main");
+        let mut check = |clicked: bool, touched: bool, state| {
+            fakexr::set_action_state(click, ActionState::Float(clicked as u8 as f32), LeftHand);
+            fakexr::set_action_state(touch, ActionState::Float(touched as u8 as f32), LeftHand);
+            f.sync(set);
+            let s = f.get_bool_state_hand(grab, left).unwrap();
+            assert!(s.bActive);
+            assert_eq!(s.bState, state, "click {clicked}, touch {touched}");
+        };
+        check(false, true, false);
+        check(true, true, true);
+        check(false, true, true);
+        check(false, false, false);
+        check(false, true, false);
     }
 
     #[test]

@@ -8,7 +8,7 @@ use crate::input::{ActionData, BoundPoseType};
 use crate::{
     input::custom_bindings::{
         self, BoolBindingType, ChordData, DoubleTapData, DpadData, DpadDirection, GrabBindingData,
-        ThresholdBindingData, TimedPress, TimedPressData, ToggleData, Vector2Inversion,
+        LatchData, ThresholdBindingData, TimedPress, TimedPressData, ToggleData, Vector2Inversion,
         Vector2Transform,
     },
     openxr_data::Hand,
@@ -520,6 +520,9 @@ struct ButtonParameters {
     force_input: Option<ButtonForceInput>,
     /// Seconds
     long_press_delay: Option<StringOrTyped<f32>>,
+    /// Keeps the click held while the input is touched.
+    #[serde(default, deserialize_with = "lenient")]
+    touchy_click: Option<StringOrTyped<bool>>,
     #[serde(flatten)]
     click_threshold: ClickThresholdParams,
 }
@@ -528,6 +531,10 @@ impl ButtonParameters {
     /// None if missing or not a valid duration (negative, NaN or too long).
     fn long_press_delay(&self) -> Option<Duration> {
         Duration::try_from_secs_f32(*self.long_press_delay?).ok()
+    }
+
+    fn touchy_click(&self) -> bool {
+        self.touchy_click.is_some_and(|touchy| *touchy)
     }
 }
 
@@ -749,6 +756,28 @@ fn long_press_delay_parse() {
 
 #[cfg(test)]
 #[test]
+fn touchy_click_parse() {
+    for (json, expected) in [
+        (r#"{}"#, false),
+        (r#"{"touchy_click": "true"}"#, true),
+        (r#"{"touchy_click": true}"#, true),
+        (r#"{"touchy_click": "false"}"#, false),
+        (r#"{"touchy_click": "yes"}"#, false),
+    ] {
+        let parameters: ButtonParameters = serde_json::from_str(json).unwrap();
+        assert_eq!(parameters.touchy_click(), expected, "{json}");
+    }
+    // An invalid value doesn't take the other parameters with it.
+    let parameters: ButtonParameters =
+        serde_json::from_str(r#"{"touchy_click": "yes", "force_input": "force"}"#).unwrap();
+    assert!(matches!(
+        parameters.force_input,
+        Some(ButtonForceInput::Force)
+    ));
+}
+
+#[cfg(test)]
+#[test]
 fn numeric_and_boolean_parameters() {
     // JSON numbers and booleans work as well as their string forms.
     let parameters: DpadParameters =
@@ -874,6 +903,17 @@ fn threshold_binding(
     if !context.accepts_custom_binding(output) {
         return None;
     }
+    input_threshold(input, params, action_set_name, action_set, context)
+}
+
+/// A threshold on an analog input (or a boolean one, read as 0 or 1), whatever it's used for.
+fn input_threshold(
+    input: DynInputPath,
+    params: Option<&ClickThresholdParams>,
+    action_set_name: &str,
+    action_set: &xr::ActionSet,
+    context: &mut BindingsProfileLoadContext,
+) -> Option<BoolBindingType> {
     Some(if input.component.is_none() {
         let action = context.input_action(action_set_name, action_set, input)?;
         BoolBindingType::ThresholdVec2(ThresholdBindingData::new(action, params))
@@ -995,6 +1035,44 @@ fn bind_bool_input(
         return;
     };
     context.add_custom_binding(output, input.hand, input, make(action));
+}
+
+/// The touch that keeps a button mode click held (touchy_click), with its thresholds. It's the
+/// touch xrizer reports for the input (see [touch_input]), so a click never outlasts the binding's
+/// own touch. A touch that is the click itself adds nothing.
+fn touchy_hold(
+    path: DynInputPath,
+    validate_path: &dyn PathValidator,
+) -> Option<(DynInputPath, ClickThresholdParams)> {
+    touch_input(path, validate_path)
+        .filter(|(touch, _)| touch.component != Some(DynComponent::Click))
+}
+
+/// A button mode press of `press`, kept held while `hold` (see [touchy_hold]) is, if given.
+fn button_press_binding(
+    output: &ActionPath,
+    press: DynInputPath,
+    thresholds: Option<&ClickThresholdParams>,
+    hold: Option<&(DynInputPath, ClickThresholdParams)>,
+    action_set_name: &str,
+    action_set: &xr::ActionSet,
+    context: &mut BindingsProfileLoadContext,
+) -> Option<BoolBindingType> {
+    let press = threshold_binding(
+        output,
+        press,
+        thresholds,
+        action_set_name,
+        action_set,
+        context,
+    )?;
+    let hold = hold.and_then(|(touch, params)| {
+        input_threshold(*touch, Some(params), action_set_name, action_set, context)
+    });
+    Some(match hold {
+        Some(hold) => BoolBindingType::Latch(LatchData::new(press, hold)),
+        None => press,
+    })
 }
 
 /// The OpenVR path of the headset's proximity sensor.
@@ -1135,6 +1213,13 @@ pub fn handle_sources(
                     continue;
                 };
                 let thresholds = parameters.map(|b| &b.click_threshold);
+                let touchy = parameters.filter(|p| p.touchy_click()).and_then(|_| {
+                    let hold = touchy_hold(path, validate_path);
+                    if hold.is_none() {
+                        debug!("Ignoring touchy_click on {path}, which has no touch");
+                    }
+                    hold
+                });
 
                 // A single press only has to wait when it could turn into something else.
                 let long_delay = long.as_ref().or(held.as_ref()).map(|_| {
@@ -1149,7 +1234,23 @@ pub fn handle_sources(
                     single.as_ref().filter(|_| !single_waits),
                 ];
                 for click in immediate.into_iter().flatten() {
-                    if is_click {
+                    if touchy.is_some() {
+                        if let Some(ty) = button_press_binding(
+                            &click.output,
+                            press,
+                            thresholds,
+                            touchy.as_ref(),
+                            action_set_name,
+                            action_set,
+                            context,
+                        ) {
+                            trace!(
+                                "suggesting {press} for {} (touchy click)",
+                                click.output.path
+                            );
+                            context.add_custom_binding(&click.output, path.hand, press, ty);
+                        }
+                    } else if is_click {
                         // The runtime's click point is used for clicks.
                         context.try_suggest_binding::<bool>(click.output.path.clone(), press);
                     } else {
@@ -1179,10 +1280,11 @@ pub fn handle_sources(
                     let (Some(output), Some(kind)) = (output, kind) else {
                         continue;
                     };
-                    let Some(press_binding) = threshold_binding(
+                    let Some(press_binding) = button_press_binding(
                         &output.output,
                         press,
                         thresholds,
+                        touchy.as_ref(),
                         action_set_name,
                         action_set,
                         context,

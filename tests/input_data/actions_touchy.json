@@ -1,0 +1,33 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/Menu",
+			"usage": "leftright"
+		},
+		{
+			"name": "/actions/main",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/Menu/in/Drag",
+			"type": "boolean",
+			"requirement": "optional"
+		},
+		{
+			"name": "/actions/main/in/grab",
+			"type": "boolean"
+		}
+	],
+	"default_bindings": [
+		{
+			"controller_type": "knuckles",
+			"binding_url": "knuckles_touchy.json"
+		},
+		{
+			"controller_type": "vive_controller",
+			"binding_url": "wands_touchy.json"
+		}
+	]
+}
