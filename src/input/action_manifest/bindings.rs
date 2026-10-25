@@ -23,6 +23,7 @@ use serde::{
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 /**
@@ -591,11 +592,31 @@ pub struct DpadParameters {
 
 impl Default for DpadParameters {
     fn default() -> Self {
+        let zones = custom_bindings::DpadZones::default();
         Self {
             sub_mode: DpadSubMode::Touch,
-            deadzone_pct: StringOrTyped(50.0),
-            overlap_pct: StringOrTyped(50.0),
-            sticky: StringOrTyped(false),
+            deadzone_pct: StringOrTyped(zones.deadzone * 100.0),
+            overlap_pct: StringOrTyped(zones.overlap * 100.0),
+            sticky: StringOrTyped(zones.sticky),
+        }
+    }
+}
+
+impl DpadParameters {
+    fn zones(&self) -> custom_bindings::DpadZones {
+        let defaults = custom_bindings::DpadZones::default();
+        let fraction = |pct: f32, default: f32| {
+            let fraction = pct / 100.0;
+            if fraction.is_finite() {
+                fraction.clamp(0.0, 1.0)
+            } else {
+                default
+            }
+        };
+        custom_bindings::DpadZones {
+            deadzone: fraction(*self.deadzone_pct, defaults.deadzone),
+            overlap: fraction(*self.overlap_pct, defaults.overlap),
+            sticky: *self.sticky,
         }
     }
 }
@@ -737,6 +758,41 @@ fn numeric_and_boolean_parameters() {
     assert_eq!(*parameters.maxzone_pct.unwrap(), 90.0);
 }
 
+#[cfg(test)]
+#[test]
+fn dpad_zone_parameters() {
+    use custom_bindings::DpadZones;
+    for (json, expected) in [
+        // SteamVR's defaults
+        (
+            r#"{"sub_mode": "touch"}"#,
+            DpadZones {
+                deadzone: 0.25,
+                overlap: 0.5,
+                sticky: false,
+            },
+        ),
+        (
+            r#"{"deadzone_pct": "75", "overlap_pct": "0", "sticky": "true"}"#,
+            DpadZones {
+                deadzone: 0.75,
+                overlap: 0.0,
+                sticky: true,
+            },
+        ),
+        (
+            r#"{"deadzone_pct": 150, "overlap_pct": "NaN"}"#,
+            DpadZones {
+                deadzone: 1.0,
+                ..Default::default()
+            },
+        ),
+    ] {
+        let parameters: DpadParameters = serde_json::from_str(json).unwrap();
+        assert_eq!(parameters.zones(), expected, "{json}");
+    }
+}
+
 pub fn handle_dpad_binding(
     validate_path: &dyn PathValidator,
     parent_path: DynInputPath,
@@ -754,7 +810,6 @@ pub fn handle_dpad_binding(
 ) {
     // Would love to use the dpad extension here, but it doesn't seem to
     // support touch trackpad dpads.
-    // TODO: actually take the deadzone and overlap into account
     use DpadDirection::*;
 
     let bound_actions: Vec<(&ActionPath, DpadDirection)> = [
@@ -788,12 +843,16 @@ pub fn handle_dpad_binding(
         return;
     };
 
+    // The directions of one binding engage together.
+    let zones = Arc::new(custom_bindings::DpadZoneState::new(
+        parameters.map_or_else(custom_bindings::DpadZones::default, DpadParameters::zones),
+    ));
     for (path, direction) in bound_actions {
         context.add_custom_binding(
             path,
             parent_path.hand,
             parent_path,
-            BoolBindingType::Dpad(DpadData::new(actions.clone(), direction)),
+            BoolBindingType::Dpad(DpadData::new(actions.clone(), direction, zones.clone())),
         );
     }
 }
@@ -1491,7 +1550,12 @@ pub fn handle_chord_bindings(
                             )
                         })
                         .filter(|actions| click.is_none() || actions.click_or_touch.is_some())
-                        .map(|actions| BoolBindingType::Dpad(DpadData::new(actions, direction)))
+                        .map(|actions| {
+                            let zones = custom_bindings::DpadZoneState::new(
+                                custom_bindings::DpadZones::default(),
+                            );
+                            BoolBindingType::Dpad(DpadData::new(actions, direction, zones.into()))
+                        })
                 }
                 other => {
                     warn!("Ignoring chord for {}: unknown input {other}", output.path);

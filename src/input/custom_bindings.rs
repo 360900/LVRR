@@ -4,9 +4,8 @@ use crate::openxr_data::SessionData;
 use log::{error, warn};
 use openvr as vr;
 use openxr as xr;
-use std::f32::consts::{FRAC_PI_4, PI};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use xr::{Haptic, HapticVibration};
 
@@ -441,25 +440,183 @@ pub(super) struct DpadActions {
     pub haptic: Option<xr::Action<Haptic>>,
 }
 
+/// How a dpad splits its input into north, east, south and west zones.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct DpadZones {
+    /// Fraction of full deflection to pass before a direction engages.
+    pub deadzone: f32,
+    /// Fraction of side to side overlap of neighbouring zones: 0 gives 90 degree zones, 1 gives
+    /// 180 degree zones.
+    pub overlap: f32,
+    /// An engaged direction stays engaged until the input returns to the deadzone or is released.
+    pub sticky: bool,
+}
+
+impl Default for DpadZones {
+    /// SteamVR's defaults, as its binding UI shows them.
+    fn default() -> Self {
+        Self {
+            deadzone: 0.25,
+            overlap: 0.5,
+            sticky: false,
+        }
+    }
+}
+
+impl DpadZones {
+    // Hysteresis around the zone edges, from VapoR's reimplementation of SteamVR's dpad. The
+    // angle is 3% of a turn, like the radius is 3% of full deflection.
+    const RADIUS_HYSTERESIS: f32 = 0.03;
+    const ANGLE_HYSTERESIS: f32 = 10.8;
+
+    /// Updates which directions (north, east, south, west) are engaged at `x`, `y`. Updating
+    /// again with the same input changes nothing, so every output of a dpad can update it.
+    fn update(&self, engaged: &mut [bool; 4], x: f32, y: f32) {
+        let radius = x.hypot(y);
+        // Never engaged at rest, even without a deadzone.
+        let hold_radius = (self.deadzone - Self::RADIUS_HYSTERESIS).max(0.0);
+        if self.sticky && engaged.contains(&true) && radius > hold_radius {
+            return;
+        }
+        // Half the angle a zone spans
+        let boundary = 45.0 + 45.0 * self.overlap;
+        // Degrees off the axis of each direction
+        let off_axis = [x.atan2(y), y.atan2(x), x.atan2(-y), y.atan2(-x)];
+        for (engaged, angle) in engaged.iter_mut().zip(off_axis) {
+            let angle = angle.abs().to_degrees();
+            *engaged = if *engaged {
+                radius > hold_radius && angle < boundary + Self::ANGLE_HYSTERESIS
+            } else {
+                radius > self.deadzone + Self::RADIUS_HYSTERESIS
+                    && angle < boundary - Self::ANGLE_HYSTERESIS
+            };
+        }
+    }
+}
+
+/// The zones of one dpad binding and which of them are engaged, shared by its outputs: a sticky
+/// direction holds off the others, and the center is where no direction is engaged.
+pub(super) struct DpadZoneState {
+    zones: DpadZones,
+    engaged: Mutex<DpadEngaged>,
+}
+
+#[derive(Default)]
+struct DpadEngaged {
+    /// The click or touch that activates the dpad is held.
+    pressed: bool,
+    /// North, east, south, west
+    directions: [bool; 4],
+}
+
+impl DpadZoneState {
+    pub fn new(zones: DpadZones) -> Self {
+        Self {
+            zones,
+            engaged: Default::default(),
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn dpad_zones() {
+    // The engaged directions after moving through `path`, at each point, updating twice per
+    // point like two outputs of the dpad would.
+    let walk = |zones: DpadZones, path: &[(f32, f32)]| {
+        let mut engaged = [false; 4];
+        path.iter()
+            .map(|&(x, y)| {
+                zones.update(&mut engaged, x, y);
+                let once = engaged;
+                zones.update(&mut engaged, x, y);
+                assert_eq!(once, engaged, "updating again changed ({x}, {y})");
+                engaged
+            })
+            .collect::<Vec<_>>()
+    };
+    const NONE: [bool; 4] = [false; 4];
+    const N: [bool; 4] = [true, false, false, false];
+    const E: [bool; 4] = [false, true, false, false];
+    const NE: [bool; 4] = [true, true, false, false];
+    const S: [bool; 4] = [false, false, true, false];
+    const W: [bool; 4] = [false, false, false, true];
+    // Points at a distance of 0.9, `degrees` clockwise from north.
+    let at = |degrees: f32| {
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        (0.9 * sin, 0.9 * cos)
+    };
+
+    // SteamVR's defaults: the deadzone is a quarter of the way out, and neighbouring zones
+    // overlap by half, so diagonals engage both.
+    let defaults = DpadZones::default();
+    assert_eq!(
+        walk(defaults, &[(0.0, 0.2), (0.0, 0.3), (0.0, 0.24), (0.0, 0.2)]),
+        [NONE, N, N, NONE]
+    );
+    assert_eq!(
+        walk(
+            defaults,
+            &[at(0.0), at(45.0), at(75.0), at(80.0), at(180.0), at(270.0)]
+        ),
+        [N, NE, NE, E, S, W]
+    );
+    // From rest, a direction only engages well inside its zone.
+    assert_eq!(walk(defaults, &[at(60.0)]), [E]);
+
+    // Without overlap, the zones are 90 degrees wide, with hysteresis at their edges.
+    let no_overlap = DpadZones {
+        overlap: 0.0,
+        ..defaults
+    };
+    assert_eq!(walk(no_overlap, &[at(30.0), at(50.0), at(60.0)]), [N, N, E]);
+    assert_eq!(walk(no_overlap, &[at(45.0)]), [NONE]);
+
+    // A sticky direction holds off the others until the input returns to the center.
+    let sticky = DpadZones {
+        deadzone: 0.75,
+        overlap: 0.0,
+        sticky: true,
+    };
+    assert_eq!(
+        walk(
+            sticky,
+            &[(0.0, 0.7), at(0.0), at(90.0), (0.0, 0.0), at(90.0)]
+        ),
+        [NONE, N, N, NONE, E]
+    );
+    // Even without a deadzone, nothing is engaged at rest.
+    let no_deadzone = DpadZones {
+        deadzone: 0.0,
+        ..defaults
+    };
+    assert_eq!(walk(no_deadzone, &[at(0.0), (0.0, 0.0)]), [N, NONE]);
+}
+
 pub(super) struct DpadData {
     pub actions: DpadActions,
     direction: DpadDirection,
+    zones: Arc<DpadZoneState>,
     last_state: AtomicBool,
 }
 
 impl DpadData {
-    const CENTER_ZONE: f32 = 0.5;
-
     // Thresholds for force-activated dpads, experimentally chosen to match SteamVR
     const DPAD_CLICK_THRESHOLD: f32 = 0.33;
     const DPAD_RELEASE_THRESHOLD: f32 = 0.2;
 
-    pub fn new(actions: DpadActions, direction: DpadDirection) -> Self {
+    pub fn new(actions: DpadActions, direction: DpadDirection, zones: Arc<DpadZoneState>) -> Self {
         Self {
             actions,
             direction,
+            zones,
             last_state: false.into(),
         }
+    }
+
+    #[cfg(test)]
+    pub fn zones(&self) -> DpadZones {
+        self.zones.zones
     }
 
     fn state(
@@ -476,58 +633,42 @@ impl DpadData {
             is_active: parent_state.is_active,
         };
 
-        let last_active = self.last_state.load(Ordering::Relaxed);
-        let active_threshold = if last_active {
+        let click_or_touch = action
+            .click_or_touch
+            .as_ref()
+            .map(|a| a.state(session, subaction_path))
+            .transpose()?;
+
+        let mut shared = self.zones.engaged.lock().unwrap();
+        let active_threshold = if shared.pressed {
             Self::DPAD_RELEASE_THRESHOLD
         } else {
             Self::DPAD_CLICK_THRESHOLD
         };
+        // If this action isn't bound in the current interaction profile, is_active will be
+        // false - in this case, it's probably a joystick touch dpad, in which case we still want
+        // to read the current state.
+        let active =
+            click_or_touch.is_none_or(|s| !s.is_active || s.current_state > active_threshold);
+        shared.pressed = active;
 
-        let active = action
-            .click_or_touch
-            .as_ref()
-            .map(|a| {
-                // If this action isn't bound in the current interaction profile,
-                // is_active will be false - in this case, it's probably a joystick touch dpad, in
-                // which case we still want to read the current state.
-                a.state(session, subaction_path)
-                    .map(|s| !s.is_active || s.current_state > active_threshold)
-            })
-            .unwrap_or(Ok(true))?;
-
-        if !active {
-            // Still bound, so report the release edge like any other button.
-            ret_state.changed_since_last_sync = self
-                .last_state
-                .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok();
-            return Ok(Some(ret_state));
-        }
-
-        // convert to polar coordinates
-        let xr::Vector2f { x, y } = parent_state.current_state;
-        let radius = x.hypot(y);
-        let angle = y.atan2(x);
-
-        // pi/2 wedges, no overlap
-        let in_bounds = match self.direction {
-            DpadDirection::North => {
-                radius >= Self::CENTER_ZONE && (FRAC_PI_4..=3.0 * FRAC_PI_4).contains(&angle)
+        let in_bounds = if active {
+            let xr::Vector2f { x, y } = parent_state.current_state;
+            self.zones.zones.update(&mut shared.directions, x, y);
+            let [north, east, south, west] = shared.directions;
+            match self.direction {
+                DpadDirection::North => north,
+                DpadDirection::East => east,
+                DpadDirection::South => south,
+                DpadDirection::West => west,
+                DpadDirection::Center => !(north || east || south || west),
             }
-            DpadDirection::East => {
-                radius >= Self::CENTER_ZONE && (-FRAC_PI_4..=FRAC_PI_4).contains(&angle)
-            }
-            DpadDirection::South => {
-                radius >= Self::CENTER_ZONE && (-3.0 * FRAC_PI_4..=-FRAC_PI_4).contains(&angle)
-            }
-            // west section is disjoint with atan2
-            DpadDirection::West => {
-                radius >= Self::CENTER_ZONE
-                    && ((3.0 * FRAC_PI_4..=PI).contains(&angle)
-                        || (-PI..=-3.0 * FRAC_PI_4).contains(&angle))
-            }
-            DpadDirection::Center => radius < Self::CENTER_ZONE,
+        } else {
+            // Still bound, so the release edge is reported like any other button.
+            shared.directions = [false; 4];
+            false
         };
+        drop(shared);
 
         ret_state.current_state = in_bounds;
         if self
@@ -1263,6 +1404,7 @@ mod tests {
         assert!(state.bState);
         assert!(state.bChanged);
 
+        // The dpad is sticky: sliding east keeps north until the input returns to the center.
         fakexr::set_action_state(
             dpad_data.xy.as_raw(),
             fakexr::ActionState::Vector2(0.55, 0.0),
@@ -1275,8 +1417,129 @@ mod tests {
 
         let state = f.get_bool_state(boolact).unwrap();
         assert!(state.bActive);
-        assert!(!state.bState);
-        assert!(state.bChanged);
+        assert!(state.bState);
+        assert!(!state.bChanged);
+
+        for (x, north) in [(0.1, false), (0.55, false)] {
+            fakexr::set_action_state(
+                dpad_data.xy.as_raw(),
+                fakexr::ActionState::Vector2(x, 0.0),
+                LeftHand,
+            );
+            f.sync(vr::VRActiveActionSet_t {
+                ulActionSet: set1,
+                ..Default::default()
+            });
+            let state = f.get_bool_state(boolact).unwrap();
+            assert!(state.bActive);
+            assert_eq!(state.bState, north, "{x}");
+        }
+    }
+
+    /// The zones and actions of the only dpad binding of `handle` in `profile`.
+    fn dpad_of(
+        f: &Fixture,
+        handle: vr::VRActionHandle_t,
+        profile: &str,
+    ) -> (DpadZones, DpadActions) {
+        let data = f.input.openxr.session_data.get();
+        let actions = data.input_data.get_loaded_actions().unwrap();
+        let profile = f.input.openxr.instance.string_to_path(profile).unwrap();
+        let dpads: Vec<_> = actions
+            .try_get_bindings(handle, profile)
+            .unwrap()
+            .iter()
+            .filter_map(|b| match &b.ty {
+                BoolBindingType::Dpad(dpad) => Some((dpad.zones(), dpad.actions.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dpads.len(), 1, "expected one dpad binding");
+        dpads.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn dpad_zones_from_bindings() {
+        let mut f = Fixture::new();
+        let set = vr::VRActiveActionSet_t {
+            ulActionSet: f.get_action_set_handle(c"/actions/main"),
+            ..Default::default()
+        };
+        let [north, east, south, west, left_north, left_east, left_center] = [
+            c"/actions/main/in/north",
+            c"/actions/main/in/east",
+            c"/actions/main/in/south",
+            c"/actions/main/in/west",
+            c"/actions/main/in/left_north",
+            c"/actions/main/in/left_east",
+            c"/actions/main/in/left_center",
+        ]
+        .map(|name| f.get_action_handle(name));
+        f.load_actions(c"actions_dpad_zones.json");
+        f.set_interaction_profile::<Knuckles>(LeftHand);
+        f.set_interaction_profile::<Knuckles>(RightHand);
+
+        let (zones, left) = dpad_of(&f, left_north, Knuckles::profile_path());
+        assert_eq!(zones, DpadZones::default());
+        let (zones, right) = dpad_of(&f, north, Knuckles::profile_path());
+        assert_eq!(
+            zones,
+            DpadZones {
+                deadzone: 0.75,
+                overlap: 0.0,
+                sticky: true,
+            }
+        );
+        // Every direction of a binding shares its zones.
+        let (_, right_east) = dpad_of(&f, east, Knuckles::profile_path());
+        assert_eq!(right.xy.as_raw(), right_east.xy.as_raw());
+
+        let input = |actions: &DpadActions, hand, x, y, touched: bool| {
+            let touch = actions.click_or_touch.as_ref().unwrap().as_raw();
+            fakexr::set_action_state(touch, ActionState::Float(touched as u8 as f32), hand);
+            fakexr::set_action_state(actions.xy.as_raw(), ActionState::Vector2(x, y), hand);
+        };
+        let states = |f: &mut Fixture, handles: &[vr::VRActionHandle_t]| {
+            f.sync(set);
+            handles
+                .iter()
+                .map(|&handle| f.get_bool_state(handle).unwrap().bState)
+                .collect::<Vec<_>>()
+        };
+
+        // Without parameters, diagonals engage both directions, and the center is the deadzone.
+        let left_handles = [left_north, left_east, left_center];
+        for ((x, y), expected) in [
+            ((0.0, 0.0), [false, false, true]),
+            ((0.0, 0.2), [false, false, true]),
+            ((0.0, 0.3), [true, false, false]),
+            ((0.6, 0.5), [true, true, false]),
+            ((0.8, 0.0), [false, true, false]),
+        ] {
+            input(&left, LeftHand, x, y, true);
+            assert_eq!(states(&mut f, &left_handles), expected, "({x}, {y})");
+        }
+        input(&left, LeftHand, 0.0, 0.0, false);
+        assert_eq!(states(&mut f, &left_handles), [false; 3]);
+
+        // Alyx's turning: a deep deadzone, no overlap, and sticky directions.
+        let right_handles = [north, east, south, west];
+        for ((x, y), expected) in [
+            ((0.0, 0.7), [false; 4]),
+            ((0.0, 0.9), [true, false, false, false]),
+            ((0.9, 0.0), [true, false, false, false]),
+            ((0.0, 0.0), [false; 4]),
+            ((0.9, 0.0), [false, true, false, false]),
+            ((0.0, 0.0), [false; 4]),
+            ((0.64, 0.64), [false; 4]),
+            ((0.0, -0.9), [false, false, true, false]),
+        ] {
+            input(&right, RightHand, x, y, true);
+            assert_eq!(states(&mut f, &right_handles), expected, "({x}, {y})");
+        }
+        // Lifting the thumb releases the direction.
+        input(&right, RightHand, 0.0, -0.9, false);
+        assert_eq!(states(&mut f, &right_handles), [false; 4]);
     }
 
     #[test]

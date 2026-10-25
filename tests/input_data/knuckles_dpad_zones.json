@@ -1,0 +1,50 @@
+{
+	"bindings": {
+		"/actions/main": {
+			"sources": [
+				{
+					"mode": "dpad",
+					"path": "/user/hand/right/input/thumbstick",
+					"inputs": {
+						"north": {
+							"output": "/actions/main/in/north"
+						},
+						"east": {
+							"output": "/actions/main/in/east"
+						},
+						"south": {
+							"output": "/actions/main/in/south"
+						},
+						"west": {
+							"output": "/actions/main/in/west"
+						}
+					},
+					"parameters": {
+						"deadzone_pct": "75",
+						"overlap_pct": "0",
+						"sticky": "true",
+						"sub_mode": "touch"
+					}
+				},
+				{
+					"mode": "dpad",
+					"path": "/user/hand/left/input/thumbstick",
+					"inputs": {
+						"north": {
+							"output": "/actions/main/in/left_north"
+						},
+						"east": {
+							"output": "/actions/main/in/left_east"
+						},
+						"center": {
+							"output": "/actions/main/in/left_center"
+						}
+					},
+					"parameters": {
+						"sub_mode": "touch"
+					}
+				}
+			]
+		}
+	}
+}
