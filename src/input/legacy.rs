@@ -1659,14 +1659,55 @@ mod tests {
         expect_button_event(&f, Ev::ButtonPress, 1, vr::EVRButtonId::SteamVR_Trigger);
         expect_no_event(&f);
 
-        // Turned off with the trigger held: it is released before the deactivation.
+        // Turned off with the trigger held: it is released, and the deactivation follows once it
+        // could no longer be a blip.
         fakexr::set_interaction_profile(f.raw_session(), LeftHand, xr::Path::NULL);
         fakexr::deactivate_action(trigger);
         f.input.frame_start_update();
         f.input.openxr.poll_events();
         expect_button_event(&f, Ev::ButtonUnpress, 1, vr::EVRButtonId::SteamVR_Trigger);
         expect_button_event(&f, Ev::ButtonUntouch, 1, vr::EVRButtonId::SteamVR_Trigger);
+        expect_no_event(&f);
+        f.input.expire_connection_grace();
         expect_device_event(&f, Ev::TrackedDeviceDeactivated, 1);
+        expect_no_event(&f);
+    }
+
+    #[test]
+    fn state_recovers_after_profile_blip() {
+        use fakexr::UserPath::*;
+        fakexr::set_actions_need_profile(true);
+        let (mut f, a) = legacy_fixture(|actions| actions.a.as_raw());
+        let frame = |f: &Fixture| {
+            f.input.frame_start_update();
+            f.input.openxr.poll_events();
+        };
+        let a_pressed = |f: &Fixture| {
+            get_state(f, 1).ulButtonPressed & super::button_mask_from_id(vr::EVRButtonId::A) != 0
+        };
+        fakexr::set_action_state(a, true.into(), LeftHand);
+        frame(&f);
+        assert!(a_pressed(&f));
+        expect_button_event(&f, vr::EVREventType::ButtonTouch, 1, vr::EVRButtonId::A);
+        expect_button_event(&f, vr::EVREventType::ButtonPress, 1, vr::EVRButtonId::A);
+
+        // Released while the profile is gone, without losing the controller.
+        for hand in [LeftHand, RightHand] {
+            fakexr::set_interaction_profile(f.raw_session(), hand, xr::Path::NULL);
+        }
+        frame(&f);
+        assert!(!a_pressed(&f));
+        expect_button_event(&f, vr::EVREventType::ButtonUnpress, 1, vr::EVRButtonId::A);
+        expect_button_event(&f, vr::EVREventType::ButtonUntouch, 1, vr::EVRButtonId::A);
+        expect_no_event(&f);
+
+        f.set_interaction_profile::<Knuckles>(LeftHand);
+        f.set_interaction_profile::<Knuckles>(RightHand);
+        frame(&f);
+        frame(&f);
+        assert!(a_pressed(&f));
+        expect_button_event(&f, vr::EVREventType::ButtonTouch, 1, vr::EVRButtonId::A);
+        expect_button_event(&f, vr::EVREventType::ButtonPress, 1, vr::EVRButtonId::A);
         expect_no_event(&f);
     }
 

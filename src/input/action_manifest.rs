@@ -477,9 +477,10 @@ impl<C: openxr_data::Compositor> Input<C> {
         hands
             .into_iter()
             .find_map(|hand| {
+                // A controller whose profile is gone for now keeps its identity.
                 let profile = devices
                     .get_controller(hand)
-                    .map(|device| device.profile_path)
+                    .map(|device| device.last_profile_path)
                     .filter(|profile| *profile != xr::Path::NULL)
                     .or_else(|| {
                         data.session

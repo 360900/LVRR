@@ -246,7 +246,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         if let Some(level) = controller
             .profile_data
             .as_ref()
-            .filter(|_| controller.connected)
+            .filter(|_| controller.connected || controller.recently_seen())
             .and_then(|p| p.skeletal_tracking_level)
         {
             return level;
@@ -1152,7 +1152,7 @@ mod tests {
         f.set_interaction_profile::<Knuckles>(fakexr::UserPath::LeftHand);
         sync(&mut f);
         assert_eq!(level(&f), vr::EVRSkeletalTrackingLevel::Partial);
-        // Turned off
+        // Turned off: kept through a blip, gone after.
         fakexr::set_interaction_profile(
             f.raw_session(),
             fakexr::UserPath::LeftHand,
@@ -1160,6 +1160,8 @@ mod tests {
         );
         sync(&mut f);
         f.input.openxr.poll_events();
+        assert_eq!(level(&f), vr::EVRSkeletalTrackingLevel::Partial);
+        f.input.expire_connection_grace();
         assert_eq!(level(&f), vr::EVRSkeletalTrackingLevel::Estimated);
         f.set_interaction_profile::<OculusTouch>(fakexr::UserPath::LeftHand);
         sync(&mut f);
@@ -1250,10 +1252,11 @@ mod tests {
         assert_eq!(data(&f), (false, vr::k_ulInvalidInputValueHandle));
         sync(&mut f, left);
 
-        // The controller turns off.
+        // The controller turns off, and is gone once it could no longer be a blip.
         fakexr::set_interaction_profile(f.raw_session(), LeftHand, openxr::Path::NULL);
         sync(&mut f, left);
         f.input.openxr.poll_events();
+        f.input.expire_connection_grace();
         assert_eq!(data(&f), (false, vr::k_ulInvalidInputValueHandle));
     }
 

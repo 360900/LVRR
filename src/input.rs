@@ -390,12 +390,16 @@ impl<C: openxr_data::Compositor> Input<C> {
     ) -> Option<xr::Path> {
         let runtime_profile = {
             let devices = session_data.input_data.devices.read().unwrap();
-            [Hand::Left, Hand::Right].into_iter().find_map(|h| {
-                devices
-                    .get_controller(h)
-                    .map(|dev| dev.profile_path)
-                    .filter(|p| *p != xr::Path::NULL)
-            })
+            let profile = |path: fn(&TrackedDevice) -> xr::Path| {
+                [Hand::Left, Hand::Right].into_iter().find_map(|h| {
+                    devices
+                        .get_controller(h)
+                        .map(path)
+                        .filter(|p| *p != xr::Path::NULL)
+                })
+            };
+            // A controller whose profile is gone for now keeps its identity.
+            profile(|dev| dev.profile_path).or_else(|| profile(|dev| dev.last_profile_path))
         }
         .or_else(|| {
             [Hand::Left, Hand::Right].into_iter().find_map(|h| {
@@ -2868,10 +2872,12 @@ impl<C: openxr_data::Compositor> Input<C> {
                         .get_controller(hand)
                         .is_some_and(|c| c.is_connected(&self.openxr, &data))
                 };
+                // A controller whose profile is gone for now keeps its pose bindings, so its last
+                // pose doesn't jump.
                 let get_hand = |hand| {
                     devices
                         .get_controller(hand)
-                        .map(|h| (hand, h.profile_path))
+                        .map(|h| (hand, h.last_profile_path))
                         .unzip()
                 };
                 let (mut hand, interaction_profile) = match subaction_path {
@@ -2882,7 +2888,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                 };
 
                 let get_hand_pose =
-                    |hand: &TrackedDevice| loaded.try_get_pose(action, hand.profile_path).ok();
+                    |hand: &TrackedDevice| loaded.try_get_pose(action, hand.last_profile_path).ok();
 
                 let get_first_bound_hand_profile = || {
                     devices
@@ -3346,7 +3352,10 @@ impl<C: openxr_data::Compositor> Input<C> {
             };
 
             if let Some(controller) = controller.as_mut() {
-                if controller.profile_path != profile_path {
+                // Losing the profile keeps the device and its identity, see CONNECTION_GRACE.
+                // Getting the same one back changes nothing.
+                if profile_path != xr::Path::NULL && controller.last_profile_path != profile_path {
+                    controller.last_profile_path = profile_path;
                     controller.reset_tracked_hand();
                     // The new device's skeleton may come from elsewhere, or not at all.
                     self.skeletal_tracking_level.write().unwrap()[hand as usize - 1] =
@@ -3361,6 +3370,10 @@ impl<C: openxr_data::Compositor> Input<C> {
             let profile_name = match profile_path {
                 xr::Path::NULL => {
                     if let Some(controller) = controller.as_mut() {
+                        // It was there until now.
+                        if controller.connected {
+                            controller.seen();
+                        }
                         controller.connected = false;
                     }
                     "<null>".to_owned()
@@ -3445,8 +3458,10 @@ impl<C: openxr_data::Compositor> Input<C> {
             std::mem::take(&mut *cache.lock().unwrap());
         }
 
+        let focus_captured = self.openxr.input_focus_captured();
         for device in devices.iter() {
             device.clear_pose_cache();
+            device.hold_connection(focus_captured);
         }
 
         let left_hand = devices.get_controller(Hand::Left);
@@ -3529,6 +3544,15 @@ impl<C: openxr_data::Compositor> Input<C> {
         }
     }
 
+    /// Ends the time controllers stay connected after they were last seen.
+    #[cfg(test)]
+    pub(crate) fn expire_connection_grace(&self) {
+        let data = self.openxr.session_data.get();
+        for device in data.input_data.devices.read().unwrap().iter() {
+            device.expire_connection_grace();
+        }
+    }
+
     pub fn post_session_restart(&self, data: &SessionData) {
         // This function is called while a write lock is called on the session, and as such should
         // not use self.openxr.session_data.get().
@@ -3545,16 +3569,20 @@ impl<C: openxr_data::Compositor> Input<C> {
         }
         let data = self.openxr.session_data.get();
         let devices = data.input_data.devices.read().unwrap();
+
+        // Before taking the event queue, since this may locate hand joints.
+        let connected: Vec<_> = devices
+            .iter()
+            .map(|device| device.is_connected(&self.openxr, &data))
+            .collect();
         let mut events = self.events.lock().unwrap();
 
         // The frame update may already have queued button events for a device that connected
         // since the last poll, so its activation goes ahead of them. A deactivation goes after
         // the releases queued for it.
         let mut activations = 0;
-        for (i, device) in devices.iter().enumerate() {
-            let current = device.connected;
-
-            if device.has_connected_changed() {
+        for (i, (device, current)) in devices.iter().zip(connected).enumerate() {
+            if device.has_connected_changed(current) {
                 debug!(
                     "sending {:?} {}connected",
                     device.get_type(),

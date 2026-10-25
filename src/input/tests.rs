@@ -2132,6 +2132,7 @@ fn pose_action_inactive_without_its_device() {
     fakexr::set_interaction_profile(f.raw_session(), LeftHand, xr::Path::NULL);
     f.set_interaction_profile::<OculusTouch>(RightHand);
     sync(&mut f);
+    f.input.expire_connection_grace();
     assert_eq!(active(&f, pose, left), inactive);
     assert_eq!(active(&f, pose, right), (true, right));
     assert_eq!(active(&f, pose, 0), (true, right));
