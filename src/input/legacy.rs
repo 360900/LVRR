@@ -3,6 +3,7 @@ use crate::{
     input::{
         LoadedActions, ManifestLoadedActions,
         devices::ProfileData,
+        haptics::{self, Vibration},
         profiles::{self, RunWithProfile},
     },
     openxr_data::{self, Hand},
@@ -128,10 +129,13 @@ impl<C: openxr_data::Compositor> Input<C> {
             .unwrap_or_else(|_| panic!("Actions unexpectedly set up"));
     }
 
+    /// Every axis pulses the controller's one haptic: SteamVR's legacy input has a single haptic
+    /// output per hand (resources/config/legacy_actions.json), and the vibrations it sends drivers
+    /// name a haptic component rather than an axis.
     pub fn legacy_haptic(
         &self,
         device_index: vr::TrackedDeviceIndex_t,
-        _axis_id: u32, // TODO: what is this for?
+        axis_id: u32,
         duration_us: std::ffi::c_ushort,
     ) {
         let Some(hand) = self.device_index_to_hand(device_index) else {
@@ -139,16 +143,15 @@ impl<C: openxr_data::Compositor> Input<C> {
             return;
         };
         let hand_path = self.get_subaction_path(hand);
+        let Some(vibration) = Vibration::legacy_pulse(duration_us) else {
+            return;
+        };
+        trace!("legacy haptic on axis {axis_id} for {duration_us} microseconds: {vibration:?}");
 
         let data = self.openxr.session_data.get();
         if let Some(manifest_actions) = data.input_data.get_loaded_actions() {
             // Game provided action manifest but also calls the legacy action's pulse method.
-            self.legacy_haptic_via_manifest(
-                &data.session,
-                manifest_actions,
-                hand_path,
-                duration_us,
-            );
+            self.legacy_haptic_via_manifest(&data.session, manifest_actions, hand_path, vibration);
             return;
         }
 
@@ -157,27 +160,13 @@ impl<C: openxr_data::Compositor> Input<C> {
             return;
         };
 
-        let duration_nanos = std::time::Duration::from_micros(duration_us as u64).as_nanos();
-
-        debug!(
-            "triggering legacy haptic for {duration_us} microseconds ({} seconds/{} milliseconds)",
-            std::time::Duration::from_micros(duration_us as _).as_secs_f32(),
-            std::time::Duration::from_micros(duration_us as _).as_millis()
-        );
-
-        if let Err(e) = legacy.actions.haptic.apply_feedback(
-            &data.session,
-            hand_path,
-            &xr::HapticVibration::new()
-                .amplitude(1.0)
-                .frequency(xr::FREQUENCY_UNSPECIFIED)
-                .duration(xr::Duration::from_nanos(duration_nanos as i64)),
-        ) {
+        if let Err(e) = haptics::apply(&data.session, &legacy.actions.haptic, hand_path, vibration)
+        {
             warn!("Failed to trigger haptic: {e:?}");
         }
     }
 
-    /// Trigger a full amplitude vibration on the given path via the global `haptic_action` in our
+    /// Trigger a vibration on the given path via the global `haptic_action` in our
     /// loaded Manifest Actions.
     ///
     /// This is necessary for the legacy input system to handle because applications may call
@@ -187,16 +176,14 @@ impl<C: openxr_data::Compositor> Input<C> {
         session: &xr::Session<xr::AnyGraphics>,
         manifest_actions: &ManifestLoadedActions,
         hand_path: xr::Path,
-        duration_us: ::std::ffi::c_ushort,
+        vibration: Vibration,
     ) {
         trace!("triggered legacy haptic while using action manifest");
-        if let Err(e) = manifest_actions.haptic_action.apply_feedback(
+        if let Err(e) = haptics::apply(
             session,
+            &manifest_actions.haptic_action,
             hand_path,
-            &xr::HapticVibration::new()
-                .amplitude(1.0)
-                .frequency(xr::FREQUENCY_UNSPECIFIED)
-                .duration(xr::Duration::from_nanos(i64::from(duration_us) * 1000)),
+            vibration,
         ) {
             warn!("Failed to trigger haptic: {e:?}");
         }
@@ -607,6 +594,7 @@ impl LegacyActionData {
 
 #[cfg(test)]
 mod tests {
+    use super::Vibration;
     use crate::input::InteractionProfile;
     use crate::input::profiles::{
         frame_controller::FrameController, knuckles::Knuckles, oculus_touch::OculusTouch,
@@ -1542,6 +1530,31 @@ mod tests {
             haptic,
             fakexr::UserPath::RightHand
         ));
+
+        // The pulse length is the strength.
+        let feedback = fakexr::take_haptic_feedback(haptic);
+        assert_eq!(feedback.len(), 2, "{feedback:?}");
+        let hands = [fakexr::UserPath::LeftHand, fakexr::UserPath::RightHand];
+        for (feedback, hand) in feedback.iter().zip(hands) {
+            assert_eq!(feedback.hand, Some(hand));
+            assert!(
+                (feedback.amplitude - 3000.0 / 3999.0).abs() < 0.001,
+                "{feedback:?}"
+            );
+            assert_eq!(
+                feedback.duration.as_nanos(),
+                Vibration::MIN_DURATION.as_nanos() as i64
+            );
+            assert_eq!(feedback.frequency, xr::FREQUENCY_UNSPECIFIED);
+        }
+
+        // A pulse of nothing doesn't vibrate, and every axis pulses the one haptic.
+        f.input.legacy_haptic(1, 0, 0);
+        assert!(fakexr::take_haptic_feedback(haptic).is_empty());
+        f.input.legacy_haptic(1, 1, 8000);
+        let feedback = fakexr::take_haptic_feedback(haptic);
+        assert_eq!(feedback.len(), 1, "{feedback:?}");
+        assert_eq!(feedback[0].amplitude, 1.0);
     }
 
     #[test]
@@ -1588,6 +1601,15 @@ mod tests {
             haptic,
             fakexr::UserPath::RightHand
         ));
+
+        let feedback = fakexr::take_haptic_feedback(haptic);
+        assert_eq!(feedback.len(), 2, "{feedback:?}");
+        assert!(
+            feedback
+                .iter()
+                .all(|f| (f.amplitude - 3000.0 / 3999.0).abs() < 0.001),
+            "{feedback:?}"
+        );
     }
 
     fn legacy_bindings_for<P: crate::input::InteractionProfile>(

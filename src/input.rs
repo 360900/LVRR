@@ -1,6 +1,7 @@
 mod action_manifest;
 mod custom_bindings;
 mod devices;
+mod haptics;
 mod legacy;
 mod origins;
 mod probe;
@@ -1810,18 +1811,16 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             return vr::EVRInputError::WrongType;
         };
 
+        let vibration = haptics::Vibration {
+            duration: duration_seconds,
+            frequency,
+            amplitude,
+        };
         if start_seconds_from_now > 0.0 {
             warn!("start_seconds_from_now: {start_seconds_from_now}")
         }
 
-        let result = action.apply_feedback(
-            &session_data.session,
-            subaction_path,
-            &xr::HapticVibration::new()
-                .amplitude(amplitude.clamp(0.0, 1.0))
-                .frequency(frequency)
-                .duration(xr::Duration::from_nanos((duration_seconds * 1e9) as _)),
-        );
+        let result = haptics::apply(&session_data.session, action, subaction_path, vibration);
         if self.openxr.check("xrApplyHapticFeedback", result).is_none() {
             return vr::EVRInputError::IPCError;
         }
