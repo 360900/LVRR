@@ -1,4 +1,5 @@
 use super::GraphicsBackend;
+use crate::compositor::GpuDone;
 use derive_more::Deref;
 use gl::types::{GLenum, GLint, GLuint};
 use glutin_glx_sys::{
@@ -16,6 +17,7 @@ use xr::sys::Handle as _;
 use xr::sys::platform::{EGLConfig, EGLContext, EGLDisplay, EglGetProcAddressMNDX};
 
 mod bridge;
+mod timing;
 pub use bridge::GlBridgeData;
 
 /// None if GLX isn't installed (EGL-only systems).
@@ -461,6 +463,7 @@ pub struct GlData {
     eye_extents: Mutex<Vec<[Option<xr::Extent2Di>; 2]>>,
     /// Copies flip rows, so the images read back top to bottom like Vulkan's, see [bridge].
     flip: bool,
+    gpu_timer: timing::GpuTimer,
 }
 
 /// Single-sample copy of a multisampled renderbuffer, see [GlData::resolve].
@@ -510,6 +513,7 @@ impl GlData {
             resolved: Default::default(),
             eye_extents: Default::default(),
             flip: false,
+            gpu_timer: Default::default(),
         })
     }
 }
@@ -686,6 +690,7 @@ impl Drop for GlData {
                 gl::DeleteFramebuffers(2, [self.read_fbo, self.draw_fbo].as_ptr());
                 gl::DeleteRenderbuffers(1, &resolved.renderbuffer);
             }
+            self.gpu_timer.destroy();
         }
     }
 }
@@ -862,6 +867,13 @@ impl GraphicsBackend for GlData {
             )
         };
         rect.extent
+    }
+
+    fn frame_submitted(&mut self, done: GpuDone) {
+        // Queries belong to the context they were created in.
+        if self.session_info.is_current() {
+            self.gpu_timer.frame_submitted(done);
+        }
     }
 }
 

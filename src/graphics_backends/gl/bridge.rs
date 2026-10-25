@@ -4,6 +4,7 @@
 //! the runtime's device copies into the swapchain images.
 
 use super::{GlData, GlTexture, cvt};
+use crate::compositor::GpuDone;
 use crate::graphics_backends::{GraphicsBackend, VulkanData};
 use ash::vk::{self, Handle};
 use gl::types::{GLenum, GLint, GLuint};
@@ -1016,5 +1017,10 @@ impl GraphicsBackend for GlBridgeData {
             slot.pending = None;
             slot.wait(&self.device.vk.device);
         }
+    }
+
+    /// The app's work is on its own GPU, which its context measures.
+    fn frame_submitted(&mut self, done: GpuDone) {
+        self.gl.frame_submitted(done);
     }
 }

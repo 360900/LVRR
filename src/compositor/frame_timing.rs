@@ -36,10 +36,10 @@ pub struct FrameTimer {
 
 /// Lets a graphics backend report when the GPU finished the work the app submitted for a frame,
 /// up to its last Submit.
-pub struct GpuDone(Box<dyn FnOnce(Instant) + Send>);
+pub struct GpuDone(Box<dyn FnOnce(Instant) + Send + Sync>);
 
 impl GpuDone {
-    pub fn new(report: impl FnOnce(Instant) + Send + 'static) -> Self {
+    pub fn new(report: impl FnOnce(Instant) + Send + Sync + 'static) -> Self {
         Self(Box::new(report))
     }
 
