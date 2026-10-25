@@ -24,6 +24,9 @@ commands:
         release build with --i686, packed into target/dist/lvrr-<version>-x86_64.tar.gz
   apk [--debug] [-- GRADLE_ARGS...]
         build the headset APK into target/dist (needs the Android SDK and NDK)
+  client
+        build WiVRn's desktop headset client into target/client-stage, for testing
+        the server without a headset
   rebrand [--check]
         show LVRR instead of WiVRn and WayVR to users; run after merging an upstream
   version
@@ -54,6 +57,7 @@ fn main() -> ExitCode {
         Some("install") => install(rest),
         Some("dist") => dist(rest),
         Some("apk") => apk(rest),
+        Some("client") => client(rest),
         Some("rebrand") => rebrand::run(rest),
         Some("version") => version().map(|v| println!("{v}")),
         _ => Err(USAGE.into()),
@@ -217,6 +221,7 @@ fn build_wivrn(b: &Build, ver: &str) -> Result {
             "-DWIVRN_BUILD_DASHBOARD=ON",
             "-DWIVRN_BUILD_CLIENT=OFF",
             "-DWIVRN_BUILD_WIVRNCTL=ON",
+            "-DWIVRN_BUILD_TEST=ON",
         ])
         // WiVRn would describe the LVRR checkout anyway; passing it keeps the
         // server, dashboard and APK on the same string.
@@ -426,6 +431,40 @@ fn apk(args: &[String]) -> Result {
     if !found {
         return Err(format!("no APK in {}", out.display()));
     }
+    Ok(())
+}
+
+fn client(args: &[String]) -> Result {
+    if let Some(arg) = args.first() {
+        return Err(format!("client: unknown argument {arg}\n\n{USAGE}"));
+    }
+    let dir = target().join("wivrn-client");
+    let prefix = target().join("client-stage");
+    let mut cmd = Command::new("cmake");
+    cmd.arg("-S")
+        .arg(root().join("wivrn"))
+        .arg("-B")
+        .arg(&dir)
+        .args(["-G", "Ninja", "-DCMAKE_BUILD_TYPE=RelWithDebInfo"])
+        .arg(format!("-DCMAKE_INSTALL_PREFIX={}", prefix.display()))
+        .args([
+            "-DCMAKE_INSTALL_LIBDIR=lib",
+            "-DWIVRN_BUILD_CLIENT=ON",
+            "-DWIVRN_BUILD_SERVER=OFF",
+            "-DWIVRN_BUILD_SERVER_LIBRARY=OFF",
+            "-DWIVRN_BUILD_WIVRNCTL=OFF",
+            "-DWIVRN_BUILD_DASHBOARD=OFF",
+        ])
+        .arg(format!("-DGIT_DESC={}", version()?))
+        .arg(format!("-DGIT_COMMIT={}", git(&["rev-parse", "HEAD"])?));
+    run(cmd)?;
+    let mut cmd = Command::new("cmake");
+    cmd.arg("--build").arg(&dir);
+    run(cmd)?;
+    let mut cmd = Command::new("cmake");
+    cmd.arg("--install").arg(&dir);
+    run(cmd)?;
+    println!("{}", prefix.join("bin/wivrn").display());
     Ok(())
 }
 
