@@ -9,13 +9,18 @@ use crate::input::haptics::{BindingHaptic, BindingHapticData, BindingPress};
 use crate::input::origins::BindingInfo;
 use crate::input::profiles::{DynInputPath, InputDevice, ProfileProperties, paths};
 use crate::input::skeletal::SkeletalInputActionData;
-use crate::input::{ActionData, BoundPose, Input, InteractionProfile};
-use crate::openxr_data;
+use crate::input::{
+    ActionData, BoundPose, BoundPoseType, Input, InputSourceKey, InteractionProfile, origins,
+};
+use crate::openxr_data::{self, Hand};
 use log::{debug, info, trace, warn};
+use openvr as vr;
 use openxr as xr;
+use slotmap::SlotMap;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::ffi::CString;
+use std::sync::{Arc, RwLock};
 
 pub(super) struct BindingsLoadContext<'a> {
     pub action_sets: &'a HashMap<String, xr::ActionSet>,
@@ -168,6 +173,11 @@ impl BindingsLoadContext<'_> {
             gamepad: P::GAMEPAD,
             bindings: Vec::new(),
             use_force_for_dpad: P::USE_FORCE_DPAD,
+            controller_type: P::properties()
+                .openvr_controller_type
+                .to_str()
+                .unwrap_or_default(),
+            input_sources: &input.input_source_map,
         })
     }
 }
@@ -203,6 +213,9 @@ pub(super) struct BindingsProfileLoadContext<'a> {
     gamepad: bool,
     pub bindings: Vec<(String, xr::Path)>,
     use_force_for_dpad: bool,
+    /// SteamVR's name of the controllers, whose inputs origins are named after.
+    controller_type: &'static str,
+    input_sources: &'a RwLock<SlotMap<InputSourceKey, CString>>,
 }
 
 pub trait WithActionPattern {
@@ -306,6 +319,27 @@ impl BindingsProfileLoadContext<'_> {
     /// Whether the profile's inputs are on `device`.
     pub fn has_device(&self, device: InputDevice) -> bool {
         self.gamepad == (device == InputDevice::Gamepad)
+    }
+
+    /// The origin action data reports for a binding of `input`: the handle of its source path in
+    /// SteamVR's profile of the controller, e.g. `/user/hand/left/input/joystick`.
+    pub fn origin(&self, input: DynInputPath) -> vr::VRInputValueHandle_t {
+        let path = origins::source_path(self.controller_type, input);
+        crate::input::input_source_handle(self.input_sources, &path)
+    }
+
+    /// The origin of a pose binding, e.g. `/user/hand/left/pose/raw`.
+    pub fn pose_origin(&self, hand: Hand, pose: BoundPoseType) -> vr::VRInputValueHandle_t {
+        let path = format!("{}/pose/{}", origins::hand_path(hand), pose.openvr_name());
+        let path = CString::new(path).expect("pose paths have no NUL");
+        crate::input::input_source_handle(self.input_sources, &path)
+    }
+
+    /// The origin of a haptic output on `device`, e.g. `/user/hand/left/output/haptic`.
+    pub fn haptic_origin(&self, device: InputDevice) -> vr::VRInputValueHandle_t {
+        let path = format!("{}/output/haptic", device.path());
+        let path = CString::new(path).expect("haptic paths have no NUL");
+        crate::input::input_source_handle(self.input_sources, &path)
     }
 
     pub fn get_action_set(&self, p0: &String) -> Option<&xr::ActionSet> {

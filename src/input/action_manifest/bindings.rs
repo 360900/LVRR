@@ -2424,16 +2424,18 @@ pub fn handle_pose_bindings(context: &mut BindingsProfileLoadContext, bindings: 
             continue;
         }
 
+        let origin = context.pose_origin(*hand, *pose_ty);
         let bound = context
             .pose_bindings
             .entry(output.path.clone())
             .or_default();
 
-        let b = match hand {
-            Hand::Left => &mut bound.left,
-            Hand::Right => &mut bound.right,
+        let (b, o) = match hand {
+            Hand::Left => (&mut bound.left, &mut bound.origins[0]),
+            Hand::Right => (&mut bound.right, &mut bound.origins[1]),
         };
         *b = Some(*pose_ty);
+        *o = origin;
         trace!(
             "bound {:?} to pose {} for hand {hand:?}",
             *pose_ty, output.path
@@ -2575,6 +2577,7 @@ pub fn record_binding_info(
             mode,
             slot,
             source_type: origins::source_type(path.subpath, analog),
+            origin: context.origin(path),
         }
     };
 
@@ -2629,6 +2632,7 @@ pub fn record_binding_info(
                 mode: "",
                 slot: "",
                 source_type: "vibration",
+                origin: context.haptic_origin(device),
             };
             found.push((output, info));
         }

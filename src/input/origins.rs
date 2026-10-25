@@ -2,8 +2,9 @@
 //! controller, the names GetOriginLocalizedName gives origins and the render model components
 //! GetOriginTrackedDeviceInfo names.
 
-use crate::input::profiles::{InputDevice, paths::DynSubpath};
+use crate::input::profiles::{DynInputPath, InputDevice, paths::DynSubpath};
 use crate::openxr_data::Hand;
+use std::ffi::CString;
 
 /// A binding as GetActionBindingInfo reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -17,6 +18,38 @@ pub struct BindingInfo {
     pub slot: &'static str,
     /// The input's type in SteamVR's profile of the controller, e.g. `joystick`.
     pub source_type: &'static str,
+    /// The handle of the input's source path, e.g. `/user/hand/left/input/joystick`.
+    pub origin: openvr::VRInputValueHandle_t,
+}
+
+pub fn hand_path(hand: Hand) -> &'static str {
+    match hand {
+        Hand::Left => "/user/hand/left",
+        Hand::Right => "/user/hand/right",
+    }
+}
+
+/// `origin`, or `fallback` if it's none.
+pub fn origin_or(
+    origin: openvr::VRInputValueHandle_t,
+    fallback: openvr::VRInputValueHandle_t,
+) -> openvr::VRInputValueHandle_t {
+    if origin == openvr::k_ulInvalidInputValueHandle {
+        fallback
+    } else {
+        origin
+    }
+}
+
+/// The source path of the input of a binding on controllers of `controller_type`, which is its
+/// origin in action data, e.g. `/user/hand/left/input/joystick`.
+pub fn source_path(controller_type: &str, path: DynInputPath) -> CString {
+    let path = format!(
+        "{}{}",
+        path.device.path(),
+        openvr_input(controller_type, path.subpath)
+    );
+    CString::new(path).expect("input paths have no NUL")
 }
 
 /// The OpenVR path of `subpath` on controllers of `controller_type`, as SteamVR's profiles of

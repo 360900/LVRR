@@ -2773,7 +2773,7 @@ fn get_action_origins(
     set: vr::VRActionSetHandle_t,
     action: vr::VRActionHandle_t,
 ) -> Vec<vr::VRInputValueHandle_t> {
-    let mut origins = [vr::k_ulInvalidInputValueHandle; 8];
+    let mut origins = [vr::k_ulInvalidInputValueHandle; vr::k_unMaxActionOriginCount as usize];
     assert_eq!(
         vr::IVRInput011_Interface::GetActionOrigins(
             f.input.as_ref(),
@@ -3694,17 +3694,14 @@ fn action_origins_are_openvr_inputs() {
             .collect::<Vec<_>>()
     };
 
-    // Bound to the grip's value in OpenXR. The other hand is reported whole.
+    // Bound to the grip's value in OpenXR, on one hand only.
     assert_eq!(
         origins_of(c"/actions/set1/in/boolact2"),
-        owned(&[
-            (
-                "/user/hand/left/input/grip",
-                "Left Hand Oculus Touch Grip",
-                "button_grip"
-            ),
-            ("/user/hand/right", "Right Hand Oculus Touch", ""),
-        ])
+        owned(&[(
+            "/user/hand/left/input/grip",
+            "Left Hand Oculus Touch Grip",
+            "button_grip"
+        )])
     );
     // Bound to /input/thumbstick, which SteamVR's Touch calls a joystick.
     assert_eq!(
@@ -3722,6 +3719,7 @@ fn action_origins_are_openvr_inputs() {
             ),
         ])
     );
+    // Every bound input, left hand first.
     assert_eq!(
         origins_of(c"/actions/set1/in/boolact"),
         owned(&[
@@ -3731,11 +3729,74 @@ fn action_origins_are_openvr_inputs() {
                 "button_x"
             ),
             (
+                "/user/hand/left/input/y",
+                "Left Hand Oculus Touch Y Button",
+                "button_y"
+            ),
+            (
+                "/user/hand/left/input/system",
+                "Left Hand Oculus Touch System",
+                "button_enter"
+            ),
+            (
+                "/user/hand/left/input/trigger",
+                "Left Hand Oculus Touch Trigger",
+                "trigger"
+            ),
+            (
+                "/user/hand/left/input/thumbrest",
+                "Left Hand Oculus Touch Thumbrest",
+                "thumbrest"
+            ),
+            (
+                "/user/hand/left/input/grip",
+                "Left Hand Oculus Touch Grip",
+                "button_grip"
+            ),
+            (
                 "/user/hand/right/input/a",
                 "Right Hand Oculus Touch A Button",
                 "button_a"
             ),
+            (
+                "/user/hand/right/input/b",
+                "Right Hand Oculus Touch B Button",
+                "button_b"
+            ),
+            (
+                "/user/hand/right/input/grip",
+                "Right Hand Oculus Touch Grip",
+                "button_grip"
+            ),
+            (
+                "/user/hand/right/input/trigger",
+                "Right Hand Oculus Touch Trigger",
+                "trigger"
+            ),
+            (
+                "/user/hand/right/input/joystick",
+                "Right Hand Oculus Touch Joystick",
+                "thumbstick"
+            ),
         ])
+    );
+
+    // Like SteamVR, a buffer too small for them all fails.
+    let boolact = f.get_action_handle(c"/actions/set1/in/boolact");
+    let mut origins = [vr::k_ulInvalidInputValueHandle; 4];
+    assert_eq!(
+        vr::IVRInput011_Interface::GetActionOrigins(
+            f.input.as_ref(),
+            set1,
+            boolact,
+            origins.as_mut_ptr(),
+            origins.len() as u32,
+        ),
+        vr::EVRInputError::BufferTooSmall
+    );
+    assert_eq!(
+        origins.to_vec(),
+        get_action_origins(&f, set1, boolact)[..4].to_vec()
     );
 }
 
@@ -5163,7 +5224,7 @@ fn gamepad_origins() {
 
     let info = get_origin_info(&f, a);
     assert_eq!(info.trackedDeviceIndex, vr::k_unTrackedDeviceIndexInvalid);
-    assert_eq!(info.devicePath, a);
+    assert_eq!(info.devicePath, f.get_input_source_handle(c"/user/gamepad"));
 }
 
 #[test]

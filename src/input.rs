@@ -65,8 +65,9 @@ fn normalize_component(name: &str) -> &str {
 
 /// Parse an OpenXR path into (device_path, input_kind, component, slot).
 /// e.g. "/user/hand/right/input/trigger/value" → ("/user/hand/right", "input", "trigger", "value")
+/// OpenVR pose sources are a kind of their own: "/user/hand/left/pose/tip" → (.., "pose", "tip", "")
 fn parse_input_path(path: &str) -> (&str, &str, &str, &str) {
-    for kind in ["input", "output"] {
+    for kind in ["input", "output", "pose"] {
         let needle = format!("/{kind}/");
         if let Some(pos) = path.find(&needle) {
             let device = &path[..pos];
@@ -217,6 +218,16 @@ fn initial_app_key() -> Option<String> {
     None
 }
 
+/// The handle of the input source `path`, made on first use.
+fn input_source_handle(
+    map: &RwLock<SlotMap<InputSourceKey, CString>>,
+    path: &CStr,
+) -> vr::VRInputValueHandle_t {
+    find_or_insert(map, |src| src.as_c_str() == path, || path.into())
+        .data()
+        .as_ffi()
+}
+
 /// For `action.state(..).unwrap_or_else(inactive_state)`: an action whose state can't be read,
 /// e.g. because the runtime lost the session, reads as inactive.
 fn inactive_state<T: xr::ActionInput + Default>(error: xr::sys::Result) -> xr::ActionState<T> {
@@ -343,6 +354,16 @@ impl<C: openxr_data::Compositor> Input<C> {
         ]
     }
 
+    /// The handle of a hand, `/user/hand/left` or `/user/hand/right`.
+    fn hand_handle(&self, hand: Hand) -> vr::VRInputValueHandle_t {
+        match hand {
+            Hand::Left => self.left_hand_key,
+            Hand::Right => self.right_hand_key,
+        }
+        .data()
+        .as_ffi()
+    }
+
     /// Determine which hand an input source key belongs to, including
     /// specific input paths like `/user/hand/right/input/trigger`.
     fn hand_from_key(&self, key: InputSourceKey) -> Option<Hand> {
@@ -380,13 +401,7 @@ impl<C: openxr_data::Compositor> Input<C> {
     /// Get or create a handle for a specific input source path
     /// (e.g., `/user/hand/right/input/trigger/click`).
     fn get_or_create_input_source_handle(&self, path: &CStr) -> u64 {
-        find_or_insert(
-            &self.input_source_map,
-            |src| src.as_c_str() == path,
-            || path.into(),
-        )
-        .data()
-        .as_ffi()
+        input_source_handle(&self.input_source_map, path)
     }
 
     /// Collect all action keys that share the same input suffix across
@@ -1173,6 +1188,8 @@ enum ActionData {
 struct BoundPose {
     left: Option<BoundPoseType>,
     right: Option<BoundPoseType>,
+    /// The handle of each hand's bound pose source (e.g. `/user/hand/left/pose/raw`), left first.
+    origins: [vr::VRInputValueHandle_t; 2],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1196,6 +1213,25 @@ pub enum BoundPoseType {
     OpenxrPoke,
     OpenxrAim,
     OpenxrGrip,
+}
+
+impl BoundPoseType {
+    /// The pose's name in its source path, e.g. `raw` in `/user/hand/left/pose/raw`.
+    fn openvr_name(self) -> &'static str {
+        match self {
+            Self::Raw => "raw",
+            Self::Tip => "tip",
+            Self::Base => "base",
+            Self::Gdc2015 => "gdc2015",
+            Self::Handgrip => "handgrip",
+            Self::Grip => "grip",
+            Self::OpenxrHandmodel => "openxr_handmodel",
+            Self::OpenxrPinch => "openxr_pinch",
+            Self::OpenxrPoke => "openxr_poke",
+            Self::OpenxrAim => "openxr_aim",
+            Self::OpenxrGrip => "openxr_grip",
+        }
+    }
 }
 
 macro_rules! get_action_from_handle {
@@ -1284,6 +1320,65 @@ impl<C: openxr_data::Compositor> Input<C> {
         let index = self.get_controller_device_index(hand)?;
         self.get_device_string_tracked_property(index, property)
             .map(|value| value.to_string_lossy().into_owned())
+    }
+
+    /// Origins for actions without recorded bindings: the first OpenXR input path bound on each
+    /// hand, or the hands for custom bindings without one.
+    fn unrecorded_action_origins(
+        &self,
+        loaded: &ManifestLoadedActions,
+        profile: Option<xr::Path>,
+        keys: &[ActionKey],
+        add: &mut impl FnMut(vr::VRInputValueHandle_t),
+    ) {
+        let profile_maps: Vec<_> = match profile {
+            Some(profile) => loaded
+                .per_profile_input_paths
+                .get(&profile)
+                .into_iter()
+                .collect(),
+            None => loaded.per_profile_input_paths.values().collect(),
+        };
+        let mut found: [Option<String>; 2] = [None, None];
+        for path in profile_maps
+            .iter()
+            .flat_map(|map| keys.iter().filter_map(|key| map.get(*key)))
+            .flatten()
+        {
+            let Ok(path) = self.openxr.instance.path_to_string(*path) else {
+                continue;
+            };
+            for (hand, slot) in [Hand::Left, Hand::Right].into_iter().zip(&mut found) {
+                if slot.is_none() && strip_device(&path, origins::hand_path(hand)).is_some() {
+                    *slot = Some(path.clone());
+                }
+            }
+        }
+
+        if found.iter().all(Option::is_none) {
+            let gamepad_profile = self.gamepad_profile();
+            let has_any = loaded
+                .per_profile_bindings
+                .iter()
+                .filter(|(profile, _)| Some(**profile) != gamepad_profile)
+                .any(|(_, m)| {
+                    keys.iter()
+                        .any(|k| m.get(*k).map(|v| !v.is_empty()).unwrap_or(false))
+                });
+            if has_any {
+                add(self.hand_handle(Hand::Left));
+                add(self.hand_handle(Hand::Right));
+            }
+            return;
+        }
+        for (hand, path) in [Hand::Left, Hand::Right].into_iter().zip(found) {
+            add(match path {
+                Some(path) => self.get_or_create_input_source_handle(
+                    &CString::new(path).expect("OpenXR paths have no NUL"),
+                ),
+                None => self.hand_handle(hand),
+            });
+        }
     }
 
     /// Bindings guessed from the OpenXR paths bound to `keys`, for actions with none recorded.
@@ -1762,10 +1857,8 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             return vr::EVRInputError::InvalidParam;
         }
 
-        let out = unsafe { std::slice::from_raw_parts_mut(origins_out, origin_out_count as usize) };
-        for slot in out.iter_mut() {
-            *slot = vr::k_ulInvalidInputValueHandle;
-        }
+        unsafe { std::slice::from_raw_parts_mut(origins_out, origin_out_count as usize) }
+            .fill(vr::k_ulInvalidInputValueHandle);
 
         let session_data = self.openxr.session_data.get();
         let Some(loaded) = session_data.input_data.get_loaded_actions() else {
@@ -1785,8 +1878,6 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
 
         let related_action_keys = self.related_action_keys(action_key);
 
-        let mut idx = 0;
-
         debug!(
             "GetActionOrigins: action 0x{:x} type={:?}, related_actions={}",
             action_handle,
@@ -1794,169 +1885,105 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             related_action_keys.len(),
         );
 
+        let mut origins = Vec::new();
+        let mut add = |origin| {
+            if origin != vr::k_ulInvalidInputValueHandle && !origins.contains(&origin) {
+                origins.push(origin);
+            }
+        };
         match loaded.actions.get(action_key) {
             // Skeleton actions are tied to exactly one hand - return it directly
             // without needing any active interaction profile.
-            Some(ActionData::Skeleton(hand)) => {
-                if idx < origin_out_count as usize {
-                    out[idx] = match hand {
-                        Hand::Left => self.left_hand_key.data().as_ffi(),
-                        Hand::Right => self.right_hand_key.data().as_ffi(),
-                    };
-                    idx += 1;
-                }
-            }
+            Some(ActionData::Skeleton(hand)) => add(self.hand_handle(*hand)),
 
-            // Pose actions: per_profile_pose_bindings stores explicit per-hand
-            // information for every loaded profile. Scan all profiles so this
-            // works even before the runtime sets an active interaction profile.
+            // The pose source bound on each hand, e.g. /user/hand/left/pose/raw, like action data
+            // reports. From the active profile's bindings, or any profile's before the runtime
+            // picked one.
             Some(ActionData::Pose) => {
-                let (mut has_left, mut has_right) = (false, false);
-                for profile_map in loaded.per_profile_pose_bindings.values() {
-                    if let Some(bound_pose) = profile_map.get(action_key) {
-                        has_left |= bound_pose.left.is_some();
-                        has_right |= bound_pose.right.is_some();
+                let active_profile = self.resolve_active_profile(&session_data, loaded);
+                let active = active_profile
+                    .and_then(|profile| loaded.per_profile_pose_bindings.get(&profile))
+                    .filter(|map| map.contains_key(action_key));
+                let maps: Vec<_> = match active {
+                    Some(map) => vec![map],
+                    None => loaded.per_profile_pose_bindings.values().collect(),
+                };
+                let mut found = [None; 2];
+                for bound in maps.into_iter().filter_map(|map| map.get(action_key)) {
+                    for (index, (hand, bound_hand)) in
+                        [(Hand::Left, bound.left), (Hand::Right, bound.right)]
+                            .into_iter()
+                            .enumerate()
+                    {
+                        if bound_hand.is_some() && found[index].is_none() {
+                            let origin = bound.origins[index];
+                            found[index] = Some(origins::origin_or(origin, self.hand_handle(hand)));
+                        }
                     }
                 }
                 // Fallback: if no pose bindings at all, check regular bindings
                 // (some profiles may bind pose actions as regular component paths).
-                if !has_left && !has_right {
-                    has_left = true;
-                    has_right = loaded
+                if found == [None; 2] {
+                    found[0] = Some(self.hand_handle(Hand::Left));
+                    let has_right = loaded
                         .per_profile_bindings
                         .values()
                         .any(|m| m.get(action_key).map(|v| !v.is_empty()).unwrap_or(false));
+                    found[1] = has_right.then(|| self.hand_handle(Hand::Right));
                 }
-                for (has, hand_key) in [
-                    (has_left, &self.left_hand_key),
-                    (has_right, &self.right_hand_key),
-                ] {
-                    if has && idx < origin_out_count as usize {
-                        out[idx] = hand_key.data().as_ffi();
-                        idx += 1;
-                    }
-                }
+                found.into_iter().flatten().for_each(&mut add);
             }
 
-            // Bool / Analog / Haptic / other actions:
-            // Return specific input source handles so that
-            // GetOriginTrackedDeviceInfo can report the correct component
-            // (e.g. "trigger", "thumbstick") instead of a bare hand path.
+            // Bool / Analog / Haptic / other actions: the OpenVR source path of every bound
+            // input, e.g. /user/hand/left/input/grip rather than OpenXR's .../squeeze/value, so
+            // GetOriginTrackedDeviceInfo can report the correct component. Action data reports
+            // one of these as its origin.
             _ => {
                 let active_profile = self.resolve_active_profile(&session_data, loaded);
-
-                let (mut left_path_str, mut right_path_str): (Option<String>, Option<String>) =
-                    (None, None);
-
-                // The OpenVR path of the first input bound on each hand, e.g.
-                // /user/hand/left/input/grip rather than OpenXR's .../squeeze/value.
-                for info in recorded_bindings(loaded, active_profile, &related_action_keys) {
-                    let path = || format!("{}{}", info.device.path(), info.input);
-                    match info.device {
-                        InputDevice::Hand(Hand::Left) => {
-                            left_path_str = left_path_str.or_else(|| Some(path()))
-                        }
-                        InputDevice::Hand(Hand::Right) => {
-                            right_path_str = right_path_str.or_else(|| Some(path()))
-                        }
-                        InputDevice::Gamepad => {}
-                    }
-                }
-
-                let profile_maps: Vec<_> = if left_path_str.is_some() || right_path_str.is_some() {
-                    Vec::new()
-                } else if let Some(ap) = active_profile {
-                    loaded
-                        .per_profile_input_paths
-                        .get(&ap)
+                // Left hand first, each hand's in binding order.
+                let mut recorded: Vec<_> =
+                    recorded_bindings(loaded, active_profile, &related_action_keys)
                         .into_iter()
-                        .collect()
+                        .filter(|info| {
+                            info.origin != vr::k_ulInvalidInputValueHandle
+                                && info.device != InputDevice::Gamepad
+                        })
+                        .collect();
+                recorded.sort_by_key(|info| info.device != InputDevice::Hand(Hand::Left));
+                if recorded.is_empty() {
+                    self.unrecorded_action_origins(
+                        loaded,
+                        active_profile,
+                        &related_action_keys,
+                        &mut add,
+                    );
                 } else {
-                    loaded.per_profile_input_paths.values().collect()
-                };
-
-                for m in &profile_maps {
-                    for key in &related_action_keys {
-                        if let Some(paths) = m.get(*key) {
-                            for &path in paths {
-                                if let Ok(path_str) = self.openxr.instance.path_to_string(path) {
-                                    if path_str.starts_with("/user/hand/left")
-                                        && left_path_str.is_none()
-                                    {
-                                        left_path_str = Some(path_str.clone());
-                                    }
-                                    if path_str.starts_with("/user/hand/right")
-                                        && right_path_str.is_none()
-                                    {
-                                        right_path_str = Some(path_str);
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    recorded.into_iter().for_each(|info| add(info.origin));
                 }
 
-                // Fallback: some custom bindings with NULL input_path end up only
-                // in per_profile_bindings (legacy path). Return both hands for those.
-                if left_path_str.is_none() && right_path_str.is_none() {
-                    let gamepad_profile = self.gamepad_profile();
-                    let has_any = loaded
-                        .per_profile_bindings
-                        .iter()
-                        .filter(|(profile, _)| Some(**profile) != gamepad_profile)
-                        .any(|(_, m)| {
-                            related_action_keys
-                                .iter()
-                                .any(|k| m.get(*k).map(|v| !v.is_empty()).unwrap_or(false))
-                        });
-                    if has_any {
-                        for hand_key in [&self.left_hand_key, &self.right_hand_key] {
-                            if idx < origin_out_count as usize {
-                                out[idx] = hand_key.data().as_ffi();
-                                idx += 1;
-                            }
-                        }
-                    }
-                } else {
-                    for (path_opt, hand_key) in [
-                        (&left_path_str, &self.left_hand_key),
-                        (&right_path_str, &self.right_hand_key),
-                    ] {
-                        if idx < origin_out_count as usize {
-                            let handle = match path_opt {
-                                Some(path_str) => self.get_or_create_input_source_handle(
-                                    &CString::new(path_str.as_str()).unwrap(),
-                                ),
-                                None => hand_key.data().as_ffi(),
-                            };
-                            out[idx] = handle;
-                            idx += 1;
-                        }
-                    }
-                }
-
-                // The first input bound on the gamepad, while there is one.
-                let gamepad_input =
-                    self.gamepad_present(&session_data, loaded)
-                        .and_then(|profile| {
-                            recorded_bindings(loaded, Some(profile), &related_action_keys)
-                                .into_iter()
-                                .next()
-                                .map(|info| format!("{}{}", info.device.path(), info.input))
-                        });
-                if let Some(path) = gamepad_input
-                    && idx < origin_out_count as usize
-                {
-                    out[idx] = self.get_or_create_input_source_handle(&CString::new(path).unwrap());
-                    idx += 1;
+                // The inputs bound on the gamepad, while there is one.
+                if let Some(profile) = self.gamepad_present(&session_data, loaded) {
+                    recorded_bindings(loaded, Some(profile), &related_action_keys)
+                        .into_iter()
+                        .filter(|info| info.device == InputDevice::Gamepad)
+                        .for_each(|info| add(info.origin));
                 }
             }
         }
 
+        let out = unsafe { std::slice::from_raw_parts_mut(origins_out, origin_out_count as usize) };
+        for (slot, origin) in out.iter_mut().zip(&origins) {
+            *slot = *origin;
+        }
+
         debug!(
             "GetActionOrigins: found {} origin(s) for action 0x{:x}",
-            idx, action_handle
+            origins.len(),
+            action_handle
         );
+        if origins.len() > out.len() {
+            return vr::EVRInputError::BufferTooSmall;
+        }
         vr::EVRInputError::None
     }
     fn TriggerHapticVibrationAction(
