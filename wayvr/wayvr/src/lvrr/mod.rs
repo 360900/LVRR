@@ -1,20 +1,51 @@
 //! LVRR: the link to the LVRR server, and dashboard features that need the backend.
 
+mod perf_overlay;
+
 use std::io::Write;
 
 use lvrr_common::{
     link::LvrrLink,
     state::{LvrrBackend, MessageKind, Notice},
 };
+use serde::{Deserialize, Serialize};
 use wgui::i18n::Translation;
-use wlx_common::overlays::ToastTopic;
+use wlx_common::{config_io, overlays::ToastTopic};
 
 use crate::{overlays::toast::Toast, state::AppState};
+
+const CONFIG_FILE: &str = "lvrr.json5";
 
 #[derive(Default)]
 pub struct LvrrApp {
     pub link: Option<LvrrLink>,
     pub perf_overlay: bool,
+}
+
+/// LVRR's own WayVR settings
+#[derive(Default, Deserialize, Serialize)]
+#[serde(default)]
+struct LvrrConfig {
+    perf_overlay: bool,
+}
+
+impl LvrrConfig {
+    fn load() -> Self {
+        let path = config_io::get_config_file_path(CONFIG_FILE);
+        match std::fs::read_to_string(&path) {
+            Ok(json) => serde_json5::from_str(&json).unwrap_or_else(|e| {
+                log::warn!("Ignoring {}: {e}", path.display());
+                Self::default()
+            }),
+            Err(_) => Self::default(),
+        }
+    }
+
+    fn save(&self) -> anyhow::Result<()> {
+        let path = config_io::get_config_file_path(CONFIG_FILE);
+        std::fs::write(path, serde_json5::to_string(self)?)?;
+        Ok(())
+    }
 }
 
 pub fn start(app: &mut AppState) {
@@ -24,6 +55,25 @@ pub fn start(app: &mut AppState) {
     match LvrrLink::start() {
         Ok(link) => app.lvrr.link = Some(link),
         Err(e) => log::error!("Could not start the LVRR server link: {e:?}"),
+    }
+    app.lvrr.perf_overlay = LvrrConfig::load().perf_overlay;
+    if app.lvrr.perf_overlay {
+        perf_overlay::set_visible(app, true);
+    }
+}
+
+/// Shows or hides the performance overlay, and remembers the choice
+pub fn set_perf_overlay(app: &mut AppState, visible: bool) {
+    if app.lvrr.perf_overlay == visible {
+        return;
+    }
+    app.lvrr.perf_overlay = visible;
+    perf_overlay::set_visible(app, visible);
+    let config = LvrrConfig {
+        perf_overlay: visible,
+    };
+    if let Err(e) = config.save() {
+        log::warn!("Could not save {CONFIG_FILE}: {e:?}");
     }
 }
 

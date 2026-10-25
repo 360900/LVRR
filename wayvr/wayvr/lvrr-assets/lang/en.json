@@ -1,0 +1,13 @@
+{
+  "LVRR": {
+    "PERF": {
+      "REFRESH_RATE": "Refresh rate",
+      "LATENCY": "Latency",
+      "ENCODE": "Encoding",
+      "NETWORK": "Network",
+      "DECODE": "Decoding",
+      "BANDWIDTH": "Bandwidth",
+      "HEADSET_GPU": "Headset GPU"
+    }
+  }
+}

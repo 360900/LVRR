@@ -1,0 +1,23 @@
+<layout version="2">
+  <!-- LVRR: the performance overlay, see src/lvrr/perf_overlay.rs -->
+
+  <!-- id, translation -->
+  <template name="Stat">
+    <div flex_direction="row" justify_content="space_between" gap="24" width="100%">
+      <label translation="${translation}" size="18" color="secondary" />
+      <label id="${id}" text="-" size="18" weight="bold" color="on_background" />
+    </div>
+  </template>
+
+  <elements>
+    <rectangle padding="12" flex_direction="column" gap="4" min_width="300" color="background(opacity-0.75)" border_color="outline" border="2" round="8">
+      <Stat id="refresh_rate" translation="LVRR.PERF.REFRESH_RATE" />
+      <Stat id="latency" translation="LVRR.PERF.LATENCY" />
+      <Stat id="encode" translation="LVRR.PERF.ENCODE" />
+      <Stat id="network" translation="LVRR.PERF.NETWORK" />
+      <Stat id="decode" translation="LVRR.PERF.DECODE" />
+      <Stat id="bandwidth" translation="LVRR.PERF.BANDWIDTH" />
+      <Stat id="headset_gpu" translation="LVRR.PERF.HEADSET_GPU" />
+    </rectangle>
+  </elements>
+</layout>

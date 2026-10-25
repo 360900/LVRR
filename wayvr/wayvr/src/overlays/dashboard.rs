@@ -417,7 +417,7 @@ impl DashInterface<AppState> for DashInterfaceLive {
     }
 
     fn lvrr_set_perf_overlay(&mut self, app: &mut AppState, visible: bool) {
-        app.lvrr.perf_overlay = visible;
+        crate::lvrr::set_perf_overlay(app, visible);
     }
 
     fn clipboard_set_text(&mut self, _app: &mut AppState, text: &str) -> anyhow::Result<()> {
