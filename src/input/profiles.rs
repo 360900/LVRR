@@ -2,6 +2,7 @@ pub mod frame_controller;
 pub mod knuckles;
 pub mod meta_touch_plus;
 pub mod oculus_touch;
+pub mod pico;
 pub mod simple_controller;
 pub mod vive_controller;
 pub mod vive_focus3;
@@ -21,6 +22,7 @@ use knuckles::Knuckles;
 use meta_touch_plus::MetaTouchPlus;
 use oculus_touch::OculusTouch;
 use openxr as xr;
+use pico::{Pico4, PicoNeo3};
 use simple_controller::SimpleController;
 use std::ffi::CStr;
 use std::marker::PhantomData;
@@ -107,6 +109,10 @@ impl ControllerType {
                 runner.run::<HolographicController>();
             }
             Self::HPMotionController => runner.run::<ReverbG2Controller>(),
+            Self::PicoController => {
+                runner.run::<Pico4>();
+                runner.run::<PicoNeo3>();
+            }
             Self::GenericHmd | Self::Unknown(_) => {}
         }
     }
@@ -145,6 +151,8 @@ pub fn run_for_all_profiles(runner: &mut impl RunWithProfile) {
     profile!(MetaTouchPlus);
     profile!(OculusTouch);
     profile!(ViveFocus3);
+    profile!(Pico4);
+    profile!(PicoNeo3);
     profile!(SimpleController);
     profile!(wmr::hp_motion_controller::ReverbG2Controller);
     profile!(wmr::ms_motion_controller::HolographicController);

@@ -1010,6 +1010,65 @@ mod tests {
     }
 
     #[test]
+    fn touch_like_bindings() {
+        use crate::input::profiles::pico::Pico4;
+        let (f, _) = legacy_fixture(|actions| actions.a.as_raw());
+        fn check<P: InteractionProfile>(f: &Fixture) {
+            assert_legacy_bindings::<P>(
+                f,
+                |a| a.trigger_click.as_raw(),
+                &[
+                    "/user/hand/left/input/trigger/value",
+                    "/user/hand/right/input/trigger/value",
+                ],
+            );
+            assert_legacy_bindings::<P>(
+                f,
+                |a| a.squeeze_click.as_raw(),
+                &[
+                    "/user/hand/left/input/squeeze/value",
+                    "/user/hand/right/input/squeeze/value",
+                ],
+            );
+            assert_legacy_bindings::<P>(
+                f,
+                |a| a.a_touch.as_raw(),
+                &[
+                    "/user/hand/left/input/x/touch",
+                    "/user/hand/right/input/a/touch",
+                ],
+            );
+            assert_legacy_bindings::<P>(
+                f,
+                |a| a.app_menu.as_raw(),
+                &[
+                    "/user/hand/left/input/y/click",
+                    "/user/hand/right/input/b/click",
+                ],
+            );
+            assert_legacy_bindings::<P>(f, |a| a.grip_touch.as_raw(), &[]);
+        }
+        check::<OculusTouch>(&f);
+        // SteamVR's Pico legacy bindings are the Touch's.
+        check::<Pico4>(&f);
+    }
+
+    #[test]
+    fn legacy_input_on_pico() {
+        use crate::input::profiles::pico::Pico4;
+        use fakexr::UserPath::*;
+        let (f, action) = legacy_fixture_for::<Pico4>(|actions| actions.a.as_raw());
+        fakexr::set_action_state(action, fakexr::ActionState::Bool(true), RightHand);
+        f.input.frame_start_update();
+        let pressed = |index| get_state(&f, index).ulButtonPressed;
+        assert_eq!(pressed(2), super::button_mask_from_id(vr::EVRButtonId::A));
+        assert_eq!(pressed(1), 0);
+        expect_button_event(&f, vr::EVREventType::ButtonTouch, 2, vr::EVRButtonId::A);
+        expect_button_event(&f, vr::EVREventType::ButtonPress, 2, vr::EVRButtonId::A);
+        expect_no_event(&f);
+    }
+
+    #[test]
     fn index_bindings() {
         let (f, _) = legacy_fixture(|actions| actions.a.as_raw());
         let both = |paths: &[&str]| -> Vec<String> {

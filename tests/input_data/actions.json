@@ -113,6 +113,10 @@
 		{
 			"binding_url": "holographiccontroller.json",
 			"controller_type": "holographic_controller"
+		},
+		{
+			"binding_url": "pico.json",
+			"controller_type": "pico_controller"
 		}
 	],
 	"localization": []

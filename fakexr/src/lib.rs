@@ -697,13 +697,14 @@ extern "system" fn enumerate_instance_extension_properties(
     properties: *mut xr::ExtensionProperties,
 ) -> xr::Result {
     assert!(layer_name.is_null());
-    let fixed: [&[u8]; 14] = [
+    let fixed: [&[u8]; 15] = [
         xr::KHR_VULKAN_ENABLE_EXTENSION_NAME,
         openxr_mndx_xdev_space::XR_MNDX_XDEV_SPACE_EXTENSION_NAME.as_bytes(),
         xr::HTC_VIVE_FOCUS3_CONTROLLER_INTERACTION_EXTENSION_NAME,
         xr::META_TOUCH_CONTROLLER_PLUS_EXTENSION_NAME,
         xr::EXT_HP_MIXED_REALITY_CONTROLLER_EXTENSION_NAME,
         xr::EXT_SAMSUNG_ODYSSEY_CONTROLLER_EXTENSION_NAME,
+        xr::BD_CONTROLLER_INTERACTION_EXTENSION_NAME,
         xr::KHR_VISIBILITY_MASK_EXTENSION_NAME,
         b"XR_VALVE_frame_controller_interaction\0",
         xr::EXT_HAND_TRACKING_EXTENSION_NAME,
@@ -1855,6 +1856,14 @@ const PROFILE_EXTENSIONS: &[(&str, &[u8])] = &[
     (
         "/interaction_profiles/samsung/odyssey_controller",
         xr::EXT_SAMSUNG_ODYSSEY_CONTROLLER_EXTENSION_NAME,
+    ),
+    (
+        "/interaction_profiles/bytedance/pico_neo3_controller",
+        xr::BD_CONTROLLER_INTERACTION_EXTENSION_NAME,
+    ),
+    (
+        "/interaction_profiles/bytedance/pico4_controller",
+        xr::BD_CONTROLLER_INTERACTION_EXTENSION_NAME,
     ),
 ];
 

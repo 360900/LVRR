@@ -214,6 +214,9 @@ fn fallback_model(model_name: &str) -> Option<&'static str> {
         // The Steam Frame profile uses the Index controllers' raw pose.
         "frame_controller_left" => Some("valve_controller_knu_1_0_left"),
         "frame_controller_right" => Some("valve_controller_knu_1_0_right"),
+        // Ringed like the Quest 2 ones, whose raw pose the Pico profiles use.
+        "pico_4_controller_left" => Some("oculus_quest2_controller_left"),
+        "pico_4_controller_right" => Some("oculus_quest2_controller_right"),
         // WMR reports the path the driver extracted the model to.
         name if name.ends_with("\\controller.obj") => Some("generic_controller"),
         _ => None,

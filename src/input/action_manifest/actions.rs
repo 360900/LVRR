@@ -48,6 +48,7 @@ pub enum ControllerType {
     HolographicController,
     #[serde(rename = "hpmotioncontroller")]
     HPMotionController,
+    PicoController,
     /// The headset, see [super::bindings::handle_hmd_bindings].
     GenericHmd,
     #[serde(untagged)]
@@ -66,6 +67,7 @@ impl std::str::FromStr for ControllerType {
             "oculus_touch" => Self::OculusTouch,
             "holographic_controller" => Self::HolographicController,
             "hpmotioncontroller" => Self::HPMotionController,
+            "pico_controller" => Self::PicoController,
             "generic_hmd" => Self::GenericHmd,
             other => Self::Unknown(other.to_owned()),
         })
@@ -82,6 +84,7 @@ impl std::fmt::Display for ControllerType {
             Self::OculusTouch => "oculus_touch",
             Self::HolographicController => "holographic_controller",
             Self::HPMotionController => "hpmotioncontroller",
+            Self::PicoController => "pico_controller",
             Self::GenericHmd => "generic_hmd",
             Self::Unknown(value) => value,
         };

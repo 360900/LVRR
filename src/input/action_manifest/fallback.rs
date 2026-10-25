@@ -22,7 +22,7 @@ impl ControllerType {
     }
 
     /// Every controller type a game can list bindings for.
-    pub fn known() -> [Self; 7] {
+    pub fn known() -> [Self; 8] {
         [
             Self::ViveController,
             Self::ViveFocus3,
@@ -31,10 +31,14 @@ impl ControllerType {
             Self::OculusTouch,
             Self::HolographicController,
             Self::HPMotionController,
+            Self::PicoController,
         ]
     }
 
     /// Controller types whose bindings convert best to this one, closest first.
+    ///
+    /// Pico bindings come right after the Touch ones, or first for the Touch, as in SteamVR's
+    /// remapping files.
     pub fn conversion_sources(&self) -> Vec<Self> {
         use ControllerType::*;
         let order = match self {
@@ -42,6 +46,7 @@ impl ControllerType {
             ViveController => [
                 Knuckles,
                 HolographicController,
+                PicoController,
                 OculusTouch,
                 ViveFocus3,
                 HPMotionController,
@@ -50,6 +55,7 @@ impl ControllerType {
             ],
             Knuckles => [
                 OculusTouch,
+                PicoController,
                 ViveFocus3,
                 HPMotionController,
                 FrameController,
@@ -61,6 +67,7 @@ impl ControllerType {
                 HPMotionController,
                 HolographicController,
                 OculusTouch,
+                PicoController,
                 Knuckles,
                 ViveFocus3,
                 FrameController,
@@ -68,6 +75,7 @@ impl ControllerType {
             ],
             _ => [
                 OculusTouch,
+                PicoController,
                 Knuckles,
                 ViveFocus3,
                 HPMotionController,
@@ -269,5 +277,43 @@ mod tests {
         assert_eq!(convert(B, Hand::Right, &knuckles, wmr), None);
         let vive = ControllerType::ViveController;
         assert_eq!(convert(Trackpad, Hand::Left, &vive, wmr), Some(Thumbstick));
+    }
+
+    #[test]
+    fn conversion_sources() {
+        use ControllerType::*;
+        // Like SteamVR's remapping files: Pico right after the Touch, or first for it.
+        assert_eq!(
+            OculusTouch.conversion_sources()[..2],
+            [PicoController, Knuckles]
+        );
+        assert_eq!(
+            PicoController.conversion_sources()[..2],
+            [OculusTouch, Knuckles]
+        );
+        assert_eq!(
+            Knuckles.conversion_sources()[..2],
+            [OculusTouch, PicoController]
+        );
+        assert_eq!(
+            ViveController.conversion_sources()[2..4],
+            [PicoController, OculusTouch]
+        );
+
+        let known = ControllerType::known();
+        for ty in &known {
+            let sources = ty.conversion_sources();
+            assert_eq!(sources.len(), known.len() - 1, "{ty}");
+            assert!(
+                known
+                    .iter()
+                    .all(|other| other == ty || sources.contains(other)),
+                "{ty}"
+            );
+            // The names games list them under.
+            assert_eq!(ty.to_string().parse::<ControllerType>(), Ok(ty.clone()));
+            let json: ControllerType = serde_json::from_str(&format!("\"{ty}\"")).unwrap();
+            assert_eq!(&json, ty);
+        }
     }
 }

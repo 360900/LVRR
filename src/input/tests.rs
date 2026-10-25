@@ -888,6 +888,35 @@ fn additional_bindings() {
 }
 
 #[test]
+fn bindings_converted_for_pico() {
+    use super::profiles::pico::Pico4;
+    let f = Fixture::new();
+    f.load_actions(c"actions_vive_only.json");
+
+    let pico = Pico4::profile_path();
+    // The right menu button goes to the upper face button.
+    f.verify_bindings::<bool>(
+        pico,
+        c"/actions/main/in/boolact",
+        [
+            "/user/hand/left/input/menu/click".into(),
+            "/user/hand/right/input/b/click".into(),
+            "/user/hand/right/input/trigger/click".into(),
+        ],
+    );
+    f.verify_bindings::<xr::Vector2f>(
+        pico,
+        c"/actions/main/in/vec2act",
+        ["/user/hand/left/input/thumbstick".into()],
+    );
+    f.verify_threshold_bindings(
+        pico,
+        c"/actions/main/in/gripact",
+        ["/user/hand/left/input/squeeze/value".into()],
+    );
+}
+
+#[test]
 fn controllers_tracked_without_bindings() {
     let f = Fixture::new();
     f.load_actions(c"actions_no_bindings.json");

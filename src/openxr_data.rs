@@ -267,6 +267,7 @@ impl<C: Compositor> OpenXrData<C> {
         exts.meta_touch_controller_plus = supported_exts.meta_touch_controller_plus;
         exts.ext_samsung_odyssey_controller = supported_exts.ext_samsung_odyssey_controller;
         exts.ext_hp_mixed_reality_controller = supported_exts.ext_hp_mixed_reality_controller;
+        exts.bd_controller_interaction = supported_exts.bd_controller_interaction;
         exts.fb_display_refresh_rate = supported_exts.fb_display_refresh_rate;
         exts.ext_user_presence = supported_exts.ext_user_presence;
 
