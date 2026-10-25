@@ -784,8 +784,8 @@ impl vr::IVRCompositor029_Interface for Compositor {
         crate::warn_unimplemented!("ForceInterleavedReprojectionOn");
     }
     fn ShouldAppRenderWithLowResources(&self) -> bool {
-        // TODO
-        false
+        // Like while SteamVR's dashboard is up, which the runtime holding the input focus is.
+        self.openxr.input_focus_captured()
     }
     fn CompositorDumpImages(&self) {
         crate::warn_unimplemented!("CompositorDumpImages");
@@ -4772,6 +4772,23 @@ mod tests {
             TIMING_PERIOD_MS as u64 + 1,
         ));
         assert_eq!(f.comp.GetFrameTimeRemaining(), 0.0);
+    }
+
+    #[test]
+    fn low_resources_while_the_runtime_has_focus() {
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+        let set_state = |state| {
+            fakexr::set_session_state(f.raw_session(), state);
+            f.comp.openxr.poll_events();
+        };
+        set_state(xr::SessionState::FOCUSED);
+        assert!(!f.comp.ShouldAppRenderWithLowResources());
+        // The runtime's menu took the focus, like SteamVR's dashboard.
+        set_state(xr::SessionState::VISIBLE);
+        assert!(f.comp.ShouldAppRenderWithLowResources());
+        set_state(xr::SessionState::FOCUSED);
+        assert!(!f.comp.ShouldAppRenderWithLowResources());
     }
 
     #[test]
