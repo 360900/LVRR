@@ -19,6 +19,13 @@ pub struct Quirks {
     /// correct even on runtimes without the problem, just redundant.
     /// Env override: XRIZER_SYNTHESIZED_VELOCITY=1/0.
     pub synthesized_velocity: bool,
+
+    /// Treat 8-bit UNORM textures submitted with ColorSpace_Auto as linear. The OpenVR header
+    /// defines Auto as gamma for them, which games rendering sRGB encoded values into UNORM
+    /// textures rely on (D3D11 TYPELESS textures arrive as UNORM through DXVK), but a game
+    /// writing linear values looks too dark that way (reportedly Outer Wilds with NomaiVR).
+    /// Env override: XRIZER_LINEAR_UNORM=1/0.
+    pub linear_unorm: bool,
 }
 
 /// Tracking glitches can teleport the controller for a frame; without a cap, a
@@ -33,6 +40,13 @@ pub fn synthesized_velocity() -> bool {
     *ENABLED.get_or_init(|| {
         env_override("XRIZER_SYNTHESIZED_VELOCITY").unwrap_or(get().synthesized_velocity)
     })
+}
+
+/// Whether 8-bit UNORM textures with ColorSpace_Auto hold linear rather than gamma encoded
+/// values, honouring the XRIZER_LINEAR_UNORM override.
+pub fn linear_unorm() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_override("XRIZER_LINEAR_UNORM").unwrap_or(get().linear_unorm))
 }
 
 /// A boolean environment override, if one is set. Anything other than 1/true
@@ -63,7 +77,7 @@ pub fn get() -> Quirks {
             _ => Quirks::default(),
         };
 
-        if quirks.no_generic_trackers || quirks.synthesized_velocity {
+        if quirks.no_generic_trackers || quirks.synthesized_velocity || quirks.linear_unorm {
             log::info!("Applying game quirks for {exe}: {quirks:?}");
         }
         quirks

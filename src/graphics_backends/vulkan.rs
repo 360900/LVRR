@@ -1477,6 +1477,10 @@ fn unorm_variant(format: vk::Format) -> Option<vk::Format> {
 /// variant are 8-bit, which ColorSpace_Auto assumes to be gamma encoded ("This mirrors the DXGI
 /// formats which have _SRGB variants"), and everything else linear. _SRGB formats decode when read.
 fn holds_gamma(format: vk::Format, color_space: vr::EColorSpace) -> bool {
+    holds_gamma_with(format, color_space, crate::quirks::linear_unorm())
+}
+
+fn holds_gamma_with(format: vk::Format, color_space: vr::EColorSpace, linear_unorm: bool) -> bool {
     if unorm_variant(format).is_some() {
         return false;
     }
@@ -1484,7 +1488,7 @@ fn holds_gamma(format: vk::Format, color_space: vr::EColorSpace) -> bool {
         vr::EColorSpace::Linear => false,
         vr::EColorSpace::Gamma => true,
         // Auto, and Auto for values that aren't a color space
-        _ => srgb_variant(format).is_some(),
+        _ => srgb_variant(format).is_some() && !linear_unorm,
     }
 }
 

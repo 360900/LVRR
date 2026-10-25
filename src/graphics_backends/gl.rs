@@ -1240,7 +1240,7 @@ fn holds_gamma(format: GLenum, color_space: vr::EColorSpace) -> bool {
         vr::EColorSpace::Linear => false,
         vr::EColorSpace::Gamma => format != gl::SRGB8_ALPHA8,
         // Auto: 8-bit formats are gamma, everything else linear.
-        _ => format == gl::RGBA8,
+        _ => format == gl::RGBA8 && !crate::quirks::linear_unorm(),
     }
 }
 

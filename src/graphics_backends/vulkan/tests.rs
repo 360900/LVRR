@@ -1118,11 +1118,23 @@ fn color_space_tells_whether_values_are_gamma_encoded() {
         (F::A2B10G10R10_UNORM_PACK32, C::Gamma, true),
     ] {
         assert_eq!(
-            holds_gamma(format, color_space),
+            holds_gamma_with(format, color_space, false),
             gamma,
             "{format:?} {color_space:?}"
         );
     }
+}
+
+/// XRIZER_LINEAR_UNORM turns Auto for 8-bit UNORM textures into linear, nothing else.
+#[test]
+fn linear_unorm_only_changes_auto() {
+    use vk::Format as F;
+    use vr::EColorSpace as C;
+    assert!(!holds_gamma_with(F::R8G8B8A8_UNORM, C::Auto, true));
+    assert!(!holds_gamma_with(F::B8G8R8A8_UNORM, C(0xdead), true));
+    assert!(holds_gamma_with(F::R8G8B8A8_UNORM, C::Gamma, true));
+    assert!(holds_gamma_with(F::R16G16B16A16_SFLOAT, C::Gamma, true));
+    assert!(!holds_gamma_with(F::R8G8B8A8_SRGB, C::Auto, true));
 }
 
 #[test]
