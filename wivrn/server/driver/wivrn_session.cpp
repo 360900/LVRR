@@ -1287,13 +1287,12 @@ void wivrn_session::reconnect(std::stop_token stop)
 
 			if (refuse_conn)
 			{
-				send_control(to_headset::server_message{
-				        .kind = to_headset::server_message::kind::error,
-				        .msg = std::format("Headset incompatible with session: {}", *refuse_conn),
-				});
-
+				// LVRR: the headset can't change this itself, so start a new session for it
+				U_LOG_W("Headset incompatible with session: %s, restarting the session", refuse_conn->c_str());
+				send_control(lvrr::expect_reconnect{.timeout_ms = 30'000});
 				connection->shutdown();
-				throw std::runtime_error("headset config incompatible with current session");
+				request_stop();
+				return;
 			}
 
 			if (warn_conn)

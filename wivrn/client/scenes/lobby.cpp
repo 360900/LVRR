@@ -888,6 +888,8 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 	if (next_scene)
 	{
 		server_hid_forwarding = next_scene->hid_forwarding_enabled();
+		// LVRR: the stream only renders once frames arrive, settings may come before
+		next_scene->lvrr_update();
 
 		switch (next_scene->current_state())
 		{

@@ -79,5 +79,39 @@
 			<arg type="s" name="where"/>
 			<arg type="s" name="message"/>
 		</signal>
+
+		<!-- LVRR: used by the LVRR dashboard, JSON formats in docs/dbus.md -->
+		<property name="HeadsetSettings"       type="s" access="read"/>
+		<property name="HeadsetStats"          type="s" access="read"/>
+		<method name="SetHeadsetSettings">
+			<arg type="s" name="Patch" direction="in"/>
+			<arg type="s" name="Settings" direction="out"/>
+		</method>
+		<!-- Ends the session so connection-time settings apply; closes all XR applications -->
+		<method name="RestartSession"/>
+		<method name="StopSession"/>
+		<method name="ListApplications">
+			<!-- id, name, icon path or "" -->
+			<arg type="a(sss)" name="Applications" direction="out"/>
+			<annotation name="org.qtproject.QtDBus.QtTypeName.Out0" value="QList&lt;std::tuple&lt;QString,QString,QString&gt;&gt;"/>
+		</method>
+		<method name="GetApplicationIcon">
+			<arg type="s" name="Id" direction="in"/>
+			<arg type="ay" name="Png" direction="out">
+				<annotation name="org.gtk.GDBus.C.ForceGVariant" value="true"/>
+			</arg>
+		</method>
+		<method name="StartApplication">
+			<arg type="s" name="Id" direction="in"/>
+		</method>
+		<method name="StopApplication">
+			<!-- Monado client id, as libmonado reports it -->
+			<arg type="u" name="ClientId" direction="in"/>
+		</method>
+		<!-- Server messages to the headset: kind is toast, toast_urgent or error -->
+		<signal name="HeadsetMessage">
+			<arg type="s" name="kind"/>
+			<arg type="s" name="message"/>
+		</signal>
 	</interface>
 </node>

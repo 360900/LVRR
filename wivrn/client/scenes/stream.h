@@ -202,6 +202,24 @@ private:
 	XrTime running_application_req = 0;
 	thread_safe<to_headset::running_applications> running_applications;
 
+	// LVRR dashboard, see stream_lvrr.cpp
+	thread_safe<std::vector<lvrr::set_headset_settings>> lvrr_requests;
+	std::atomic<bool> lvrr_report_needed = false;
+	std::atomic<bool> reconnect_expected_ = false;
+	std::atomic<uint8_t> lvrr_permission_pending = 0;
+	std::atomic<uint8_t> lvrr_permission_denied = 0;
+	lvrr::headset_config lvrr_session_config; // connection-time settings of this stream
+	XrTime lvrr_last_stats = 0;
+	int lvrr_stats_offset = 0;
+	void lvrr_start();
+	void lvrr_stats(XrTime now);
+	void lvrr_report(uint32_t request_id);
+	lvrr::headset_capabilities lvrr_capabilities();
+	lvrr::headset_config lvrr_config();
+	// Returns whether the server must get a settings_changed
+	bool lvrr_apply(const lvrr::headset_config &);
+	void lvrr_send_settings_changed();
+
 	stream(std::string server_name, scene & parent_scene);
 
 	bool forward_hid_input(from_headset::hid::input_t, bool device_enabled);
@@ -245,6 +263,17 @@ public:
 	void operator()(to_headset::application_icon &&);
 	void operator()(to_headset::running_applications &&);
 	void operator()(audio_data &&);
+	// LVRR, see stream_lvrr.cpp
+	void operator()(lvrr::set_headset_settings &&);
+	void operator()(lvrr::expect_reconnect &&);
+
+	// Applies settings sent by the LVRR dashboard, on the render thread
+	void lvrr_update();
+	// The server closed the connection on purpose and expects a silent reconnect
+	bool reconnect_expected() const
+	{
+		return reconnect_expected_;
+	}
 
 	void push_blit_handle(wivrn::shard_accumulator * decoder, std::shared_ptr<wivrn::shard_accumulator::blit_handle> handle);
 

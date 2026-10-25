@@ -100,6 +100,7 @@ if (WIVRN_BUILD_SERVER)
 			active_runtime.cpp
 			avahi_publisher.cpp
 			hostname.cpp
+			lvrr_dbus.cpp
 			main.cpp
 			sleep_inhibitor.cpp
 			start_application.cpp
@@ -138,6 +139,7 @@ if (WIVRN_BUILD_SERVER)
 			driver/wivrn_generic_tracker.cpp
 			driver/wivrn_uinput.cpp
 			driver/wivrn_session.cpp
+			driver/wivrn_session_lvrr.cpp
 			driver/wivrn_connection.cpp
 			driver/xrt_cast.cpp
 
@@ -279,6 +281,14 @@ if (WIVRN_BUILD_SERVER)
 		)
 
 	target_compile_definitions(wivrn-server PRIVATE JSON_DIAGNOSTICS=1)
+
+	# LVRR: tests for the LVRR packets and their D-Bus JSON
+	if (WIVRN_BUILD_TEST)
+		add_executable(lvrr-test lvrr_test.cpp lvrr_dbus.cpp)
+		target_compile_features(lvrr-test PRIVATE cxx_std_20)
+		target_include_directories(lvrr-test PRIVATE .)
+		target_link_libraries(lvrr-test PRIVATE wivrn-server-dbus wivrn-common wivrn-common-server wivrn-external nlohmann_json::nlohmann_json)
+	endif()
 
 	configure_file(dist/wivrn.service.in wivrn.service)
 	install(FILES ${CMAKE_CURRENT_BINARY_DIR}/wivrn.service

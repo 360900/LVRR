@@ -195,17 +195,19 @@ bool configuration::check_feature(feature f) const
 #endif
 }
 
-void configuration::set_feature(feature f, bool state)
+void configuration::set_feature(feature f, bool state, std::function<void(bool enabled)> done)
 {
 #ifdef __ANDROID__
 	if (state)
 	{
-		request_permission(application::get_hmd_traits().permission_name(f), [this, f](bool granted) {
+		request_permission(application::get_hmd_traits().permission_name(f), [this, f, done](bool granted) {
 			{
 				std::lock_guard lock(mutex);
 				features[f] = granted;
 			}
 			save();
+			if (done)
+				done(granted);
 		});
 
 		return;
@@ -216,6 +218,8 @@ void configuration::set_feature(feature f, bool state)
 		features[f] = state;
 	}
 	save();
+	if (done)
+		done(state);
 }
 
 configuration::configuration(xr::system & system, xr::session & session)

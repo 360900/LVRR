@@ -64,6 +64,10 @@ std::unique_ptr<wivrn::TCP> wivrn::accept_connection(wivrn_session & cnx, std::s
 					                   U_LOG_I("Received stop packet during reconnect, stopping");
 					                   cnx.request_stop();
 				                   },
+				                   [&cnx](to_monado::restart_session) {
+					                   U_LOG_I("Received restart request during reconnect, stopping");
+					                   cnx.request_stop();
+				                   },
 				                   [](auto &&) {
 					                   // Ignore request when no headset is connected
 				                   },

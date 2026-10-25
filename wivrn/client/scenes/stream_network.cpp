@@ -85,6 +85,7 @@ void scenes::stream::operator()(to_headset::feature_control && control)
 	{
 		case wivrn::to_headset::feature_control::hid_input:
 			hid_forwarding = control.state;
+			lvrr_report_needed = true;
 			if (not control.state and (application::get_config().forward_keyboard or application::get_config().forward_mouse or application::get_config().forward_gamepad))
 			{
 				auto toast = gui_toast.lock();

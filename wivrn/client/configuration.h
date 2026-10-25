@@ -23,6 +23,7 @@
 #include "wivrn_packets.h"
 
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -132,7 +133,8 @@ public:
 	std::string locale;
 
 	bool check_feature(feature f) const;
-	void set_feature(feature f, bool state);
+	// done, if set, gets the resulting state once a permission request is answered
+	void set_feature(feature f, bool state, std::function<void(bool enabled)> done = {});
 
 	static constexpr float default_height_offset_standing = 0;
 	static constexpr float default_height_offset_seated = 0.45;

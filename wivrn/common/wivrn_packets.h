@@ -33,6 +33,7 @@
 #include <vector>
 #include <openxr/openxr.h>
 
+#include "lvrr_packets.h"
 #include "packed_quaternion.h"
 #include "smp.h"
 #include "wivrn_serialization_types.h"
@@ -751,7 +752,9 @@ using packets = std::variant<
         set_active_application,
         hid::input,
         stop_application,
-        foveation>;
+        foveation,
+        lvrr::headset_settings,
+        lvrr::headset_stats>;
 } // namespace from_headset
 
 namespace to_headset
@@ -983,7 +986,9 @@ using packets = std::variant<
         stream_tab_change,
         application_list,
         application_icon,
-        running_applications>;
+        running_applications,
+        lvrr::set_headset_settings,
+        lvrr::expect_reconnect>;
 } // namespace to_headset
 } // namespace wivrn
 

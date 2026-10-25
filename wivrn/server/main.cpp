@@ -35,6 +35,7 @@
 #include "driver/wivrn_connection.h"
 #include "exit_codes.h"
 #include "ipc_server_cb.h"
+#include "lvrr_dbus.h"
 #include "protocol_version.h"
 #include "start_application.h"
 #include "start_systemd_unit.h"
@@ -405,7 +406,8 @@ void update_fsm()
 		if (not server_running and app_running)
 			children->stop();
 
-		if (not server_running)
+		// LVRR: wait for the old session's applications to stop, children calls update_fsm again
+		if (not server_running and not app_running)
 		{
 			runtime_setter.reset();
 
@@ -514,6 +516,21 @@ gboolean headset_connected(gint fd, GIOCondition condition, gpointer user_data)
 	return G_SOURCE_CONTINUE;
 }
 
+// LVRR: starts an application from the list, or the configured one for an empty id
+void start_app_by_id(const std::string & app_id)
+{
+	if (app_id.empty())
+	{
+		children->start_application(configuration().application);
+		return;
+	}
+	const auto & apps = list_applications();
+	auto it = apps.find(app_id);
+	if (it == apps.end())
+		throw std::runtime_error("unknown application " + app_id);
+	children->start_application(it->second.exec, it->second.path);
+}
+
 gboolean control_received(gint fd, GIOCondition condition, gpointer user_data)
 {
 	auto packet = wivrn_ipc_socket_main_loop->receive();
@@ -530,29 +547,35 @@ gboolean control_received(gint fd, GIOCondition condition, gpointer user_data)
 			                   wivrn_server_set_bitrate(dbus_server, settings.bitrate_bps);
 		                   },
 		                   [&](const wivrn::from_headset::start_app & request) {
-			                   const auto & apps = list_applications();
-			                   if (auto it = apps.find(request.app_id); it != apps.end())
+			                   try
 			                   {
-				                   try
-				                   {
-					                   children->start_application(it->second.exec, it->second.path);
-				                   }
-				                   catch (std::exception & e)
-				                   {
-					                   std::cerr << "Failed to launch application " << it->second.name.at("") << ": " << e.what() << std::endl;
-				                   }
+				                   start_app_by_id(request.app_id);
+			                   }
+			                   catch (std::exception & e)
+			                   {
+				                   std::cerr << "Failed to launch application " << request.app_id << ": " << e.what() << std::endl;
 			                   }
 		                   },
 		                   [&](const from_monado::headset_connected &) {
 			                   stop_publishing();
 			                   inhibitor.emplace();
 			                   wivrn_server_set_headset_connected(dbus_server, true);
+			                   // LVRR: bring the dashboard back if it stopped while the session kept running
+			                   try
+			                   {
+				                   start_app_by_id("");
+			                   }
+			                   catch (std::exception & e)
+			                   {
+				                   std::cerr << "Failed to start application: " << e.what() << std::endl;
+			                   }
 		                   },
 		                   [&](const from_monado::headset_disconnected &) {
 			                   start_publishing();
 			                   inhibitor.reset();
 			                   wivrn_server_set_headset_connected(dbus_server, false);
 			                   wivrn_server_set_client_tab(dbus_server, "");
+			                   lvrr_dbus::on_headset_disconnected();
 		                   },
 		                   [&](const wivrn::from_headset::stream_tab_changed & event) {
 			                   wivrn_server_set_client_tab(dbus_server, magic_enum::enum_name(event.tab).data());
@@ -560,6 +583,9 @@ gboolean control_received(gint fd, GIOCondition condition, gpointer user_data)
 		                   [&](const from_monado::server_error & e) {
 			                   wivrn_server_emit_server_error(dbus_server, e.where.c_str(), e.message.c_str());
 		                   },
+		                   [&](const wivrn::lvrr::headset_settings & settings) { lvrr_dbus::on_headset_settings(settings); },
+		                   [&](const wivrn::lvrr::headset_stats & stats) { lvrr_dbus::on_headset_stats(stats); },
+		                   [&](const wivrn::to_headset::server_message & message) { lvrr_dbus::on_server_message(message); },
 		           },
 		           *packet);
 	}
@@ -873,6 +899,14 @@ void on_name_acquired(GDBusConnection * connection, const gchar * name, gpointer
 	}
 
 	g_signal_connect(dbus_server, "handle-set-client-tab", G_CALLBACK(on_handle_set_client_tab), NULL);
+
+	lvrr_dbus::setup(dbus_server,
+	                 {
+	                         .headset_connected = [] { return bool(wivrn_server_get_headset_connected(dbus_server)); },
+	                         .session_running = [] { return server_watch != 0; },
+	                         .send_to_session = [](to_monado::packets packet) { std::visit([](auto && p) { wivrn_ipc_socket_main_loop->send(std::move(p)); }, std::move(packet)); },
+	                         .start_application = start_app_by_id,
+	                 });
 
 	wivrn_server_set_steam_command(dbus_server, steam_command().c_str());
 

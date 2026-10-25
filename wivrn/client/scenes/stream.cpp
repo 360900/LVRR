@@ -365,6 +365,8 @@ std::shared_ptr<scenes::stream> scenes::stream::create(std::unique_ptr<wivrn_ses
 		return info;
 	}());
 
+	self->lvrr_start();
+
 	self->network_session->send_control(from_headset::session_state_changed{
 	        .state = application::get_session_state(),
 	});
@@ -830,6 +832,8 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	if (state_ == state::shutdown)
 		application::pop_scene();
 
+	lvrr_update();
+
 	display_time_phase = frame_state.predictedDisplayPeriod ? frame_state.predictedDisplayTime % frame_state.predictedDisplayPeriod : 0;
 	display_time_period = frame_state.predictedDisplayPeriod;
 	real_display_period = last_display_time ? frame_state.predictedDisplayTime - last_display_time : frame_state.predictedDisplayPeriod;
@@ -1189,6 +1193,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			set_layer_settings(openxr_post_processing.sharpening | openxr_post_processing.super_sampling);
 
 		accumulate_metrics(frame_state.predictedDisplayTime, current_blit_handles, timestamps);
+		lvrr_stats(frame_state.predictedDisplayTime);
 
 		draw_gui(frame_state.predictedDisplayTime, frame_state.predictedDisplayPeriod);
 

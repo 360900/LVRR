@@ -189,11 +189,16 @@ public:
 	void operator()(const from_headset::set_active_application &);
 	void operator()(const from_headset::stop_application &);
 	void operator()(audio_data &&);
+	// LVRR, see wivrn_session_lvrr.cpp
+	void operator()(lvrr::headset_settings &&);
+	void operator()(lvrr::headset_stats &&);
 
 	void operator()(to_monado::stop &&);
 	void operator()(to_monado::disconnect &&);
 	void operator()(to_monado::set_bitrate &&);
 	void operator()(to_headset::stream_tab_change &&);
+	void operator()(lvrr::set_headset_settings &&);
+	void operator()(to_monado::restart_session &&);
 
 	bool has_stream()
 	{
@@ -216,6 +221,9 @@ public:
 	template <typename T>
 	void send_control(T && packet)
 	{
+		// LVRR: the dashboard shows server messages instead of the headset
+		if constexpr (std::is_same_v<std::remove_cvref_t<T>, to_headset::server_message>)
+			send_to_main(packet);
 		try
 		{
 			connection->send_control(std::forward<T>(packet));

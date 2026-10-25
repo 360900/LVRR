@@ -55,7 +55,10 @@ using packets = std::variant<
         wivrn::from_headset::stream_tab_changed,
         headset_connected,
         headset_disconnected,
-        server_error>;
+        server_error,
+        wivrn::lvrr::headset_settings,
+        wivrn::lvrr::headset_stats,
+        wivrn::to_headset::server_message>;
 } // namespace from_monado
 
 namespace to_monado
@@ -71,7 +74,17 @@ struct set_bitrate
 	uint32_t bitrate_bps;
 };
 
-using packets = std::variant<stop, disconnect, set_bitrate, wivrn::to_headset::stream_tab_change>;
+// LVRR: close the session so connection-time settings apply; the headset reconnects
+struct restart_session
+{};
+
+using packets = std::variant<stop,
+                             disconnect,
+                             set_bitrate,
+                             wivrn::to_headset::stream_tab_change,
+                             wivrn::lvrr::set_headset_settings,
+                             wivrn::from_headset::stop_application,
+                             restart_session>;
 } // namespace to_monado
 
 extern std::optional<wivrn::typed_socket<wivrn::UnixDatagram, to_monado::packets, from_monado::packets>> wivrn_ipc_socket_monado;
