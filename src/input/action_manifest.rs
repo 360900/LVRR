@@ -327,6 +327,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             info_set,
             haptic_action,
             haptic_set,
+            pending_vibrations: Default::default(),
             skeleton_sets,
             head_proximity,
             binding_variants,

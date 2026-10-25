@@ -1802,7 +1802,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         amplitude: f32,
         restrict_to_device: vr::VRInputValueHandle_t,
     ) -> vr::EVRInputError {
-        get_action_from_handle!(self, action, session_data, action);
+        get_action_from_handle!(self, action, session_data, action, loaded);
         let Some(subaction_path) = self.subaction_path_from_handle(restrict_to_device) else {
             return vr::EVRInputError::None;
         };
@@ -1817,7 +1817,19 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             amplitude,
         };
         if start_seconds_from_now > 0.0 {
-            warn!("start_seconds_from_now: {start_seconds_from_now}")
+            match std::time::Duration::try_from_secs_f32(start_seconds_from_now)
+                .ok()
+                .and_then(|delay| std::time::Instant::now().checked_add(delay))
+            {
+                Some(at) => loaded
+                    .pending_vibrations
+                    .push(at, action, subaction_path, vibration),
+                None => crate::warn_once!(
+                    "Ignoring a vibration starting in {} seconds",
+                    start_seconds_from_now
+                ),
+            }
+            return vr::EVRInputError::None;
         }
 
         let result = haptics::apply(&session_data.session, action, subaction_path, vibration);
@@ -2428,6 +2440,13 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             hands.map(|(_, profile, _)| profile),
         );
         let masked_hands = |key| [0, 1].map(|hand| masked.contains(&(key, hand)));
+
+        let check_haptic = |result| {
+            self.openxr.check("xrApplyHapticFeedback", result);
+        };
+        actions
+            .pending_vibrations
+            .start_due(&data.session, check_haptic);
 
         for (key, action) in &actions.actions {
             if let ActionData::Vector2 {
@@ -3300,6 +3319,11 @@ impl<C: openxr_data::Compositor> Input<C> {
 
         let input_data = &data.input_data;
         if let Some(loaded) = input_data.get_loaded_actions() {
+            loaded
+                .pending_vibrations
+                .start_due(&data.session, |result| {
+                    self.openxr.check("xrApplyHapticFeedback", result);
+                });
             // If the game has loaded actions, we shouldn't need to sync the state because the game
             // should be doing it itself with UpdateActionState. However, some games (Tea for God)
             // don't actually call UpdateActionState if no controllers are reported as connected,
@@ -3461,6 +3485,7 @@ struct ManifestLoadedActions {
     _info_action: xr::Action<bool>,
     haptic_set: xr::ActionSet,
     haptic_action: xr::Action<xr::Haptic>,
+    pending_vibrations: haptics::PendingVibrations,
     /// The set each skeleton action belongs to.
     skeleton_sets: SecondaryMap<ActionKey, ActionSetKey>,
     head_proximity: SecondaryMap<ActionKey, HeadProximity>,

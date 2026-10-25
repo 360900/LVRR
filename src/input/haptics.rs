@@ -1,7 +1,8 @@
-//! Vibrations, with OpenVR's parameters turned into OpenXR's.
+//! Vibrations: OpenVR's parameters turned into OpenXR's, and vibrations that start later.
 
 use openxr as xr;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// A vibration in OpenVR's terms, as SteamVR passes it to drivers (`VREvent_HapticVibration_t`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -79,6 +80,67 @@ pub(super) fn apply(
     }
 }
 
+struct PendingVibration {
+    at: Instant,
+    action: xr::Action<xr::Haptic>,
+    hand: xr::Path,
+    vibration: Vibration,
+}
+
+/// Vibrations to start later (`start_seconds_from_now`, a binding's `haptic_delay`). The frame and
+/// UpdateActionState start them once they're due, so nothing waits for them.
+#[derive(Default)]
+pub(super) struct PendingVibrations(Mutex<Vec<PendingVibration>>);
+
+impl PendingVibrations {
+    /// A second of one vibration per frame on each hand, with room to spare.
+    const MAX: usize = 512;
+
+    pub fn push(
+        &self,
+        at: Instant,
+        action: &xr::Action<xr::Haptic>,
+        hand: xr::Path,
+        vibration: Vibration,
+    ) {
+        let mut pending = self.0.lock().unwrap();
+        if pending.len() >= Self::MAX {
+            crate::warn_once!("Too many vibrations waiting to start, dropping some");
+            return;
+        }
+        pending.push(PendingVibration {
+            at,
+            action: action.clone(),
+            hand,
+            vibration,
+        });
+    }
+
+    /// Starts the vibrations that are due, oldest first, passing each result to `check`.
+    pub fn start_due(
+        &self,
+        session: &xr::Session<xr::AnyGraphics>,
+        check: impl Fn(xr::Result<()>),
+    ) {
+        let due = {
+            let mut pending = self.0.lock().unwrap();
+            if pending.is_empty() {
+                return;
+            }
+            let now = Instant::now();
+            let (mut due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut *pending)
+                .into_iter()
+                .partition(|p| p.at <= now);
+            *pending = later;
+            due.sort_by_key(|p| p.at);
+            due
+        };
+        for p in due {
+            check(apply(session, &p.action, p.hand, p.vibration));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,5 +208,80 @@ mod tests {
         assert!((quarter - 0.25).abs() < 0.001, "{quarter}");
         // Past what a wand plays, the length is kept at full strength.
         assert_eq!(values(20000), (20_000_000, xr::FREQUENCY_UNSPECIFIED, 1.0));
+    }
+
+    use crate::input::profiles::oculus_touch::OculusTouch;
+    use crate::input::tests::Fixture;
+    use fakexr::{HapticFeedback, UserPath, UserPath::*};
+    use openvr::{self as vr, IVRInput010_Interface};
+
+    fn touch_fixture(actions: &std::ffi::CStr) -> Fixture {
+        let mut f = Fixture::new();
+        f.load_actions(actions);
+        f.set_interaction_profile::<OculusTouch>(LeftHand);
+        f.set_interaction_profile::<OculusTouch>(RightHand);
+        f
+    }
+
+    fn pulse(hand: UserPath, duration_ms: i64, frequency: f32, amplitude: f32) -> HapticFeedback {
+        HapticFeedback {
+            hand: Some(hand),
+            duration: xr::Duration::from_nanos(duration_ms * 1_000_000),
+            frequency,
+            amplitude,
+        }
+    }
+
+    #[test]
+    fn vibration_action() {
+        let mut f = touch_fixture(c"actions_haptics.json");
+        let set1 = f.get_action_set_handle(c"/actions/set1");
+        let sync = |f: &mut Fixture| {
+            f.sync(vr::VRActiveActionSet_t {
+                ulActionSet: set1,
+                ..Default::default()
+            })
+        };
+        sync(&mut f);
+        let handle = f.get_action_handle(c"/actions/set1/out/haptic");
+        let action = f.get_action::<xr::Haptic>(handle);
+        let left = f.get_input_source_handle(c"/user/hand/left");
+        let vibrate = |f: &Fixture, start, duration, frequency, amplitude| {
+            f.input
+                .TriggerHapticVibrationAction(handle, start, duration, frequency, amplitude, left)
+        };
+
+        // A single pulse at the runtime's frequency.
+        assert_eq!(vibrate(&f, 0.0, 0.0, 0.0, 0.5), vr::EVRInputError::None);
+        assert_eq!(
+            fakexr::take_haptic_feedback(action),
+            [pulse(LeftHand, 10, xr::FREQUENCY_UNSPECIFIED, 0.5)]
+        );
+        assert_eq!(
+            vibrate(&f, 0.0, 0.1, 160.0, f32::NAN),
+            vr::EVRInputError::None
+        );
+        assert_eq!(fakexr::take_haptic_feedback(action), []);
+
+        // Started later by UpdateActionState or the frame, without blocking the call.
+        assert_eq!(vibrate(&f, 0.05, 0.1, 160.0, 0.5), vr::EVRInputError::None);
+        sync(&mut f);
+        assert_eq!(fakexr::take_haptic_feedback(action), []);
+        std::thread::sleep(Duration::from_millis(60));
+        sync(&mut f);
+        let later = pulse(LeftHand, 100, 160.0, 0.5);
+        assert_eq!(fakexr::take_haptic_feedback(action), [later]);
+
+        assert_eq!(vibrate(&f, 0.02, 0.1, 160.0, 0.5), vr::EVRInputError::None);
+        std::thread::sleep(Duration::from_millis(30));
+        f.input.frame_start_update();
+        assert_eq!(fakexr::take_haptic_feedback(action), [later]);
+
+        assert_eq!(
+            vibrate(&f, f32::INFINITY, 0.1, 160.0, 0.5),
+            vr::EVRInputError::None
+        );
+        sync(&mut f);
+        assert_eq!(fakexr::take_haptic_feedback(action), []);
     }
 }
