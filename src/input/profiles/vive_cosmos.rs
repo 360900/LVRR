@@ -10,9 +10,10 @@ use crate::openxr_data::Hand;
 use glam::Mat4;
 use openvr::EVRButtonId as btn;
 
-/// The Vive Cosmos controllers (`XR_HTC_vive_cosmos_controller_interaction`). SteamVR's Cosmos
-/// driver isn't part of SteamVR, so only the controller type and the headset's (which games
-/// list bindings for) are known.
+/// The Vive Cosmos controllers (`XR_HTC_vive_cosmos_controller_interaction`). HTC's Cosmos driver
+/// (`vive_eyes`) isn't part of SteamVR. Its strings come from games' logs and code: the model
+/// numbers, the controller types (which games list bindings for), the tracking system and the
+/// headset's manufacturer. The rest is a guess.
 pub struct ViveCosmos;
 
 impl InteractionProfile for ViveCosmos {
@@ -33,6 +34,8 @@ impl InteractionProfile for ViveCosmos {
 
     fn properties() -> &'static ProfileProperties {
         static DEVICE_PROPERTIES: ProfileProperties = ProfileProperties {
+            // As Unity reads it, and as HTC's streaming driver reports it (RR2_HmdList.json of
+            // HTC's VIVE Wave SDK, which emulates the Cosmos).
             model: Property::BothHands(c"vive_cosmos_controller"),
             openvr_controller_type: c"vive_cosmos_controller",
             render_model_name: Property::PerHand {
@@ -44,9 +47,13 @@ impl InteractionProfile for ViveCosmos {
                 left: c"CTL_LEFT",
                 right: c"CTL_RIGHT",
             },
-            tracking_system_name: c"htc_eyes",
+            // Unreal logs it as the driver ("SteamVR initialized. Driver: vive_eyes"), and HTC's
+            // SRWorks samples tell the Cosmos by it.
+            tracking_system_name: c"vive_eyes",
             manufacturer_name: c"HTC",
-            input_profile_path: c"{htc}/input/vive_cosmos_controller_profile.json",
+            // In the driver's resources, as SteamVR's htc driver has no Cosmos profile. Named
+            // like the profile of HTC's streaming driver.
+            input_profile_path: c"{vive_eyes}/input/vive_cosmos_controller_profile.json",
             main_axis: MainAxisType::Thumbstick,
             legacy_buttons_mask: button_mask_from_ids!(
                 btn::System,
@@ -57,10 +64,10 @@ impl InteractionProfile for ViveCosmos {
                 btn::Axis1,
                 btn::Axis2,
             ),
-            // TODO: These are guesses, not pulled from a real system report, except the
-            // headset's controller type, which games list bindings for.
+            // Unreal logs the model with the manufacturer ("HMD Device: HTC vive_cosmos"). Games
+            // list bindings for the controller type. TODO: The serial number is a guess.
             hmd: HmdProperties {
-                model: c"VIVE Cosmos",
+                model: c"vive_cosmos",
                 controller_type: c"vive_cosmos",
                 serial_number: c"HMD",
             },
