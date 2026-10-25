@@ -562,6 +562,51 @@ impl<C: openxr_data::Compositor> Input<C> {
         *previous = next;
     }
 
+    /// Updates a Vector3 action's state like [Input::sync_vector1]. Only scalar_constant bindings
+    /// drive these.
+    fn sync_vector3(
+        &self,
+        session_data: &SessionData,
+        loaded: &ManifestLoadedActions,
+        key: ActionKey,
+        state: &Mutex<[vr::InputAnalogActionData_t; 3]>,
+        masked: [bool; 2],
+    ) {
+        let mut next = [vr::InputAnalogActionData_t::default(); 3];
+        let hands = [
+            (self.subaction_paths.left, self.left_hand_key),
+            (self.subaction_paths.right, self.right_hand_key),
+        ];
+        for ((slot, (path, hand_key)), masked) in next.iter_mut().zip(hands).zip(masked) {
+            if masked {
+                continue;
+            }
+            if let Some(constant) =
+                self.scalar_constant_state(session_data, loaded, key, path, hand_key)
+            {
+                *slot = constant;
+            }
+        }
+        // The longest vector when unrestricted. Left wins ties.
+        next[2] = if next[1].bActive
+            && (!next[0].bActive
+                || custom_bindings::analog_magnitude(&next[1])
+                    > custom_bindings::analog_magnitude(&next[0]))
+        {
+            next[1]
+        } else {
+            next[0]
+        };
+
+        let mut previous = state.lock().unwrap();
+        for (next, previous) in next.iter_mut().zip(previous.iter()) {
+            next.deltaX = next.x - previous.x;
+            next.deltaY = next.y - previous.y;
+            next.deltaZ = next.z - previous.z;
+        }
+        *previous = next;
+    }
+
     /// The value of an action's scalar_constant bindings on a hand, if any is active.
     fn scalar_constant_state(
         &self,
@@ -681,7 +726,10 @@ impl<C: openxr_data::Compositor> Input<C> {
         for (key, data) in &loaded.actions {
             if !matches!(
                 data,
-                ActionData::Bool(_) | ActionData::Vector1 { .. } | ActionData::Vector2 { .. }
+                ActionData::Bool(_)
+                    | ActionData::Vector1 { .. }
+                    | ActionData::Vector2 { .. }
+                    | ActionData::Vector3 { .. }
             ) {
                 continue;
             }
@@ -989,6 +1037,11 @@ enum ActionData {
     Vector2 {
         action: xr::Action<xr::Vector2f>,
         data: Vector2ActionData,
+    },
+    /// OpenXR has no vector3 actions, so only scalar_constant bindings drive these.
+    Vector3 {
+        /// Left, right, unrestricted. See [Input::sync_vector3].
+        state: Mutex<[vr::InputAnalogActionData_t; 3]>,
     },
     Pose,
     Skeleton(Hand),
@@ -2062,6 +2115,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         let state = match action {
             ActionData::Vector1 { state, .. } => state,
             ActionData::Vector2 { data, .. } => &data.state,
+            ActionData::Vector3 { state } => state,
             _ => return vr::EVRInputError::WrongType,
         };
         let index = if subaction_path == self.subaction_paths.left {
@@ -2442,6 +2496,11 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             } = action
             {
                 self.sync_vector1(&data, actions, key, action, state, masked_hands(key));
+            }
+        }
+        for (key, action) in &actions.actions {
+            if let ActionData::Vector3 { state } = action {
+                self.sync_vector3(&data, actions, key, state, masked_hands(key));
             }
         }
 

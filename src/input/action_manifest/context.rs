@@ -437,7 +437,7 @@ impl BindingsProfileLoadContext<'_> {
     ) -> bool {
         match self.actions.get(&output.path) {
             Some(ActionData::Vector1 { .. }) => on[0] != 1.0 || off[0] != 0.0,
-            Some(ActionData::Vector2 { .. }) => true,
+            Some(ActionData::Vector2 { .. } | ActionData::Vector3 { .. }) => true,
             // The direct binding reports what's wrong with it.
             _ => false,
         }
@@ -456,6 +456,7 @@ impl BindingsProfileLoadContext<'_> {
         let axes = match self.actions.get(&output.path) {
             Some(ActionData::Vector1 { .. }) => 1,
             Some(ActionData::Vector2 { .. }) => 2,
+            Some(ActionData::Vector3 { .. }) => 3,
             _ => {
                 warn!(
                     "{} can't get a scalar constant, it isn't an analog action",

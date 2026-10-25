@@ -34,6 +34,7 @@ impl std::fmt::Debug for ActionData {
             ActionData::Bool(_) => f.write_str("InputAction::Bool"),
             ActionData::Vector1 { .. } => f.write_str("InputAction::Float"),
             ActionData::Vector2 { .. } => f.write_str("InputAction::Vector2"),
+            ActionData::Vector3 { .. } => f.write_str("InputAction::Vector3"),
             ActionData::Pose => f.write_str("InputAction::Pose"),
             ActionData::Skeleton { .. } => f.write_str("InputAction::Skeleton"),
             ActionData::Haptic(_) => f.write_str("InputAction::Haptic"),
@@ -3732,6 +3733,86 @@ fn scalar_constant_values() {
     sync(&mut f);
     let s = get_analog_state(&f, reverse, left);
     assert_eq!((s.x, s.deltaX, s.fUpdateTime), (-1.0, -1.0, -0.5));
+}
+
+#[test]
+fn vector3_actions() {
+    let mut f = Fixture::new();
+    let main = f.get_action_set_handle(c"/actions/main");
+    let menu = f.get_action_set_handle(c"/actions/menu");
+    let look = f.get_action_handle(c"/actions/main/in/look");
+    let unbound = f.get_action_handle(c"/actions/main/in/unbound");
+    let [left, right] =
+        [c"/user/hand/left", c"/user/hand/right"].map(|hand| f.get_input_source_handle(hand));
+    f.load_actions(c"actions_scalar_constant.json");
+    f.set_interaction_profile::<OculusTouch>(RightHand);
+    let grip = f.get_action::<f32>(
+        f.get_action_handle(c"/user/hand/right/input/squeeze/value-/actions/main"),
+    );
+    fakexr::set_action_state(grip, fakexr::ActionState::Float(0.0), RightHand);
+    let sync = |f: &mut Fixture, menu_priority| {
+        f.sync_sets(&mut [
+            vr::VRActiveActionSet_t {
+                ulActionSet: main,
+                ..Default::default()
+            },
+            vr::VRActiveActionSet_t {
+                ulActionSet: menu,
+                nPriority: menu_priority,
+                ..Default::default()
+            },
+        ])
+    };
+
+    // Before any sync, and without bindings, the action is valid but inactive.
+    for action in [look, unbound] {
+        assert!(!get_analog_state(&f, action, 0).bActive);
+    }
+    // Scalar constants drive every axis.
+    let xyz = |s: vr::InputAnalogActionData_t| (s.x, s.y, s.z);
+    sync(&mut f, 0);
+    let s = get_analog_state(&f, look, right);
+    assert!(s.bActive);
+    assert_eq!(xyz(s), (0.0, 0.0, -1.0));
+    fakexr::set_action_state(grip, fakexr::ActionState::Float(1.0), RightHand);
+    sync(&mut f, 0);
+    let s = get_analog_state(&f, look, right);
+    assert_eq!(xyz(s), (0.5, -0.5, 1.0));
+    assert_eq!((s.deltaX, s.deltaY, s.deltaZ), (0.5, -0.5, 2.0));
+    assert_eq!(s.activeOrigin, right);
+    assert_eq!(xyz(get_analog_state(&f, look, 0)), (0.5, -0.5, 1.0));
+    assert!(!get_analog_state(&f, look, left).bActive);
+
+    let s = get_analog_state(&f, unbound, 0);
+    assert!(!s.bActive);
+    assert_eq!((s.x, s.y, s.z), (0.0, 0.0, 0.0));
+    assert!(get_action_origins(&f, main, unbound).is_empty());
+    assert!(get_binding_info(&f, unbound).is_empty());
+
+    let origins = get_action_origins(&f, main, look);
+    assert!(
+        origins
+            .iter()
+            .any(|origin| get_origin_info(&f, *origin).trackedDeviceIndex == Hand::Right as u32)
+    );
+    assert_eq!(get_binding_info(&f, look).len(), 1);
+
+    let mut digital = vr::InputDigitalActionData_t::default();
+    assert_eq!(
+        f.input.GetDigitalActionData(
+            look,
+            &mut digital,
+            std::mem::size_of_val(&digital) as u32,
+            0
+        ),
+        vr::EVRInputError::WrongType
+    );
+
+    // The menu binds the grip too, so it masks the action while it takes priority.
+    sync(&mut f, 1);
+    assert!(!get_analog_state(&f, look, right).bActive);
+    sync(&mut f, 0);
+    assert!(get_analog_state(&f, look, right).bActive);
 }
 
 #[test]

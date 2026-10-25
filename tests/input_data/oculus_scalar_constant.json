@@ -89,6 +89,34 @@
 							"output": "/actions/main/in/steer"
 						}
 					}
+				},
+				{
+					"mode": "scalar_constant",
+					"path": "/user/hand/right/input/grip",
+					"inputs": {
+						"value": {
+							"output": "/actions/main/in/look"
+						}
+					},
+					"parameters": {
+						"on/x": "0.5",
+						"on/y": "-0.5",
+						"on/z": "1",
+						"off/z": "-1"
+					}
+				}
+			]
+		},
+		"/actions/menu": {
+			"sources": [
+				{
+					"mode": "button",
+					"path": "/user/hand/right/input/grip",
+					"inputs": {
+						"click": {
+							"output": "/actions/menu/in/select"
+						}
+					}
 				}
 			]
 		}

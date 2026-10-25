@@ -209,7 +209,9 @@ impl<C: openxr_data::Compositor> Input<C> {
             .filter(|(_, data)| {
                 !matches!(
                     data,
-                    super::ActionData::Pose | super::ActionData::Skeleton(_)
+                    super::ActionData::Pose
+                        | super::ActionData::Skeleton(_)
+                        | super::ActionData::Vector3 { .. }
                 )
             })
             .filter_map(|(path, _)| path.match_indices('/').nth(2).map(|(idx, _)| &path[..idx]))
@@ -758,7 +760,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                     Vector1 { action, .. } => xr::Binding::new(action, path),
                     Vector2 { action, .. } => xr::Binding::new(action, path),
                     Haptic(action) => xr::Binding::new(action, path),
-                    Skeleton { .. } | Pose => unreachable!(),
+                    Skeleton { .. } | Pose | Vector3 { .. } => unreachable!(),
                 }
             })
             .chain(

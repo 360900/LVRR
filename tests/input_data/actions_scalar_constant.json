@@ -3,6 +3,10 @@
 		{
 			"name": "/actions/main",
 			"usage": "leftright"
+		},
+		{
+			"name": "/actions/menu",
+			"usage": "leftright"
 		}
 	],
 	"actions": [
@@ -29,6 +33,18 @@
 		{
 			"name": "/actions/main/in/steer",
 			"type": "vector2"
+		},
+		{
+			"name": "/actions/main/in/look",
+			"type": "vector3"
+		},
+		{
+			"name": "/actions/main/in/unbound",
+			"type": "vector3"
+		},
+		{
+			"name": "/actions/menu/in/select",
+			"type": "boolean"
 		}
 	],
 	"default_bindings": [
