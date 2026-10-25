@@ -14,6 +14,10 @@ use crate::{
     rendermodels::RenderModels,
     screenshots::Screenshots,
     settings::Settings,
+    stubs::{
+        ControlPanel, DriverManager, IoBuffer, IpcResourceManagerClient, Notifications, Resources,
+        SpatialAnchors, TrackedCamera,
+    },
     system::System,
 };
 
@@ -375,6 +379,14 @@ impl IVRClientCore003_Interface for ClientCore {
             .or_else(|| self.try_interface(interface, |_| ChaperoneSetup::new(openxr.clone())))
             .or_else(|| self.try_interface(interface, |_| ExtendedDisplay::new(openxr.clone())))
             .or_else(|| self.try_interface(interface, |_| HeadsetView::default()))
+            .or_else(|| self.try_interface(interface, |_| TrackedCamera::default()))
+            .or_else(|| self.try_interface(interface, |_| Resources::default()))
+            .or_else(|| self.try_interface(interface, Notifications::new))
+            .or_else(|| self.try_interface(interface, |_| DriverManager::default()))
+            .or_else(|| self.try_interface(interface, |_| SpatialAnchors::default()))
+            .or_else(|| self.try_interface(interface, |_| IoBuffer::default()))
+            .or_else(|| self.try_interface(interface, |_| IpcResourceManagerClient::default()))
+            .or_else(|| self.try_interface(interface, |_| ControlPanel::default()))
             .or_else(|| self.try_interface(interface, |_| UnknownInterfaces::default()))
             .unwrap_or_else(|| {
                 warn!("app requested unknown interface {interface:?}");
@@ -405,6 +417,14 @@ impl IVRClientCore003_Interface for ClientCore {
                 ChaperoneSetup::supported_versions(),
                 ExtendedDisplay::supported_versions(),
                 HeadsetView::supported_versions(),
+                TrackedCamera::supported_versions(),
+                Resources::supported_versions(),
+                Notifications::supported_versions(),
+                DriverManager::supported_versions(),
+                SpatialAnchors::supported_versions(),
+                IoBuffer::supported_versions(),
+                IpcResourceManagerClient::supported_versions(),
+                ControlPanel::supported_versions(),
                 UnknownInterfaces::supported_versions(),
             ]
             .concat()
@@ -744,6 +764,92 @@ mod tests {
             );
             assert_eq!(error, vr::EVRInitError::None, "{version:?}");
         }
+    }
+
+    /// Interfaces that only report that nothing is available are still handed out, as apps
+    /// don't always check for null.
+    #[test]
+    fn serves_stub_interfaces() {
+        use vr::{IVRNotifications002_Interface, IVROverlay028_Interface};
+
+        let core = ClientCore::new(c"IVRClientCore_003").unwrap();
+        assert_eq!(
+            core.clone()
+                .Init(vr::EVRApplicationType::Scene, std::ptr::null()),
+            vr::EVRInitError::None
+        );
+        for version in [
+            c"IVRTrackedCamera_001",
+            c"IVRTrackedCamera_003",
+            c"IVRTrackedCamera_004",
+            c"IVRTrackedCamera_005",
+            c"IVRTrackedCamera_006",
+            c"IVRResources_001",
+            c"IVRNotifications_002",
+            c"IVRDriverManager_001",
+            c"IVRSpatialAnchors_001",
+            c"IVRIOBuffer_001",
+            c"IVRIOBuffer_002",
+            c"IVRIPCResourceManagerClient_002",
+            c"IVRIPCResourceManagerClient_003",
+            c"IVRControlPanel_001",
+        ] {
+            assert_eq!(
+                core.IsInterfaceVersionValid(version.as_ptr()),
+                vr::EVRInitError::None,
+                "{version:?}"
+            );
+            let mut error = vr::EVRInitError::Unknown;
+            assert!(
+                !core
+                    .GetGenericInterface(version.as_ptr(), &mut error)
+                    .is_null(),
+                "{version:?}"
+            );
+            assert_eq!(error, vr::EVRInitError::None, "{version:?}");
+
+            // The C API's form.
+            let fntable = CString::new(format!("FnTable:{}", version.to_str().unwrap())).unwrap();
+            assert!(
+                !core
+                    .GetGenericInterface(fntable.as_ptr(), &mut error)
+                    .is_null(),
+                "{fntable:?}"
+            );
+            assert_eq!(error, vr::EVRInitError::None, "{fntable:?}");
+        }
+
+        // Notifications tell the app's overlays from other handles.
+        let mut error = vr::EVRInitError::Unknown;
+        core.GetGenericInterface(c"IVROverlay_028".as_ptr(), &mut error);
+        let overlays: Arc<OverlayMan> = core.get_interface().unwrap();
+        let mut handle = vr::k_ulOverlayHandleInvalid;
+        assert_eq!(
+            overlays.CreateOverlay(c"key".as_ptr(), c"name".as_ptr(), &mut handle),
+            vr::EVROverlayError::None
+        );
+        let notifications: Arc<Notifications> = core.get_interface().unwrap();
+        let mut id = 5;
+        let create = |overlay, id: &mut u32| {
+            notifications.CreateNotification(
+                overlay,
+                0,
+                vr::EVRNotificationType::Transient,
+                c"hi".as_ptr(),
+                vr::EVRNotificationStyle::None,
+                std::ptr::null(),
+                id,
+            )
+        };
+        assert_eq!(
+            create(handle, &mut id),
+            vr::EVRNotificationError::NotificationQueueFull
+        );
+        assert_eq!(id, 0);
+        assert_eq!(
+            create(handle + 1, &mut id),
+            vr::EVRNotificationError::InvalidOverlayHandle
+        );
     }
 
     #[test]
