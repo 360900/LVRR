@@ -9,7 +9,10 @@
   <blueprint name="context_menu_power_options">
     <context_menu>
       <cell translation="APP_SETTINGS.RESTART_WAYVR" action="restart" sprite_src_builtin="@/dashboard/refresh.svg"/>
-      <cell translation="APP_SETTINGS.CLOSE_WAYVR" action="close" sprite_src_builtin="@/dashboard/close.svg"/>
+      <!-- LVRR: closing the dashboard would leave no UI, the headset can disconnect instead -->
+      <cell translation="LVRR.RESTART_SESSION" action="lvrr_restart_session" sprite_src_builtin="@/dashboard/refresh.svg"/>
+      <cell translation="LVRR.DISCONNECT" action="lvrr_disconnect" sprite_src_builtin="@/dashboard/close.svg"/>
+      <cell translation="LVRR.QUIT" action="lvrr_quit" sprite_src_builtin="@/dashboard/power.svg"/>
       <separator/>
       <cell translation="POWER_OPTIONS.SUSPEND" action="suspend" sprite_src_builtin="@/dashboard/sleep.svg"/>
       <cell translation="POWER_OPTIONS.SHUTDOWN" action="shutdown" sprite_src_builtin="@/dashboard/power.svg"/>
@@ -52,9 +55,16 @@
           gap="4"
         >
           <SideButton id="btn_side_home" src_builtin="@/dashboard/wayvr_dashboard_mono.svg" tooltip="HOME_SCREEN" tooltip_side="right" />
+          <!-- LVRR: VR library, running apps, headset and PC; Games and Monado open from those pages -->
+          <SideButton id="btn_side_library" src_builtin="@/dashboard/games.svg" tooltip="LVRR.LIBRARY.TITLE" tooltip_side="right" />
           <SideButton id="btn_side_apps" src_builtin="@/dashboard/apps.svg" tooltip="APPLICATIONS" tooltip_side="right" />
-          <SideButton id="btn_side_games" src_builtin="@/dashboard/games.svg" tooltip="GAMES" tooltip_side="right" />
-          <SideButton id="btn_side_monado" src_builtin="@/dashboard/monado.svg" tooltip="MONADO_RUNTIME" tooltip_side="right" />
+          <SideButton id="btn_side_running" src_builtin="@/dashboard/play.svg" tooltip="LVRR.RUNNING.TITLE" tooltip_side="right" />
+          <SideButton id="btn_side_headset" src_builtin="@/dashboard/wivrn_head_symbolic.svg" tooltip="LVRR.HEADSET.TITLE" tooltip_side="right" />
+          <SideButton id="btn_side_pc" src_builtin="@/dashboard/display.svg" tooltip="LVRR.PC.TITLE" tooltip_side="right" />
+          <div display="none">
+            <SideButton id="btn_side_games" src_builtin="@/dashboard/games.svg" tooltip="GAMES" tooltip_side="right" />
+            <SideButton id="btn_side_monado" src_builtin="@/dashboard/monado.svg" tooltip="MONADO_RUNTIME" tooltip_side="right" />
+          </div>
           <rectangle height="2" color="outline" width="~side_sprite_size" />
           <SideButton id="btn_side_settings" src_builtin="@/dashboard/settings.svg" tooltip="SETTINGS" tooltip_side="right" />
         </rectangle>

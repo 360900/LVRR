@@ -5,7 +5,9 @@ use crate::frontend::Frontend;
 pub mod apps;
 pub mod donate;
 pub mod games;
+#[allow(dead_code)] // LVRR: replaced by lvrr::home
 pub mod home;
+pub mod lvrr;
 pub mod monado;
 pub mod settings;
 pub mod welcome;
@@ -19,6 +21,8 @@ pub enum TabType {
 	Settings,
 	Welcome,
 	Donate,
+	// LVRR
+	Lvrr(lvrr::Page),
 }
 
 impl TabType {

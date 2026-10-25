@@ -34,7 +34,7 @@ use wlx_common::{
 use crate::{
 	assets,
 	tab::{
-		Tab, TabType, apps::TabApps, donate::TabDonate, games::TabGames, home::TabHome, monado::TabMonado,
+		Tab, TabType, apps::TabApps, donate::TabDonate, games::TabGames, lvrr::home::TabLvrrHome, monado::TabMonado,
 		settings::TabSettings, welcome::TabWelcome,
 	},
 	util::{
@@ -44,6 +44,9 @@ use crate::{
 	},
 	views::{self, ViewUpdateParams},
 };
+
+// LVRR: side buttons, power menu actions and confirmations for the LVRR pages
+mod lvrr_ext;
 
 pub struct FrontendWidgets {
 	id_label_time: WidgetID,
@@ -132,6 +135,7 @@ pub enum FrontendTask {
 	HideDashboard,
 	MarkTutorialGraduated,
 	BackendTask(DashBackendTask),
+	Lvrr(lvrr_common::state::LvrrRequest),
 }
 
 impl<T: 'static> Frontend<T> {
@@ -323,9 +327,7 @@ impl<T: 'static> Frontend<T> {
 			"shutdown" => {
 				self.power_action_confirm(PowerAction::Poweroff);
 			}
-			_ => {
-				unreachable!()
-			}
+			other => self.lvrr_power_action(other),
 		}
 	}
 
@@ -448,6 +450,7 @@ impl<T: 'static> Frontend<T> {
 			FrontendTask::RunCommand(program, args) => self.action_run_command(program, args),
 			FrontendTask::MarkTutorialGraduated => self.action_tutorial_graduated(params.data),
 			FrontendTask::BackendTask(task) => self.interface.backend_task(params.data, task)?,
+			FrontendTask::Lvrr(request) => self.lvrr_request(params.data, request),
 		};
 		Ok(())
 	}
@@ -499,18 +502,20 @@ impl<T: 'static> Frontend<T> {
 			TabType::Monado => ("MONADO_RUNTIME", "dashboard/monado.svg"),
 			TabType::Settings => ("SETTINGS", "dashboard/settings.svg"),
 			TabType::Donate => ("DONATE.SUPPORT_US", "dashboard/opencollective.svg"),
+			TabType::Lvrr(page) => page.title_icon(),
 		};
 
 		self.set_tab_title(tab_translation, icon_path)?;
 
 		let tab: Box<dyn Tab<T>> = match tab_type {
 			TabType::Welcome => Box::new(TabWelcome::new(self, widget_content.id, data)?),
-			TabType::Home => Box::new(TabHome::new(self, widget_content.id, data)?),
+			TabType::Home => Box::new(TabLvrrHome::new(self, widget_content.id, data)?),
 			TabType::Apps => Box::new(TabApps::new(self, widget_content.id, data)?),
 			TabType::Games => Box::new(TabGames::new(self, widget_content.id)?),
 			TabType::Monado => Box::new(TabMonado::new(self, widget_content.id)?),
 			TabType::Settings => Box::new(TabSettings::new(self, widget_content.id, data)?),
 			TabType::Donate => Box::new(TabDonate::new(self, widget_content.id, data)?),
+			TabType::Lvrr(page) => crate::tab::lvrr::create(page, self, widget_content.id, data)?,
 		};
 
 		self.current_tab = Some(tab);
@@ -562,6 +567,8 @@ impl<T: 'static> Frontend<T> {
 		let btn = self.state.fetch_component_as::<ComponentButton>("btn_side_settings")?;
 		self.tasks.handle_button(&btn, FrontendTask::SetTab(TabType::Settings));
 		self.side_buttons.push((TabType::Settings, btn));
+
+		self.lvrr_register_widgets()?;
 
 		// ################################
 		// BOTTOM BAR BUTTONS

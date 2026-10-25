@@ -1,0 +1,20 @@
+<layout version="2">
+  <!-- LVRR: headset settings, see src/tab/lvrr/headset.rs -->
+  <macro name="tab_style" color="background" />
+  <elements>
+    <div gap="4" width="100%">
+      <Tabs id="tabs">
+        <Tab macro="tab_style" name="video" translation="LVRR.HEADSET.VIDEO" sprite_src_builtin="@/dashboard/display.svg" />
+        <Tab macro="tab_style" name="streaming" translation="LVRR.HEADSET.STREAMING" sprite_src_builtin="@/dashboard/usage.svg" />
+        <Tab macro="tab_style" name="post_processing" translation="LVRR.HEADSET.POST_PROCESSING" sprite_src_builtin="@/dashboard/magic_wand.svg" />
+        <Tab macro="tab_style" name="audio" translation="LVRR.HEADSET.AUDIO" sprite_src_builtin="@/dashboard/microphone.svg" />
+        <Tab macro="tab_style" name="devices" translation="LVRR.HEADSET.DEVICES" sprite_src_builtin="@/dashboard/controller.svg" />
+        <Tab macro="tab_style" name="tracking" translation="LVRR.HEADSET.TRACKING" sprite_src_builtin="@/dashboard/person.svg" />
+        <Tab macro="tab_style" name="system" translation="LVRR.HEADSET.SYSTEM" sprite_src_builtin="@/dashboard/options.svg" />
+      </Tabs>
+      <div id="content" flex_direction="column" gap="8" flex_grow="1">
+        <!-- filled in at runtime -->
+      </div>
+    </div>
+  </elements>
+</layout>

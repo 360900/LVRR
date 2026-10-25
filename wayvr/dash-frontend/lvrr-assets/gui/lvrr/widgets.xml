@@ -1,0 +1,101 @@
+<layout version="2">
+  <!-- LVRR: building blocks for the LVRR dashboard pages, see src/tab/lvrr/ui.rs -->
+  <include src="@/gui/t_group_box.xml" />
+  <include src="@/gui/t_dropdown_button.xml" />
+
+  <!-- id, translation, icon -->
+  <template name="Group">
+    <rectangle macro="group_box" id="${id}" width="100%">
+      <GroupBoxTitle translation="${translation}" src_builtin="${icon}" />
+    </rectangle>
+  </template>
+
+  <!-- id -->
+  <template name="Row">
+    <div id="${id}" flex_direction="row" align_items="center" gap="12" flex_wrap="wrap" />
+  </template>
+
+  <!-- id; a row that never wraps, for a Column of details followed by buttons -->
+  <template name="Line">
+    <div id="${id}" flex_direction="row" align_items="center" gap="12" width="100%" />
+  </template>
+
+  <!-- id -->
+  <template name="Column">
+    <div id="${id}" flex_direction="column" gap="4" flex_grow="1" flex_shrink="1" />
+  </template>
+
+  <!-- text, translation, size, color -->
+  <template name="Text">
+    <label text="${text}" translation="${translation}" size="${size}" color="${color}" wrap="1" />
+  </template>
+
+  <!-- text, translation, size, color -->
+  <template name="Bold">
+    <label text="${text}" translation="${translation}" size="${size}" color="${color}" weight="bold" wrap="1" />
+  </template>
+
+  <!-- translation, color -->
+  <template name="Badge">
+    <rectangle round="4" color="${color}(opacity-0.25)" border="1" border_color="${color}" padding_left="6" padding_right="6" padding_top="2" padding_bottom="2">
+      <label translation="${translation}" size="12" weight="bold" color="${color}" />
+    </rectangle>
+  </template>
+
+  <!-- id, translation, tooltip, checked -->
+  <template name="Toggle">
+    <CheckBox id="${id}" translation="${translation}" tooltip="${tooltip}" checked="${checked}" />
+  </template>
+
+  <!-- id, text, translation, checked -->
+  <template name="ToggleText">
+    <CheckBox id="${id}" text="${text}" translation="${translation}" checked="${checked}" />
+  </template>
+
+  <!-- id, translation, min, max, step, value -->
+  <template name="Slider">
+    <div flex_direction="column" gap="4">
+      <label translation="${translation}" />
+      <Slider id="${id}" width="300" height="24" min_value="${min}" max_value="${max}" step="${step}" value="${value}" />
+    </div>
+  </template>
+
+  <!-- id, text, translation, icon, color -->
+  <template name="Button">
+    <Button id="${id}" height="32" padding="4" gap="8" color="${color}">
+      <sprite src_builtin="${icon}" height="24" width="24" />
+      <label text="${text}" translation="${translation}" weight="bold" />
+    </Button>
+  </template>
+
+  <!-- id, translation, icon -->
+  <template name="ActionButton">
+    <Button id="${id}" width="150" height="96" padding="8" gap="8" flex_direction="column" align_items="center" justify_content="center">
+      <sprite src_builtin="${icon}" height="40" width="40" />
+      <label translation="${translation}" weight="bold" align="center" wrap="1" />
+    </Button>
+  </template>
+
+  <!-- translation, value_id -->
+  <template name="Stat">
+    <rectangle flex_direction="column" align_items="center" gap="4" min_width="120" padding="8" round="8" color="background_contrast(opacity-0.5)" border="2" border_color="outline">
+      <label translation="${translation}" size="12" color="secondary" />
+      <label id="${value_id}" weight="bold" size="18" text="-" />
+    </rectangle>
+  </template>
+
+  <!-- id, name, limit_max, unit -->
+  <template name="Graph">
+    <rectangle flex_direction="column" align_items="center" gap="8" border="2" color="#ffffff11" color2="#ffffff22" gradient="vertical" border_color="#ffffff33" round="4" padding="4">
+      <label translation="${name}" size="12" weight="bold" />
+      <BarGraph id="${id}" width="240" height="80" unit="${unit}" limit_min="0" limit_max="${limit_max}" capacity="120" />
+    </rectangle>
+  </template>
+
+  <!-- id, translation, color -->
+  <template name="Banner">
+    <rectangle id="${id}" width="100%" flex_direction="row" align_items="center" justify_content="space_between" gap="12" padding="12" round="8" color="${color}(opacity-0.2)" border="2" border_color="${color}">
+      <label translation="${translation}" weight="bold" wrap="1" />
+    </rectangle>
+  </template>
+</layout>

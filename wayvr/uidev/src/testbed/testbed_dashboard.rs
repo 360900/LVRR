@@ -21,7 +21,7 @@ impl TestbedDashboard {
 		let palette_name = std::env::var("PALETTE").unwrap_or_else(|_| "Default".to_string());
 		let executor = wlx_common::async_executor::create_local();
 
-		let frontend = frontend::Frontend::new(frontend::InitParams {
+		let mut frontend = frontend::Frontend::new(frontend::InitParams {
 			interface: Box::new(interface),
 			show_welcome: false,
 			has_monado: true,
@@ -30,6 +30,10 @@ impl TestbedDashboard {
 			color_palette: &palette_name,
 			executor: executor.clone(),
 		})?;
+		// LVRR: open a page directly, e.g. LVRR_PAGE=headset:streaming
+		if let Ok(page) = std::env::var("LVRR_PAGE") {
+			frontend.lvrr_open(&page);
+		}
 		Ok(Self { frontend, executor })
 	}
 }

@@ -69,7 +69,8 @@ pub struct DashInterfaceEmulated {
 	brightness: f32,
 	debug_frame_id: u64,
 	debug_counter: u64,
-	gfx: Arc<WGfx>,
+	// LVRR: None in tests
+	gfx: Option<Arc<WGfx>>,
 	// LVRR: LVRR_EMU=connected (default), absent or none
 	lvrr: Option<lvrr_common::emulator::LvrrEmulator>,
 	lvrr_perf_overlay: bool,
@@ -77,6 +78,18 @@ pub struct DashInterfaceEmulated {
 
 impl DashInterfaceEmulated {
 	pub fn new(gfx: Arc<WGfx>, locale: &Locale) -> Self {
+		Self::new_inner(Some(gfx), locale)
+	}
+
+	/// LVRR: without a GPU, for tests; `lvrr` is the LVRR server to emulate
+	pub fn new_headless(locale: &Locale, lvrr: Option<lvrr_common::emulator::LvrrEmulator>) -> Self {
+		Self {
+			lvrr,
+			..Self::new_inner(None, locale)
+		}
+	}
+
+	fn new_inner(gfx: Option<Arc<WGfx>>, locale: &Locale) -> Self {
 		let mut processes = DenseSlotMap::<EmuProcessHandle, EmuProcess>::default();
 		let process_handle = processes.insert(EmuProcess {
 			name: String::from("My app"),
@@ -174,7 +187,10 @@ impl DashInterface<()> for DashInterfaceEmulated {
 	}
 
 	fn enumerate_vulkan_devices(&mut self, _: &mut ()) -> anyhow::Result<Vec<String>> {
-		self.gfx.enumerate_devices()
+		self
+			.gfx
+			.as_ref()
+			.map_or_else(|| Ok(Vec::new()), |gfx| gfx.enumerate_devices())
 	}
 
 	fn window_list(&mut self, _: &mut ()) -> anyhow::Result<Vec<WvrWindow>> {
