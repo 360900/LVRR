@@ -1,0 +1,56 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/main",
+			"usage": "leftright"
+		},
+		{
+			"name": "/actions/menu",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/main/in/fire",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/jump",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/turn",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/throttle",
+			"type": "vector1"
+		},
+		{
+			"name": "/actions/main/in/move",
+			"type": "vector2"
+		},
+		{
+			"name": "/actions/main/in/pose",
+			"type": "pose"
+		},
+		{
+			"name": "/actions/main/in/vib",
+			"type": "vibration"
+		},
+		{
+			"name": "/actions/menu/in/select",
+			"type": "boolean"
+		}
+	],
+	"default_bindings": [
+		{
+			"binding_url": "touch_gamepad.json",
+			"controller_type": "oculus_touch"
+		},
+		{
+			"binding_url": "gamepad.json",
+			"controller_type": "gamepad"
+		}
+	]
+}

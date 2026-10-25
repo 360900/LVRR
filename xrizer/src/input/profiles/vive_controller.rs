@@ -68,20 +68,20 @@ impl InteractionProfile for ViveWands {
     fn translate_path(path: DynInputPath) -> Option<DynInputPath> {
         match path {
             DynInputPath {
-                hand,
+                device,
                 subpath: subpath @ DynSubpath::Trigger,
                 component: Some(DynComponent::Click),
             } => Some(DynInputPath {
-                hand,
+                device,
                 subpath,
                 component: Some(DynComponent::Value),
             }),
             DynInputPath {
-                hand,
+                device,
                 subpath: subpath @ DynSubpath::Squeeze,
                 component: Some(DynComponent::Value),
             } => Some(DynInputPath {
-                hand,
+                device,
                 subpath,
                 component: Some(DynComponent::Click),
             }),

@@ -3,7 +3,8 @@ pub mod vulkan;
 mod hand_tracking;
 mod monado_xdev;
 pub use hand_tracking::{
-    hand_joints_located, hand_trackers_created, set_hand_tracked, set_hand_tracking_supported,
+    hand_joints_located, hand_trackers_created, set_hand_joints, set_hand_tracked,
+    set_hand_tracking_supported,
 };
 pub use monado_xdev::add_trackers;
 
@@ -47,26 +48,97 @@ pub fn set_action_state_with_time(
     hand: UserPath,
     time: xr::Time,
 ) {
-    let action = action.to_handle().unwrap();
-    assert_eq!(
-        std::mem::discriminant(&state),
-        std::mem::discriminant(&action.state.left.load().state)
-    );
-    let mut d = action.pending_state.take();
-    match hand {
-        UserPath::RightHand => {
-            d.right = Some((state, time));
-        }
-        UserPath::LeftHand => {
-            d.left = Some((state, time));
-        }
-    }
-    action.pending_state.store(d);
-    action.active.store(true, Ordering::Relaxed);
+    action.to_handle().unwrap().set_state(state, hand, time);
 }
 
 pub fn set_action_state(action: xr::Action, state: ActionState, hand: UserPath) {
     set_action_state_with_time(action, state, hand, xr::Time::from_nanos(0));
+}
+
+/// The value of a controller input, see [set_input].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum InputValue {
+    Bool(bool),
+    Float(f32),
+    Vector2(f32, f32),
+}
+
+/// Sets an input of a hand's controller, like `/user/hand/right/input/thumbstick`, for every
+/// action bound to it in the hand's current interaction profile. Values are converted like
+/// Monado does: the axes of a 2D input go to float actions bound to its `/x` and `/y`, a
+/// boolean input reads 0 or 1 in a float action, a float input presses a boolean action past
+/// 0.7 (past 0.2 for an axis), and actions bound to the parent of a `/click` (boolean actions)
+/// or `/value` (float actions) follow it.
+pub fn set_input(session: xr::Session, input: &str, value: InputValue) {
+    let session = session.to_handle().unwrap();
+    let instance = session.instance.upgrade().unwrap();
+    let hand = [UserPath::LeftHand, UserPath::RightHand]
+        .into_iter()
+        .find(|hand| input.starts_with(&format!("{}/", hand.as_path())))
+        .unwrap_or_else(|| panic!("{input} isn't a hand input"));
+    let hand_data = get_hand_data(hand, &session);
+    let profile = hand_data
+        .pending_profile
+        .load()
+        .unwrap_or_else(|| hand_data.profile.load());
+
+    let converted = |binding: &str, ty: &ActionState| -> Option<ActionState> {
+        use ActionState as S;
+        use InputValue as V;
+        if binding == input {
+            return match (value, ty) {
+                (V::Bool(b), S::Bool(_)) => Some(S::Bool(b)),
+                (V::Bool(b), S::Float(_)) => Some(S::Float(b.into())),
+                (V::Float(f), S::Float(_)) => Some(S::Float(f)),
+                (V::Float(f), S::Bool(_)) => Some(S::Bool(f > 0.7)),
+                (V::Vector2(x, y), S::Vector2(..)) => Some(S::Vector2(x, y)),
+                _ => None,
+            };
+        }
+        if let V::Vector2(x, y) = value {
+            let axis = match binding.strip_prefix(input)? {
+                "/x" => x,
+                "/y" => y,
+                _ => return None,
+            };
+            return match ty {
+                S::Float(_) => Some(S::Float(axis)),
+                S::Bool(_) => Some(S::Bool(axis > 0.2)),
+                _ => None,
+            };
+        }
+        match (input.rsplit_once('/'), value, ty) {
+            (Some((parent, "click")), V::Bool(b), S::Bool(_)) if binding == parent => {
+                Some(S::Bool(b))
+            }
+            (Some((parent, "value")), V::Float(f), S::Float(_)) if binding == parent => {
+                Some(S::Float(f))
+            }
+            _ => None,
+        }
+    };
+
+    let sets = session
+        .attached_sets
+        .get()
+        .expect("action sets not attached");
+    for set in sets.iter() {
+        let set = set.to_handle().unwrap();
+        for action in set.actions.get().into_iter().flatten() {
+            let ty = action.state.left.load().state;
+            let suggested = action.suggested.lock().unwrap();
+            let state = suggested
+                .get(&profile)
+                .into_iter()
+                .flatten()
+                .filter_map(|path| instance.get_path_value(*path).ok().flatten())
+                .find_map(|binding| converted(&binding, &ty));
+            drop(suggested);
+            if let Some(state) = state {
+                action.set_state(state, hand, xr::Time::from_nanos(0));
+            }
+        }
+    }
 }
 
 pub fn deactivate_action(action: xr::Action) {
@@ -89,27 +161,44 @@ pub fn is_haptic_activated(action: xr::Action, hand: UserPath) -> bool {
     state
 }
 
+/// A vibration applied with xrApplyHapticFeedback.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HapticFeedback {
+    /// None when applied without a subaction path, to both hands.
+    pub hand: Option<UserPath>,
+    pub duration: xr::Duration,
+    pub frequency: f32,
+    pub amplitude: f32,
+}
+
+/// The vibrations applied to `action` since the last call, oldest first.
+pub fn take_haptic_feedback(action: xr::Action) -> Vec<HapticFeedback> {
+    let action = action.to_handle().unwrap();
+    std::mem::take(&mut *action.haptic_feedback.lock().unwrap())
+}
+
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum UserPath {
     /// /user/hand/left
     LeftHand,
     /// /user/hand/right
     RightHand,
+    /// /user/gamepad
+    Gamepad,
 }
 
 impl UserPath {
+    const ALL: [Self; 3] = [Self::LeftHand, Self::RightHand, Self::Gamepad];
+
     fn from_path(s: &str) -> Option<Self> {
-        match s {
-            "/user/hand/left" => Some(Self::LeftHand),
-            "/user/hand/right" => Some(Self::RightHand),
-            _ => None,
-        }
+        Self::ALL.into_iter().find(|path| path.as_path() == s)
     }
 
     fn as_path(&self) -> &'static str {
         match self {
             Self::LeftHand => "/user/hand/left",
             Self::RightHand => "/user/hand/right",
+            Self::Gamepad => "/user/gamepad",
         }
     }
 }
@@ -118,6 +207,7 @@ fn get_hand_data(hand: UserPath, session: &Session) -> &HandData {
     match hand {
         UserPath::RightHand => &session.right_hand,
         UserPath::LeftHand => &session.left_hand,
+        UserPath::Gamepad => &session.gamepad,
     }
 }
 
@@ -127,12 +217,28 @@ pub fn set_interaction_profile(session: xr::Session, hand: UserPath, profile: xr
 }
 
 thread_local! {
-    static DEFAULT_PROFILES: RefCell<[Option<String>; 2]> = const { RefCell::new([None, None]) };
+    static DEFAULT_PROFILES: RefCell<[Option<String>; 3]> = const { RefCell::new([None, None, None]) };
     static EXTRA_EXTENSIONS: RefCell<Vec<&'static [u8]>> = const { RefCell::new(Vec::new()) };
     static REJECTED_PROFILES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     static LOCATE_VIEWS_ERROR: Cell<Option<xr::Result>> = const { Cell::new(None) };
     static VISIBILITY_MASK: RefCell<Option<(Vec<xr::Vector2f>, Vec<u32>)>> = const { RefCell::new(None) };
     static HEADLESS_SUPPORTED: Cell<bool> = const { Cell::new(false) };
+    static BINDING_ACTIVITY: Cell<bool> = const { Cell::new(false) };
+    static ACTIONS_NEED_PROFILE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Makes instances created on this thread report input actions active on a hand only like
+/// Monado does: when they have a suggested binding on that hand in its current interaction
+/// profile, and their action set was synced for that hand. Without it, an action is active on
+/// both hands once a test set its state.
+pub fn set_binding_activity(enabled: bool) {
+    BINDING_ACTIVITY.set(enabled);
+}
+
+/// Makes actions read on this thread inactive for a hand without an interaction profile, like a
+/// real runtime. Off by default, so tests can set action states without binding a profile.
+pub fn set_actions_need_profile(need: bool) {
+    ACTIONS_NEED_PROFILE.set(need);
 }
 
 /// Sets the vertices and indices xrGetVisibilityMaskKHR returns on this thread. Without one, it
@@ -197,6 +303,13 @@ pub fn set_grip(session: xr::Session, path: UserPath, pose: xr::Posef) {
 pub fn set_aim(session: xr::Session, path: UserPath, pose: xr::Posef) {
     let session = session.to_handle().unwrap();
     get_hand_data(path, &session).aim_pose.store(pose);
+}
+
+/// Sets the linear velocity that xrLocateSpace reports for spaces on the hand's grip pose, or
+/// reports none again with None.
+pub fn set_grip_velocity(session: xr::Session, path: UserPath, velocity: Option<xr::Vector3f>) {
+    let session = session.to_handle().unwrap();
+    get_hand_data(path, &session).grip_velocity.store(velocity);
 }
 
 #[track_caller]
@@ -316,6 +429,23 @@ pub fn session_frame_state(session: xr::Session) -> FrameState {
 pub fn last_frame_display_time(session: xr::Session) -> xr::Time {
     let session = session.to_handle().unwrap();
     xr::Time::from_nanos(session.frames.lock().unwrap().ended_display_time)
+}
+
+/// Makes xrWaitFrame on `session` predict display times `period` nanoseconds apart, the first one
+/// `lead` nanoseconds after the current time (CLOCK_MONOTONIC, which
+/// xrConvertTimespecTimeToTimeKHR converts as is), instead of 1 ns apart.
+pub fn set_frame_period(session: xr::Session, period: i64, lead: i64) {
+    let session = session.to_handle().unwrap();
+    let mut frames = session.frames.lock().unwrap();
+    frames.pacing = Some((period, lead));
+    frames.pacing_started = true;
+}
+
+/// Makes the next xrWaitFrame on `session` predict a display time `vsyncs` periods later than an
+/// on time frame's, like a runtime after the app missed vsyncs.
+pub fn skip_vsyncs(session: xr::Session, vsyncs: u32) {
+    let session = session.to_handle().unwrap();
+    session.frames.lock().unwrap().skip = vsyncs;
 }
 
 /// The number of begun frames xrBeginFrame discarded on `session`, because they weren't ended.
@@ -697,13 +827,16 @@ extern "system" fn enumerate_instance_extension_properties(
     properties: *mut xr::ExtensionProperties,
 ) -> xr::Result {
     assert!(layer_name.is_null());
-    let fixed: [&[u8]; 14] = [
+    let fixed: [&[u8]; 17] = [
         xr::KHR_VULKAN_ENABLE_EXTENSION_NAME,
         openxr_mndx_xdev_space::XR_MNDX_XDEV_SPACE_EXTENSION_NAME.as_bytes(),
         xr::HTC_VIVE_FOCUS3_CONTROLLER_INTERACTION_EXTENSION_NAME,
         xr::META_TOUCH_CONTROLLER_PLUS_EXTENSION_NAME,
         xr::EXT_HP_MIXED_REALITY_CONTROLLER_EXTENSION_NAME,
         xr::EXT_SAMSUNG_ODYSSEY_CONTROLLER_EXTENSION_NAME,
+        xr::BD_CONTROLLER_INTERACTION_EXTENSION_NAME,
+        xr::FB_TOUCH_CONTROLLER_PRO_EXTENSION_NAME,
+        xr::HTC_VIVE_COSMOS_CONTROLLER_INTERACTION_EXTENSION_NAME,
         xr::KHR_VISIBILITY_MASK_EXTENSION_NAME,
         b"XR_VALVE_frame_controller_interaction\0",
         xr::EXT_HAND_TRACKING_EXTENSION_NAME,
@@ -809,11 +942,11 @@ struct Instance {
     paths: Mutex<SlotMap<DefaultKey, String>>,
     string_to_path: Mutex<HashMap<String, DefaultKey>>,
     action_sets: Mutex<HashSet<xr::ActionSet>>,
-    left_hand_key: DefaultKey,
-    right_hand_key: DefaultKey,
     lost: AtomicBool,
     enabled_extensions: Vec<CString>,
     rejected_profiles: Vec<String>,
+    /// See [set_binding_activity].
+    binding_activity: bool,
 }
 
 impl Instance {
@@ -858,6 +991,7 @@ struct HandData {
     profile: AtomicCell<xr::Path>,
     grip_pose: AtomicCell<xr::Posef>,
     aim_pose: AtomicCell<xr::Posef>,
+    grip_velocity: AtomicCell<Option<xr::Vector3f>>,
 }
 
 impl Default for HandData {
@@ -867,6 +1001,7 @@ impl Default for HandData {
             profile: Default::default(),
             grip_pose: xr::Posef::IDENTITY.into(),
             aim_pose: xr::Posef::IDENTITY.into(),
+            grip_velocity: Default::default(),
         }
     }
 }
@@ -892,6 +1027,13 @@ struct Frames {
     waited_display_time: i64,
     /// The display time of the last frame ended, in nanoseconds.
     ended_display_time: i64,
+    /// The display period xrWaitFrame predicts and how long after the current time the first
+    /// frame is displayed, see [set_frame_period]. Without it, display times are 1 ns apart.
+    pacing: Option<(i64, i64)>,
+    /// The next waited frame is the first one with `pacing`.
+    pacing_started: bool,
+    /// Vsyncs the next waited frame's display time skips.
+    skip: u32,
 }
 
 impl Frames {
@@ -916,6 +1058,7 @@ struct Session {
     attached_sets: OnceLock<Box<[xr::ActionSet]>>,
     left_hand: HandData,
     right_hand: HandData,
+    gamepad: HandData,
     spaces: Mutex<HashSet<DefaultKey>>,
     state: AtomicCell<xr::SessionState>,
     state_synced: AtomicBool,
@@ -991,6 +1134,23 @@ impl Session {
         xr
     }
 
+    /// Whether actions read for `subaction_path` can be active: with [set_actions_need_profile],
+    /// only while that hand (or either hand, for NULL) has an interaction profile, like a real
+    /// runtime binds actions through one.
+    fn is_bound(&self, subaction_path: xr::Path) -> bool {
+        if !ACTIONS_NEED_PROFILE.get() {
+            return true;
+        }
+        let instance = self.instance.upgrade().unwrap();
+        let has_profile = |hand: &HandData| hand.profile.load() != xr::Path::NULL;
+        match instance.get_user_path(subaction_path) {
+            Ok(Some(UserPath::LeftHand)) => has_profile(&self.left_hand),
+            Ok(Some(UserPath::RightHand)) => has_profile(&self.right_hand),
+            Ok(Some(UserPath::Gamepad)) => has_profile(&self.gamepad),
+            _ => has_profile(&self.left_hand) || has_profile(&self.right_hand),
+        }
+    }
+
     fn get_action_if_attached(
         &self,
         info: *const xr::ActionStateGetInfo,
@@ -1006,6 +1166,50 @@ impl Session {
             }
             None
         })
+    }
+
+    fn user_path(&self, path: xr::Path) -> Option<UserPath> {
+        self.instance.upgrade()?.get_user_path(path).ok().flatten()
+    }
+
+    /// The state of an input action for `subaction_path`, and whether it's active (see
+    /// [set_binding_activity]).
+    fn input_state(
+        &self,
+        set: &ActionSet,
+        action: &Action,
+        subaction_path: xr::Path,
+    ) -> (ActionStateData, bool) {
+        let instance = self.instance.upgrade().unwrap();
+        if !instance.binding_activity {
+            return (
+                action.get_hand_state(subaction_path),
+                action.is_active(subaction_path) && self.is_bound(subaction_path),
+            );
+        }
+        let synced = set.synced_hands.load();
+        let suggested = action.suggested.lock().unwrap();
+        let active = |hand: UserPath| {
+            let prefix = format!("{}/", hand.as_path());
+            synced[hand as usize]
+                && (hand != UserPath::Gamepad || action.gamepad_active.load(Ordering::Relaxed))
+                && suggested
+                    .get(&get_hand_data(hand, self).profile.load())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|path| instance.get_path_value(*path).ok().flatten())
+                    .any(|path| path.starts_with(&prefix))
+        };
+        match instance.get_user_path(subaction_path).unwrap() {
+            Some(hand) => (action.get_hand_state(subaction_path), active(hand)),
+            None => {
+                let mut active_paths = UserPath::ALL.into_iter().filter(|path| active(*path));
+                match (active_paths.next(), active_paths.next()) {
+                    (Some(path), None) => (action.state.get(path).load(), true),
+                    (any, _) => (action.combined_state(), any.is_some()),
+                }
+            }
+        }
     }
 }
 
@@ -1040,6 +1244,26 @@ struct Space {
 }
 
 impl Space {
+    /// The velocity set with set_grip_velocity, for an action space bound to a hand's grip.
+    fn grip_velocity(&self) -> Option<xr::Vector3f> {
+        let SpaceType::Action { hand, action } = &self.ty else {
+            return None;
+        };
+        let session = self.session.upgrade()?;
+        let hand = hand.unwrap_or(UserPath::LeftHand);
+        let hand_data = get_hand_data(hand, &session);
+        let velocity = hand_data.grip_velocity.load()?;
+        let instance = session.instance.upgrade()?;
+        let action = action.upgrade()?;
+        let grip = format!("{}/input/grip/pose", hand.as_path());
+        let bindings = action.suggested.lock().unwrap();
+        bindings
+            .get(&hand_data.profile.load())?
+            .iter()
+            .any(|&path| instance.get_path_value(path).ok().flatten().as_ref() == Some(&grip))
+            .then_some(velocity)
+    }
+
     fn get_pose_relative_to_local(&self) -> Result<xr::SpaceLocation, xr::Result> {
         let default = || xr::SpaceLocation {
             ty: xr::SpaceLocation::TYPE,
@@ -1073,10 +1297,11 @@ impl Space {
 
         // Check if this hand has an interaction profile
         let hand = hand.unwrap_or(UserPath::LeftHand);
-        let hand_data = match hand {
-            UserPath::LeftHand => &session.left_hand,
-            UserPath::RightHand => &session.right_hand,
-        };
+        // A gamepad has no pose.
+        if hand == UserPath::Gamepad {
+            return Ok(default());
+        }
+        let hand_data = get_hand_data(hand, &session);
         let hand_path = hand.as_path();
         let profile = match hand_data.profile.load() {
             xr::Path::NULL => {
@@ -1094,10 +1319,7 @@ impl Space {
         };
 
         // Check if this action has been synced
-        let state = match hand {
-            UserPath::LeftHand => &action.state.left,
-            UserPath::RightHand => &action.state.right,
-        };
+        let state = action.state.get(hand);
 
         let ActionState::Pose(state) = state.load().state else {
             unreachable!();
@@ -1151,6 +1373,8 @@ struct ActionSet {
     pending_actions: RwLock<Vec<Arc<Action>>>,
     actions: OnceLock<Vec<Arc<Action>>>,
     active: AtomicBool,
+    /// The hands (left, right) the set was synced for by the last xrSyncActions.
+    synced_hands: AtomicCell<[bool; 3]>,
 }
 impl ActionSet {
     fn make_immutable(&self) {
@@ -1166,54 +1390,116 @@ struct Action {
     name: CString,
     active: AtomicBool,
     localized_name: CString,
-    state: LeftRight<AtomicCell<ActionStateData>>,
-    pending_state: AtomicCell<LeftRight<Option<(ActionState, xr::Time)>>>,
+    state: PerUserPath<AtomicCell<ActionStateData>>,
+    pending_state: AtomicCell<PerUserPath<Option<(ActionState, xr::Time)>>>,
     suggested: Mutex<HashMap<xr::Path, Vec<xr::Path>>>,
     subaction_paths: Vec<xr::Path>,
+    haptic_feedback: Mutex<Vec<HapticFeedback>>,
+    /// Whether the gamepad has a state: like a runtime without a gamepad connected, its inputs
+    /// are inactive until a test sets one.
+    gamepad_active: AtomicBool,
 }
 
 impl Action {
+    /// Sets the state the next xrSyncActions reports for `hand`.
+    fn set_state(&self, state: ActionState, hand: UserPath, time: xr::Time) {
+        assert_eq!(
+            std::mem::discriminant(&state),
+            std::mem::discriminant(&self.state.left.load().state)
+        );
+        let mut d = self.pending_state.take();
+        *d.get_mut(hand) = Some((state, time));
+        self.pending_state.store(d);
+        self.active.store(true, Ordering::Relaxed);
+        if hand == UserPath::Gamepad {
+            self.gamepad_active.store(true, Ordering::Relaxed);
+        }
+    }
+
     fn get_hand_state(&self, path: xr::Path) -> ActionStateData {
         let instance = self.instance.upgrade().expect("Failed to get instance");
         match instance.get_user_path(path).unwrap() {
             None => self.combined_state(),
-            Some(UserPath::LeftHand) => self.state.left.load(),
-            Some(UserPath::RightHand) => self.state.right.load(),
+            Some(user_path) => self.state.get(user_path).load(),
         }
     }
 
-    /// The state without a subaction path, combined from both hands as OpenXR specifies.
+    /// Whether the action is active on `path`, see [Action::gamepad_active].
+    fn is_active(&self, path: xr::Path) -> bool {
+        let instance = self.instance.upgrade().expect("Failed to get instance");
+        self.active.load(Ordering::Relaxed)
+            && (instance.get_user_path(path) != Ok(Some(UserPath::Gamepad))
+                || self.gamepad_active.load(Ordering::Relaxed))
+    }
+
+    /// Whether the state can be read with `path`: like Monado, a subaction path must be one the
+    /// action was created with.
+    fn has_subaction_path(&self, path: xr::Path) -> bool {
+        path == xr::Path::NULL || self.subaction_paths.contains(&path)
+    }
+
+    /// The state without a subaction path, combined from every user path as OpenXR specifies.
     fn combined_state(&self) -> ActionStateData {
-        let (left, right) = (self.state.left.load(), self.state.right.load());
-        match (left.state, right.state) {
-            (ActionState::Bool(l), ActionState::Bool(r)) => {
+        let combine = |best: ActionStateData, data: ActionStateData| match (best.state, data.state)
+        {
+            (ActionState::Bool(b), ActionState::Bool(d)) => {
                 let previous = |data: &ActionStateData, state: bool| state != data.changed;
-                let state = l || r;
+                let state = b || d;
                 ActionStateData {
                     state: ActionState::Bool(state),
-                    changed: state != (previous(&left, l) || previous(&right, r)),
+                    changed: state != (previous(&best, b) || previous(&data, d)),
                     last_change_time: xr::Time::from_nanos(
-                        left.last_change_time
+                        best.last_change_time
                             .as_nanos()
-                            .max(right.last_change_time.as_nanos()),
+                            .max(data.last_change_time.as_nanos()),
                     ),
                 }
             }
-            (ActionState::Float(l), ActionState::Float(r)) if r.abs() > l.abs() => right,
-            (ActionState::Vector2(lx, ly), ActionState::Vector2(rx, ry))
-                if rx * rx + ry * ry > lx * lx + ly * ly =>
+            (ActionState::Float(b), ActionState::Float(d)) if d.abs() > b.abs() => data,
+            (ActionState::Vector2(bx, by), ActionState::Vector2(dx, dy))
+                if dx * dx + dy * dy > bx * bx + by * by =>
             {
-                right
+                data
             }
-            _ => left,
-        }
+            _ => best,
+        };
+        let gamepad_active = self.gamepad_active.load(Ordering::Relaxed);
+        UserPath::ALL
+            .into_iter()
+            .filter(|path| *path != UserPath::Gamepad || gamepad_active)
+            .map(|path| self.state.get(path).load())
+            .reduce(combine)
+            .unwrap()
     }
 }
 
 #[derive(Default)]
-struct LeftRight<T> {
+struct PerUserPath<T> {
     left: T,
     right: T,
+    gamepad: T,
+}
+
+impl<T> PerUserPath<T> {
+    fn get(&self, path: UserPath) -> &T {
+        match path {
+            UserPath::LeftHand => &self.left,
+            UserPath::RightHand => &self.right,
+            UserPath::Gamepad => &self.gamepad,
+        }
+    }
+
+    fn get_mut(&mut self, path: UserPath) -> &mut T {
+        match path {
+            UserPath::LeftHand => &mut self.left,
+            UserPath::RightHand => &mut self.right,
+            UserPath::Gamepad => &mut self.gamepad,
+        }
+    }
+
+    fn all(&self) -> [&T; 3] {
+        UserPath::ALL.map(|path| self.get(path))
+    }
 }
 
 #[derive(Copy, Clone, PartialEq)]
@@ -1260,11 +1546,11 @@ extern "system" fn create_instance(
     );
     let mut paths = SlotMap::new();
     let mut string_to_path = HashMap::new();
-    let left_hand_key = paths.insert_with_key(|key| {
+    paths.insert_with_key(|key| {
         string_to_path.insert(left.clone(), key);
         left
     });
-    let right_hand_key = paths.insert_with_key(|key| {
+    paths.insert_with_key(|key| {
         string_to_path.insert(right.clone(), key);
         right
     });
@@ -1274,11 +1560,10 @@ extern "system" fn create_instance(
         paths: Mutex::new(paths),
         string_to_path: Mutex::new(string_to_path),
         action_sets: Default::default(),
-        left_hand_key,
-        right_hand_key,
         lost: false.into(),
         enabled_extensions,
         rejected_profiles: REJECTED_PROFILES.with_borrow(Clone::clone),
+        binding_activity: BINDING_ACTIVITY.get(),
     });
     unsafe {
         *instance = inst.to_xr();
@@ -1331,6 +1616,7 @@ extern "system" fn create_session(
         attached_sets: OnceLock::new(),
         left_hand: Default::default(),
         right_hand: Default::default(),
+        gamepad: Default::default(),
         spaces: Default::default(),
         state: xr::SessionState::READY.into(),
         state_synced: true.into(),
@@ -1356,7 +1642,7 @@ extern "system" fn create_session(
     });
 
     DEFAULT_PROFILES.with_borrow(|profiles| {
-        for (hand, profile) in [&sess.left_hand, &sess.right_hand]
+        for (hand, profile) in [&sess.left_hand, &sess.right_hand, &sess.gamepad]
             .into_iter()
             .zip(profiles)
         {
@@ -1454,6 +1740,7 @@ extern "system" fn create_action_set(
         actions: OnceLock::new(),
         pending_actions: RwLock::default(),
         active: false.into(),
+        synced_hands: Default::default(),
     });
 
     unsafe {
@@ -1538,9 +1825,10 @@ extern "system" fn create_action(
         })
         .unwrap()
         .to_owned(),
-        state: LeftRight {
+        state: PerUserPath {
             left: data.into(),
             right: data.into(),
+            gamepad: data.into(),
         },
         pending_state: Default::default(),
         suggested: Mutex::default(),
@@ -1552,6 +1840,8 @@ extern "system" fn create_action(
             }
             .to_vec()
         },
+        haptic_feedback: Mutex::default(),
+        gamepad_active: false.into(),
     });
 
     set.pending_actions.write().unwrap().push(a.clone());
@@ -1856,6 +2146,22 @@ const PROFILE_EXTENSIONS: &[(&str, &[u8])] = &[
         "/interaction_profiles/samsung/odyssey_controller",
         xr::EXT_SAMSUNG_ODYSSEY_CONTROLLER_EXTENSION_NAME,
     ),
+    (
+        "/interaction_profiles/bytedance/pico_neo3_controller",
+        xr::BD_CONTROLLER_INTERACTION_EXTENSION_NAME,
+    ),
+    (
+        "/interaction_profiles/bytedance/pico4_controller",
+        xr::BD_CONTROLLER_INTERACTION_EXTENSION_NAME,
+    ),
+    (
+        "/interaction_profiles/facebook/touch_controller_pro",
+        xr::FB_TOUCH_CONTROLLER_PRO_EXTENSION_NAME,
+    ),
+    (
+        "/interaction_profiles/htc/vive_cosmos_controller",
+        xr::HTC_VIVE_COSMOS_CONTROLLER_INTERACTION_EXTENSION_NAME,
+    ),
 ];
 
 const HAND_INTERACTION_PROFILE: &str = "/interaction_profiles/ext/hand_interaction_ext";
@@ -1919,6 +2225,22 @@ extern "system" fn suggest_interaction_profile_bindings(
         return xr::Result::ERROR_PATH_UNSUPPORTED;
     }
 
+    // A suggestion replaces the previous one for the profile, like in Monado.
+    for set in instance.action_sets.lock().unwrap().iter().copied() {
+        let Some(set) = set.to_handle() else {
+            continue;
+        };
+        let pending = set.pending_actions.read().unwrap();
+        for action in set
+            .actions
+            .get()
+            .into_iter()
+            .flatten()
+            .chain(pending.iter())
+        {
+            action.suggested.lock().unwrap().remove(&profile_path);
+        }
+    }
     for xr::ActionSuggestedBinding { action, binding } in bindings.iter().copied() {
         let action = get_handle!(action);
         action
@@ -1958,7 +2280,7 @@ extern "system" fn sync_actions(
     info: *const xr::ActionsSyncInfo,
 ) -> xr::Result {
     let session = get_session!(session_xr);
-    for hand in [&session.left_hand, &session.right_hand] {
+    for hand in [&session.left_hand, &session.right_hand, &session.gamepad] {
         if let Some(profile) = hand.pending_profile.load() {
             hand.profile.store(profile);
             send_event(
@@ -1978,6 +2300,7 @@ extern "system" fn sync_actions(
     for set in attached {
         let set = get_handle!(*set);
         set.active.store(false, Ordering::Relaxed);
+        set.synced_hands.store([false; 3]);
     }
     let sets = unsafe {
         std::slice::from_raw_parts(
@@ -2002,11 +2325,17 @@ extern "system" fn sync_actions(
             return xr::Result::ERROR_PATH_UNSUPPORTED;
         }
         set.active.store(true, Ordering::Relaxed);
+        let mut hands = set.synced_hands.load();
+        match session.user_path(subaction_path) {
+            Some(path) => hands[path as usize] = true,
+            None => hands = [true; 3],
+        }
+        set.synced_hands.store(hands);
 
         for action in actions {
             // activate pose actions
             if matches!(action.state.left.load().state, ActionState::Pose(_)) {
-                for state in [&action.state.left, &action.state.right] {
+                for state in action.state.all() {
                     let mut d = state.load();
                     d.state = ActionState::Pose(true);
                     state.store(d);
@@ -2014,13 +2343,10 @@ extern "system" fn sync_actions(
             } else {
                 // other actions
                 let data = action.pending_state.take();
-                for (new, state) in [
-                    (data.left, &action.state.left),
-                    (data.right, &action.state.right),
-                ] {
+                for (new, state) in data.all().into_iter().zip(action.state.all()) {
                     let mut d = state.load();
                     d.changed = false;
-                    if let Some((new_state, change_time)) = new
+                    if let Some((new_state, change_time)) = *new
                         && d.state != new_state
                     {
                         d.changed = true;
@@ -2048,7 +2374,7 @@ extern "system" fn sync_actions(
         };
         for action in actions {
             if matches!(action.state.left.load().state, ActionState::Pose(_)) {
-                for state in [&action.state.left, &action.state.right] {
+                for state in action.state.all() {
                     let mut d = state.load();
                     d.state = ActionState::Pose(false);
                     state.store(d);
@@ -2081,13 +2407,15 @@ extern "system" fn get_action_state_boolean(
     };
 
     let info = unsafe { info.as_ref().unwrap() };
-    let hand_state = action.get_hand_state(info.subaction_path);
+    if !action.has_subaction_path(info.subaction_path) {
+        return xr::Result::ERROR_PATH_UNSUPPORTED;
+    }
+    let (hand_state, active) = session.input_state(&set, &action, info.subaction_path);
     let ActionState::Bool(b) = hand_state.state else {
         return xr::Result::ERROR_ACTION_TYPE_MISMATCH;
     };
     let state = unsafe { state.as_mut().unwrap() };
     if set.active.load(Ordering::Relaxed) {
-        let active = action.active.load(Ordering::Relaxed);
         if active {
             state.current_state = b.into();
             state.changed_since_last_sync = hand_state.changed.into();
@@ -2117,13 +2445,16 @@ extern "system" fn get_action_state_float(
     let Some((set, action)) = session.get_action_if_attached(info) else {
         return xr::Result::ERROR_ACTIONSET_NOT_ATTACHED;
     };
-    let hand_state = action.get_hand_state(unsafe { (*info).subaction_path });
+    let subaction_path = unsafe { (*info).subaction_path };
+    if !action.has_subaction_path(subaction_path) {
+        return xr::Result::ERROR_PATH_UNSUPPORTED;
+    }
+    let (hand_state, active) = session.input_state(&set, &action, subaction_path);
     let ActionState::Float(f) = hand_state.state else {
         return xr::Result::ERROR_ACTION_TYPE_MISMATCH;
     };
     let state = unsafe { state.as_mut().unwrap() };
     if set.active.load(Ordering::Relaxed) {
-        let active = action.active.load(Ordering::Relaxed);
         if active {
             state.current_state = f;
             state.changed_since_last_sync = hand_state.changed.into();
@@ -2154,13 +2485,16 @@ extern "system" fn get_action_state_vector2f(
         return xr::Result::ERROR_ACTIONSET_NOT_ATTACHED;
     };
 
-    let hand_state = action.get_hand_state(unsafe { (*info).subaction_path });
+    let subaction_path = unsafe { (*info).subaction_path };
+    if !action.has_subaction_path(subaction_path) {
+        return xr::Result::ERROR_PATH_UNSUPPORTED;
+    }
+    let (hand_state, active) = session.input_state(&set, &action, subaction_path);
     let ActionState::Vector2(x, y) = hand_state.state else {
         return xr::Result::ERROR_ACTION_TYPE_MISMATCH;
     };
     let state = unsafe { state.as_mut().unwrap() };
     if set.active.load(Ordering::Relaxed) {
-        let active = action.active.load(Ordering::Relaxed);
         if active {
             state.current_state = xr::Vector2f { x, y };
             state.changed_since_last_sync = hand_state.changed.into();
@@ -2184,10 +2518,9 @@ extern "system" fn get_current_interaction_profile(
     let Ok(val) = instance.get_path_value(user_path) else {
         return xr::Result::ERROR_PATH_INVALID;
     };
-    let profile = match val.as_deref() {
-        Some("/user/hand/left") => session.left_hand.profile.load(),
-        Some("/user/hand/right") => session.right_hand.profile.load(),
-        _ => xr::Path::NULL,
+    let profile = match val.as_deref().and_then(UserPath::from_path) {
+        Some(user_path) => get_hand_data(user_path, &session).profile.load(),
+        None => xr::Path::NULL,
     };
 
     unsafe {
@@ -2220,6 +2553,7 @@ extern "system" fn locate_space(
         pose: xr::Posef::IDENTITY,
     };
 
+    let mut velocity_out = None;
     if !next.is_null() {
         let header = next as *mut xr::BaseOutStructure;
         unsafe {
@@ -2233,6 +2567,7 @@ extern "system" fn locate_space(
                     angular_velocity: Default::default(),
                 });
                 out_loc.next = velo as _;
+                velocity_out = Some(velo);
             }
         }
     }
@@ -2267,6 +2602,17 @@ extern "system" fn locate_space(
 
             let out_mat = base_mat.inverse() * target_mat;
             out_loc.pose = mat_to_pose(out_mat);
+        }
+    }
+
+    // Reference spaces don't move, so a velocity's length is the same in all of them.
+    if let Some(velo) = velocity_out
+        && out_loc.location_flags.contains(*LOCATION_FLAGS_TRACKED)
+        && let Some(velocity) = space.grip_velocity()
+    {
+        unsafe {
+            (*velo).velocity_flags = xr::SpaceVelocityFlags::LINEAR_VALID;
+            (*velo).linear_velocity = velocity;
         }
     }
 
@@ -2381,7 +2727,7 @@ extern "system" fn wait_frame(
 ) -> xr::Result {
     let session = get_session!(session);
     run_hook(&session.wait_frame_hook);
-    let display_time = {
+    let (display_time, period) = {
         let mut frames = session.frames.lock().unwrap();
         // A runtime blocks until the waited frame is begun, which would hang the test.
         if frames.waited {
@@ -2389,15 +2735,29 @@ extern "system" fn wait_frame(
             return xr::Result::ERROR_CALL_ORDER_INVALID;
         }
         frames.waited = true;
-        frames.waited_display_time += 1;
-        xr::Time::from_nanos(frames.waited_display_time)
+        let skip = i64::from(std::mem::take(&mut frames.skip));
+        let (period, lead) = frames.pacing.unwrap_or((1, 0));
+        frames.waited_display_time = if std::mem::take(&mut frames.pacing_started) {
+            monotonic_nanos() + lead
+        } else {
+            frames.waited_display_time + period * (1 + skip)
+        };
+        (xr::Time::from_nanos(frames.waited_display_time), period)
     };
+    // Paced frames are released `lead` before their display time, like a runtime pacing the app.
+    if let Some((_, lead)) = session.frames.lock().unwrap().pacing {
+        let release = display_time.as_nanos() - lead;
+        let wait = release - monotonic_nanos();
+        if wait > 0 {
+            std::thread::sleep(std::time::Duration::from_nanos(wait as u64));
+        }
+    }
     unsafe {
         state.write(xr::FrameState {
             ty: xr::FrameState::TYPE,
             next: std::ptr::null_mut(),
             predicted_display_time: display_time,
-            predicted_display_period: xr::Duration::from_nanos(1),
+            predicted_display_period: xr::Duration::from_nanos(period),
             should_render: session.should_render.load(Ordering::Relaxed).into(),
         })
     }
@@ -2457,6 +2817,16 @@ extern "system" fn end_frame(session: xr::Session, info: *const xr::FrameEndInfo
         session.synchronized();
     }
     xr::Result::SUCCESS
+}
+
+/// The current time, as xrConvertTimespecTimeToTimeKHR converts it.
+fn monotonic_nanos() -> i64 {
+    let mut now = std::mem::MaybeUninit::uninit();
+    unsafe {
+        libc::clock_gettime(libc::CLOCK_MONOTONIC, now.as_mut_ptr());
+        let now: libc::timespec = now.assume_init();
+        now.tv_sec * 1_000_000_000 + now.tv_nsec
+    }
 }
 
 extern "system" fn convert_timespec_time_to_time_k_h_r(
@@ -2647,6 +3017,9 @@ extern "system" fn apply_haptic_feedback(
     };
 
     let info = unsafe { action_info.as_ref().unwrap() };
+    if !action.has_subaction_path(info.subaction_path) {
+        return xr::Result::ERROR_PATH_UNSUPPORTED;
+    }
     let mut hand_state = action.get_hand_state(info.subaction_path);
     let ActionState::Haptic(_) = hand_state.state else {
         return xr::Result::ERROR_ACTION_TYPE_MISMATCH;
@@ -2656,20 +3029,30 @@ extern "system" fn apply_haptic_feedback(
     if unsafe { *(&raw const (*haptic_feedback).ty) } != xr::HapticVibration::TYPE {
         return xr::Result::ERROR_VALIDATION_FAILURE;
     }
+    let vibration = unsafe { *(haptic_feedback as *const xr::HapticVibration) };
 
     hand_state.state = ActionState::Haptic(true);
 
     let instance = session.instance.upgrade().unwrap();
 
-    match DefaultKey::from(KeyData::from_ffi(info.subaction_path.into_raw())) {
-        x if x == instance.left_hand_key => {
-            action.state.left.store(hand_state);
+    let Ok(hand) = instance.get_user_path(info.subaction_path) else {
+        return xr::Result::ERROR_PATH_INVALID;
+    };
+    match hand {
+        Some(user_path) => action.state.get(user_path).store(hand_state),
+        // Without a subaction path, every device vibrates.
+        None => {
+            for state in action.state.all() {
+                state.store(hand_state);
+            }
         }
-        x if x == instance.right_hand_key => {
-            action.state.right.store(hand_state);
-        }
-        _ => unreachable!(),
     }
+    action.haptic_feedback.lock().unwrap().push(HapticFeedback {
+        hand,
+        duration: vibration.duration,
+        frequency: vibration.frequency,
+        amplitude: vibration.amplitude,
+    });
 
     xr::Result::SUCCESS
 }

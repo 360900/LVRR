@@ -2,21 +2,23 @@ mod actions;
 mod bindings;
 mod context;
 mod fallback;
+pub(super) mod legacy_actions;
 
 pub(super) use actions::ControllerType;
-pub(super) use bindings::{ClickThresholdParams, GrabParameters};
+pub(super) use bindings::{ClickThresholdParams, GrabParameters, StringOrTyped};
 
 use crate::input::InteractionProfile;
 use crate::input::action_manifest::context::BindingsLoadContext;
-use crate::input::profiles::{DynInputPath, LegalPathsT, paths::DynSubpath};
+use crate::input::binding_sources::{BindingChoices, BindingSources};
+use crate::input::profiles::{DynInputPath, InputDevice, LegalPathsT, paths::DynSubpath};
+use crate::input::steamvr_bindings::Category;
 use crate::input::{ActionKey, Input, profiles::RunWithProfile, skeletal::SkeletalInputActionData};
 use crate::openxr_data::{self, Hand, SessionData};
 use log::{debug, error, info, warn};
 use openvr as vr;
 use openxr as xr;
-use slotmap::{SecondaryMap, SlotMap};
+use slotmap::{KeyData, SecondaryMap, SlotMap};
 use std::collections::{HashMap, HashSet};
-use std::env::current_dir;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -62,7 +64,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                 if let Some(loaded) = session_data.input_data.actions.get() {
                     error!(
                         "{} actions are already loaded!",
-                        if matches!(loaded, super::LoadedActions::Legacy(_)) {
+                        if matches!(loaded, super::LoadedActions::Legacy(..)) {
                             "Legacy"
                         } else {
                             "Manifest"
@@ -78,11 +80,44 @@ impl<C: openxr_data::Compositor> Input<C> {
             vr::EVRInputError::InvalidParam
         })?;
 
-        let manifest: actions::ActionManifest = serde_json::from_slice(&data).map_err(|e| {
+        let mut manifest: actions::ActionManifest = serde_json::from_slice(&data).map_err(|e| {
             error!("Failed to parse action manifest: {e}");
             vr::EVRInputError::InvalidParam
         })?;
 
+        let default_bindings = std::mem::take(&mut manifest.default_bindings);
+        let loaded = self.create_manifest_actions(
+            session_data,
+            manifest,
+            |context| {
+                self.load_bindings(manifest_path.parent().unwrap(), default_bindings, context)
+            },
+            &[],
+        )?;
+
+        session_data
+            .input_data
+            .actions
+            .set(super::LoadedActions::Manifest(Box::new(loaded)))
+            .unwrap_or_else(|_| unreachable!());
+        // Only remember the path once it loaded, so a failed attempt doesn't block a retry with
+        // the right path.
+        let _ = self.loaded_actions_path.set(manifest_path.to_path_buf());
+        Ok(())
+    }
+
+    /// Creates the actions of `manifest` and attaches them, with `extra_sets`, after
+    /// `load_bindings` suggested their bindings. It returns the variant of the bindings each
+    /// profile got and the files chosen to replace the default bindings.
+    fn create_manifest_actions(
+        &self,
+        session_data: &SessionData,
+        manifest: actions::ActionManifest,
+        load_bindings: impl FnOnce(
+            &mut BindingsLoadContext,
+        ) -> (HashMap<xr::Path, String>, BindingChoices),
+        extra_sets: &[&xr::ActionSet],
+    ) -> Result<super::ManifestLoadedActions, vr::EVRInputError> {
         // TODO: support non english localization?
         let english = manifest
             .localization
@@ -103,14 +138,14 @@ impl<C: openxr_data::Compositor> Input<C> {
         let left_hand_subaction_path = self.get_subaction_path(Hand::Left);
         let right_hand_subaction_path = self.get_subaction_path(Hand::Right);
 
+        // Any action may get gamepad bindings.
         let actions = actions::load_actions(
             &self.openxr.instance,
             &mut names,
             &english,
             &mut sets,
             manifest.actions,
-            left_hand_subaction_path,
-            right_hand_subaction_path,
+            &self.subaction_paths.all(),
         );
         debug!("Loaded {} actions.", actions.len());
 
@@ -145,7 +180,17 @@ impl<C: openxr_data::Compositor> Input<C> {
             .create_action::<xr::Haptic>(
                 "xrizer-haptic-action",
                 "XRizer haptic action",
-                &[self.subaction_paths.left, self.subaction_paths.right],
+                &self.subaction_paths.all(),
+            )
+            .unwrap();
+        // Bound to an input of the gamepad, which runtimes like WiVRn only make active while a
+        // gamepad is connected. It's in the haptic set, as that is synced on every
+        // UpdateActionState.
+        let gamepad_presence = haptic_set
+            .create_action::<bool>(
+                "xrizer-gamepad-presence",
+                "XRizer gamepad presence",
+                &[self.subaction_paths.gamepad],
             )
             .unwrap();
 
@@ -156,14 +201,11 @@ impl<C: openxr_data::Compositor> Input<C> {
             &session_data.input_data.pose_data.grip,
             &info_action,
             &haptic_action,
+            &gamepad_presence,
             skeletal_input,
         );
 
-        self.load_bindings(
-            manifest_path.parent().unwrap(),
-            manifest.default_bindings,
-            &mut binding_context,
-        );
+        let (binding_variants, binding_choices) = load_bindings(&mut binding_context);
 
         let context::BindingsLoadContext {
             actions,
@@ -171,7 +213,13 @@ impl<C: openxr_data::Compositor> Input<C> {
             per_profile_bindings,
             per_profile_pose_bindings,
             per_profile_input_paths,
+            per_profile_binding_info,
             head_proximity,
+            scalar_constants,
+            simulated_properties,
+            binding_haptics,
+            hand_speeds,
+            uses_hand_speeds,
             ..
         } = binding_context;
 
@@ -183,6 +231,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                 &haptic_set,
                 &skeletal_input.set,
             ])
+            .chain(extra_sets.iter().copied())
             .collect();
         let attached = session_data.session.attach_action_sets(&xr_sets);
         if self
@@ -199,14 +248,16 @@ impl<C: openxr_data::Compositor> Input<C> {
             .sync_actions(&[xr::ActiveActionSet::new(&info_set)]);
         self.openxr.check("xrSyncActions", synced);
 
-        // Every manifest OpenXR action is created with both hand subaction paths, so a set can
-        // only be synced restricted to a hand if it has at least one.
+        // Every manifest OpenXR action is created with the hands' and the gamepad's subaction
+        // paths, so a set can only be synced restricted to one if it has at least one.
         let sets_with_xr_actions: HashSet<String> = actions
             .iter()
             .filter(|(_, data)| {
                 !matches!(
                     data,
-                    super::ActionData::Pose | super::ActionData::Skeleton(_)
+                    super::ActionData::Pose
+                        | super::ActionData::Skeleton(_)
+                        | super::ActionData::Vector3 { .. }
                 )
             })
             .filter_map(|(path, _)| path.match_indices('/').nth(2).map(|(idx, _)| &path[..idx]))
@@ -273,6 +324,12 @@ impl<C: openxr_data::Compositor> Input<C> {
             .map(|(k, v)| (k, action_map_to_secondary(&mut act_guard, v)))
             .collect();
 
+        let per_profile_binding_info = per_profile_binding_info
+            .into_iter()
+            .map(|(k, v)| (k, action_map_to_secondary(&mut act_guard, v)))
+            .collect();
+        let scalar_constants = action_map_to_secondary(&mut act_guard, scalar_constants);
+
         // An action belongs to the set its path starts with, e.g. /actions/main/in/hand_left.
         let skeleton_sets = actions
             .iter()
@@ -301,7 +358,20 @@ impl<C: openxr_data::Compositor> Input<C> {
             })
             .collect();
 
-        let loaded = super::ManifestLoadedActions {
+        let binding_haptics = binding_haptics
+            .into_iter()
+            .filter_map(|(set_name, action, haptic)| {
+                let set = set_guard
+                    .iter()
+                    .find_map(|(set, name)| (*name == set_name).then_some(set))?;
+                let action = act_guard
+                    .iter()
+                    .find_map(|(key, a)| (a.path == action).then_some(key))?;
+                Some((set, action, haptic))
+            })
+            .collect();
+
+        let mut loaded = super::ManifestLoadedActions {
             sets,
             hand_restrictable_sets,
             actions,
@@ -309,23 +379,26 @@ impl<C: openxr_data::Compositor> Input<C> {
             per_profile_bindings,
             per_profile_pose_bindings,
             per_profile_input_paths,
+            per_profile_binding_info,
+            direct_origins: Default::default(),
+            scalar_constants,
             _info_action: info_action,
             info_set,
             haptic_action,
             haptic_set,
+            gamepad_presence,
+            binding_haptics,
+            pending_vibrations: Default::default(),
             skeleton_sets,
             head_proximity,
+            binding_variants,
+            binding_choices,
+            legacy: None,
+            simulated_properties,
+            hand_speeds: uses_hand_speeds.then_some(hand_speeds),
         };
-
-        session_data
-            .input_data
-            .actions
-            .set(super::LoadedActions::Manifest(Box::new(loaded)))
-            .unwrap_or_else(|_| unreachable!());
-        // Only remember the path once it loaded, so a failed attempt doesn't block a retry with
-        // the right path.
-        let _ = self.loaded_actions_path.set(manifest_path.to_path_buf());
-        Ok(())
+        loaded.direct_origins = loaded.find_direct_origins();
+        Ok(loaded)
     }
 }
 
@@ -347,6 +420,17 @@ fn read_bindings(
 
 /// The path to bind for `path` on `P`: the path itself, or what the profile translates it to.
 fn validate_path<P: InteractionProfile>(path: DynInputPath) -> Option<DynInputPath> {
+    let path = match path {
+        DynInputPath {
+            device: InputDevice::Hand(Hand::Left),
+            subpath: DynSubpath::System,
+            ..
+        } if P::LEFT_MENU_IS_SYSTEM => DynInputPath {
+            subpath: DynSubpath::Menu,
+            ..path
+        },
+        path => path,
+    };
     let legal = <P::LegalPaths as LegalPathsT>::is_legal;
     // A translation that isn't legal either would fail the whole profile's suggestion.
     legal(path)
@@ -361,7 +445,7 @@ fn has_input<P: InteractionProfile>(hand: Hand, subpath: DynSubpath) -> bool {
         .into_iter()
         .any(|component| {
             validate_path::<P>(DynInputPath {
-                hand,
+                device: InputDevice::Hand(hand),
                 subpath,
                 component,
             })
@@ -371,7 +455,7 @@ fn has_input<P: InteractionProfile>(hand: Hand, subpath: DynSubpath) -> bool {
 
 /// An environment variable, or in tests the value [TEST_ENV] gives it on this thread, since the
 /// process environment is shared by the tests running alongside.
-fn env_var(name: &str) -> Option<OsString> {
+pub(super) fn env_var(name: &str) -> Option<OsString> {
     #[cfg(test)]
     if let Some(value) = TEST_ENV.with_borrow(|env| env.get(name).cloned()) {
         return Some(value);
@@ -385,21 +469,88 @@ thread_local! {
         Default::default();
 }
 
+/// Like [env_var], but tests only see what [TEST_ENV] sets, so the machine's own SteamVR config
+/// stays out of them.
+#[cfg(not(test))]
+pub(super) fn isolated_env_var(name: &str) -> Option<OsString> {
+    std::env::var_os(name)
+}
+
+#[cfg(test)]
+pub(super) fn isolated_env_var(name: &str) -> Option<OsString> {
+    TEST_ENV.with_borrow(|env| env.get(name).cloned())
+}
+
+impl<C: openxr_data::Compositor> Input<C> {
+    /// The variant (`options.variant`) of the bindings of `device`'s controller, empty if they
+    /// have none. Other handles get the first hand's that has one.
+    pub(super) fn binding_variant(&self, device: vr::VRInputValueHandle_t) -> String {
+        if self.openxr.is_lost() {
+            return String::new();
+        }
+        let data = self.openxr.session_data.get();
+        let Some(loaded) = data.input_data.get_loaded_actions() else {
+            return String::new();
+        };
+        let hand = (device != vr::k_ulInvalidInputValueHandle)
+            .then(|| self.hand_from_key(super::InputSourceKey::from(KeyData::from_ffi(device))))
+            .flatten();
+        let hands = match hand {
+            Some(hand) => vec![hand],
+            None => vec![Hand::Left, Hand::Right],
+        };
+        let devices = data.input_data.devices.read().unwrap();
+        hands
+            .into_iter()
+            .find_map(|hand| {
+                // A controller whose profile is gone for now keeps its identity.
+                let profile = devices
+                    .get_controller(hand)
+                    .map(|device| device.last_profile_path)
+                    .filter(|profile| *profile != xr::Path::NULL)
+                    .or_else(|| {
+                        data.session
+                            .current_interaction_profile(self.get_subaction_path(hand))
+                            .ok()
+                            .filter(|profile| *profile != xr::Path::NULL)
+                    })?;
+                loaded.binding_variants.get(&profile).cloned()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// Remembers the variant of the bindings `P` got.
+fn record_variant<C: openxr_data::Compositor, P: InteractionProfile>(
+    input: &Input<C>,
+    bindings: &bindings::Bindings,
+    variants: &mut HashMap<xr::Path, String>,
+) {
+    if let (Some(variant), Ok(profile)) = (
+        &bindings.options.variant,
+        input.openxr.instance.string_to_path(P::profile_path()),
+    ) {
+        variants.insert(profile, variant.clone());
+    }
+}
+
 /// Whether two paths name the same file, even if spelled differently.
 pub(super) fn same_file(a: &Path, b: &Path) -> bool {
     a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
 }
 
 impl<C: openxr_data::Compositor> Input<C> {
+    /// Suggests the bindings for every profile. Returns the variant of the bindings each profile
+    /// got, for GetBindingVariant, and the files chosen to replace the game's.
     fn load_bindings(
         &self,
         parent_path: &Path,
         bindings: Vec<actions::DefaultBindings>,
         context: &mut context::BindingsLoadContext,
-    ) {
-        let custom_bindings_dir = env_var("XRIZER_CUSTOM_BINDINGS_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| current_dir().unwrap_or_default().join("xrizer"));
+    ) -> (HashMap<xr::Path, String>, BindingChoices) {
+        // Custom bindings, then the ones chosen in SteamVR, then the game's.
+        let sources = BindingSources::new(self.app_key(), Category::SteamVrInput);
+        let mut variants = HashMap::new();
 
         let mut bindings = bindings;
         if let Some(additional_bindings) =
@@ -435,12 +586,12 @@ impl<C: openxr_data::Compositor> Input<C> {
                 continue;
             }
 
-            let custom_path = custom_bindings_dir.join(format!("{controller_type}.json"));
-            let bindings_path = match custom_path.exists() {
-                true => custom_path,
-                false => parent_path.join(binding_url),
-            };
-            let Some(bindings) = read_bindings(&bindings_path, &controller_type) else {
+            // Like SteamVR, the default is used if the chosen bindings don't load.
+            let bindings = sources
+                .file_for(&controller_type)
+                .and_then(|path| read_bindings(&path, &controller_type))
+                .or_else(|| read_bindings(&parent_path.join(binding_url), &controller_type));
+            let Some(bindings) = bindings else {
                 continue;
             };
 
@@ -454,36 +605,9 @@ impl<C: openxr_data::Compositor> Input<C> {
                     );
                 }
             } else {
-                let mut runner = Runner(self, context, &bindings);
-                controller_type.run_for_profile(&mut runner);
+                self.load_controller_bindings(&controller_type, &bindings, context, &mut variants);
             }
             loaded.push((controller_type, bindings));
-
-            // lifetime moment
-            struct Runner<'a, 'b, 'c, 'd, C: openxr_data::Compositor>(
-                &'a Input<C>,
-                &'b mut BindingsLoadContext<'c>,
-                &'d bindings::Bindings,
-            );
-            impl<C: openxr_data::Compositor> RunWithProfile for Runner<'_, '_, '_, '_, C> {
-                fn run<P: super::InteractionProfile>(&mut self) {
-                    if let Some(mut context) = self.1.for_profile::<C, P>(self.0) {
-                        // simple_controller gets the Vive's bindings, most of whose inputs it
-                        // lacks.
-                        context.adapted = std::any::TypeId::of::<P>()
-                            == std::any::TypeId::of::<
-                                super::profiles::simple_controller::SimpleController,
-                            >();
-                        self.0
-                            .load_bindings_for_profile::<P>(&self.2.bindings, &mut context);
-                    } else {
-                        warn!(
-                            "Couldn't create context for profile {}?",
-                            std::any::type_name::<P>()
-                        );
-                    }
-                }
-            }
         }
 
         // Controllers the game has no bindings for get bindings converted from the closest
@@ -492,7 +616,8 @@ impl<C: openxr_data::Compositor> Input<C> {
             input: self,
             context,
             loaded: &loaded,
-            custom_bindings_dir: &custom_bindings_dir,
+            sources: &sources,
+            variants: &mut variants,
         };
         super::profiles::run_for_all_profiles(&mut runner);
 
@@ -500,7 +625,8 @@ impl<C: openxr_data::Compositor> Input<C> {
             input: &'a Input<C>,
             context: &'b mut BindingsLoadContext<'c>,
             loaded: &'a [(actions::ControllerType, bindings::Bindings)],
-            custom_bindings_dir: &'a Path,
+            sources: &'a BindingSources,
+            variants: &'a mut HashMap<xr::Path, String>,
         }
         impl<C: openxr_data::Compositor> RunWithProfile for FallbackRunner<'_, '_, '_, C> {
             fn run<P: super::InteractionProfile>(&mut self) {
@@ -522,18 +648,19 @@ impl<C: openxr_data::Compositor> Input<C> {
                     return;
                 };
 
-                let custom_path = self.custom_bindings_dir.join(format!("{native}.json"));
                 let source = native
                     .conversion_sources()
                     .into_iter()
                     .find_map(|ty| self.loaded.iter().find(|(loaded, _)| *loaded == ty));
-                let bindings = if let Some(custom) = custom_path
-                    .exists()
-                    .then(|| read_bindings(&custom_path, &native))
-                    .flatten()
-                {
-                    info!("Using {} for {profile}", custom_path.display());
-                    custom
+                // Custom bindings and those chosen in SteamVR may be for controllers the game has
+                // none for.
+                let own_path = self.sources.file_for(&native);
+                let bindings = if let Some((path, own)) = own_path.and_then(|path| {
+                    let bindings = read_bindings(&path, &native)?;
+                    Some((path, bindings))
+                }) {
+                    info!("Using {} for {profile}", path.display());
+                    own
                 } else if let Some((source, bindings)) = source {
                     crate::log_unique!(
                         log::Level::Info,
@@ -541,6 +668,14 @@ impl<C: openxr_data::Compositor> Input<C> {
                     );
                     let mut bindings = bindings.clone();
                     fallback::convert(&mut bindings, source, has_input::<P>);
+                    if let Some(properties) = source
+                        .simulated_properties()
+                        .filter(|_| P::SIMULATE_CONVERTED)
+                    {
+                        self.context
+                            .simulated_properties
+                            .insert(profile_path, properties);
+                    }
                     bindings
                 } else {
                     info!("No bindings to convert for {profile}");
@@ -551,9 +686,49 @@ impl<C: openxr_data::Compositor> Input<C> {
                     context.adapted = true;
                     self.input
                         .load_bindings_for_profile::<P>(&bindings.bindings, &mut context);
+                    record_variant::<C, P>(self.input, &bindings, self.variants);
                 }
             }
         }
+
+        (variants, sources.into_choices())
+    }
+
+    /// Suggests `bindings` for the profiles of `controller_type`, recording their variant.
+    fn load_controller_bindings(
+        &self,
+        controller_type: &actions::ControllerType,
+        bindings: &bindings::Bindings,
+        context: &mut BindingsLoadContext,
+        variants: &mut HashMap<xr::Path, String>,
+    ) {
+        // lifetime moment
+        struct Runner<'a, 'b, 'c, 'd, C: openxr_data::Compositor>(
+            &'a Input<C>,
+            &'b mut BindingsLoadContext<'c>,
+            &'d bindings::Bindings,
+            &'d mut HashMap<xr::Path, String>,
+        );
+        impl<C: openxr_data::Compositor> RunWithProfile for Runner<'_, '_, '_, '_, C> {
+            fn run<P: super::InteractionProfile>(&mut self) {
+                if let Some(mut context) = self.1.for_profile::<C, P>(self.0) {
+                    // simple_controller gets the Vive's bindings, most of whose inputs it lacks.
+                    context.adapted = std::any::TypeId::of::<P>()
+                        == std::any::TypeId::of::<
+                            super::profiles::simple_controller::SimpleController,
+                        >();
+                    self.0
+                        .load_bindings_for_profile::<P>(&self.2.bindings, &mut context);
+                    record_variant::<C, P>(self.0, self.2, self.3);
+                } else {
+                    warn!(
+                        "Couldn't create context for profile {}?",
+                        std::any::type_name::<P>()
+                    );
+                }
+            }
+        }
+        controller_type.run_for_profile(&mut Runner(self, context, bindings, variants));
     }
 
     fn load_bindings_for_profile<P: InteractionProfile>(
@@ -595,6 +770,13 @@ impl<C: openxr_data::Compositor> Input<C> {
                 &set,
                 &bindings.sources,
             );
+            bindings::handle_binding_haptics(
+                &path_validator,
+                context,
+                action_set_name,
+                &set,
+                &bindings.sources,
+            );
             bindings::handle_chord_bindings(
                 &path_validator,
                 context,
@@ -603,6 +785,15 @@ impl<C: openxr_data::Compositor> Input<C> {
                 &bindings.chords,
             );
         }
+        bindings::record_binding_info(
+            &path_validator,
+            P::properties()
+                .openvr_controller_type
+                .to_str()
+                .unwrap_or_default(),
+            context,
+            bindings,
+        );
 
         let info_action_binding = *legacy_bindings
             .trigger_click
@@ -626,7 +817,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                     Vector1 { action, .. } => xr::Binding::new(action, path),
                     Vector2 { action, .. } => xr::Binding::new(action, path),
                     Haptic(action) => xr::Binding::new(action, path),
-                    Skeleton { .. } | Pose => unreachable!(),
+                    Skeleton { .. } | Pose | Vector3 { .. } => unreachable!(),
                 }
             })
             .chain(
@@ -647,6 +838,14 @@ impl<C: openxr_data::Compositor> Input<C> {
                     .map(|path| xr::Binding::new(context.haptic_action, path)),
             )
             .chain(skeletal_bindings.binding_iter(&context.skeletal_input.actions))
+            .chain(P::GAMEPAD.then(|| {
+                let input = self
+                    .openxr
+                    .instance
+                    .string_to_path(super::profiles::xbox_controller::PRESENCE_INPUT)
+                    .unwrap();
+                xr::Binding::new(context.gamepad_presence, input)
+            }))
             .collect();
 
         match self

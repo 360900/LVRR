@@ -267,6 +267,10 @@ impl<C: Compositor> OpenXrData<C> {
         exts.meta_touch_controller_plus = supported_exts.meta_touch_controller_plus;
         exts.ext_samsung_odyssey_controller = supported_exts.ext_samsung_odyssey_controller;
         exts.ext_hp_mixed_reality_controller = supported_exts.ext_hp_mixed_reality_controller;
+        exts.bd_controller_interaction = supported_exts.bd_controller_interaction;
+        exts.fb_touch_controller_pro = supported_exts.fb_touch_controller_pro;
+        exts.htc_vive_cosmos_controller_interaction =
+            supported_exts.htc_vive_cosmos_controller_interaction;
         exts.fb_display_refresh_rate = supported_exts.fb_display_refresh_rate;
         exts.ext_user_presence = supported_exts.ext_user_presence;
 
@@ -530,7 +534,20 @@ impl<C: Compositor> OpenXrData<C> {
                     info!("Display refresh rate changed from {from} Hz to {to} Hz");
                     // A rate that isn't positive is unknown, so it's queried again.
                     let to = if to.is_finite() && to > 0.0 { to } else { 0.0 };
-                    self.refresh_rate.store(to.to_bits(), Ordering::Relaxed);
+                    let previous = self.refresh_rate.swap(to.to_bits(), Ordering::Relaxed);
+                    // Like SteamVR when a driver changes a property. Apps can't look container
+                    // handles up, so none is given.
+                    if previous != to.to_bits() {
+                        self.push_event(
+                            vr::EVREventType::PropertyChanged,
+                            vr::VREvent_Data_t {
+                                property: vr::VREvent_Property_t {
+                                    container: vr::k_ulInvalidPropertyContainer,
+                                    prop: vr::ETrackedDeviceProperty::DisplayFrequency_Float,
+                                },
+                            },
+                        );
+                    }
                 }
                 // Hidden area meshes are fetched from the runtime whenever the app asks.
                 xr::Event::VisibilityMaskChangedKHR(_) => debug!("visibility mask changed"),
@@ -731,6 +748,12 @@ impl<C: Compositor> OpenXrData<C> {
         if !connection_lost {
             self.quit_watchdog.start();
         }
+    }
+
+    /// Lets [Self::restart_session] try once more after the runtime rejected a session, with
+    /// another graphics backend.
+    pub fn retry_session_creation(&self) {
+        self.session_creation_failed.store(false, Ordering::Relaxed);
     }
 
     /// Why [Self::restart_session] would refuse to start a new session, if it would.
@@ -1493,8 +1516,9 @@ impl SessionData {
             .map(G::from_openxr_format)
             .collect();
 
-        if !formats.contains(&G::from_openxr_format(info.format)) {
-            let new_format = formats[0];
+        let requested = G::from_openxr_format(info.format);
+        if !formats.contains(&requested) {
+            let new_format = G::fallback_format(requested, &formats).unwrap_or(formats[0]);
             warn!(
                 "Requested to init swapchain with unsupported format {:?} - instead using {:?}",
                 G::to_nice_format(G::from_openxr_format(info.format)),

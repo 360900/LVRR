@@ -38,6 +38,8 @@ struct Gpu {
     copies: Vec<(u64, u64, vk::ImageCopy)>,
     resolves: Vec<(u64, u64, vk::ImageResolve)>,
     blits: Vec<(u64, u64, vk::ImageBlit)>,
+    /// The format of each image the backend created.
+    image_formats: HashMap<u64, vk::Format>,
     /// Pending work never finishes, so waits for it time out.
     hung: bool,
     /// Fails the next submission of command buffers.
@@ -150,8 +152,30 @@ create_destroy! {
     vkCreatePipelineLayout, vkDestroyPipelineLayout: PipelineLayoutCreateInfo -> PipelineLayout;
     vkCreateImageView, vkDestroyImageView: ImageViewCreateInfo -> ImageView;
     vkCreateSampler, vkDestroySampler: SamplerCreateInfo -> Sampler;
-    vkCreateImage, vkDestroyImage: ImageCreateInfo -> Image;
     vkAllocateMemory, vkFreeMemory: MemoryAllocateInfo -> DeviceMemory;
+}
+
+unsafe extern "system" fn vkCreateImage(
+    _: vk::Device,
+    info: *const vk::ImageCreateInfo<'_>,
+    _: *const vk::AllocationCallbacks<'_>,
+    out: *mut vk::Image,
+) -> vk::Result {
+    let format = unsafe { (*info).format };
+    gpu(|gpu| {
+        let image = gpu.create();
+        gpu.image_formats.insert(image, format);
+        unsafe { *out = vk::Image::from_raw(image) };
+    });
+    vk::Result::SUCCESS
+}
+
+unsafe extern "system" fn vkDestroyImage(
+    _: vk::Device,
+    image: vk::Image,
+    _: *const vk::AllocationCallbacks<'_>,
+) {
+    gpu(|gpu| gpu.destroy(image.as_raw()));
 }
 
 unsafe extern "system" fn vkGetImageMemoryRequirements(
@@ -698,6 +722,8 @@ fn fake_vulkan() -> VulkanData {
         real_data: None,
         owns_device: false,
         host_import_alignment: None,
+        memory_export: None,
+        semaphore_export: false,
     }
 }
 
@@ -958,7 +984,7 @@ fn overlay_decodes_srgb_only_for_gamma_encoded_unorm() {
         (F::R16G16B16A16_SFLOAT, C::Gamma, true),
     ] {
         assert_eq!(
-            overlay_needs_srgb_decode(format, color_space),
+            holds_gamma(format, color_space),
             decode,
             "{format:?} {color_space:?}"
         );
@@ -989,6 +1015,18 @@ fn overlay_shader_decodes_unorm_textures() {
     finish(vk);
 }
 
+/// Integer overlay textures can't be sampled, so nothing reads them.
+#[test]
+fn integer_overlay_is_not_sampled() {
+    let mut vk = fake_vulkan();
+    store_images(&mut vk, 1);
+    let texture = with_format(vk::Format::A2R10G10B10_UINT_PACK32, texture(16, 16));
+    let extent = copy_overlay(&mut vk, &texture, FULL_BOUNDS, 0);
+    assert_eq!((extent.width, extent.height), (16, 16));
+    gpu(|gpu| assert_eq!((gpu.draws, gpu.refs.len()), (0, 0)));
+    finish(vk);
+}
+
 #[test]
 fn teardown_after_device_lost() {
     use crate::clientcore::Injector;
@@ -1016,14 +1054,220 @@ fn resolve_only_into_the_same_format() {
     use vk::Format as F;
     let (unorm, srgb) = (F::R8G8B8A8_UNORM, F::R8G8B8A8_SRGB);
     // Gamma encoded textures get an sRGB swapchain.
-    assert_eq!(EyeCopy::new(unorm, srgb, srgb, true), EyeCopy::Copy);
-    assert_eq!(EyeCopy::new(unorm, srgb, srgb, false), EyeCopy::Copy);
-    assert_eq!(EyeCopy::new(srgb, srgb, srgb, true), EyeCopy::Resolve);
-    assert_eq!(EyeCopy::new(unorm, unorm, unorm, true), EyeCopy::Resolve);
-    // The runtime doesn't support the format.
-    let other = F::B8G8R8A8_SRGB;
-    assert_eq!(EyeCopy::new(unorm, srgb, other, true), EyeCopy::Blit);
-    assert_eq!(EyeCopy::new(unorm, srgb, other, false), EyeCopy::Blit);
+    assert_eq!(EyeCopy::new(unorm, true, srgb, true), EyeCopy::Copy);
+    assert_eq!(EyeCopy::new(unorm, true, srgb, false), EyeCopy::Copy);
+    assert_eq!(EyeCopy::new(srgb, false, srgb, true), EyeCopy::Resolve);
+    assert_eq!(EyeCopy::new(unorm, false, unorm, true), EyeCopy::Resolve);
+}
+
+/// Copies keep the bytes and blits convert what the source's format reads, so data whose encoding
+/// the source format doesn't tell goes through an image that does.
+#[test]
+fn eye_copies_keep_the_brightness() {
+    use vk::Format as F;
+    let (unorm, srgb) = (F::R8G8B8A8_UNORM, F::R8G8B8A8_SRGB);
+    let (bgra_unorm, bgra_srgb) = (F::B8G8R8A8_UNORM, F::B8G8R8A8_SRGB);
+    let float = F::R16G16B16A16_SFLOAT;
+    for (texture, gamma, swapchain, expected) in [
+        // Gamma encoded UNORM data in its sRGB variant is shown as it is.
+        (unorm, true, srgb, EyeCopy::Copy),
+        (bgra_unorm, true, bgra_srgb, EyeCopy::Copy),
+        // Linear data in its own format.
+        (unorm, false, unorm, EyeCopy::Copy),
+        (srgb, false, srgb, EyeCopy::Copy),
+        (float, false, float, EyeCopy::Copy),
+        // Values that are linear as read convert into any substituted format.
+        (srgb, false, bgra_srgb, EyeCopy::Blit),
+        (srgb, false, float, EyeCopy::Blit),
+        (unorm, false, srgb, EyeCopy::Blit),
+        (float, false, srgb, EyeCopy::Blit),
+        // Gamma encoded data for a linear swapchain is decoded by reading it as sRGB.
+        (unorm, true, float, EyeCopy::CopyBlit(srgb)),
+        (unorm, true, unorm, EyeCopy::CopyBlit(srgb)),
+        (bgra_unorm, true, unorm, EyeCopy::CopyBlit(bgra_srgb)),
+        // Gamma encoded data for an sRGB swapchain of another layout keeps its encoded values.
+        (unorm, true, bgra_srgb, EyeCopy::BlitCopy(bgra_unorm)),
+        (float, true, srgb, EyeCopy::BlitCopy(unorm)),
+        (
+            F::A2B10G10R10_UNORM_PACK32,
+            true,
+            bgra_srgb,
+            EyeCopy::BlitCopy(bgra_unorm),
+        ),
+        // Nothing to decode with on either side.
+        (float, true, float, EyeCopy::Blit),
+        // Integers can't be blitted, their bits are copied as their UNORM format's.
+        (
+            F::A2B10G10R10_UINT_PACK32,
+            false,
+            F::A2B10G10R10_UNORM_PACK32,
+            EyeCopy::Copy,
+        ),
+        (
+            F::A2R10G10B10_UINT_PACK32,
+            false,
+            float,
+            EyeCopy::CopyBlit(F::A2R10G10B10_UNORM_PACK32),
+        ),
+        (
+            F::A2R10G10B10_UINT_PACK32,
+            true,
+            srgb,
+            EyeCopy::CopyBlit(F::A2R10G10B10_UNORM_PACK32),
+        ),
+    ] {
+        assert_eq!(
+            EyeCopy::new(texture, gamma, swapchain, false),
+            expected,
+            "{texture:?} gamma {gamma} into {swapchain:?}"
+        );
+    }
+}
+
+/// What ColorSpace_Auto, Gamma and Linear mean for the texture's values, per the OpenVR header:
+/// Auto "assumes 'gamma' for 8-bit per component formats, otherwise 'linear'", Gamma is display
+/// native data and Linear has been converted to linear.
+#[test]
+fn color_space_tells_whether_values_are_gamma_encoded() {
+    use vk::Format as F;
+    use vr::EColorSpace as C;
+    for (format, color_space, gamma) in [
+        (F::R8G8B8A8_UNORM, C::Auto, true),
+        (F::B8G8R8A8_UNORM, C::Auto, true),
+        (F::R8G8B8A8_UNORM, C::Gamma, true),
+        (F::R8G8B8A8_UNORM, C::Linear, false),
+        (F::B8G8R8A8_UNORM, C::Linear, false),
+        // Values that aren't a color space count as Auto.
+        (F::R8G8B8A8_UNORM, C(0xdead), true),
+        // Reading these decodes, whatever the color space.
+        (F::R8G8B8A8_SRGB, C::Auto, false),
+        (F::B8G8R8A8_SRGB, C::Gamma, false),
+        (F::R8G8B8A8_SRGB, C::Linear, false),
+        // Other formats are linear unless the app says otherwise.
+        (F::R16G16B16A16_SFLOAT, C::Auto, false),
+        (F::R16G16B16A16_SFLOAT, C::Linear, false),
+        (F::R16G16B16A16_SFLOAT, C::Gamma, true),
+        (F::A2B10G10R10_UNORM_PACK32, C::Auto, false),
+        (F::A2B10G10R10_UNORM_PACK32, C::Gamma, true),
+        // Integers hold the bits of UNORM values.
+        (F::A2R10G10B10_UINT_PACK32, C::Auto, false),
+        (F::A2B10G10R10_UINT_PACK32, C::Auto, false),
+        (F::A2R10G10B10_UINT_PACK32, C::Gamma, true),
+    ] {
+        assert_eq!(
+            holds_gamma_with(format, color_space, false),
+            gamma,
+            "{format:?} {color_space:?}"
+        );
+    }
+}
+
+/// XRIZER_LINEAR_UNORM turns Auto for 8-bit UNORM textures into linear, nothing else.
+#[test]
+fn linear_unorm_only_changes_auto() {
+    use vk::Format as F;
+    use vr::EColorSpace as C;
+    assert!(!holds_gamma_with(F::R8G8B8A8_UNORM, C::Auto, true));
+    assert!(!holds_gamma_with(F::B8G8R8A8_UNORM, C(0xdead), true));
+    assert!(holds_gamma_with(F::R8G8B8A8_UNORM, C::Gamma, true));
+    assert!(holds_gamma_with(F::R16G16B16A16_SFLOAT, C::Gamma, true));
+    assert!(!holds_gamma_with(F::R8G8B8A8_SRGB, C::Auto, true));
+}
+
+#[test]
+fn swapchain_formats() {
+    use vk::Format as F;
+    use vr::EColorSpace as C;
+    for (format, color_space, expected) in [
+        // Gamma encoded UNORM data goes into the sRGB variant, which shows the bytes as they are.
+        (F::R8G8B8A8_UNORM, C::Auto, F::R8G8B8A8_SRGB),
+        (F::R8G8B8A8_UNORM, C::Gamma, F::R8G8B8A8_SRGB),
+        (F::B8G8R8A8_UNORM, C::Auto, F::B8G8R8A8_SRGB),
+        (F::A8B8G8R8_UNORM_PACK32, C::Gamma, F::A8B8G8R8_SRGB_PACK32),
+        // Linear data keeps its format, which runtimes treat as linear.
+        (F::R8G8B8A8_UNORM, C::Linear, F::R8G8B8A8_UNORM),
+        (F::B8G8R8A8_UNORM, C::Linear, F::B8G8R8A8_UNORM),
+        (F::R16G16B16A16_SFLOAT, C::Auto, F::R16G16B16A16_SFLOAT),
+        (F::R32G32B32A32_SFLOAT, C::Linear, F::R32G32B32A32_SFLOAT),
+        (
+            F::A2B10G10R10_UNORM_PACK32,
+            C::Auto,
+            F::A2B10G10R10_UNORM_PACK32,
+        ),
+        // sRGB data stays sRGB.
+        (F::R8G8B8A8_SRGB, C::Auto, F::R8G8B8A8_SRGB),
+        (F::B8G8R8A8_SRGB, C::Gamma, F::B8G8R8A8_SRGB),
+        (F::R8G8B8A8_SRGB, C::Linear, F::R8G8B8A8_SRGB),
+        // Gamma encoded data in formats without an sRGB variant needs an sRGB swapchain too.
+        (F::R16G16B16A16_SFLOAT, C::Gamma, F::R8G8B8A8_SRGB),
+        (F::A2B10G10R10_UNORM_PACK32, C::Gamma, F::R8G8B8A8_SRGB),
+        (F::A2R10G10B10_UINT_PACK32, C::Gamma, F::R8G8B8A8_SRGB),
+        // Integers can't be shown, the UNORM format of their bits can.
+        (
+            F::A2R10G10B10_UINT_PACK32,
+            C::Auto,
+            F::A2R10G10B10_UNORM_PACK32,
+        ),
+        (
+            F::A2B10G10R10_UINT_PACK32,
+            C::Linear,
+            F::A2B10G10R10_UNORM_PACK32,
+        ),
+        // Compressed formats can't be rendered to.
+        (F::BC3_SRGB_BLOCK, C::Auto, F::R8G8B8A8_SRGB),
+        (F::BC7_UNORM_BLOCK, C::Auto, F::R8G8B8A8_SRGB),
+        (F::BC1_RGB_UNORM_BLOCK, C::Linear, F::R8G8B8A8_UNORM),
+    ] {
+        assert_eq!(
+            swapchain_format(format, color_space),
+            expected,
+            "{format:?} {color_space:?}"
+        );
+    }
+}
+
+/// Without the format a swapchain wants, the runtime's closest one keeps the data's encoding.
+#[test]
+fn fallback_formats_keep_the_encoding() {
+    use vk::Format as F;
+    let fallback = |format: F, offered: &[F]| {
+        let offered: Vec<u32> = offered.iter().map(|f| f.as_raw() as u32).collect();
+        VulkanData::fallback_format(format.as_raw() as u32, &offered).map(|f| F::from_raw(f as i32))
+    };
+    // Monado's order puts 16-bit UNORM first.
+    let monado = [
+        F::R16G16B16A16_UNORM,
+        F::R16G16B16A16_SFLOAT,
+        F::R8G8B8A8_SRGB,
+        F::B8G8R8A8_SRGB,
+        F::R8G8B8A8_UNORM,
+        F::B8G8R8A8_UNORM,
+    ];
+    assert_eq!(
+        fallback(F::A8B8G8R8_SRGB_PACK32, &monado),
+        Some(F::R8G8B8A8_SRGB)
+    );
+    assert_eq!(
+        fallback(F::A8B8G8R8_UNORM_PACK32, &monado),
+        Some(F::R8G8B8A8_UNORM)
+    );
+    assert_eq!(
+        fallback(F::R32G32B32A32_SFLOAT, &monado),
+        Some(F::R16G16B16A16_SFLOAT)
+    );
+    // sRGB data rather goes into a float format than into 8-bit linear storage.
+    let no_srgb = [F::R8G8B8A8_UNORM, F::R16G16B16A16_SFLOAT];
+    assert_eq!(
+        fallback(F::R8G8B8A8_SRGB, &no_srgb),
+        Some(F::R16G16B16A16_SFLOAT)
+    );
+    // Linear data in an sRGB format, which a blit encodes.
+    assert_eq!(
+        fallback(F::R8G8B8A8_UNORM, &[F::B8G8R8A8_SRGB]),
+        Some(F::B8G8R8A8_SRGB)
+    );
+    // None of ours: the runtime's first.
+    assert_eq!(fallback(F::R8G8B8A8_SRGB, &[F::R16G16B16A16_UNORM]), None);
 }
 
 /// A multisampled texture in the swapchain's format is resolved straight into the eye's layer.
@@ -1095,6 +1339,51 @@ fn multisampled_eye_resolves_before_converting() {
     finish(vk);
 }
 
+/// An integer texture's bits are copied into an image of their UNORM format, which the blit into
+/// the swapchain reads as colors.
+#[test]
+fn integer_eye_is_copied_as_unorm_before_converting() {
+    let texture = with_format(vk::Format::A2R10G10B10_UINT_PACK32, texture(16, 16));
+    let vk = copy_right_eye(
+        vk::Format::R16G16B16A16_SFLOAT,
+        &texture,
+        vr::EColorSpace::Auto,
+        FULL_BOUNDS,
+    );
+    gpu(|gpu| {
+        let [(src, staging, _)] = gpu.copies[..] else {
+            panic!("copied {:?}", gpu.copies);
+        };
+        assert_eq!(src, GAME_IMAGE);
+        assert_eq!(
+            gpu.image_formats[&staging],
+            vk::Format::A2R10G10B10_UNORM_PACK32
+        );
+        let [(blitted, dst, _)] = gpu.blits[..] else {
+            panic!("blitted {:?}", gpu.blits);
+        };
+        assert_eq!((blitted, dst), (staging, APP_HANDLE));
+    });
+    finish(vk);
+}
+
+/// Into a swapchain of the UNORM format of its bits, an integer texture is copied as it is.
+#[test]
+fn integer_eye_is_copied_into_its_unorm_swapchain() {
+    let format = vk::Format::A2B10G10R10_UINT_PACK32;
+    let swapchain = swapchain_format(format, vr::EColorSpace::Auto);
+    let texture = with_format(format, texture(16, 16));
+    let vk = copy_right_eye(swapchain, &texture, vr::EColorSpace::Auto, FULL_BOUNDS);
+    gpu(|gpu| {
+        let [(src, dst, _)] = gpu.copies[..] else {
+            panic!("copied {:?}", gpu.copies);
+        };
+        assert_eq!((src, dst), (GAME_IMAGE, APP_HANDLE));
+        assert!(gpu.blits.is_empty());
+    });
+    finish(vk);
+}
+
 /// Blits take the far corner rather than the extent, also for a texture with both eyes.
 #[test]
 fn eye_blit_covers_the_bounds() {
@@ -1124,6 +1413,189 @@ fn eye_blit_covers_the_bounds() {
         assert_eq!(blit.dst_offsets, [offset(0, 0, 0), offset(32, 16, 1)]);
         assert_eq!(blit.dst_subresource.base_array_layer, 1);
     });
+    finish(vk);
+}
+
+/// Copies `texture` into the right eye of a swapchain of `swapchain_format`.
+fn copy_right_eye(
+    swapchain_format: vk::Format,
+    texture: &vr::VRVulkanTextureData_t,
+    color_space: vr::EColorSpace,
+    bounds: vr::VRTextureBounds_t,
+) -> VulkanData {
+    let mut vk = fake_vulkan();
+    vk.store_swapchain_images(vec![APP_HANDLE], swapchain_format.as_raw() as u32);
+    vk.copy_texture_to_swapchain(
+        vr::EVREye::Right,
+        texture,
+        color_space,
+        bounds,
+        0,
+        vr::EVRSubmitFlags::Default,
+    );
+    vk
+}
+
+fn with_format(
+    format: vk::Format,
+    texture: vr::VRVulkanTextureData_t,
+) -> vr::VRVulkanTextureData_t {
+    vr::VRVulkanTextureData_t {
+        m_nFormat: format.as_raw() as u32,
+        ..texture
+    }
+}
+
+/// The layouts the barriers of `image` move it into, in order.
+fn layouts(gpu: &Gpu, image: u64) -> Vec<vk::ImageLayout> {
+    gpu.barriers
+        .iter()
+        .filter(|b| b.image.as_raw() == image)
+        .map(|b| b.new_layout)
+        .collect()
+}
+
+/// Linear UNORM data goes into a swapchain of its own format, which runtimes show as linear.
+#[test]
+fn linear_eye_is_copied_as_it_is() {
+    let swapchain = swapchain_format(vk::Format::R8G8B8A8_UNORM, vr::EColorSpace::Linear);
+    assert_eq!(swapchain, vk::Format::R8G8B8A8_UNORM);
+    let texture = unorm(texture(16, 16));
+    let vk = copy_right_eye(swapchain, &texture, vr::EColorSpace::Linear, FULL_BOUNDS);
+    gpu(|gpu| {
+        let [(src, dst, _)] = gpu.copies[..] else {
+            panic!("copied {:?}", gpu.copies);
+        };
+        assert_eq!((src, dst), (GAME_IMAGE, APP_HANDLE));
+        assert!(gpu.blits.is_empty() && gpu.image_formats.is_empty());
+    });
+    finish(vk);
+}
+
+/// Gamma encoded UNORM data for a linear swapchain is copied into an image of its sRGB variant,
+/// which the blit into the swapchain decodes.
+#[test]
+fn gamma_eye_is_decoded_for_a_linear_swapchain() {
+    let bounds = vr::VRTextureBounds_t {
+        uMin: 0.5,
+        ..FULL_BOUNDS
+    };
+    let vk = copy_right_eye(
+        vk::Format::R16G16B16A16_SFLOAT,
+        &unorm(texture(32, 16)),
+        vr::EColorSpace::Auto,
+        bounds,
+    );
+    gpu(|gpu| {
+        let [(src, staging, copy)] = gpu.copies[..] else {
+            panic!("copied {:?}", gpu.copies);
+        };
+        assert_eq!(src, GAME_IMAGE);
+        assert_eq!(gpu.image_formats[&staging], vk::Format::R8G8B8A8_SRGB);
+        assert_eq!(copy.src_offset, offset(16, 0, 0));
+        assert_eq!(copy.dst_offset, offset(16, 0, 0));
+        let [(blitted, dst, blit)] = gpu.blits[..] else {
+            panic!("blitted {:?}", gpu.blits);
+        };
+        assert_eq!((blitted, dst), (staging, APP_HANDLE));
+        assert_eq!(blit.src_offsets, [offset(16, 0, 0), offset(32, 16, 1)]);
+        assert_eq!(blit.dst_offsets, [offset(0, 0, 0), offset(16, 16, 1)]);
+        assert_eq!(blit.dst_subresource.base_array_layer, 1);
+        assert_eq!(
+            layouts(gpu, staging),
+            [
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL
+            ]
+        );
+    });
+    finish(vk);
+}
+
+/// Gamma encoded float data keeps its encoded values on the way into an sRGB swapchain, rather
+/// than getting encoded again.
+#[test]
+fn gamma_float_eye_is_not_encoded_again() {
+    let format = vk::Format::R16G16B16A16_SFLOAT;
+    let swapchain = swapchain_format(format, vr::EColorSpace::Gamma);
+    let texture = with_format(format, texture(16, 16));
+    let vk = copy_right_eye(swapchain, &texture, vr::EColorSpace::Gamma, FULL_BOUNDS);
+    gpu(|gpu| {
+        let [(src, staging, _)] = gpu.blits[..] else {
+            panic!("blitted {:?}", gpu.blits);
+        };
+        assert_eq!(src, GAME_IMAGE);
+        assert_eq!(gpu.image_formats[&staging], vk::Format::R8G8B8A8_UNORM);
+        let [(copied, dst, copy)] = gpu.copies[..] else {
+            panic!("copied {:?}", gpu.copies);
+        };
+        assert_eq!((copied, dst), (staging, APP_HANDLE));
+        assert_eq!(copy.dst_subresource.base_array_layer, 1);
+    });
+    finish(vk);
+}
+
+/// Multisampled gamma encoded data is resolved in its own format before it's reinterpreted.
+#[test]
+fn multisampled_gamma_eye_is_resolved_then_decoded() {
+    let vk = copy_right_eye(
+        vk::Format::R16G16B16A16_SFLOAT,
+        &multisampled(unorm(texture(16, 16))),
+        vr::EColorSpace::Gamma,
+        FULL_BOUNDS,
+    );
+    gpu(|gpu| {
+        let [(src, resolved, _)] = gpu.resolves[..] else {
+            panic!("resolved {:?}", gpu.resolves);
+        };
+        assert_eq!(src, GAME_IMAGE);
+        assert_eq!(gpu.image_formats[&resolved], vk::Format::R8G8B8A8_UNORM);
+        let [(copied, staging, _)] = gpu.copies[..] else {
+            panic!("copied {:?}", gpu.copies);
+        };
+        assert_eq!(copied, resolved);
+        assert_eq!(gpu.image_formats[&staging], vk::Format::R8G8B8A8_SRGB);
+        let [(blitted, dst, _)] = gpu.blits[..] else {
+            panic!("blitted {:?}", gpu.blits);
+        };
+        assert_eq!((blitted, dst), (staging, APP_HANDLE));
+    });
+    finish(vk);
+}
+
+/// The staging image is replaced when the texture's format changes, and freed with the swapchain,
+/// but only once the copies using it are done.
+#[test]
+fn staging_images_outlive_their_copies() {
+    let mut vk = fake_vulkan();
+    let float = vk::Format::R16G16B16A16_SFLOAT.as_raw() as u32;
+    vk.store_swapchain_images(vec![APP_HANDLE, APP_HANDLE + 1], float);
+    let copy = |vk: &VulkanData, format, image_index| {
+        vk.copy_texture_to_swapchain(
+            vr::EVREye::Left,
+            &with_format(format, texture(16, 16)),
+            vr::EColorSpace::Gamma,
+            FULL_BOUNDS,
+            image_index,
+            vr::EVRSubmitFlags::Default,
+        );
+    };
+    let staging = || gpu(|gpu| gpu.copies.last().unwrap().1);
+
+    copy(&vk, vk::Format::R8G8B8A8_UNORM, 0);
+    let first = staging();
+    copy(&vk, vk::Format::B8G8R8A8_UNORM, 1);
+    let second = staging();
+    assert_ne!(first, second);
+    gpu(|gpu| {
+        assert!(!gpu.live.contains(&first));
+        assert_eq!(gpu.image_formats[&second], vk::Format::B8G8R8A8_SRGB);
+    });
+
+    // The swapchain is recreated while the copy is pending.
+    vk.store_swapchain_images(vec![APP_HANDLE, APP_HANDLE + 1], float);
+    gpu(|gpu| assert!(!gpu.live.contains(&second)));
+    copy(&vk, vk::Format::R8G8B8A8_UNORM, 0);
     finish(vk);
 }
 
@@ -1213,4 +1685,59 @@ fn reject_null_image() {
     assert!(VulkanData::get_texture(&texture(&mut data), flags).is_none());
     data.m_nImage = 1;
     assert!(VulkanData::get_texture(&texture(&mut data), flags).is_some());
+}
+
+fn reporter(
+    frame: u32,
+    reports: &std::sync::mpsc::Sender<(u32, std::time::Instant)>,
+) -> crate::compositor::GpuDone {
+    let reports = reports.clone();
+    crate::compositor::GpuDone::new(move |done| reports.send((frame, done)).unwrap())
+}
+
+#[test]
+fn gpu_timer_reports_frames_in_order() {
+    let vk = fake_vulkan();
+    let mut timer = timing::GpuTimer::without_thread(vk.device.clone());
+    let (send, reports) = std::sync::mpsc::channel();
+    for frame in 0..3 {
+        timer.frame_submitted(vk.queue, reporter(frame, &send));
+    }
+    for _ in 0..3 {
+        assert!(timer.wait_next());
+    }
+    let reports: Vec<_> = reports.try_iter().collect();
+    assert_eq!(
+        reports.iter().map(|(frame, _)| *frame).collect::<Vec<_>>(),
+        [0, 1, 2]
+    );
+    assert!(reports.windows(2).all(|pair| pair[0].1 <= pair[1].1));
+
+    // Signaled fences are reset and submitted again.
+    let fences = gpu(|gpu| gpu.live.len());
+    timer.frame_submitted(vk.queue, reporter(3, &send));
+    assert!(timer.wait_next());
+    assert_eq!(gpu(|gpu| gpu.live.len()), fences);
+    drop(timer);
+    finish(vk);
+}
+
+#[test]
+fn gpu_timer_skips_frames_while_the_gpu_hangs() {
+    let vk = fake_vulkan();
+    let mut timer = timing::GpuTimer::without_thread(vk.device.clone());
+    let (send, reports) = std::sync::mpsc::channel();
+    gpu(|gpu| gpu.hung = true);
+    for frame in 0..6 {
+        timer.frame_submitted(vk.queue, reporter(frame, &send));
+    }
+    assert!(timer.wait_next());
+    assert!(reports.try_recv().is_err());
+    // Frames past the fence limit aren't waited for, and the pending fences are leaked.
+    assert_eq!(gpu(|gpu| gpu.live.len()), 4);
+    drop(timer);
+    gpu(|gpu| {
+        assert_eq!(gpu.errors, Vec::<String>::new());
+        assert_eq!(gpu.live.len(), 4);
+    });
 }

@@ -1,17 +1,26 @@
 use super::actions::{LoadedActionDataMap, XrNames};
 use super::bindings::{ActionPath, DpadParameters, DpadSubMode};
 use crate::input::custom_bindings::{
-    BoolBindingData, BoolBindingType, DpadActions, Vector2ActionData, Vector2BindingData,
-    Vector2Transform,
+    BoolBindingData, BoolBindingType, DpadActions, HandSpeeds, ScalarConstantBinding,
+    Vector2ActionData, Vector2BindingData, Vector2Transform,
 };
-use crate::input::profiles::{DynInputPath, paths};
+use crate::input::devices::SubactionPaths;
+use crate::input::haptics::{BindingHaptic, BindingHapticData, BindingPress};
+use crate::input::origins::BindingInfo;
+use crate::input::profiles::{DynInputPath, InputDevice, ProfileProperties, paths};
 use crate::input::skeletal::SkeletalInputActionData;
-use crate::input::{ActionData, BoundPose, Input, InteractionProfile};
+use crate::input::{
+    ActionData, BoundPose, BoundPoseType, Input, InputSourceKey, InteractionProfile, origins,
+};
 use crate::openxr_data::{self, Hand};
 use log::{debug, info, trace, warn};
+use openvr as vr;
 use openxr as xr;
+use slotmap::SlotMap;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::ffi::CString;
+use std::sync::{Arc, RwLock};
 
 pub(super) struct BindingsLoadContext<'a> {
     pub action_sets: &'a HashMap<String, xr::ActionSet>,
@@ -26,15 +35,30 @@ pub(super) struct BindingsLoadContext<'a> {
     /// Maps each interaction profile path → action name → bound input paths.
     /// Used to implement GetActionBindingInfo/GetActionOrigins.
     pub per_profile_input_paths: HashMap<xr::Path, HashMap<String, Vec<xr::Path>>>,
+    /// Maps each interaction profile path → action name → what GetActionBindingInfo reports.
+    pub per_profile_binding_info: HashMap<xr::Path, HashMap<String, Vec<BindingInfo>>>,
     /// Boolean actions bound to the headset's proximity sensor.
     pub head_proximity: HashSet<String>,
+    /// The scalar_constant bindings of analog actions that aren't bound to their input directly,
+    /// in every profile.
+    pub scalar_constants: HashMap<String, Vec<ScalarConstantBinding>>,
+    /// The identity of the controller that converted bindings were made for, per interaction
+    /// profile that shows it (see [InteractionProfile::SIMULATE_CONVERTED]).
+    pub simulated_properties: HashMap<xr::Path, &'static ProfileProperties>,
+    /// SteamVR's binding haptics, with the set and action of their binding.
+    pub binding_haptics: Vec<(String, String, BindingHapticData)>,
+    /// The controller speeds grab bindings drop with, if any binding reads them.
+    pub hand_speeds: Arc<HandSpeeds>,
+    pub uses_hand_speeds: bool,
     pub grip_action: &'a xr::Action<xr::Posef>,
     pub info_action: &'a xr::Action<bool>,
     pub haptic_action: &'a xr::Action<xr::Haptic>,
+    pub gamepad_presence: &'a xr::Action<bool>,
     pub skeletal_input: &'a SkeletalInputActionData,
 }
 
 impl<'a> BindingsLoadContext<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         action_sets: &'a HashMap<String, xr::ActionSet>,
         actions: LoadedActionDataMap,
@@ -42,6 +66,7 @@ impl<'a> BindingsLoadContext<'a> {
         grip_action: &'a xr::Action<xr::Posef>,
         info_action: &'a xr::Action<bool>,
         haptic_action: &'a xr::Action<xr::Haptic>,
+        gamepad_presence: &'a xr::Action<bool>,
         skeletal_input: &'a SkeletalInputActionData,
     ) -> Self {
         BindingsLoadContext {
@@ -53,10 +78,17 @@ impl<'a> BindingsLoadContext<'a> {
             per_profile_bindings: Default::default(),
             per_profile_pose_bindings: Default::default(),
             per_profile_input_paths: Default::default(),
+            per_profile_binding_info: Default::default(),
             head_proximity: Default::default(),
+            scalar_constants: Default::default(),
+            simulated_properties: Default::default(),
+            binding_haptics: Default::default(),
+            hand_speeds: Default::default(),
+            uses_hand_speeds: false,
             grip_action,
             info_action,
             haptic_action,
+            gamepad_presence,
             skeletal_input,
         }
     }
@@ -98,11 +130,6 @@ impl BindingsLoadContext<'_> {
             return None;
         }
 
-        let hands = [
-            input.get_subaction_path(Hand::Left),
-            input.get_subaction_path(Hand::Right),
-        ];
-
         self.suggested_profiles.insert(interaction_profile);
         let bindings_parsed = self
             .per_profile_bindings
@@ -116,6 +143,10 @@ impl BindingsLoadContext<'_> {
             .per_profile_input_paths
             .entry(interaction_profile)
             .or_default();
+        let binding_info_out = self
+            .per_profile_binding_info
+            .entry(interaction_profile)
+            .or_default();
         Some(BindingsProfileLoadContext {
             interaction_profile,
             profile_name: P::profile_path(),
@@ -127,14 +158,26 @@ impl BindingsLoadContext<'_> {
             bindings_parsed,
             pose_bindings,
             input_paths_out,
+            binding_info_out,
+            scalar_constants: &mut self.scalar_constants,
+            binding_haptics: &mut self.binding_haptics,
+            hand_speeds: &self.hand_speeds,
+            uses_hand_speeds: &mut self.uses_hand_speeds,
             grip_action: self.grip_action,
             info_action: self.info_action,
             haptic_action: self.haptic_action,
+            gamepad_presence: self.gamepad_presence,
             skeletal_input: self.skeletal_input,
             instance,
-            hands,
+            subaction_paths: input.subaction_paths,
+            gamepad: P::GAMEPAD,
             bindings: Vec::new(),
             use_force_for_dpad: P::USE_FORCE_DPAD,
+            controller_type: P::properties()
+                .openvr_controller_type
+                .to_str()
+                .unwrap_or_default(),
+            input_sources: &input.input_source_map,
         })
     }
 }
@@ -153,14 +196,26 @@ pub(super) struct BindingsProfileLoadContext<'a> {
     pub pose_bindings: &'a mut HashMap<String, BoundPose>,
     /// Input paths bound to each action in the current profile, keyed by action name.
     pub input_paths_out: &'a mut HashMap<String, Vec<xr::Path>>,
+    /// What GetActionBindingInfo reports for each action in the current profile.
+    pub binding_info_out: &'a mut HashMap<String, Vec<BindingInfo>>,
+    scalar_constants: &'a mut HashMap<String, Vec<ScalarConstantBinding>>,
+    binding_haptics: &'a mut Vec<(String, String, BindingHapticData)>,
+    hand_speeds: &'a Arc<HandSpeeds>,
+    uses_hand_speeds: &'a mut bool,
     pub grip_action: &'a xr::Action<xr::Posef>,
     pub info_action: &'a xr::Action<bool>,
     pub haptic_action: &'a xr::Action<xr::Haptic>,
+    pub gamepad_presence: &'a xr::Action<bool>,
     pub skeletal_input: &'a SkeletalInputActionData,
     pub instance: &'a xr::Instance,
-    pub hands: [xr::Path; 2],
+    subaction_paths: SubactionPaths,
+    /// The profile is the gamepad's, see [InteractionProfile::GAMEPAD].
+    gamepad: bool,
     pub bindings: Vec<(String, xr::Path)>,
     use_force_for_dpad: bool,
+    /// SteamVR's name of the controllers, whose inputs origins are named after.
+    controller_type: &'static str,
+    input_sources: &'a RwLock<SlotMap<InputSourceKey, CString>>,
 }
 
 pub trait WithActionPattern {
@@ -237,13 +292,6 @@ impl InputActionType for xr::Vector2f {
     }
 }
 
-fn hand_to_path(hand: Hand) -> &'static str {
-    match hand {
-        Hand::Left => "/user/hand/left",
-        Hand::Right => "/user/hand/right",
-    }
-}
-
 impl BindingsProfileLoadContext<'_> {
     /// Logs a binding this controller can't use, which SteamVR ignores silently: binding files
     /// often list inputs that only other models of the controller have. Expected in bindings
@@ -256,11 +304,42 @@ impl BindingsProfileLoadContext<'_> {
         }
     }
 
-    pub fn hand_path(&self, hand: Hand) -> xr::Path {
-        match hand {
-            Hand::Left => self.hands[0],
-            Hand::Right => self.hands[1],
-        }
+    /// The controller speeds that grab bindings drop with, which are measured at each action
+    /// sync once a binding reads them.
+    pub fn hand_speeds(&mut self) -> Arc<HandSpeeds> {
+        *self.uses_hand_speeds = true;
+        self.hand_speeds.clone()
+    }
+
+    /// The subaction path of `device`.
+    pub fn device_path(&self, device: InputDevice) -> xr::Path {
+        self.subaction_paths.get(device)
+    }
+
+    /// Whether the profile's inputs are on `device`.
+    pub fn has_device(&self, device: InputDevice) -> bool {
+        self.gamepad == (device == InputDevice::Gamepad)
+    }
+
+    /// The origin action data reports for a binding of `input`: the handle of its source path in
+    /// SteamVR's profile of the controller, e.g. `/user/hand/left/input/joystick`.
+    pub fn origin(&self, input: DynInputPath) -> vr::VRInputValueHandle_t {
+        let path = origins::source_path(self.controller_type, input);
+        crate::input::input_source_handle(self.input_sources, &path)
+    }
+
+    /// The origin of a pose binding, e.g. `/user/hand/left/pose/raw`.
+    pub fn pose_origin(&self, hand: Hand, pose: BoundPoseType) -> vr::VRInputValueHandle_t {
+        let path = format!("{}/pose/{}", origins::hand_path(hand), pose.openvr_name());
+        let path = CString::new(path).expect("pose paths have no NUL");
+        crate::input::input_source_handle(self.input_sources, &path)
+    }
+
+    /// The origin of a haptic output on `device`, e.g. `/user/hand/left/output/haptic`.
+    pub fn haptic_origin(&self, device: InputDevice) -> vr::VRInputValueHandle_t {
+        let path = format!("{}/output/haptic", device.path());
+        let path = CString::new(path).expect("haptic paths have no NUL");
+        crate::input::input_source_handle(self.input_sources, &path)
     }
 
     pub fn get_action_set(&self, p0: &String) -> Option<&xr::ActionSet> {
@@ -335,12 +414,13 @@ impl BindingsProfileLoadContext<'_> {
     ) -> Option<xr::Action<T>> {
         let key = format!("{input}-{action_set_name}{}", T::KEY_SUFFIX);
         let binding = self.instance.string_to_path(&input.to_string()).ok()?;
+        let paths = self.subaction_paths.all();
         let action = match self.actions.entry(key.clone()) {
             Entry::Occupied(entry) => T::from_data(entry.get())?.clone(),
             Entry::Vacant(entry) => {
                 let name = self.names.action_name(action_set_name, "xrizer-input");
                 let action = action_set
-                    .create_action::<T>(&name, &name, &self.hands)
+                    .create_action::<T>(&name, &name, &paths)
                     .inspect_err(|e| warn!("Couldn't create action for {input}: {e}"))
                     .ok()?;
                 trace!("created {name} for {input} ({action_set_name})");
@@ -353,22 +433,40 @@ impl BindingsProfileLoadContext<'_> {
         Some(action)
     }
 
-    /// Adds a custom binding for `output`, which reads `input` on `hand`.
+    /// Adds a custom binding for `output`, which reads `input` on `device`.
     pub fn add_custom_binding(
         &mut self,
         output: &ActionPath,
-        hand: Hand,
+        device: InputDevice,
         input: DynInputPath,
         ty: BoolBindingType,
     ) {
         if let Ok(input) = self.instance.string_to_path(&input.to_string()) {
             self.push_input_path(&output.path, input);
         }
-        let hand_path = self.hand_path(hand);
+        let device_path = self.device_path(device);
+        let origin = self.origin(input);
         self.bindings_parsed
             .entry(output.path.clone())
             .or_default()
-            .push(BoolBindingData::new(ty, hand_path));
+            .push(BoolBindingData::new(ty, device_path).with_origin(origin));
+    }
+
+    /// Plays `haptic` when `press` changes on `device`, for `output`'s binding in a set.
+    pub fn add_binding_haptic(
+        &mut self,
+        action_set_name: &str,
+        output: &ActionPath,
+        device: InputDevice,
+        press: BindingPress,
+        haptic: BindingHaptic,
+    ) {
+        let hand = self.device_path(device);
+        self.binding_haptics.push((
+            action_set_name.to_owned(),
+            output.path.clone(),
+            BindingHapticData::new(self.interaction_profile, hand, press, haptic),
+        ));
     }
 
     pub fn add_vector2_binding(
@@ -397,7 +495,8 @@ impl BindingsProfileLoadContext<'_> {
         if let Ok(input) = self.instance.string_to_path(&path.to_string()) {
             self.push_input_path(&output.path, input);
         }
-        let hand = self.hand_path(path.hand);
+        let hand = self.device_path(path.device);
+        let origin = self.origin(path);
         let ActionData::Vector2 { data, .. } = self.actions.get_mut(&output.path).unwrap() else {
             unreachable!();
         };
@@ -405,8 +504,69 @@ impl BindingsProfileLoadContext<'_> {
             action,
             profile: self.interaction_profile,
             hand,
+            origin,
             transform,
         });
+    }
+
+    /// Whether `output` needs a scalar_constant binding with these values rather than a direct
+    /// one: a vector1 action can be bound to its input when it's 1 while pressed and 0 otherwise,
+    /// like a button.
+    pub fn is_custom_scalar_constant(
+        &self,
+        output: &ActionPath,
+        on: [f32; 3],
+        off: [f32; 3],
+    ) -> bool {
+        match self.actions.get(&output.path) {
+            Some(ActionData::Vector1 { .. }) => on[0] != 1.0 || off[0] != 0.0,
+            Some(ActionData::Vector2 { .. } | ActionData::Vector3 { .. }) => true,
+            // The direct binding reports what's wrong with it.
+            _ => false,
+        }
+    }
+
+    /// Adds a scalar_constant binding for `output`, an analog action, that reads `input` through
+    /// `press`.
+    pub fn add_scalar_constant_binding(
+        &mut self,
+        output: &ActionPath,
+        input: DynInputPath,
+        press: BoolBindingType,
+        mut on: [f32; 3],
+        mut off: [f32; 3],
+    ) {
+        let axes = match self.actions.get(&output.path) {
+            Some(ActionData::Vector1 { .. }) => 1,
+            Some(ActionData::Vector2 { .. }) => 2,
+            Some(ActionData::Vector3 { .. }) => 3,
+            _ => {
+                warn!(
+                    "{} can't get a scalar constant, it isn't an analog action",
+                    output.path
+                );
+                return;
+            }
+        };
+        for values in [&mut on, &mut off] {
+            values[axes..].fill(0.0);
+        }
+        if let Ok(path) = self.instance.string_to_path(&input.to_string()) {
+            self.push_input_path(&output.path, path);
+        }
+        let hand = self.device_path(input.device);
+        let origin = self.origin(input);
+        self.scalar_constants
+            .entry(output.path.clone())
+            .or_default()
+            .push(ScalarConstantBinding {
+                press,
+                profile: self.interaction_profile,
+                hand,
+                origin,
+                on,
+                off,
+            });
     }
 
     pub fn push_binding(&mut self, action: String, path: xr::Path) {
@@ -469,9 +629,10 @@ impl BindingsProfileLoadContext<'_> {
         action_set_name: &str,
         action_set: &xr::ActionSet,
     ) -> Option<xr::Action<xr::Haptic>> {
-        let haptic_path = format!("{}/output/haptic", hand_to_path(parent_path.hand));
+        let haptic_path = format!("{}/output/haptic", parent_path.device.path());
         let binding = self.instance.string_to_path(&haptic_path).ok()?;
         let key = format!("{parent_path}-{action_set_name}-haptic");
+        let paths = self.subaction_paths.all();
         let action = match self.actions.entry(key.clone()) {
             Entry::Occupied(entry) => {
                 let ActionData::Haptic(action) = entry.get() else {
@@ -484,7 +645,7 @@ impl BindingsProfileLoadContext<'_> {
                     .names
                     .action_name(action_set_name, "xrizer-dpad-haptic");
                 let action = action_set
-                    .create_action::<xr::Haptic>(&name, &name, &self.hands)
+                    .create_action::<xr::Haptic>(&name, &name, &paths)
                     .inspect_err(|e| warn!("Couldn't create dpad haptic action: {e}"))
                     .ok()?;
                 self.extra_action_sets.insert(action_set_name.to_owned());

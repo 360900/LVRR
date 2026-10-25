@@ -1,0 +1,28 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/main",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/main/in/menu",
+			"type": "boolean"
+		}
+	],
+	"default_bindings": [
+		{
+			"binding_url": "left_system.json",
+			"controller_type": "oculus_touch"
+		},
+		{
+			"binding_url": "left_system.json",
+			"controller_type": "vive_focus3_controller"
+		},
+		{
+			"binding_url": "left_system.json",
+			"controller_type": "pico_controller"
+		}
+	]
+}

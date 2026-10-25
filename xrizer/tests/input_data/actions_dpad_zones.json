@@ -1,0 +1,48 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/main",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/main/in/north",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/east",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/south",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/west",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/left_north",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/left_east",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/left_center",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/pad_north",
+			"type": "boolean"
+		}
+	],
+	"default_bindings": [
+		{
+			"controller_type": "knuckles",
+			"binding_url": "knuckles_dpad_zones.json"
+		}
+	]
+}

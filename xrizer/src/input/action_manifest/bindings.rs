@@ -2,13 +2,15 @@
 
 use super::context::BindingsProfileLoadContext;
 use crate::input::action_manifest::context;
+use crate::input::custom_bindings::BoolBindingData;
+use crate::input::haptics::{BindingHaptic, BindingPress, Vibration};
 use crate::input::profiles::paths::DynComponent;
-use crate::input::profiles::{Component, DynInputPath, paths};
+use crate::input::profiles::{Component, DynInputPath, GAMEPAD_HAPTICS, InputDevice, paths};
 use crate::input::{ActionData, BoundPoseType};
 use crate::{
     input::custom_bindings::{
         self, BoolBindingType, ChordData, DoubleTapData, DpadData, DpadDirection, GrabBindingData,
-        ThresholdBindingData, TimedPress, TimedPressData, ToggleData, Vector2Inversion,
+        LatchData, ThresholdBindingData, TimedPress, TimedPressData, ToggleData, Vector2Inversion,
         Vector2Transform,
     },
     openxr_data::Hand,
@@ -23,6 +25,7 @@ use serde::{
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 /**
@@ -33,6 +36,39 @@ use std::time::Duration;
 pub struct Bindings {
     #[serde(deserialize_with = "lenient_sets")]
     pub bindings: HashMap<String, ActionSetBinding>,
+    #[serde(default, deserialize_with = "binding_options")]
+    pub options: BindingOptions,
+}
+
+/// The `options` of a bindings file that xrizer uses.
+#[derive(Clone, Default)]
+pub struct BindingOptions {
+    /// `variant`, e.g. "singlecontroller" in Half-Life: Alyx's single controller bindings, which
+    /// games read with GetBindingVariant.
+    pub variant: Option<String>,
+    /// `mirror_actions` of legacy bindings: both hands drive the actions of
+    /// /actions/legacy_mirrored, rather than their own of /actions/legacy.
+    pub mirror_actions: bool,
+    /// `simulated_controller_type`: the controller type apps are shown instead of the real one.
+    pub simulated_controller_type: Option<String>,
+}
+
+fn binding_options<'de, D: serde::Deserializer<'de>>(d: D) -> Result<BindingOptions, D::Error> {
+    let options = serde_json::Value::deserialize(d)?;
+    let string = |name| {
+        options[name]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    Ok(BindingOptions {
+        variant: string("variant"),
+        // The binding UI saves a boolean; a string is accepted too.
+        mirror_actions: options["mirror_actions"].as_bool().unwrap_or(false)
+            || options["mirror_actions"].as_str() == Some("true"),
+        simulated_controller_type: string("simulated_controller_type")
+            .filter(|ty| !ty.eq_ignore_ascii_case("none")),
+    })
 }
 
 // SteamVR skips what it doesn't understand, so one odd entry (an unknown mode, a missing
@@ -227,7 +263,7 @@ impl From<String> for MaybeInputPath {
 pub enum ActionBinding {
     None(IgnoredAny),
     Button(ActionBindingData<ButtonInput, ButtonParameters>),
-    ToggleButton(ActionBindingData<ButtonInput>),
+    ToggleButton(ActionBindingData<ButtonInput, ButtonParameters>),
     Dpad(ActionBindingData<DpadInput, DpadParameters>),
     /// Older name for a dpad with the click sub mode.
     DpadClick(ActionBindingData<DpadInput, DpadParameters>),
@@ -240,12 +276,18 @@ pub enum ActionBinding {
     Scroll(ActionBindingData<ScrollInput, ScrollParameters>),
     Trackpad(ActionBindingData<Vector2Input, Vector2Parameters>),
     Joystick(ActionBindingData<Vector2Input, Vector2Parameters>),
+    /// A radial menu, as the binding UI names it. It offers no inputs for it, so its bindings
+    /// have none.
+    Radial(ActionBindingData<Option<RadialInput>, RadialParameters>),
+    /// A radial menu, as SteamVR's runtime names it (see [handle_radial_binding]).
+    RadialMenu(ActionBindingData<Option<RadialInput>, RadialParameters>),
 }
 
 impl ActionBinding {
     fn path_mut(&mut self) -> Option<&mut MaybeInputPath> {
         match self {
             Self::None(_) => None,
+            Self::Radial(data) | Self::RadialMenu(data) => Some(&mut data.path),
             Self::Button(data) => Some(&mut data.path),
             Self::ToggleButton(data) => Some(&mut data.path),
             Self::Dpad(data) | Self::DpadClick(data) | Self::DpadTouch(data) => {
@@ -481,6 +523,9 @@ struct ButtonInput {
 pub struct ClickThresholdParams {
     pub click_activate_threshold: Option<StringOrTyped<f32>>,
     pub click_deactivate_threshold: Option<StringOrTyped<f32>>,
+    /// Played when an analog input crosses the thresholds.
+    #[serde(flatten)]
+    pub haptic: HapticParameters,
 }
 
 impl ClickThresholdParams {
@@ -488,14 +533,88 @@ impl ClickThresholdParams {
         Self {
             click_activate_threshold: Some(0.01f32.into()),
             click_deactivate_threshold: Some(0.005f32.into()),
+            ..Default::default()
         }
     }
 }
 
+/// The haptic SteamVR plays where a click crosses its threshold. An amplitude of 0 turns it off.
+#[derive(Clone, Copy, Default, Deserialize)]
+pub struct HapticParameters {
+    haptic_amplitude: Option<StringOrTyped<f32>>,
+    /// Hz
+    haptic_frequency: Option<StringOrTyped<f32>>,
+    /// Seconds, 0 for a single pulse
+    haptic_duration: Option<StringOrTyped<f32>>,
+    /// Seconds
+    haptic_delay: Option<StringOrTyped<f32>>,
+    /// The release's, the press's when unset.
+    off_haptic_amplitude: Option<StringOrTyped<f32>>,
+    off_haptic_frequency: Option<StringOrTyped<f32>>,
+    off_haptic_duration: Option<StringOrTyped<f32>>,
+}
+
+impl HapticParameters {
+    /// The haptic, with `default_amplitude` if the binding doesn't set one. None if it's off.
+    fn haptic(&self, default_amplitude: f32) -> Option<BindingHaptic> {
+        let get = |value: Option<StringOrTyped<f32>>| value.map(|v| *v).filter(|v| v.is_finite());
+        let on = Vibration {
+            duration: get(self.haptic_duration).unwrap_or(0.0),
+            frequency: get(self.haptic_frequency).unwrap_or(BindingHaptic::DEFAULT_FREQUENCY),
+            amplitude: get(self.haptic_amplitude).unwrap_or(default_amplitude),
+        };
+        let off = Vibration {
+            duration: get(self.off_haptic_duration).unwrap_or(on.duration),
+            frequency: get(self.off_haptic_frequency).unwrap_or(on.frequency),
+            amplitude: get(self.off_haptic_amplitude).unwrap_or(on.amplitude),
+        };
+        let delay = get(self.haptic_delay)
+            .and_then(|delay| Duration::try_from_secs_f32(delay).ok())
+            .unwrap_or_default();
+        BindingHaptic::new(on, off, delay)
+    }
+}
+
+/// The value while pressed (on) and released (off), per axis.
 #[derive(Clone, Deserialize)]
 struct ScalarConstantParameters {
     #[serde(rename = "on/x")]
     on_x: Option<StringOrTyped<f32>>,
+    #[serde(rename = "on/y")]
+    on_y: Option<StringOrTyped<f32>>,
+    #[serde(rename = "on/z")]
+    on_z: Option<StringOrTyped<f32>>,
+    #[serde(rename = "off/x")]
+    off_x: Option<StringOrTyped<f32>>,
+    #[serde(rename = "off/y")]
+    off_y: Option<StringOrTyped<f32>>,
+    #[serde(rename = "off/z")]
+    off_z: Option<StringOrTyped<f32>>,
+}
+
+impl ScalarConstantParameters {
+    /// The on and off values, with the binding UI's defaults (1 and 0) for missing or invalid ones.
+    fn values(parameters: Option<&Self>) -> ([f32; 3], [f32; 3]) {
+        let value = |get: fn(&Self) -> Option<StringOrTyped<f32>>, default: f32| {
+            parameters
+                .and_then(get)
+                .map(|value| *value)
+                .filter(|value| value.is_finite())
+                .unwrap_or(default)
+        };
+        (
+            [
+                value(|p| p.on_x, 1.0),
+                value(|p| p.on_y, 1.0),
+                value(|p| p.on_z, 1.0),
+            ],
+            [
+                value(|p| p.off_x, 0.0),
+                value(|p| p.off_y, 0.0),
+                value(|p| p.off_z, 0.0),
+            ],
+        )
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -504,6 +623,9 @@ struct ButtonParameters {
     force_input: Option<ButtonForceInput>,
     /// Seconds
     long_press_delay: Option<StringOrTyped<f32>>,
+    /// Keeps the click held while the input is touched.
+    #[serde(default, deserialize_with = "lenient")]
+    touchy_click: Option<StringOrTyped<bool>>,
     #[serde(flatten)]
     click_threshold: ClickThresholdParams,
 }
@@ -512,6 +634,10 @@ impl ButtonParameters {
     /// None if missing or not a valid duration (negative, NaN or too long).
     fn long_press_delay(&self) -> Option<Duration> {
         Duration::try_from_secs_f32(*self.long_press_delay?).ok()
+    }
+
+    fn touchy_click(&self) -> bool {
+        self.touchy_click.is_some_and(|touchy| *touchy)
     }
 }
 
@@ -579,11 +705,31 @@ pub struct DpadParameters {
 
 impl Default for DpadParameters {
     fn default() -> Self {
+        let zones = custom_bindings::DpadZones::default();
         Self {
             sub_mode: DpadSubMode::Touch,
-            deadzone_pct: StringOrTyped(50.0),
-            overlap_pct: StringOrTyped(50.0),
-            sticky: StringOrTyped(false),
+            deadzone_pct: StringOrTyped(zones.deadzone * 100.0),
+            overlap_pct: StringOrTyped(zones.overlap * 100.0),
+            sticky: StringOrTyped(zones.sticky),
+        }
+    }
+}
+
+impl DpadParameters {
+    fn zones(&self) -> custom_bindings::DpadZones {
+        let defaults = custom_bindings::DpadZones::default();
+        let fraction = |pct: f32, default: f32| {
+            let fraction = pct / 100.0;
+            if fraction.is_finite() {
+                fraction.clamp(0.0, 1.0)
+            } else {
+                default
+            }
+        };
+        custom_bindings::DpadZones {
+            deadzone: fraction(*self.deadzone_pct, defaults.deadzone),
+            overlap: fraction(*self.overlap_pct, defaults.overlap),
+            sticky: *self.sticky,
         }
     }
 }
@@ -593,6 +739,46 @@ impl Default for DpadParameters {
 pub enum DpadSubMode {
     Click,
     Touch,
+}
+
+/// The outputs of a radial menu: `button_<n>` for its buttons, and `center`.
+#[derive(Clone, Deserialize)]
+#[serde(transparent)]
+struct RadialInput(HashMap<String, ActionBindingOutput<Custom>>);
+
+#[derive(Clone, Deserialize)]
+struct RadialParameters {
+    #[serde(default, deserialize_with = "lenient")]
+    num_buttons: Option<StringOrTyped<u32>>,
+    // Like a dpad's, which SteamVR's radial menu shares its code with.
+    #[serde(default, deserialize_with = "lenient")]
+    sub_mode: Option<DpadSubMode>,
+    #[serde(default, deserialize_with = "lenient")]
+    deadzone_pct: Option<StringOrTyped<f32>>,
+    #[serde(default, deserialize_with = "lenient")]
+    overlap_pct: Option<StringOrTyped<f32>>,
+    #[serde(default, deserialize_with = "lenient")]
+    sticky: Option<StringOrTyped<bool>>,
+}
+
+impl RadialParameters {
+    /// The most buttons SteamVR's radial menu takes is unknown. Steam Input's radial menus,
+    /// which it seems to come from, take 20.
+    const MAX_BUTTONS: u32 = 20;
+
+    fn zones(&self) -> custom_bindings::DpadZones {
+        let fraction = |pct: Option<StringOrTyped<f32>>, default: f32| {
+            pct.map(|pct| *pct / 100.0)
+                .filter(|f| f.is_finite())
+                .map_or(default, |f| f.clamp(0.0, 1.0))
+        };
+        custom_bindings::DpadZones {
+            deadzone: fraction(self.deadzone_pct, 0.25),
+            // A menu picks one button.
+            overlap: fraction(self.overlap_pct, 0.0),
+            sticky: self.sticky.is_some_and(|sticky| *sticky),
+        }
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -627,6 +813,17 @@ struct GrabInput {
 pub struct GrabParameters {
     pub value_hold_threshold: Option<StringOrTyped<f32>>,
     pub value_release_threshold: Option<StringOrTyped<f32>>,
+    pub force_hold_threshold: Option<StringOrTyped<f32>>,
+    pub force_release_threshold: Option<StringOrTyped<f32>>,
+    /// m/s, see GrabBindingData
+    pub downgrade_speed: Option<StringOrTyped<f32>>,
+    pub drop_speed: Option<StringOrTyped<f32>>,
+    // capsense_enable_threshold is ignored: SteamVR's binding UI only offers it on pinch sources
+    // (the Index's /input/pinch), where the index finger's proximity enables the grab. OpenXR only
+    // has the trigger's touch for that, and xrizer reads pinch as the trigger, whose pull needs
+    // the finger on it anyway.
+    #[serde(flatten)]
+    pub haptic: HapticParameters,
 }
 
 #[derive(Clone, Deserialize)]
@@ -654,8 +851,12 @@ struct Vector2Parameters {
     invert: Vector2Inversion,
     deadzone_pct: Option<StringOrTyped<f32>>,
     maxzone_pct: Option<StringOrTyped<f32>>,
-    #[allow(unused)]
+    /// Keeps the click held while the stick is deflected.
+    #[serde(default, deserialize_with = "lenient")]
     sticky_click: Option<StringOrTyped<bool>>,
+    /// How far the stick must be deflected to keep the click, and released to let it go.
+    sticky_activate_threshold: Option<StringOrTyped<f32>>,
+    sticky_deactivate_threshold: Option<StringOrTyped<f32>>,
 }
 
 impl Vector2Parameters {
@@ -670,6 +871,22 @@ impl Vector2Parameters {
             deadzone: fraction(self.deadzone_pct, 0.0),
             maxzone: fraction(self.maxzone_pct, 1.0),
         }
+    }
+
+    /// The deflection thresholds that keep the click held, if sticky_click is on. The defaults
+    /// are the binding UI's.
+    fn sticky_thresholds(&self) -> Option<ClickThresholdParams> {
+        self.sticky_click
+            .is_some_and(|sticky| *sticky)
+            .then(|| ClickThresholdParams {
+                click_activate_threshold: Some(
+                    self.sticky_activate_threshold.unwrap_or(0.4f32.into()),
+                ),
+                click_deactivate_threshold: Some(
+                    self.sticky_deactivate_threshold.unwrap_or(0.3f32.into()),
+                ),
+                ..Default::default()
+            })
     }
 }
 
@@ -711,6 +928,70 @@ fn long_press_delay_parse() {
 
 #[cfg(test)]
 #[test]
+fn touchy_click_parse() {
+    for (json, expected) in [
+        (r#"{}"#, false),
+        (r#"{"touchy_click": "true"}"#, true),
+        (r#"{"touchy_click": true}"#, true),
+        (r#"{"touchy_click": "false"}"#, false),
+        (r#"{"touchy_click": "yes"}"#, false),
+    ] {
+        let parameters: ButtonParameters = serde_json::from_str(json).unwrap();
+        assert_eq!(parameters.touchy_click(), expected, "{json}");
+    }
+    // An invalid value doesn't take the other parameters with it.
+    let parameters: ButtonParameters =
+        serde_json::from_str(r#"{"touchy_click": "yes", "force_input": "force"}"#).unwrap();
+    assert!(matches!(
+        parameters.force_input,
+        Some(ButtonForceInput::Force)
+    ));
+}
+
+#[cfg(test)]
+#[test]
+fn sticky_click_parse() {
+    let thresholds = |json| {
+        let parameters: Vector2Parameters = serde_json::from_str(json).unwrap();
+        parameters.sticky_thresholds().map(|t| {
+            (
+                *t.click_activate_threshold.unwrap(),
+                *t.click_deactivate_threshold.unwrap(),
+            )
+        })
+    };
+    assert_eq!(thresholds(r#"{}"#), None);
+    assert_eq!(thresholds(r#"{"sticky_click": "false"}"#), None);
+    assert_eq!(thresholds(r#"{"sticky_click": "true"}"#), Some((0.4, 0.3)));
+    assert_eq!(
+        thresholds(r#"{"sticky_click": true, "sticky_activate_threshold": "0.6"}"#),
+        Some((0.6, 0.3))
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn scalar_constant_values_parse() {
+    assert_eq!(ScalarConstantParameters::values(None), ([1.0; 3], [0.0; 3]));
+    for (json, expected) in [
+        (r#"{}"#, ([1.0; 3], [0.0; 3])),
+        (
+            r#"{"on/x": "-1", "off/y": 0.5, "on/z": 0}"#,
+            ([-1.0, 1.0, 0.0], [0.0, 0.5, 0.0]),
+        ),
+        (r#"{"on/x": "NaN"}"#, ([1.0; 3], [0.0; 3])),
+    ] {
+        let parameters: ScalarConstantParameters = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            ScalarConstantParameters::values(Some(&parameters)),
+            expected,
+            "{json}"
+        );
+    }
+}
+
+#[cfg(test)]
+#[test]
 fn numeric_and_boolean_parameters() {
     // JSON numbers and booleans work as well as their string forms.
     let parameters: DpadParameters =
@@ -723,6 +1004,64 @@ fn numeric_and_boolean_parameters() {
         serde_json::from_str(r#"{"deadzone_pct": 10, "maxzone_pct": "90"}"#).unwrap();
     assert_eq!(*parameters.deadzone_pct.unwrap(), 10.0);
     assert_eq!(*parameters.maxzone_pct.unwrap(), 90.0);
+}
+
+#[cfg(test)]
+#[test]
+fn dpad_zone_parameters() {
+    use custom_bindings::DpadZones;
+    for (json, expected) in [
+        // SteamVR's defaults
+        (
+            r#"{"sub_mode": "touch"}"#,
+            DpadZones {
+                deadzone: 0.25,
+                overlap: 0.5,
+                sticky: false,
+            },
+        ),
+        (
+            r#"{"deadzone_pct": "75", "overlap_pct": "0", "sticky": "true"}"#,
+            DpadZones {
+                deadzone: 0.75,
+                overlap: 0.0,
+                sticky: true,
+            },
+        ),
+        (
+            r#"{"deadzone_pct": 150, "overlap_pct": "NaN"}"#,
+            DpadZones {
+                deadzone: 1.0,
+                ..Default::default()
+            },
+        ),
+    ] {
+        let parameters: DpadParameters = serde_json::from_str(json).unwrap();
+        assert_eq!(parameters.zones(), expected, "{json}");
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn radial_parameters_parse() {
+    use custom_bindings::DpadZones;
+    let parameters: RadialParameters =
+        serde_json::from_str(r#"{"num_buttons": "6", "overlap_pct": 50, "sticky": "true"}"#)
+            .unwrap();
+    assert_eq!(parameters.num_buttons.map(|n| *n), Some(6));
+    assert_eq!(
+        parameters.zones(),
+        DpadZones {
+            deadzone: 0.25,
+            overlap: 0.5,
+            sticky: true,
+        }
+    );
+    // An invalid count doesn't take the other parameters with it.
+    let parameters: RadialParameters =
+        serde_json::from_str(r#"{"num_buttons": "six", "deadzone_pct": "50"}"#).unwrap();
+    assert!(parameters.num_buttons.is_none());
+    assert_eq!(parameters.zones().deadzone, 0.5);
 }
 
 pub fn handle_dpad_binding(
@@ -742,7 +1081,6 @@ pub fn handle_dpad_binding(
 ) {
     // Would love to use the dpad extension here, but it doesn't seem to
     // support touch trackpad dpads.
-    // TODO: actually take the deadzone and overlap into account
     use DpadDirection::*;
 
     let bound_actions: Vec<(&ActionPath, DpadDirection)> = [
@@ -776,13 +1114,129 @@ pub fn handle_dpad_binding(
         return;
     };
 
+    // The directions of one binding engage together.
+    let zones = Arc::new(custom_bindings::DpadZoneState::new(
+        parameters.map_or_else(custom_bindings::DpadZones::default, DpadParameters::zones),
+    ));
     for (path, direction) in bound_actions {
         context.add_custom_binding(
             path,
-            parent_path.hand,
+            parent_path.device,
             parent_path,
-            BoolBindingType::Dpad(DpadData::new(actions.clone(), direction)),
+            BoolBindingType::Dpad(DpadData::new(actions.clone(), direction, zones.clone())),
         );
+    }
+}
+
+/// A radial menu: a dpad with `num_buttons` zones. SteamVR's runtime has one (vrclient's
+/// CInputFilter_RadialMenu, named radial_menu), whose processing its dpad shares. It reads the
+/// input's x and y, requires num_buttons and caps it. The rest is guessed: the buttons are
+/// `button_<n>` from 0, the first at the north and the others clockwise like a dpad's
+/// directions, with the dpad's parameters and zones that don't overlap.
+fn handle_radial_binding(
+    validate_path: &dyn PathValidator,
+    path: DynInputPath,
+    action_set_name: &str,
+    action_set: &xr::ActionSet,
+    context: &mut BindingsProfileLoadContext,
+    inputs: Option<&RadialInput>,
+    parameters: Option<&RadialParameters>,
+) {
+    // What the binding UI writes.
+    let Some(RadialInput(outputs)) = inputs.filter(|inputs| !inputs.0.is_empty()) else {
+        debug!("Radial menu without outputs on {path} in {action_set_name}");
+        return;
+    };
+    let Some((parameters, buttons)) =
+        parameters.and_then(|p| p.num_buttons.map(|buttons| (p, *buttons)))
+    else {
+        crate::log_unique!(
+            log::Level::Warn,
+            "Ignoring radial menu on {path} in {action_set_name}: num_buttons is missing"
+        );
+        return;
+    };
+    if !(1..=RadialParameters::MAX_BUTTONS).contains(&buttons) {
+        crate::log_unique!(
+            log::Level::Warn,
+            "Ignoring radial menu on {path} in {action_set_name}: {buttons} buttons"
+        );
+        return;
+    }
+
+    let mut bound_actions = Vec::new();
+    for (slot, output) in outputs {
+        let direction = match slot.as_str() {
+            "center" => DpadDirection::Center,
+            button => match button.strip_prefix("button_").map(str::parse::<u32>) {
+                Some(Ok(button)) if button < buttons => DpadDirection::Button(button as usize),
+                _ => {
+                    crate::log_unique!(
+                        log::Level::Warn,
+                        "Ignoring unknown radial menu input {slot} on {path}"
+                    );
+                    continue;
+                }
+            },
+        };
+        if context.accepts_custom_binding(&output.output) {
+            bound_actions.push((&output.output, direction));
+        }
+    }
+    if bound_actions.is_empty() {
+        return;
+    }
+
+    let Some(parent_path) = validate_path(path) else {
+        for (output, _) in &bound_actions {
+            InvalidActionPath(path, &output.path).report(context);
+        }
+        return;
+    };
+    // Engaged by touch like a dpad, unless the binding says otherwise.
+    let dpad_parameters = DpadParameters {
+        sub_mode: parameters.sub_mode.unwrap_or(DpadSubMode::Touch),
+        ..Default::default()
+    };
+    let Some(actions) = context.get_dpad_actions(
+        validate_path,
+        parent_path,
+        action_set_name,
+        action_set,
+        Some(&dpad_parameters),
+    ) else {
+        return;
+    };
+
+    let zones = Arc::new(custom_bindings::DpadZoneState::radial(
+        parameters.zones(),
+        buttons as usize,
+    ));
+    for (output, direction) in bound_actions {
+        trace!(
+            "suggesting {parent_path} for {} (radial menu {direction:?})",
+            output.path
+        );
+        context.add_custom_binding(
+            output,
+            parent_path.device,
+            parent_path,
+            BoolBindingType::Dpad(DpadData::new(actions.clone(), direction, zones.clone())),
+        );
+    }
+}
+
+/// The speeds a grab on `device` drops with, and the hand they are measured for. Only a grab
+/// that the force held drops for moving, and speeds are measured for hands only.
+fn grab_speeds(
+    context: &mut BindingsProfileLoadContext,
+    force: bool,
+    device: InputDevice,
+) -> (Arc<custom_bindings::HandSpeeds>, Hand) {
+    match device {
+        InputDevice::Hand(hand) if force => (context.hand_speeds(), hand),
+        InputDevice::Hand(hand) => (Default::default(), hand),
+        InputDevice::Gamepad => (Default::default(), Hand::Left),
     }
 }
 
@@ -798,6 +1252,17 @@ fn threshold_binding(
     if !context.accepts_custom_binding(output) {
         return None;
     }
+    input_threshold(input, params, action_set_name, action_set, context)
+}
+
+/// A threshold on an analog input (or a boolean one, read as 0 or 1), whatever it's used for.
+fn input_threshold(
+    input: DynInputPath,
+    params: Option<&ClickThresholdParams>,
+    action_set_name: &str,
+    action_set: &xr::ActionSet,
+    context: &mut BindingsProfileLoadContext,
+) -> Option<BoolBindingType> {
     Some(if input.component.is_none() {
         let action = context.input_action(action_set_name, action_set, input)?;
         BoolBindingType::ThresholdVec2(ThresholdBindingData::new(action, params))
@@ -819,7 +1284,7 @@ fn bind_threshold(
     if let Some(ty) = threshold_binding(output, input, params, action_set_name, action_set, context)
     {
         trace!("suggesting {input} for {} (threshold)", output.path);
-        context.add_custom_binding(output, input.hand, input, ty);
+        context.add_custom_binding(output, input.device, input, ty);
     }
 }
 
@@ -918,7 +1383,83 @@ fn bind_bool_input(
     let Some(action) = context.input_action(action_set_name, action_set, input) else {
         return;
     };
-    context.add_custom_binding(output, input.hand, input, make(action));
+    context.add_custom_binding(output, input.device, input, make(action));
+}
+
+/// The touch that keeps a button mode click held (touchy_click), with its thresholds. It's the
+/// touch xrizer reports for the input (see [touch_input]), so a click never outlasts the binding's
+/// own touch. A touch that is the click itself adds nothing.
+fn touchy_hold(
+    path: DynInputPath,
+    validate_path: &dyn PathValidator,
+) -> Option<(DynInputPath, ClickThresholdParams)> {
+    touch_input(path, validate_path)
+        .filter(|(touch, _)| touch.component != Some(DynComponent::Click))
+}
+
+/// A button mode press of `press`, kept held while `hold` (see [touchy_hold]) is, if given.
+fn button_press_binding(
+    output: &ActionPath,
+    press: DynInputPath,
+    thresholds: Option<&ClickThresholdParams>,
+    hold: Option<&(DynInputPath, ClickThresholdParams)>,
+    action_set_name: &str,
+    action_set: &xr::ActionSet,
+    context: &mut BindingsProfileLoadContext,
+) -> Option<BoolBindingType> {
+    let press = threshold_binding(
+        output,
+        press,
+        thresholds,
+        action_set_name,
+        action_set,
+        context,
+    )?;
+    let hold = hold.and_then(|(touch, params)| {
+        input_threshold(*touch, Some(params), action_set_name, action_set, context)
+    });
+    Some(match hold {
+        Some(hold) => BoolBindingType::Latch(LatchData::new(press, hold)),
+        None => press,
+    })
+}
+
+/// Binds a stick's click that stays held while the stick is deflected (sticky_click).
+fn bind_sticky_click(
+    click: &ActionBindingOutput<paths::Click>,
+    path: DynInputPath,
+    sticky: &ClickThresholdParams,
+    validate_path: &dyn PathValidator,
+    action_set_name: &str,
+    action_set: &xr::ActionSet,
+    context: &mut BindingsProfileLoadContext,
+) {
+    // Like plain clicks of this mode, missing ones are skipped silently.
+    let Some(click_path) = validate_path(path.with_component(DynComponent::Click)) else {
+        return;
+    };
+    let Some(press) = threshold_binding(
+        &click.output,
+        click_path,
+        None,
+        action_set_name,
+        action_set,
+        context,
+    ) else {
+        return;
+    };
+    let hold = validate_path(path).and_then(|position| {
+        input_threshold(position, Some(sticky), action_set_name, action_set, context)
+    });
+    let ty = match hold {
+        Some(hold) => BoolBindingType::Latch(LatchData::new(press, hold)),
+        None => press,
+    };
+    trace!(
+        "suggesting {click_path} for {} (sticky click)",
+        click.output.path
+    );
+    context.add_custom_binding(&click.output, path.device, click_path, ty);
 }
 
 /// The OpenVR path of the headset's proximity sensor.
@@ -959,6 +1500,25 @@ pub fn handle_sources(
     for mode in sources {
         match mode {
             ActionBinding::None(_) => {}
+            ActionBinding::Radial(data) | ActionBinding::RadialMenu(data) => {
+                let Some(ValidActionBindingData {
+                    path,
+                    inputs,
+                    parameters,
+                }) = data.validate_path(context)
+                else {
+                    continue;
+                };
+                handle_radial_binding(
+                    validate_path,
+                    path,
+                    action_set_name,
+                    action_set,
+                    context,
+                    inputs.as_ref(),
+                    parameters,
+                );
+            }
             ActionBinding::ToggleButton(data) => {
                 let Some(ValidActionBindingData {
                     path,
@@ -1056,6 +1616,13 @@ pub fn handle_sources(
                     continue;
                 };
                 let thresholds = parameters.map(|b| &b.click_threshold);
+                let touchy = parameters.filter(|p| p.touchy_click()).and_then(|_| {
+                    let hold = touchy_hold(path, validate_path);
+                    if hold.is_none() {
+                        debug!("Ignoring touchy_click on {path}, which has no touch");
+                    }
+                    hold
+                });
 
                 // A single press only has to wait when it could turn into something else.
                 let long_delay = long.as_ref().or(held.as_ref()).map(|_| {
@@ -1070,7 +1637,23 @@ pub fn handle_sources(
                     single.as_ref().filter(|_| !single_waits),
                 ];
                 for click in immediate.into_iter().flatten() {
-                    if is_click {
+                    if touchy.is_some() {
+                        if let Some(ty) = button_press_binding(
+                            &click.output,
+                            press,
+                            thresholds,
+                            touchy.as_ref(),
+                            action_set_name,
+                            action_set,
+                            context,
+                        ) {
+                            trace!(
+                                "suggesting {press} for {} (touchy click)",
+                                click.output.path
+                            );
+                            context.add_custom_binding(&click.output, path.device, press, ty);
+                        }
+                    } else if is_click {
                         // The runtime's click point is used for clicks.
                         context.try_suggest_binding::<bool>(click.output.path.clone(), press);
                     } else {
@@ -1100,10 +1683,11 @@ pub fn handle_sources(
                     let (Some(output), Some(kind)) = (output, kind) else {
                         continue;
                     };
-                    let Some(press_binding) = threshold_binding(
+                    let Some(press_binding) = button_press_binding(
                         &output.output,
                         press,
                         thresholds,
+                        touchy.as_ref(),
                         action_set_name,
                         action_set,
                         context,
@@ -1112,7 +1696,7 @@ pub fn handle_sources(
                     };
                     context.add_custom_binding(
                         &output.output,
-                        path.hand,
+                        path.device,
                         press,
                         BoolBindingType::Timed(TimedPressData::new(press_binding, kind)),
                     );
@@ -1223,15 +1807,27 @@ pub fn handle_sources(
                 else {
                     continue;
                 };
-                // Only 1.0 can be reported. Other values (like -1 to reverse) would come out
-                // wrong, which is worse than not binding them.
-                if let Some(on) = parameters.and_then(|p| p.on_x.as_deref().copied())
-                    && on != 1.0
-                {
-                    warn!(
-                        "Ignoring {path} setting {} to {on}, only 1.0 is supported",
-                        value.output.path
-                    );
+                let (on, off) = ScalarConstantParameters::values(parameters);
+                if context.is_custom_scalar_constant(&value.output, on, off) {
+                    let Some((press, _)) = button_press_input(path, None, validate_path) else {
+                        InvalidActionPath(path, &value.output.path).report(context);
+                        continue;
+                    };
+                    if let Some(press_binding) =
+                        input_threshold(press, None, action_set_name, action_set, context)
+                    {
+                        trace!(
+                            "suggesting {press} for {} (scalar constant {on:?}, {off:?})",
+                            value.output.path
+                        );
+                        context.add_scalar_constant_binding(
+                            &value.output,
+                            press,
+                            press_binding,
+                            on,
+                            off,
+                        );
+                    }
                     continue;
                 }
 
@@ -1310,14 +1906,17 @@ pub fn handle_sources(
                     force_path.is_some(),
                     grab.output.path
                 );
+                let (speeds, hand) = grab_speeds(context, force_action.is_some(), path.device);
                 context.add_custom_binding(
                     &grab.output,
-                    path.hand,
+                    path.device,
                     value_path,
                     BoolBindingType::Grab(GrabBindingData::new(
                         force_action,
                         value_action,
                         parameters,
+                        speeds,
+                        hand,
                     )),
                 );
             }
@@ -1376,7 +1975,20 @@ pub fn handle_sources(
                 } = inputs;
 
                 if let Some(click) = click {
-                    let _ = click.try_bind_with_component(path, context, validate_path);
+                    match parameters.and_then(Vector2Parameters::sticky_thresholds) {
+                        Some(sticky) => bind_sticky_click(
+                            click,
+                            path,
+                            &sticky,
+                            validate_path,
+                            action_set_name,
+                            action_set,
+                            context,
+                        ),
+                        None => {
+                            let _ = click.try_bind_with_component(path, context, validate_path);
+                        }
+                    }
                 }
 
                 if let Some(touch) = touch {
@@ -1479,7 +2091,12 @@ pub fn handle_chord_bindings(
                             )
                         })
                         .filter(|actions| click.is_none() || actions.click_or_touch.is_some())
-                        .map(|actions| BoolBindingType::Dpad(DpadData::new(actions, direction)))
+                        .map(|actions| {
+                            let zones = custom_bindings::DpadZoneState::new(
+                                custom_bindings::DpadZones::default(),
+                            );
+                            BoolBindingType::Dpad(DpadData::new(actions, direction, zones.into()))
+                        })
                 }
                 other => {
                     warn!("Ignoring chord for {}: unknown input {other}", output.path);
@@ -1493,14 +2110,14 @@ pub fn handle_chord_bindings(
                 ));
                 continue 'chords;
             };
-            parts.push((context.hand_path(path.hand), part));
+            parts.push((context.device_path(path.device), part));
         }
 
         trace!("binding chord for {}", output.path);
         // Owned by the hand of the last input, which usually completes the chord.
         context.add_custom_binding(
             output,
-            last.hand,
+            last.device,
             *last,
             BoolBindingType::Chord(ChordData::new(parts)),
         );
@@ -1545,19 +2162,31 @@ pub fn handle_skeleton_bindings(
     }
 }
 
+/// The device of a haptic output's OpenVR path, e.g. `/user/hand/left/output/haptic`.
+fn haptic_device(path: &str) -> Option<InputDevice> {
+    let device = path.strip_suffix("/output/haptic")?;
+    InputDevice::ALL
+        .into_iter()
+        .find(|candidate| candidate.path() == device)
+}
+
 pub fn handle_haptic_bindings(
     instance: &xr::Instance,
     context: &mut BindingsProfileLoadContext,
     bindings: &[SimpleActionBinding],
 ) {
     for SimpleActionBinding { output, path } in bindings {
-        if !matches!(
-            path.as_str(),
-            "/user/hand/left/output/haptic" | "/user/hand/right/output/haptic",
-        ) {
+        let Some(device) = haptic_device(path) else {
             warn!("invalid haptic path {path} for {}", output.path);
             continue;
         };
+        if !context.has_device(device) {
+            context.unusable_binding(format_args!(
+                "ignoring haptic {path} for {}, it isn't on this controller",
+                output.path
+            ));
+            continue;
+        }
         if !context.find_action(&output.path) {
             continue;
         };
@@ -1569,9 +2198,215 @@ pub fn handle_haptic_bindings(
             );
             continue;
         }
-        let xr_path = instance.string_to_path(path).unwrap();
-        context.push_binding(output.path.clone(), xr_path);
+        let outputs = match device {
+            InputDevice::Gamepad => &GAMEPAD_HAPTICS[..],
+            InputDevice::Hand(_) => &[path.as_str()],
+        };
+        for output_path in outputs {
+            let xr_path = instance.string_to_path(output_path).unwrap();
+            context.push_binding(output.path.clone(), xr_path);
+        }
     }
+}
+
+/// SteamVR's haptics for clicks that come from an analog input crossing a threshold: a pulse on
+/// the press with the `haptic_*` parameters, and on the release with the `off_haptic_*` ones. They
+/// read the inputs of [handle_sources]' bindings on their own, as SteamVR plays them whether or
+/// not the game reads the action. Physical clicks have none.
+pub fn handle_binding_haptics(
+    validate_path: &dyn PathValidator,
+    context: &mut BindingsProfileLoadContext,
+    action_set_name: &str,
+    action_set: &xr::ActionSet,
+    sources: &[ActionBinding],
+) {
+    use DynComponent::{Click, Force, Value};
+    let is_bool = |context: &BindingsProfileLoadContext, output: &ActionPath| {
+        context
+            .actions
+            .get(&output.path)
+            .is_some_and(<bool as context::WithActionPattern>::check_match)
+    };
+    let analog_click = |path: DynInputPath| {
+        validate_path(path.with_component(Click))
+            .filter(|input| matches!(input.component, Some(Value | Force)))
+    };
+
+    for source in sources {
+        let (output, path, haptic, press) = match source {
+            ActionBinding::Button(ActionBindingData {
+                path: MaybeInputPath::Valid(path),
+                inputs:
+                    ButtonInput {
+                        click,
+                        grab,
+                        long,
+                        held,
+                        single,
+                        ..
+                    },
+                parameters,
+            }) => {
+                let Some(output) = [click, grab, long, held, single]
+                    .into_iter()
+                    .flatten()
+                    .find(|output| is_bool(context, &output.output))
+                else {
+                    continue;
+                };
+                let force_input = parameters.as_ref().and_then(|p| p.force_input);
+                let Some((press, false)) = button_press_input(*path, force_input, validate_path)
+                else {
+                    continue;
+                };
+                let thresholds = parameters.as_ref().map(|p| &p.click_threshold);
+                let haptic = thresholds
+                    .map_or_else(HapticParameters::default, |t| t.haptic)
+                    .haptic(BindingHaptic::DEFAULT_AMPLITUDE);
+                let Some(haptic) = haptic else {
+                    continue;
+                };
+                let Some(press) =
+                    threshold_press(press, thresholds, action_set_name, action_set, context)
+                else {
+                    continue;
+                };
+                (&output.output, path, haptic, BindingPress::Custom(press))
+            }
+            ActionBinding::ToggleButton(ActionBindingData {
+                path: MaybeInputPath::Valid(path),
+                inputs:
+                    ButtonInput {
+                        click: Some(output),
+                        ..
+                    },
+                parameters,
+            }) if is_bool(context, &output.output) => {
+                let Some(input) = analog_click(*path) else {
+                    continue;
+                };
+                let haptic = parameters
+                    .as_ref()
+                    .map_or_else(HapticParameters::default, |p| p.click_threshold.haptic)
+                    .haptic(BindingHaptic::DEFAULT_AMPLITUDE);
+                let (Some(haptic), Some(action)) = (
+                    haptic,
+                    context.input_action(action_set_name, action_set, input),
+                ) else {
+                    continue;
+                };
+                (&output.output, path, haptic, BindingPress::Runtime(action))
+            }
+            // Like button mode's. The binding UI has no settings for trigger mode, but every
+            // binding SteamVR ships that turns its haptic off does so with haptic_amplitude 0
+            // (legacy bindings of Touch, Pico, Focus 3 and Frame controllers, Half-Life: Alyx's
+            // menus), the same way as for button mode on the same inputs.
+            ActionBinding::Trigger(ActionBindingData {
+                path: MaybeInputPath::Valid(path),
+                inputs:
+                    TriggerInput {
+                        click: Some(output),
+                        ..
+                    },
+                parameters,
+            }) if is_bool(context, &output.output) => {
+                let haptic = parameters
+                    .as_ref()
+                    .map_or_else(HapticParameters::default, |p| p.haptic)
+                    .haptic(BindingHaptic::DEFAULT_AMPLITUDE);
+                let (Some(input), Some(haptic)) = (analog_click(*path), haptic) else {
+                    continue;
+                };
+                let press = if parameters.as_ref().is_some_and(|p| {
+                    p.click_activate_threshold.is_some() || p.click_deactivate_threshold.is_some()
+                }) {
+                    threshold_press(
+                        input,
+                        parameters.as_ref(),
+                        action_set_name,
+                        action_set,
+                        context,
+                    )
+                    .map(BindingPress::Custom)
+                } else {
+                    context
+                        .input_action(action_set_name, action_set, input)
+                        .map(BindingPress::Runtime)
+                };
+                let Some(press) = press else {
+                    continue;
+                };
+                (&output.output, path, haptic, press)
+            }
+            // Off by default in the binding UI.
+            ActionBinding::Grab(ActionBindingData {
+                path: MaybeInputPath::Valid(path),
+                inputs: GrabInput { grab: output },
+                parameters: Some(parameters),
+            }) if is_bool(context, &output.output) => {
+                let Some(haptic) = parameters.haptic.haptic(0.0) else {
+                    continue;
+                };
+                let Some(value_path) = validate_path(path.with_component(Value)) else {
+                    continue;
+                };
+                let force_path = validate_path(path.with_component(Force))
+                    .filter(|p| p.component == Some(Force));
+                let force_action = match force_path {
+                    Some(force_path) => {
+                        match context.input_action(action_set_name, action_set, force_path) {
+                            Some(action) => Some(action),
+                            None => continue,
+                        }
+                    }
+                    None => None,
+                };
+                let Some(value_action) =
+                    context.input_action(action_set_name, action_set, value_path)
+                else {
+                    continue;
+                };
+                let (speeds, hand) = grab_speeds(context, force_action.is_some(), path.device);
+                let grab = GrabBindingData::new(
+                    force_action,
+                    value_action,
+                    Some(parameters),
+                    speeds,
+                    hand,
+                );
+                let press = BoolBindingData::new(
+                    BoolBindingType::Grab(grab),
+                    context.device_path(path.device),
+                );
+                (&output.output, path, haptic, BindingPress::Custom(press))
+            }
+            _ => continue,
+        };
+        trace!(
+            "haptic for {} on {path} ({action_set_name}): {haptic:?}",
+            output.path
+        );
+        context.add_binding_haptic(action_set_name, output, path.device, press, haptic);
+    }
+}
+
+/// A click at `params`' thresholds on an analog input, or on a 2D one by its distance from the
+/// center.
+fn threshold_press(
+    input: DynInputPath,
+    params: Option<&ClickThresholdParams>,
+    action_set_name: &str,
+    action_set: &xr::ActionSet,
+    context: &mut BindingsProfileLoadContext,
+) -> Option<BoolBindingData> {
+    let ty = if input.component.is_none() {
+        let action = context.input_action(action_set_name, action_set, input)?;
+        BoolBindingType::ThresholdVec2(ThresholdBindingData::new(action, params))
+    } else {
+        let action = context.input_action(action_set_name, action_set, input)?;
+        BoolBindingType::ThresholdFloat(ThresholdBindingData::new(action, params))
+    };
+    Some(BoolBindingData::new(ty, context.device_path(input.device)))
 }
 
 pub fn handle_pose_bindings(context: &mut BindingsProfileLoadContext, bindings: &[PoseBinding]) {
@@ -1592,19 +2427,231 @@ pub fn handle_pose_bindings(context: &mut BindingsProfileLoadContext, bindings: 
             continue;
         }
 
+        let origin = context.pose_origin(*hand, *pose_ty);
         let bound = context
             .pose_bindings
             .entry(output.path.clone())
             .or_default();
 
-        let b = match hand {
-            Hand::Left => &mut bound.left,
-            Hand::Right => &mut bound.right,
+        let (b, o) = match hand {
+            Hand::Left => (&mut bound.left, &mut bound.origins[0]),
+            Hand::Right => (&mut bound.right, &mut bound.origins[1]),
         };
         *b = Some(*pose_ty);
+        *o = origin;
         trace!(
             "bound {:?} to pose {} for hand {hand:?}",
             *pose_ty, output.path
         );
+    }
+}
+
+/// The output bound to each slot (input) of a mode.
+type SlotOutputs<'a> = Vec<(&'static str, &'a ActionPath)>;
+
+impl ActionBinding {
+    /// The mode's name, the input path and the bound output of each slot, as
+    /// GetActionBindingInfo reports them.
+    fn slots(&self) -> Option<(&'static str, DynInputPath, SlotOutputs<'_>)> {
+        fn slot<'a, C>(
+            name: &'static str,
+            output: &'a Option<ActionBindingOutput<C>>,
+        ) -> Option<(&'static str, &'a ActionPath)> {
+            output.as_ref().map(|output| (name, &output.output))
+        }
+        fn directions(inputs: &DpadInput) -> Vec<Option<(&'static str, &ActionPath)>> {
+            vec![
+                slot("north", &inputs.north),
+                slot("east", &inputs.east),
+                slot("south", &inputs.south),
+                slot("west", &inputs.west),
+                slot("center", &inputs.center),
+            ]
+        }
+        let (mode, path, slots) = match self {
+            // What SteamVR reports for radial menu buttons isn't known.
+            Self::None(_) | Self::Radial(_) | Self::RadialMenu(_) => return None,
+            Self::Button(data) => {
+                let inputs = &data.inputs;
+                let slots = vec![
+                    slot("click", &inputs.click),
+                    slot("touch", &inputs.touch),
+                    slot("double", &inputs.double),
+                    slot("grab", &inputs.grab),
+                    slot("long", &inputs.long),
+                    slot("held", &inputs.held),
+                    slot("single", &inputs.single),
+                ];
+                ("button", &data.path, slots)
+            }
+            Self::ToggleButton(data) => {
+                let slots = vec![
+                    slot("click", &data.inputs.click),
+                    slot("touch", &data.inputs.touch),
+                ];
+                ("toggle_button", &data.path, slots)
+            }
+            Self::Dpad(data) => ("dpad", &data.path, directions(&data.inputs)),
+            Self::DpadClick(data) => ("dpad_click", &data.path, directions(&data.inputs)),
+            Self::DpadTouch(data) => ("dpad_touch", &data.path, directions(&data.inputs)),
+            Self::Trigger(data) => {
+                let inputs = &data.inputs;
+                let slots = vec![
+                    slot("pull", &inputs.pull),
+                    slot("touch", &inputs.touch),
+                    slot("click", &inputs.click),
+                ];
+                ("trigger", &data.path, slots)
+            }
+            Self::ScalarConstant(data) => (
+                "scalar_constant",
+                &data.path,
+                vec![Some(("value", &data.inputs.value.output))],
+            ),
+            Self::ForceSensor(data) => (
+                "force_sensor",
+                &data.path,
+                vec![Some(("force", &data.inputs.force.output))],
+            ),
+            Self::Grab(data) => (
+                "grab",
+                &data.path,
+                vec![Some(("grab", &data.inputs.grab.output))],
+            ),
+            Self::Scroll(data) => (
+                "scroll",
+                &data.path,
+                vec![Some(("scroll", &data.inputs.scroll.output))],
+            ),
+            Self::Trackpad(data) | Self::Joystick(data) => {
+                let mode = match self {
+                    Self::Trackpad(_) => "trackpad",
+                    _ => "joystick",
+                };
+                let inputs = &data.inputs;
+                let slots = vec![
+                    slot("position", &inputs.position),
+                    slot("click", &inputs.click),
+                    slot("touch", &inputs.touch),
+                ];
+                (mode, &data.path, slots)
+            }
+        };
+        let MaybeInputPath::Valid(path) = path else {
+            return None;
+        };
+        Some((mode, *path, slots.into_iter().flatten().collect()))
+    }
+}
+
+/// Whether the profile `validate_path` checks for has what `slot` of a mode reads on `path`.
+fn has_slot(validate_path: &dyn PathValidator, path: DynInputPath, slot: &str) -> bool {
+    use DynComponent::*;
+    let components: &[Option<DynComponent>] = match slot {
+        // Touches fall back to the pull, see touch_input.
+        "touch" => &[Some(Touch), Some(Value)],
+        "pull" | "grab" => &[Some(Value)],
+        "force" => &[Some(Force)],
+        "position" | "scroll" | "north" | "east" | "south" | "west" | "center" => &[None],
+        _ => &[Some(Click), Some(Value), Some(Force)],
+    };
+    components
+        .iter()
+        .any(|&component| validate_path(DynInputPath { component, ..path }).is_some())
+}
+
+/// Records what GetActionBindingInfo reports for the actions this profile got bindings for:
+/// the OpenVR input, mode and slot of each of their sources, chord inputs and haptic outputs
+/// that the profile has.
+pub fn record_binding_info(
+    validate_path: &dyn PathValidator,
+    controller_type: &str,
+    context: &mut BindingsProfileLoadContext,
+    bindings: &HashMap<String, ActionSetBinding>,
+) {
+    use crate::input::origins::{self, BindingInfo};
+
+    let info = |path: DynInputPath, mode, slot| {
+        let analog = validate_path(path.with_component(DynComponent::Value))
+            .is_some_and(|path| path.component == Some(DynComponent::Value));
+        BindingInfo {
+            device: path.device,
+            input: origins::openvr_input(controller_type, path.subpath),
+            mode,
+            slot,
+            source_type: origins::source_type(path.subpath, analog),
+            origin: context.origin(path),
+        }
+    };
+
+    let mut found: Vec<(&ActionPath, BindingInfo)> = Vec::new();
+    for (set_name, set) in bindings {
+        if context.get_action_set(set_name).is_none() {
+            continue;
+        }
+        for source in &set.sources {
+            let Some((mode, path, slots)) = source.slots() else {
+                continue;
+            };
+            for (slot, output) in slots {
+                if has_slot(validate_path, path, slot) {
+                    found.push((output, info(path, mode, slot)));
+                }
+            }
+        }
+        for chord in &set.chords {
+            for (path, slot) in &chord.inputs {
+                let MaybeInputPath::Valid(path) = path else {
+                    continue;
+                };
+                // Each input as the mode a chord reads it with.
+                let (mode, slot) = match slot.as_str() {
+                    "click" => ("button", "click"),
+                    "touch" => ("button", "touch"),
+                    "single" => ("button", "single"),
+                    "long" => ("button", "long"),
+                    "held" => ("button", "held"),
+                    "double" => ("button", "double"),
+                    "north" => ("dpad", "north"),
+                    "east" => ("dpad", "east"),
+                    "south" => ("dpad", "south"),
+                    "west" => ("dpad", "west"),
+                    "center" => ("dpad", "center"),
+                    _ => continue,
+                };
+                if has_slot(validate_path, *path, slot) {
+                    found.push((&chord.output, info(*path, mode, slot)));
+                }
+            }
+        }
+        for SimpleActionBinding { output, path } in &set.haptics {
+            let Some(device) = haptic_device(path).filter(|device| context.has_device(*device))
+            else {
+                continue;
+            };
+            let info = BindingInfo {
+                device,
+                input: "/output/haptic".to_owned(),
+                mode: "",
+                slot: "",
+                source_type: "vibration",
+                origin: context.haptic_origin(device),
+            };
+            found.push((output, info));
+        }
+    }
+
+    for (output, info) in found {
+        // Only actions that got a binding, so no handles are made for unknown names.
+        if !context.input_paths_out.contains_key(&output.path) {
+            continue;
+        }
+        let infos = context
+            .binding_info_out
+            .entry(output.path.clone())
+            .or_default();
+        if !infos.contains(&info) {
+            infos.push(info);
+        }
     }
 }

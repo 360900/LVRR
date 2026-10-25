@@ -71,9 +71,13 @@ If a launcher strips `RUST_LOG`, put the same filter string in a file named `log
 
 `XRIZER_SYNTHESIZED_VELOCITY` - `1` computes controller linear velocity from position deltas, `0` forces the runtime's. Helps with throwing on runtimes that under-report velocity. Enabled automatically for games known to need it.
 
-`XRIZER_CUSTOM_BINDINGS_DIR` - Directory with controller binding overrides, default `xrizer` in the game's working directory. A file named `<controller_type>.json` (e.g. `knuckles.json`) replaces the game's own bindings for that controller, or provides them if the game has none. Same format as SteamVR binding files. Without one, a controller the game ships no bindings for gets them converted from the closest controller it does, like SteamVR.
+`XRIZER_CUSTOM_BINDINGS_DIR` - Directory with controller binding overrides. A file named `<controller_type>.json` (e.g. `knuckles.json`) replaces the game's own bindings and the ones chosen in SteamVR for that controller, or provides them if the game has none. Same format as SteamVR binding files. Overrides are looked for in this directory, then in `~/.config/xrizer/bindings/<app key>/` (under `$XDG_CONFIG_HOME` if set), then, if the variable isn't set, in `xrizer` in the game's working directory. The app key is `steam.app.<id>` for Steam games, or what the app identifies as (e.g. `org.jrbudda.vivecraft.steamvrinput`), lowercase, with characters other than letters, digits, `.`, `_` and `-` replaced by `_`. For games without an action manifest (Skyrim VR, Fallout 4 VR) the file holds bindings for SteamVR's `/actions/legacy` actions; controllers without one keep the built-in mapping. Without an override, a controller the game ships no bindings for gets them converted from the closest controller it does, like SteamVR.
+
+`XRIZER_STEAMVR_BINDINGS` - `0` ignores the bindings chosen for the game in SteamVR, including Workshop bindings, which are used by default. They're read from `steamvr.vrsettings` in `VR_CONFIG_PATH`, the `config` paths in `openvrpaths.vrpath`, or Steam's `config` directory. Includes the legacy bindings chosen for games without an action manifest.
 
 `XRIZER_ADDITIONAL_BINDINGS` - `;` separated list of controller types to load bindings for in addition to the ones the game lists, e.g. `knuckles;oculus_touch`. Each is read from the custom bindings directory, or `bindings_<controller_type>.json` next to the game's action manifest.
+
+`XRIZER_LINEAR_UNORM` - `1` shows 8-bit UNORM textures submitted with `ColorSpace_Auto` as linear instead of sRGB encoded, `0` forces sRGB. Try `1` if a game looks much too dark. Enabled automatically for games known to need it.
 
 `XRIZER_PRESERVE_VIEW_CANTING` - `1` keeps per-eye view rotations from canted-display headsets (e.g. Pimax, Bigscreen Beyond) instead of flattening them to parallel views with a widened FOV. Saves rendering the wider FOV, may confuse games that assume parallel views.
 

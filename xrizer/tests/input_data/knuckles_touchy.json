@@ -1,0 +1,55 @@
+{
+	"bindings": {
+		"/actions/menu": {
+			"chords": [],
+			"haptics": [],
+			"poses": [],
+			"skeleton": [],
+			"sources": [
+				{
+					"inputs": {
+						"click": {
+							"output": "/actions/menu/in/drag"
+						}
+					},
+					"mode": "button",
+					"parameters": {
+						"force_input": "force",
+						"touchy_click": "true"
+					},
+					"path": "/user/hand/left/input/grip"
+				},
+				{
+					"inputs": {
+						"click": {
+							"output": "/actions/menu/in/drag"
+						}
+					},
+					"mode": "button",
+					"parameters": {
+						"force_input": "force",
+						"touchy_click": "true"
+					},
+					"path": "/user/hand/right/input/grip"
+				}
+			]
+		},
+		"/actions/main": {
+			"sources": [
+				{
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/grab"
+						}
+					},
+					"mode": "button",
+					"parameters": {
+						"touchy_click": true
+					},
+					"path": "/user/hand/left/input/a"
+				}
+			]
+		}
+	},
+	"controller_type": "knuckles"
+}

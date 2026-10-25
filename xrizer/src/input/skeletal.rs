@@ -246,7 +246,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         if let Some(level) = controller
             .profile_data
             .as_ref()
-            .filter(|_| controller.connected)
+            .filter(|_| controller.connected || controller.recently_seen())
             .and_then(|p| p.skeletal_tracking_level)
         {
             return level;
@@ -945,10 +945,16 @@ impl SkeletalInputActionData {
 
 #[cfg(test)]
 mod tests {
-    use super::{Count, bone_transform_to_glam, finalize_transforms, generated};
-    use crate::input::tests::Fixture;
+    use super::HandSkeletonBone::{self, *};
+    use super::{
+        Count, JOINTS_TO_BONES, bone_transform_to_glam, finalize_transforms, generated,
+        set_aux_bones,
+    };
+    use crate::input::{InteractionProfile, devices::ProfileData, tests::Fixture};
+    use crate::openxr_data::Hand;
     use crate::vr::{self, IVRInput010_Interface};
-    use glam::Affine3A;
+    use glam::{Affine3A, EulerRot, Mat3, Quat, Vec3};
+    use openxr as xr;
 
     const SENTINEL: vr::VRBoneTransform_t = vr::VRBoneTransform_t {
         position: vr::HmdVector4_t {
@@ -1146,7 +1152,7 @@ mod tests {
         f.set_interaction_profile::<Knuckles>(fakexr::UserPath::LeftHand);
         sync(&mut f);
         assert_eq!(level(&f), vr::EVRSkeletalTrackingLevel::Partial);
-        // Turned off
+        // Turned off: kept through a blip, gone after.
         fakexr::set_interaction_profile(
             f.raw_session(),
             fakexr::UserPath::LeftHand,
@@ -1154,6 +1160,8 @@ mod tests {
         );
         sync(&mut f);
         f.input.openxr.poll_events();
+        assert_eq!(level(&f), vr::EVRSkeletalTrackingLevel::Partial);
+        f.input.expire_connection_grace();
         assert_eq!(level(&f), vr::EVRSkeletalTrackingLevel::Estimated);
         f.set_interaction_profile::<OculusTouch>(fakexr::UserPath::LeftHand);
         sync(&mut f);
@@ -1244,10 +1252,11 @@ mod tests {
         assert_eq!(data(&f), (false, vr::k_ulInvalidInputValueHandle));
         sync(&mut f, left);
 
-        // The controller turns off.
+        // The controller turns off, and is gone once it could no longer be a blip.
         fakexr::set_interaction_profile(f.raw_session(), LeftHand, openxr::Path::NULL);
         sync(&mut f, left);
         f.input.openxr.poll_events();
+        f.input.expire_connection_grace();
         assert_eq!(data(&f), (false, vr::k_ulInvalidInputValueHandle));
     }
 
@@ -1304,5 +1313,310 @@ mod tests {
         let with = bones(vr::EVRSkeletalMotionRange::WithController);
         assert!(without.abs_diff_eq(reference(&generated::left_hand::FIST), 1e-4));
         assert!(with.abs_diff_eq(reference(&generated::left_hand::GRIPLIMIT), 1e-4));
+    }
+
+    type Bones = [vr::VRBoneTransform_t; Count as usize];
+
+    /// OpenXR joints of a hand in one of SteamVR's poses, relative to the pose its bones are
+    /// relative to (the controller's raw pose), like a runtime reports a hand around a controller.
+    fn joints_in_pose(hand: Hand, pose: &Bones) -> [Affine3A; xr::HAND_JOINT_COUNT] {
+        let mut model = *pose;
+        finalize_transforms(&mut model, vr::EVRSkeletalTransformSpace::Model);
+        // OpenXR joints point -Z towards the fingertips and +Y out of the back of the hand. In
+        // SteamVR's poses, finger bones point down -X on the right hand and +X on the left, and
+        // curl about +Z towards -Y and +Y. Wrists point +Z towards the fingers, with the back of
+        // the hand at -X and +X.
+        let side = match hand {
+            Hand::Left => -1.0,
+            Hand::Right => 1.0,
+        };
+        let joint = |bone: HandSkeletonBone, towards_tip: Vec3, back: Vec3| {
+            let (pos, rot) = bone_transform_to_glam(model[bone as usize]);
+            let rot = rot.normalize();
+            let (z, y) = (rot * -towards_tip, rot * back);
+            let rot = Quat::from_mat3(&Mat3::from_cols(y.cross(z), y, z));
+            Affine3A::from_rotation_translation(rot, pos)
+        };
+        let mut joints = [Affine3A::IDENTITY; xr::HAND_JOINT_COUNT];
+        joints[xr::HandJoint::WRIST] = joint(Wrist, Vec3::Z, -side * Vec3::X);
+        for (xr_joint, bone) in JOINTS_TO_BONES[1..].iter().flat_map(|f| f.iter()).copied() {
+            joints[xr_joint] = joint(bone, -side * Vec3::X, side * Vec3::Y);
+        }
+        // The palm is in the middle of the middle metacarpal, turned like the wrist.
+        let position = |bone: HandSkeletonBone| bone_transform_to_glam(model[bone as usize]).0;
+        let mut palm = joints[xr::HandJoint::WRIST];
+        palm.translation = ((position(MiddleFinger0) + position(MiddleFinger1)) / 2.0).into();
+        joints[xr::HandJoint::PALM] = palm;
+        joints
+    }
+
+    fn pose_from_affine(affine: Affine3A) -> xr::Posef {
+        let (_, rot, pos) = affine.to_scale_rotation_translation();
+        xr::Posef {
+            orientation: xr::Quaternionf {
+                x: rot.x,
+                y: rot.y,
+                z: rot.z,
+                w: rot.w,
+            },
+            position: xr::Vector3f {
+                x: pos.x,
+                y: pos.y,
+                z: pos.z,
+            },
+        }
+    }
+
+    fn user_path(hand: Hand) -> fakexr::UserPath {
+        match hand {
+            Hand::Left => fakexr::UserPath::LeftHand,
+            Hand::Right => fakexr::UserPath::RightHand,
+        }
+    }
+
+    /// Places the hand's joints in `pose` around its controller, which has profile `P` and is held
+    /// away from the origin.
+    fn place_joints<P: InteractionProfile>(f: &Fixture, hand: Hand, pose: &Bones) {
+        let grip = Affine3A::from_rotation_translation(
+            Quat::from_euler(EulerRot::YXZ, 0.5, 0.2, 0.1),
+            Vec3::new(0.2, 1.1, -0.3),
+        );
+        fakexr::set_grip(f.raw_session(), user_path(hand), pose_from_affine(grip));
+        let raw = grip * Affine3A::from_mat4(ProfileData::new::<P>().hand_offset(hand));
+        let joints = joints_in_pose(hand, pose).map(|joint| pose_from_affine(raw * joint));
+        fakexr::set_hand_joints(f.raw_session(), user_path(hand), Some(joints));
+    }
+
+    struct Skeletons {
+        set: vr::VRActionSetHandle_t,
+        actions: [vr::VRActionHandle_t; 2],
+    }
+
+    impl Skeletons {
+        /// A fixture with hand trackers, and its skeleton actions.
+        fn new() -> (Fixture, Self) {
+            fakexr::set_hand_tracking_supported(true);
+            let f = Fixture::new();
+            f.load_actions(c"actions.json");
+            // fakexr can't locate in the stage space.
+            f.input
+                .openxr
+                .set_tracking_space(vr::ETrackingUniverseOrigin::Seated);
+            let skeletons = Self {
+                set: f.get_action_set_handle(c"/actions/set1"),
+                actions: [
+                    f.get_action_handle(c"/actions/set1/in/skellyl"),
+                    f.get_action_handle(c"/actions/set1/in/skellyr"),
+                ],
+            };
+            (f, skeletons)
+        }
+
+        /// Syncs and starts a frame, so the joints are located again.
+        fn frame(&self, f: &mut Fixture) {
+            f.sync(vr::VRActiveActionSet_t {
+                ulActionSet: self.set,
+                ..Default::default()
+            });
+            f.input.frame_start_update();
+        }
+
+        fn bones(
+            &self,
+            f: &Fixture,
+            hand: Hand,
+            space: vr::EVRSkeletalTransformSpace,
+            range: vr::EVRSkeletalMotionRange,
+        ) -> Bones {
+            let mut bones = [vr::VRBoneTransform_t::default(); Count as usize];
+            assert_eq!(
+                f.input.GetSkeletalBoneData(
+                    self.actions[hand as usize - 1],
+                    space,
+                    range,
+                    bones.as_mut_ptr(),
+                    bones.len() as u32,
+                ),
+                vr::EVRInputError::None
+            );
+            bones
+        }
+
+        fn level(&self, f: &Fixture, hand: Hand) -> vr::EVRSkeletalTrackingLevel {
+            let mut level = vr::EVRSkeletalTrackingLevel::Full;
+            assert_eq!(
+                f.input
+                    .GetSkeletalTrackingLevel(self.actions[hand as usize - 1], &mut level),
+                vr::EVRInputError::None
+            );
+            level
+        }
+
+        fn curls(&self, f: &Fixture, hand: Hand) -> [f32; 5] {
+            let mut summary = vr::VRSkeletalSummaryData_t::default();
+            assert_eq!(
+                f.input.GetSkeletalSummaryData(
+                    self.actions[hand as usize - 1],
+                    vr::EVRSummaryType::FromAnimation,
+                    &mut summary
+                ),
+                vr::EVRInputError::None
+            );
+            summary.flFingerCurl
+        }
+    }
+
+    #[track_caller]
+    fn assert_bones_eq(actual: &Bones, expected: &Bones, what: &str) {
+        for (i, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            let (pos, rot) = bone_transform_to_glam(*actual);
+            let (expected_pos, expected_rot) = bone_transform_to_glam(*expected);
+            assert!(
+                pos.distance(expected_pos) < 1e-4,
+                "{what}, bone {i}: {pos} != {expected_pos}"
+            );
+            assert!(
+                rot.normalize().dot(expected_rot.normalize()).abs() > 0.9999,
+                "{what}, bone {i}: {rot} != {expected_rot}"
+            );
+        }
+    }
+
+    /// Tracked joints in each of SteamVR's poses give SteamVR's bones for that pose.
+    fn check_tracked_bones<P: InteractionProfile>(
+        f: &mut Fixture,
+        skeletons: &Skeletons,
+        source: xr::HandTrackingDataSourceEXT,
+        level: vr::EVRSkeletalTrackingLevel,
+    ) {
+        use vr::{EVRSkeletalMotionRange as Range, EVRSkeletalTransformSpace as Space};
+        let name = P::profile_path();
+        for hand in [Hand::Left, Hand::Right] {
+            f.set_interaction_profile::<P>(user_path(hand));
+            fakexr::set_hand_tracked(f.raw_session(), user_path(hand), Some(source));
+            let poses = match hand {
+                Hand::Left => [
+                    ("grip limit", &generated::left_hand::GRIPLIMIT),
+                    ("fist", &generated::left_hand::FIST),
+                    ("open hand", &generated::left_hand::OPENHAND),
+                ],
+                Hand::Right => [
+                    ("grip limit", &generated::right_hand::GRIPLIMIT),
+                    ("fist", &generated::right_hand::FIST),
+                    ("open hand", &generated::right_hand::OPENHAND),
+                ],
+            };
+            for (pose_name, pose) in poses {
+                place_joints::<P>(f, hand, pose);
+                skeletons.frame(f);
+                let what = format!("{name} {hand:?} {pose_name}");
+                assert_eq!(skeletons.level(f, hand), level, "{what}");
+                // The aux bones follow the knuckles, see aux_bones_follow_the_last_knuckles.
+                // (SteamVR's fist moves the thumb but not its aux bone.)
+                let mut expected = *pose;
+                set_aux_bones(&mut expected, hand);
+                let mut model = expected;
+                finalize_transforms(&mut model, Space::Model);
+                for range in [Range::WithoutController, Range::WithController] {
+                    let parent = skeletons.bones(f, hand, Space::Parent, range);
+                    assert_bones_eq(&parent, &expected, &format!("{what}, parent space"));
+                    let bones = skeletons.bones(f, hand, Space::Model, range);
+                    assert_bones_eq(&bones, &model, &format!("{what}, model space"));
+                }
+                // So do the curls, except for the Index's thumb (see force_estimated_thumb). The
+                // fist barely bends the thumb.
+                let curls = skeletons.curls(f, hand);
+                match pose_name {
+                    "fist" => assert!(curls[1..].iter().all(|c| *c > 0.8), "{what}: {curls:?}"),
+                    "open hand" => assert!(curls.iter().all(|c| *c < 0.2), "{what}: {curls:?}"),
+                    _ => {}
+                }
+            }
+            fakexr::set_hand_tracked(f.raw_session(), user_path(hand), None);
+            fakexr::set_hand_joints(f.raw_session(), user_path(hand), None);
+        }
+    }
+
+    #[test]
+    fn controller_joints_of_finger_sensing_controllers_give_steamvr_bones() {
+        use crate::input::profiles::{frame_controller::FrameController, knuckles::Knuckles};
+        let (mut f, skeletons) = Skeletons::new();
+        let source = xr::HandTrackingDataSourceEXT::CONTROLLER;
+        let level = vr::EVRSkeletalTrackingLevel::Partial;
+        check_tracked_bones::<Knuckles>(&mut f, &skeletons, source, level);
+        check_tracked_bones::<FrameController>(&mut f, &skeletons, source, level);
+    }
+
+    #[test]
+    fn optically_tracked_joints_give_steamvr_bones() {
+        use crate::input::profiles::{
+            oculus_touch::OculusTouch, simple_controller::SimpleController,
+        };
+        let (mut f, skeletons) = Skeletons::new();
+        let source = xr::HandTrackingDataSourceEXT::UNOBSTRUCTED;
+        let level = vr::EVRSkeletalTrackingLevel::Full;
+        check_tracked_bones::<SimpleController>(&mut f, &skeletons, source, level);
+        // A hand that let go of its controller
+        check_tracked_bones::<OculusTouch>(&mut f, &skeletons, source, level);
+    }
+
+    /// Joints derived from a controller that doesn't sense the fingers only follow its buttons
+    /// and capacitive sensors, so its skeleton is estimated from them like SteamVR does.
+    fn check_estimated_bones<P: InteractionProfile>(f: &mut Fixture, skeletons: &Skeletons) {
+        use vr::EVRSkeletalTrackingLevel::*;
+        use vr::{EVRSkeletalMotionRange as Range, EVRSkeletalTransformSpace as Space};
+        use xr::HandTrackingDataSourceEXT as Source;
+        let name = P::profile_path();
+        for hand in [Hand::Left, Hand::Right] {
+            let (open, fist) = match hand {
+                Hand::Left => (&generated::left_hand::OPENHAND, &generated::left_hand::FIST),
+                Hand::Right => (
+                    &generated::right_hand::OPENHAND,
+                    &generated::right_hand::FIST,
+                ),
+            };
+            let what = format!("{name} {hand:?}");
+            f.set_interaction_profile::<P>(user_path(hand));
+            // The joints make a fist, but nothing is touched.
+            fakexr::set_hand_tracked(f.raw_session(), user_path(hand), Some(Source::CONTROLLER));
+            place_joints::<P>(f, hand, fist);
+            skeletons.frame(f);
+            assert_eq!(skeletons.level(f, hand), Estimated, "{what}");
+            for range in [Range::WithoutController, Range::WithController] {
+                let bones = skeletons.bones(f, hand, Space::Parent, range);
+                assert_bones_eq(&bones, open, &format!("{what}, controller joints"));
+            }
+            assert_eq!(skeletons.curls(f, hand), [0.0; 5], "{what}");
+
+            // The hand let go of the controller and is tracked optically.
+            fakexr::set_hand_tracked(f.raw_session(), user_path(hand), Some(Source::UNOBSTRUCTED));
+            skeletons.frame(f);
+            assert_eq!(skeletons.level(f, hand), Full, "{what}");
+            let mut expected = *fist;
+            set_aux_bones(&mut expected, hand);
+            let bones = skeletons.bones(f, hand, Space::Parent, Range::WithoutController);
+            assert_bones_eq(&bones, &expected, &format!("{what}, optical joints"));
+
+            fakexr::set_hand_tracked(f.raw_session(), user_path(hand), None);
+            fakexr::set_hand_joints(f.raw_session(), user_path(hand), None);
+        }
+    }
+
+    #[test]
+    fn controller_joints_of_touch_like_controllers_are_estimated() {
+        use crate::input::profiles::{
+            meta_touch_plus::MetaTouchPlus,
+            oculus_touch::OculusTouch,
+            pico::{Pico4, PicoNeo3},
+            touch_pro::TouchPro,
+            vive_focus3::ViveFocus3,
+        };
+        let (mut f, skeletons) = Skeletons::new();
+        check_estimated_bones::<OculusTouch>(&mut f, &skeletons);
+        check_estimated_bones::<MetaTouchPlus>(&mut f, &skeletons);
+        check_estimated_bones::<TouchPro>(&mut f, &skeletons);
+        check_estimated_bones::<Pico4>(&mut f, &skeletons);
+        check_estimated_bones::<PicoNeo3>(&mut f, &skeletons);
+        check_estimated_bones::<ViveFocus3>(&mut f, &skeletons);
     }
 }

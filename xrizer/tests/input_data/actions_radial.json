@@ -1,0 +1,40 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/menu",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/menu/in/item0",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/menu/in/item1",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/menu/in/item3",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/menu/in/center",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/menu/in/unnumbered",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/menu/in/beyond",
+			"type": "boolean"
+		}
+	],
+	"default_bindings": [
+		{
+			"controller_type": "knuckles",
+			"binding_url": "knuckles_radial.json"
+		}
+	]
+}

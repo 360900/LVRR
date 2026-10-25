@@ -1,0 +1,45 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/set1",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/set1/in/press",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/set1/in/offonly",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/set1/in/physical",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/set1/in/silent",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/set1/in/trig",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/set1/in/toggle",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/set1/out/haptic",
+			"type": "vibration"
+		}
+	],
+	"default_bindings": [
+		{
+			"controller_type": "oculus_touch",
+			"binding_url": "oculus_haptics.json"
+		}
+	],
+	"localization": []
+}

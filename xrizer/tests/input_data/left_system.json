@@ -1,0 +1,26 @@
+{
+	"bindings": {
+		"/actions/main": {
+			"sources": [
+				{
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/menu"
+						}
+					},
+					"mode": "button",
+					"path": "/user/hand/left/input/system"
+				},
+				{
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/menu"
+						}
+					},
+					"mode": "button",
+					"path": "/user/hand/right/input/system"
+				}
+			]
+		}
+	}
+}

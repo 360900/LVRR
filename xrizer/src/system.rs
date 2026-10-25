@@ -2460,6 +2460,25 @@ mod tests {
             .then_some(event)
     }
 
+    /// A refresh rate change is a change of the headset's display frequency property.
+    #[test]
+    fn refresh_rate_change_event() {
+        let (xr, system) = system_with_events();
+        fakexr::set_display_refresh_rate(session(&xr), 120.0);
+        xr.poll_events();
+        let event = next_event(&system).expect("no event");
+        assert_eq!(event.eventType, vr::EVREventType::PropertyChanged.0);
+        assert_eq!(event.trackedDeviceIndex, vr::k_unTrackedDeviceIndex_Hmd);
+        let prop = unsafe { event.data.property.prop };
+        assert_eq!(prop, vr::ETrackedDeviceProperty::DisplayFrequency_Float);
+        assert_eq!(xr.get_refresh_rate(), 120.0);
+
+        // Runtimes report the rate again when the headset reconnects, which changes nothing.
+        fakexr::set_display_refresh_rate(session(&xr), 120.0);
+        xr.poll_events();
+        assert!(next_event(&system).is_none());
+    }
+
     fn session(xr: &RealOpenXrData) -> xr::sys::Session {
         xr.session_data.get().session.as_raw()
     }

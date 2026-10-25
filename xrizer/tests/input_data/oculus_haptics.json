@@ -1,0 +1,83 @@
+{
+	"bindings": {
+		"/actions/set1": {
+			"haptics": [
+				{
+					"output": "/actions/set1/out/haptic",
+					"path": "/user/hand/left/output/haptic"
+				},
+				{
+					"output": "/actions/set1/out/haptic",
+					"path": "/user/hand/right/output/haptic"
+				}
+			],
+			"sources": [
+				{
+					"mode": "button",
+					"path": "/user/hand/left/input/trigger",
+					"inputs": {
+						"click": {
+							"output": "/actions/set1/in/press"
+						}
+					}
+				},
+				{
+					"mode": "button",
+					"path": "/user/hand/left/input/grip",
+					"inputs": {
+						"click": {
+							"output": "/actions/set1/in/offonly"
+						}
+					},
+					"parameters": {
+						"click_activate_threshold": "0.7",
+						"click_deactivate_threshold": "0.55",
+						"haptic_amplitude": "0.5",
+						"haptic_frequency": "100",
+						"haptic_duration": "0.05",
+						"off_haptic_amplitude": "0"
+					}
+				},
+				{
+					"mode": "button",
+					"path": "/user/hand/left/input/x",
+					"inputs": {
+						"click": {
+							"output": "/actions/set1/in/physical"
+						}
+					}
+				},
+				{
+					"mode": "button",
+					"path": "/user/hand/right/input/trigger",
+					"inputs": {
+						"click": {
+							"output": "/actions/set1/in/silent"
+						}
+					},
+					"parameters": {
+						"haptic_amplitude": "0"
+					}
+				},
+				{
+					"mode": "trigger",
+					"path": "/user/hand/right/input/trigger",
+					"inputs": {
+						"click": {
+							"output": "/actions/set1/in/trig"
+						}
+					}
+				},
+				{
+					"mode": "toggle_button",
+					"path": "/user/hand/right/input/grip",
+					"inputs": {
+						"click": {
+							"output": "/actions/set1/in/toggle"
+						}
+					}
+				}
+			]
+		}
+	}
+}

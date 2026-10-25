@@ -14,6 +14,8 @@ use std::iter::Iterator;
 pub struct Knuckles;
 
 impl InteractionProfile for Knuckles {
+    // The trackpad clicks by force, and a dpad on it plays a tick when a direction engages.
+    const USE_FORCE_DPAD: bool = true;
     // The finger curl sensors measure the fingers only partially.
     const SKELETAL_TRACKING_LEVEL: Option<openvr::EVRSkeletalTrackingLevel> =
         Some(openvr::EVRSkeletalTrackingLevel::Partial);

@@ -1,0 +1,41 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/game",
+			"usage": "leftright"
+		},
+		{
+			"name": "/actions/menu",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/game/in/fire",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/game/in/grab",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/game/in/delayed",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/menu/in/select",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/menu/in/drag",
+			"type": "boolean"
+		}
+	],
+	"default_bindings": [
+		{
+			"controller_type": "oculus_touch",
+			"binding_url": "oculus_haptics_sets.json"
+		}
+	],
+	"localization": []
+}

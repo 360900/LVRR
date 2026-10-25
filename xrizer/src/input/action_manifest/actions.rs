@@ -48,6 +48,10 @@ pub enum ControllerType {
     HolographicController,
     #[serde(rename = "hpmotioncontroller")]
     HPMotionController,
+    ViveCosmosController,
+    PicoController,
+    /// The gamepad, `/user/gamepad`.
+    Gamepad,
     /// The headset, see [super::bindings::handle_hmd_bindings].
     GenericHmd,
     #[serde(untagged)]
@@ -66,6 +70,9 @@ impl std::str::FromStr for ControllerType {
             "oculus_touch" => Self::OculusTouch,
             "holographic_controller" => Self::HolographicController,
             "hpmotioncontroller" => Self::HPMotionController,
+            "vive_cosmos_controller" => Self::ViveCosmosController,
+            "pico_controller" => Self::PicoController,
+            "gamepad" => Self::Gamepad,
             "generic_hmd" => Self::GenericHmd,
             other => Self::Unknown(other.to_owned()),
         })
@@ -82,6 +89,9 @@ impl std::fmt::Display for ControllerType {
             Self::OculusTouch => "oculus_touch",
             Self::HolographicController => "holographic_controller",
             Self::HPMotionController => "hpmotioncontroller",
+            Self::ViveCosmosController => "vive_cosmos_controller",
+            Self::PicoController => "pico_controller",
+            Self::Gamepad => "gamepad",
             Self::GenericHmd => "generic_hmd",
             Self::Unknown(value) => value,
         };
@@ -278,14 +288,13 @@ pub fn load_action_sets(
     action_sets
 }
 
-fn create_action<T: xr::ActionTy>(
+/// The set of an action, created if the manifest doesn't list it.
+fn action_set<'a, 'd>(
     instance: &xr::Instance,
     names: &mut XrNames,
-    data: &ActionDataCommon,
-    sets: &mut HashMap<String, xr::ActionSet>,
-    english: &HashMap<String, String>,
-    paths: &[xr::Path],
-) -> Option<xr::Action<T>> {
+    data: &'d ActionDataCommon,
+    sets: &'a mut HashMap<String, xr::ActionSet>,
+) -> Option<(&'d str, &'a mut xr::ActionSet)> {
     let Some(set_name) = data.name.action_set_name() else {
         warn!(
             "Action {} is not in an action set, skipping",
@@ -300,6 +309,18 @@ fn create_action<T: xr::ActionTy>(
             entry.insert(create_action_set(instance, names, set_name, None)?)
         }
     };
+    Some((set_name, set))
+}
+
+fn create_action<T: xr::ActionTy>(
+    instance: &xr::Instance,
+    names: &mut XrNames,
+    data: &ActionDataCommon,
+    sets: &mut HashMap<String, xr::ActionSet>,
+    english: &HashMap<String, String>,
+    paths: &[xr::Path],
+) -> Option<xr::Action<T>> {
+    let (set_name, set) = action_set(instance, names, data, sets)?;
     let xr_friendly_name = names.action_name(set_name, &data.name.cleaned_name());
     let localized = english.get(&data.name.path).map(String::as_str);
     trace!("Creating action {xr_friendly_name} (localized: {localized:?}) in set {set_name:?}");
@@ -326,12 +347,10 @@ pub fn load_actions(
     english: &HashMap<String, String>,
     sets: &mut HashMap<String, xr::ActionSet>,
     actions: Vec<ActionType>,
-    left_hand: xr::Path,
-    right_hand: xr::Path,
+    paths: &[xr::Path],
 ) -> LoadedActionDataMap {
     let mut ret = HashMap::with_capacity(actions.len());
     for action in actions {
-        let paths = &[left_hand, right_hand];
         macro_rules! create_action {
             ($ty:ty, $data:expr) => {{
                 let Some(action) =
@@ -373,12 +392,17 @@ pub fn load_actions(
                     data: Default::default(),
                 },
             ),
+            // OpenXR has no vector3 actions, so these only get scalar_constant bindings.
             ActionType::Vector3(data) => {
-                warn!(
-                    "Got vector3 action {}, but these are currently unsupported.",
-                    data.name.path
-                );
-                continue;
+                if action_set(instance, names, data, sets).is_none() {
+                    continue;
+                }
+                (
+                    &data.name,
+                    Vector3 {
+                        state: Default::default(),
+                    },
+                )
             }
             ActionType::Pose(data) => (&data.name, Pose),
             ActionType::Skeleton(SkeletonData { skeleton, data }) => {

@@ -1,4 +1,7 @@
+mod timing;
+
 use super::GraphicsBackend;
+use crate::compositor::GpuDone;
 use ash::vk::{self, Handle};
 use log::warn;
 use openvr as vr;
@@ -19,6 +22,10 @@ struct RealSessionData {
     eye_extents: Mutex<Vec<[Option<vk::Extent2D>; 2]>>,
     /// Per eye, for multisampled textures that can't be resolved straight into the swapchain.
     resolve_images: Mutex<[Option<ResolveImage>; 2]>,
+    /// Per eye, for textures whose data has to be reinterpreted on the way, see [EyeCopy].
+    staging_images: Mutex<[Option<ResolveImage>; 2]>,
+    /// Set up with the first frame, and kept when the swapchain is recreated.
+    gpu_timer: Option<timing::GpuTimer>,
 }
 
 impl RealSessionData {
@@ -31,14 +38,15 @@ impl RealSessionData {
             if let Some(pipeline) = &self.overlay_pipeline {
                 pipeline.destroy(device);
             }
-            for image in self
-                .resolve_images
-                .into_inner()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .iter()
-                .flatten()
-            {
-                image.destroy(device);
+            for images in [self.resolve_images, self.staging_images] {
+                for image in images
+                    .into_inner()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .iter()
+                    .flatten()
+                {
+                    image.destroy(device);
+                }
             }
             for &fence in &self.fences {
                 device.destroy_fence(fence, None);
@@ -75,9 +83,20 @@ pub struct VulkanData {
     /// The alignment of host memory the device can import, if it has VK_EXT_external_memory_host
     /// enabled.
     pub host_import_alignment: Option<vk::DeviceSize>,
+    /// Who can import the device's memory, if it can export buffer memory as opaque fds.
+    pub memory_export: Option<DeviceIds>,
+    /// Whether the device can export semaphores as opaque fds.
+    pub semaphore_export: bool,
 }
 
-/// A single sampled image in the format and size of a multisampled eye texture.
+/// Memory exported as an opaque fd can only be imported on the same device and driver.
+#[derive(Copy, Clone)]
+pub struct DeviceIds {
+    pub device_uuid: [u8; vk::UUID_SIZE],
+    pub driver_uuid: [u8; vk::UUID_SIZE],
+}
+
+/// A single sampled image the size of an eye texture, to resolve or reinterpret it in.
 struct ResolveImage {
     image: vk::Image,
     memory: vk::DeviceMemory,
@@ -156,33 +175,81 @@ impl ResolveImage {
     }
 }
 
-/// How an eye texture gets into a swapchain image.
+/// How an eye texture gets into a swapchain image. Copies keep the bytes, blits convert the values
+/// read through the source's format into the destination's.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum EyeCopy {
     Resolve,
-    /// The swapchain has the texture's format, or its sRGB variant for gamma encoded textures.
+    /// The swapchain has the texture's format, its sRGB variant for gamma encoded textures, or the
+    /// UNORM format of an integer texture's bits.
     Copy,
-    /// The swapchain format was substituted.
+    /// The swapchain format was substituted, and the texture's values are linear as read.
     Blit,
+    /// Gamma encoded data for a swapchain that isn't sRGB: copied into an image of this format,
+    /// the texture's _SRGB variant, which decodes it, then blitted. Integer textures are copied
+    /// into their UNORM format this way, since integers can't be blitted.
+    CopyBlit(vk::Format),
+    /// Gamma encoded data for an sRGB swapchain of another layout: blitted into an image of this
+    /// format, the swapchain's UNORM variant, which keeps the encoded values, then copied.
+    BlitCopy(vk::Format),
 }
 
 impl EyeCopy {
-    /// `game_format` is the format of the texture's data, which may be the sRGB variant of
-    /// `texture_format`. vkCmdResolveImage needs both images to have the same format, and copies
-    /// and blits a single sampled source, so other multisampled textures are resolved into an image
-    /// of their own format first.
+    /// `gamma` is whether the texture's values are sRGB encoded as its format reads them.
+    /// vkCmdResolveImage needs both images to have the same format, and copies and blits a single
+    /// sampled source, so other multisampled textures are resolved into an image of their own
+    /// format first.
     fn new(
         texture_format: vk::Format,
-        game_format: vk::Format,
+        gamma: bool,
         swapchain_format: vk::Format,
         multisampled: bool,
     ) -> Self {
-        if multisampled && swapchain_format == texture_format {
-            Self::Resolve
-        } else if swapchain_format == game_format {
-            Self::Copy
+        if let Some(unorm) = unorm_bits(texture_format) {
+            if gamma {
+                crate::warn_once!(
+                    "Can't decode gamma encoded {:?} textures, they show too bright",
+                    texture_format
+                );
+            }
+            return if swapchain_format == unorm {
+                Self::Copy
+            } else {
+                Self::CopyBlit(unorm)
+            };
+        }
+        let same_data = if gamma {
+            srgb_variant(texture_format) == Some(swapchain_format)
         } else {
+            swapchain_format == texture_format
+        };
+        if same_data {
+            if multisampled && swapchain_format == texture_format {
+                Self::Resolve
+            } else {
+                Self::Copy
+            }
+        } else if !gamma {
             Self::Blit
+        } else if let Some(unorm) = unorm_variant(swapchain_format) {
+            Self::BlitCopy(unorm)
+        } else if let Some(srgb) = srgb_variant(texture_format) {
+            Self::CopyBlit(srgb)
+        } else {
+            crate::warn_once!(
+                "Can't decode gamma encoded {:?} textures for {:?} swapchains, they show too bright",
+                texture_format,
+                swapchain_format
+            );
+            Self::Blit
+        }
+    }
+
+    /// The format of the image the texture is converted in on the way, if any.
+    fn staging_format(self) -> Option<vk::Format> {
+        match self {
+            Self::CopyBlit(format) | Self::BlitCopy(format) => Some(format),
+            _ => None,
         }
     }
 }
@@ -263,6 +330,14 @@ impl GraphicsBackend for VulkanData {
         let device = unsafe { (*texture).m_pDevice };
         vk::Device::from_raw(device as _) == self.device.handle()
     }
+
+    fn fallback_format(format: u32, offered: &[u32]) -> Option<u32> {
+        fallback_formats(vk::Format::from_raw(format as _))
+            .iter()
+            .map(|format| format.as_raw() as u32)
+            .find(|format| offered.contains(format))
+    }
+
     fn store_swapchain_images(&mut self, images: Vec<u64>, format: Self::Format) {
         let images: Vec<vk::Image> = images.into_iter().map(vk::Image::from_raw).collect();
         let pool = unsafe {
@@ -299,6 +374,10 @@ impl GraphicsBackend for VulkanData {
             .collect();
 
         let eye_extents = Mutex::new(vec![[None; 2]; images.len()]);
+        let gpu_timer = self
+            .real_data
+            .as_mut()
+            .and_then(|data| data.gpu_timer.take());
         if let Some(data) = self.real_data.replace(RealSessionData {
             images,
             format: vk::Format::from_raw(format as _),
@@ -308,6 +387,8 @@ impl GraphicsBackend for VulkanData {
             overlay_pipeline: Default::default(),
             eye_extents,
             resolve_images: Default::default(),
+            staging_images: Default::default(),
+            gpu_timer,
         }) {
             data.destroy(&self.device);
         }
@@ -325,11 +406,8 @@ impl GraphicsBackend for VulkanData {
             create_flags: xr::SwapchainCreateFlags::EMPTY,
             usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT
                 | xr::SwapchainUsageFlags::TRANSFER_DST,
-            format: get_colorspace_corrected_format(
-                vk::Format::from_raw(texture.m_nFormat as _),
-                color_space,
-            )
-            .as_raw() as _,
+            format: swapchain_format(vk::Format::from_raw(texture.m_nFormat as _), color_space)
+                .as_raw() as _,
             sample_count: texture.m_nSampleCount,
             width: extent.width,
             height: extent.height,
@@ -369,16 +447,26 @@ impl GraphicsBackend for VulkanData {
         };
 
         let texture_format = vk::Format::from_raw(texture.m_nFormat as _);
-        let game_format = get_colorspace_corrected_format(texture_format, color_space);
+        let gamma = holds_gamma(texture_format, color_space);
         let multisampled = texture.m_nSampleCount > 1;
-        let method = EyeCopy::new(texture_format, game_format, data.format, multisampled);
+        let method = EyeCopy::new(texture_format, gamma, data.format, multisampled);
         let resolve_image = if multisampled && method != EyeCopy::Resolve {
-            let Some(image) = self.resolve_image(eye, texture) else {
+            let Some(image) = self.eye_image(&data.resolve_images, eye, texture, texture_format)
+            else {
                 return xr_extent;
             };
             Some(image)
         } else {
             None
+        };
+        let staging_image = match method.staging_format() {
+            Some(format) => {
+                let Some(image) = self.eye_image(&data.staging_images, eye, texture, format) else {
+                    return xr_extent;
+                };
+                Some(image)
+            }
+            None => None,
         };
 
         let clear = {
@@ -465,31 +553,7 @@ impl GraphicsBackend for VulkanData {
 
             let (src_image, src_subresource) = match resolve_image {
                 Some(image) => {
-                    let range = vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    };
-                    // The old contents aren't needed, but earlier copies from it must be done.
-                    self.device.cmd_pipeline_barrier(
-                        buf,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[],
-                        &[vk::ImageMemoryBarrier {
-                            src_access_mask: vk::AccessFlags::empty(),
-                            dst_access_mask: vk::AccessFlags::TRANSFER_WRITE,
-                            old_layout: vk::ImageLayout::UNDEFINED,
-                            new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                            image,
-                            subresource_range: range,
-                            ..Default::default()
-                        }],
-                    );
+                    staging_barrier(&self.device, buf, image, true);
                     self.device.cmd_resolve_image(
                         buf,
                         game_image,
@@ -504,23 +568,7 @@ impl GraphicsBackend for VulkanData {
                             extent,
                         }],
                     );
-                    self.device.cmd_pipeline_barrier(
-                        buf,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[],
-                        &[vk::ImageMemoryBarrier {
-                            src_access_mask: vk::AccessFlags::TRANSFER_WRITE,
-                            dst_access_mask: vk::AccessFlags::TRANSFER_READ,
-                            old_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                            new_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                            image,
-                            subresource_range: range,
-                            ..Default::default()
-                        }],
-                    );
+                    staging_barrier(&self.device, buf, image, false);
                     (image, subresource)
                 }
                 None => (game_image, game_subresource),
@@ -537,16 +585,23 @@ impl GraphicsBackend for VulkanData {
                 extent,
             };
 
-            if method == EyeCopy::Resolve {
-                self.device.cmd_resolve_image(
+            let copy_image = |src: vk::Image, dst: vk::Image, region: vk::ImageResolve| {
+                self.device.cmd_copy_image(
                     buf,
-                    src_image,
+                    src,
                     vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                    swapchain_image,
+                    dst,
                     vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    &[copy],
+                    &[
+                        // SAFETY: ImageResolve and ImageCopy have the same fields and layout.
+                        #[allow(unused_unsafe, clippy::missing_transmute_annotations)]
+                        unsafe {
+                            std::mem::transmute(region)
+                        },
+                    ],
                 );
-            } else if method == EyeCopy::Blit {
+            };
+            let blit_image = |src: vk::Image, dst: vk::Image, region: vk::ImageResolve| {
                 // Blits take the corners of each region instead of an extent.
                 let end = |offset: vk::Offset3D| vk::Offset3D {
                     x: offset.x + extent.width as i32,
@@ -555,33 +610,53 @@ impl GraphicsBackend for VulkanData {
                 };
                 self.device.cmd_blit_image(
                     buf,
-                    src_image,
+                    src,
                     vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                    swapchain_image,
+                    dst,
                     vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                     &[vk::ImageBlit {
-                        src_subresource: copy.src_subresource,
-                        src_offsets: [copy.src_offset, end(copy.src_offset)],
-                        dst_subresource: copy.dst_subresource,
-                        dst_offsets: [copy.dst_offset, end(copy.dst_offset)],
+                        src_subresource: region.src_subresource,
+                        src_offsets: [region.src_offset, end(region.src_offset)],
+                        dst_subresource: region.dst_subresource,
+                        dst_offsets: [region.dst_offset, end(region.dst_offset)],
                     }],
                     vk::Filter::NEAREST,
                 );
-            } else {
-                self.device.cmd_copy_image(
+            };
+
+            match (method, staging_image) {
+                (EyeCopy::Resolve, _) => self.device.cmd_resolve_image(
                     buf,
                     src_image,
                     vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                     swapchain_image,
                     vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    &[
-                        // SAFETY: ImageResolve and ImageCopy have the same fields and layout.
-                        #[allow(unused_unsafe, clippy::missing_transmute_annotations)]
-                        unsafe {
-                            std::mem::transmute(copy)
-                        },
-                    ],
-                );
+                    &[copy],
+                ),
+                (EyeCopy::Copy, _) => copy_image(src_image, swapchain_image, copy),
+                (EyeCopy::CopyBlit(_) | EyeCopy::BlitCopy(_), Some(staging)) => {
+                    // The region keeps its place in the staging image, like in the resolve image.
+                    let into_staging = vk::ImageResolve {
+                        dst_subresource: subresource,
+                        dst_offset: offset,
+                        ..copy
+                    };
+                    let from_staging = vk::ImageResolve {
+                        src_subresource: subresource,
+                        ..copy
+                    };
+                    staging_barrier(&self.device, buf, staging, true);
+                    if let EyeCopy::CopyBlit(_) = method {
+                        copy_image(src_image, staging, into_staging);
+                        staging_barrier(&self.device, buf, staging, false);
+                        blit_image(staging, swapchain_image, from_staging);
+                    } else {
+                        blit_image(src_image, staging, into_staging);
+                        staging_barrier(&self.device, buf, staging, false);
+                        copy_image(staging, swapchain_image, from_staging);
+                    }
+                }
+                _ => blit_image(src_image, swapchain_image, copy),
             }
 
             // transition swapchain image back to OPTIMAL
@@ -633,6 +708,13 @@ impl GraphicsBackend for VulkanData {
         if extent.width == 0 || extent.height == 0 {
             return xr_extent;
         }
+        let format = vk::Format::from_raw(texture.m_nFormat as _);
+        // Sampling them as colors is undefined, and a view of another format needs an image
+        // created for it.
+        if unorm_bits(format).is_some() {
+            crate::warn_once!("Can't draw {:?} overlay textures", format);
+            return xr_extent;
+        }
         let data = self.real_data.as_mut().unwrap();
         let buf = data.bufs[image_index];
         // The image's resources can only be replaced once its previous copy has finished.
@@ -660,7 +742,7 @@ impl GraphicsBackend for VulkanData {
                 .create_image_view(
                     &vk::ImageViewCreateInfo::default()
                         .image(game_image)
-                        .format(vk::Format::from_raw(texture.m_nFormat as _))
+                        .format(format)
                         .view_type(vk::ImageViewType::TYPE_2D)
                         .components(vk::ComponentMapping::default())
                         .subresource_range(game_range),
@@ -705,8 +787,7 @@ impl GraphicsBackend for VulkanData {
         let OverlaySlot {
             set, framebuffer, ..
         } = *slot;
-        let decode_srgb =
-            overlay_needs_srgb_decode(vk::Format::from_raw(texture.m_nFormat as _), color_space);
+        let decode_srgb = holds_gamma(format, color_space);
         let clear = [vk::ClearValue::default()];
         let render_pass_info = vk::RenderPassBeginInfo::default()
             .render_pass(renderpass)
@@ -801,21 +882,32 @@ impl GraphicsBackend for VulkanData {
             wait_for_fences(&self.device, &data.fences);
         }
     }
+
+    fn frame_submitted(&mut self, done: GpuDone) {
+        let Some(data) = self.real_data.as_mut() else {
+            return;
+        };
+        data.gpu_timer
+            .get_or_insert_with(|| timing::GpuTimer::new(self.device.clone()))
+            .frame_submitted(self.queue, done);
+    }
 }
 impl VulkanData {
-    /// The image to resolve `eye`'s multisampled texture into, if it could be created.
-    fn resolve_image(
+    /// An image of `format` and the texture's size out of `images`, to resolve or reinterpret
+    /// `eye`'s texture in, if it could be created.
+    fn eye_image(
         &self,
+        images: &Mutex<[Option<ResolveImage>; 2]>,
         eye: vr::EVREye,
         texture: &vr::VRVulkanTextureData_t,
+        format: vk::Format,
     ) -> Option<vk::Image> {
         let data = self.real_data.as_ref()?;
-        let format = vk::Format::from_raw(texture.m_nFormat as _);
         let extent = vk::Extent2D {
             width: texture.m_nWidth,
             height: texture.m_nHeight,
         };
-        let mut images = data.resolve_images.lock().unwrap();
+        let mut images = images.lock().unwrap();
         let slot = &mut images[usize::from(eye != vr::EVREye::Left)];
         if let Some(image) = slot
             .as_ref()
@@ -833,10 +925,7 @@ impl VulkanData {
         }
         ResolveImage::new(self, format, extent)
             .inspect_err(|e| {
-                crate::warn_once!(
-                    "Failed to create an image to resolve the eye texture in: {}",
-                    e
-                )
+                crate::warn_once!("Failed to create an image for the eye texture: {}", e)
             })
             .ok()
             .map(|image| slot.insert(image).image)
@@ -906,6 +995,8 @@ impl VulkanData {
             real_data: Default::default(),
             owns_device: false,
             host_import_alignment: None,
+            memory_export: None,
+            semaphore_export: false,
         }
     }
 
@@ -922,12 +1013,13 @@ impl VulkanData {
         Self::try_new_temporary_with(xr_instance, system_id, false)
     }
 
-    /// Like [Self::try_new_temporary], with VK_EXT_external_memory_host if `host_import` and the
-    /// device has it.
+    /// Like [Self::try_new_temporary]. For the GL bridge (`bridge`), with
+    /// VK_EXT_external_memory_host if the device has it, [Self::memory_export] and
+    /// [Self::semaphore_export].
     pub fn try_new_temporary_with(
         xr_instance: &xr::Instance,
         system_id: xr::SystemId,
-        host_import: bool,
+        bridge: bool,
     ) -> Result<Self, String> {
         let entry = new_entry();
 
@@ -938,10 +1030,12 @@ impl VulkanData {
             .split_ascii_whitespace()
             .map(|ext| CString::new(ext).unwrap())
             .collect();
+        let has_inst_ext = |name: &CStr| inst_exts.iter().any(|ext| ext.as_c_str() == name);
         // The import alignment is only reported through vkGetPhysicalDeviceProperties2.
-        let has_properties2 = inst_exts
-            .iter()
-            .any(|ext| ext.as_c_str() == ash::khr::get_physical_device_properties2::NAME);
+        let has_properties2 = has_inst_ext(ash::khr::get_physical_device_properties2::NAME);
+        let has_memory_capabilities = has_inst_ext(ash::khr::external_memory_capabilities::NAME);
+        let has_semaphore_capabilities =
+            has_inst_ext(ash::khr::external_semaphore_capabilities::NAME);
         let inst_exts: Vec<*const c_char> = inst_exts.iter().map(|ext| ext.as_ptr()).collect();
 
         let instance = unsafe {
@@ -959,17 +1053,28 @@ impl VulkanData {
                 .map_err(|e| format!("Failed to create temporary Vulkan instance: {e}"))?
         };
 
-        let (physical_device, queue_family_index, device, host_import) =
+        let (physical_device, queue_family_index, device, host_import, runtime_exts) =
             Self::create_temporary_device(
                 xr_instance,
                 system_id,
                 &instance,
-                host_import && has_properties2,
+                bridge && has_properties2,
             )
             .inspect_err(|_| {
                 unsafe { instance.destroy_instance(None) };
             })?;
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
+        let enabled = |name: &CStr| runtime_exts.iter().any(|ext| ext.as_c_str() == name);
+        let memory_export = (bridge
+            && has_properties2
+            && has_memory_capabilities
+            && enabled(ash::khr::external_memory_fd::NAME))
+        .then(|| exportable_buffer_ids(&entry, &instance, physical_device))
+        .flatten();
+        let semaphore_export = bridge
+            && has_semaphore_capabilities
+            && enabled(ash::khr::external_semaphore_fd::NAME)
+            && exportable_semaphores(&entry, &instance, physical_device);
         let host_import_alignment = host_import.then(|| {
             let mut host = vk::PhysicalDeviceExternalMemoryHostPropertiesEXT::default();
             let mut props = vk::PhysicalDeviceProperties2::default().push_next(&mut host);
@@ -990,15 +1095,19 @@ impl VulkanData {
             real_data: Default::default(),
             owns_device: true,
             host_import_alignment,
+            memory_export,
+            semaphore_export,
         })
     }
 
+    /// Also returns whether VK_EXT_external_memory_host is enabled, and the runtime's extensions,
+    /// which are.
     fn create_temporary_device(
         xr_instance: &xr::Instance,
         system_id: xr::SystemId,
         instance: &ash::Instance,
         host_import: bool,
-    ) -> Result<(vk::PhysicalDevice, u32, ash::Device, bool), String> {
+    ) -> Result<(vk::PhysicalDevice, u32, ash::Device, bool, Vec<CString>), String> {
         let physical_device = vk::PhysicalDevice::from_raw(unsafe {
             xr_instance
                 .vulkan_graphics_device(system_id, instance.handle().as_raw() as _)
@@ -1041,9 +1150,9 @@ impl VulkanData {
             && dev_exts
                 .iter()
                 .any(|ext| ext.as_c_str() == ash::khr::external_memory::NAME);
-        let mut dev_exts: Vec<*const c_char> = dev_exts.iter().map(|ext| ext.as_ptr()).collect();
+        let mut names: Vec<*const c_char> = dev_exts.iter().map(|ext| ext.as_ptr()).collect();
         if host_import {
-            dev_exts.push(ash::ext::external_memory_host::NAME.as_ptr());
+            names.push(ash::ext::external_memory_host::NAME.as_ptr());
         }
 
         // find whatever graphics queue family
@@ -1063,14 +1172,81 @@ impl VulkanData {
                                 .queue_family_index(queue_family_index)
                                 .queue_priorities(&[1.0]),
                         ))
-                        .enabled_extension_names(&dev_exts),
+                        .enabled_extension_names(&names),
                     None,
                 )
                 .map_err(|e| format!("Could not create temporary vulkan device: {e}"))?
         };
 
-        Ok((physical_device, queue_family_index, device, host_import))
+        Ok((
+            physical_device,
+            queue_family_index,
+            device,
+            host_import,
+            dev_exts,
+        ))
     }
+}
+
+/// The IDs of `physical_device` if it can export memory of transfer source buffers as opaque fds.
+/// Needs VK_KHR_external_memory_capabilities and VK_KHR_get_physical_device_properties2.
+fn exportable_buffer_ids(
+    entry: &ash::Entry,
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+) -> Option<DeviceIds> {
+    let mut external = vk::ExternalBufferProperties::default();
+    unsafe {
+        (ash::khr::external_memory_capabilities::Instance::new(entry, instance)
+            .fp()
+            .get_physical_device_external_buffer_properties_khr)(
+            physical_device,
+            &vk::PhysicalDeviceExternalBufferInfo::default()
+                .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+                .handle_type(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD),
+            &mut external,
+        )
+    };
+    let features = external.external_memory_properties.external_memory_features;
+    // Dedicated allocations would need GL to import them as such.
+    if !features.contains(vk::ExternalMemoryFeatureFlags::EXPORTABLE)
+        || features.contains(vk::ExternalMemoryFeatureFlags::DEDICATED_ONLY)
+    {
+        return None;
+    }
+    let mut id = vk::PhysicalDeviceIDProperties::default();
+    let mut props = vk::PhysicalDeviceProperties2::default().push_next(&mut id);
+    unsafe {
+        ash::khr::get_physical_device_properties2::Instance::new(entry, instance)
+            .get_physical_device_properties2(physical_device, &mut props)
+    };
+    Some(DeviceIds {
+        device_uuid: id.device_uuid,
+        driver_uuid: id.driver_uuid,
+    })
+}
+
+/// Whether `physical_device` can export binary semaphores as opaque fds. Needs
+/// VK_KHR_external_semaphore_capabilities.
+fn exportable_semaphores(
+    entry: &ash::Entry,
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+) -> bool {
+    let mut external = vk::ExternalSemaphoreProperties::default();
+    unsafe {
+        (ash::khr::external_semaphore_capabilities::Instance::new(entry, instance)
+            .fp()
+            .get_physical_device_external_semaphore_properties_khr)(
+            physical_device,
+            &vk::PhysicalDeviceExternalSemaphoreInfo::default()
+                .handle_type(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD),
+            &mut external,
+        )
+    };
+    external
+        .external_semaphore_features
+        .contains(vk::ExternalSemaphoreFeatureFlags::EXPORTABLE)
 }
 
 /// UUID of the device the runtime renders on, which the images it shares with other APIs live on.
@@ -1404,54 +1580,220 @@ impl PipelineData {
     }
 }
 
-#[inline]
-fn get_colorspace_corrected_format(format: vk::Format, color_space: vr::EColorSpace) -> vk::Format {
-    static UNSUPPORTED: LazyLock<Mutex<HashSet<vk::Format>>> = LazyLock::new(Mutex::default);
-    // https://github.com/ValveSoftware/openvr/wiki/Vulkan#image-formats
-    match color_space {
-        vr::EColorSpace::Linear => {
-            crate::warn_unimplemented!("Linear colorspace");
-            format
-        }
-        // Auto, Gamma, and Auto for values that aren't a color space
-        _ => match format {
-            vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => vk::Format::R8G8B8A8_SRGB,
-            vk::Format::B8G8R8A8_UNORM | vk::Format::B8G8R8A8_SRGB => vk::Format::B8G8R8A8_SRGB,
-            vk::Format::BC3_SRGB_BLOCK => format,
-            _ => {
-                if UNSUPPORTED.lock().unwrap().insert(format) {
-                    warn!("Unhandled texture format: {format:?}");
-                }
-                format
-            }
-        },
+/// Formats with an _SRGB variant, and that variant.
+const SRGB_VARIANTS: [(vk::Format, vk::Format); 8] = {
+    use vk::Format as F;
+    [
+        (F::R8G8B8A8_UNORM, F::R8G8B8A8_SRGB),
+        (F::B8G8R8A8_UNORM, F::B8G8R8A8_SRGB),
+        (F::A8B8G8R8_UNORM_PACK32, F::A8B8G8R8_SRGB_PACK32),
+        (F::BC1_RGB_UNORM_BLOCK, F::BC1_RGB_SRGB_BLOCK),
+        (F::BC1_RGBA_UNORM_BLOCK, F::BC1_RGBA_SRGB_BLOCK),
+        (F::BC2_UNORM_BLOCK, F::BC2_SRGB_BLOCK),
+        (F::BC3_UNORM_BLOCK, F::BC3_SRGB_BLOCK),
+        (F::BC7_UNORM_BLOCK, F::BC7_SRGB_BLOCK),
+    ]
+};
+
+/// The _SRGB variant of a UNORM format, which reads the same bytes as sRGB encoded.
+fn srgb_variant(format: vk::Format) -> Option<vk::Format> {
+    SRGB_VARIANTS
+        .iter()
+        .find(|(unorm, _)| *unorm == format)
+        .map(|&(_, srgb)| srgb)
+}
+
+/// The UNORM variant of an _SRGB format, which reads the same bytes without decoding them.
+fn unorm_variant(format: vk::Format) -> Option<vk::Format> {
+    SRGB_VARIANTS
+        .iter()
+        .find(|(_, srgb)| *srgb == format)
+        .map(|&(unorm, _)| unorm)
+}
+
+/// The UNORM format of an integer format's bits. The OpenVR wiki lists A2R10G10B10_UINT among the
+/// formats apps can submit, and integers can't be blitted or sampled as colors, so their bits are
+/// copied as the UNORM format's, which copies between formats of one size allow.
+fn unorm_bits(format: vk::Format) -> Option<vk::Format> {
+    match format {
+        vk::Format::A2R10G10B10_UINT_PACK32 => Some(vk::Format::A2R10G10B10_UNORM_PACK32),
+        vk::Format::A2B10G10R10_UINT_PACK32 => Some(vk::Format::A2B10G10R10_UNORM_PACK32),
+        _ => None,
     }
 }
 
-/// Whether the overlay shader has to decode sRGB to output linear colour.
-fn overlay_needs_srgb_decode(format: vk::Format, color_space: vr::EColorSpace) -> bool {
-    use vk::Format as F;
-    match format {
-        // Sampling these already decodes.
-        F::R8G8B8A8_SRGB
-        | F::B8G8R8A8_SRGB
-        | F::A8B8G8R8_SRGB_PACK32
-        | F::BC1_RGB_SRGB_BLOCK
-        | F::BC1_RGBA_SRGB_BLOCK
-        | F::BC2_SRGB_BLOCK
-        | F::BC3_SRGB_BLOCK
-        | F::BC7_SRGB_BLOCK => false,
-        // ColorSpace_Auto treats formats with _SRGB variants as gamma encoded.
-        F::R8G8B8A8_UNORM
-        | F::B8G8R8A8_UNORM
-        | F::A8B8G8R8_UNORM_PACK32
-        | F::BC1_RGB_UNORM_BLOCK
-        | F::BC1_RGBA_UNORM_BLOCK
-        | F::BC2_UNORM_BLOCK
-        | F::BC3_UNORM_BLOCK
-        | F::BC7_UNORM_BLOCK => color_space != vr::EColorSpace::Linear,
-        _ => color_space == vr::EColorSpace::Gamma,
+/// Whether the texture's values, as its format reads them, are sRGB encoded rather than linear,
+/// so they need decoding before they can be blended, blitted or shown. Formats with an _SRGB
+/// variant are 8-bit, which ColorSpace_Auto assumes to be gamma encoded ("This mirrors the DXGI
+/// formats which have _SRGB variants"), and everything else linear. _SRGB formats decode when read.
+fn holds_gamma(format: vk::Format, color_space: vr::EColorSpace) -> bool {
+    holds_gamma_with(format, color_space, crate::quirks::linear_unorm())
+}
+
+fn holds_gamma_with(format: vk::Format, color_space: vr::EColorSpace, linear_unorm: bool) -> bool {
+    let format = unorm_bits(format).unwrap_or(format);
+    if unorm_variant(format).is_some() {
+        return false;
     }
+    match color_space {
+        vr::EColorSpace::Linear => false,
+        vr::EColorSpace::Gamma => true,
+        // Auto, and Auto for values that aren't a color space
+        _ => srgb_variant(format).is_some() && !linear_unorm,
+    }
+}
+
+/// Block compressed formats, which can't be swapchain formats.
+fn is_compressed(format: vk::Format) -> bool {
+    (vk::Format::BC1_RGB_UNORM_BLOCK.as_raw()..=vk::Format::ASTC_12X12_SRGB_BLOCK.as_raw())
+        .contains(&format.as_raw())
+}
+
+/// The swapchain format that shows the texture at the right brightness. Runtimes decode only
+/// _SRGB swapchains, so gamma encoded data goes into one whatever its format, and everything else
+/// into a swapchain of its own format.
+fn swapchain_format(format: vk::Format, color_space: vr::EColorSpace) -> vk::Format {
+    // https://github.com/ValveSoftware/openvr/wiki/Vulkan#image-formats, their variants, and what
+    // Proton makes of D3D11's other common render target formats
+    const KNOWN: [vk::Format; 15] = {
+        use vk::Format as F;
+        [
+            F::R8G8B8A8_UNORM,
+            F::R8G8B8A8_SRGB,
+            F::B8G8R8A8_UNORM,
+            F::B8G8R8A8_SRGB,
+            F::A8B8G8R8_UNORM_PACK32,
+            F::A8B8G8R8_SRGB_PACK32,
+            F::R32G32B32A32_SFLOAT,
+            F::R32G32B32_SFLOAT,
+            F::R16G16B16A16_SFLOAT,
+            F::R16G16B16A16_UNORM,
+            F::A2R10G10B10_UINT_PACK32,
+            F::A2R10G10B10_UNORM_PACK32,
+            F::A2B10G10R10_UINT_PACK32,
+            F::A2B10G10R10_UNORM_PACK32,
+            F::B10G11R11_UFLOAT_PACK32,
+        ]
+    };
+    static UNSUPPORTED: LazyLock<Mutex<HashSet<vk::Format>>> = LazyLock::new(Mutex::default);
+    static SEEN: LazyLock<Mutex<HashSet<(vk::Format, u32)>>> = LazyLock::new(Mutex::default);
+
+    let gamma = holds_gamma(format, color_space);
+    let swapchain = if is_compressed(format) {
+        if gamma || unorm_variant(format).is_some() {
+            vk::Format::R8G8B8A8_SRGB
+        } else {
+            vk::Format::R8G8B8A8_UNORM
+        }
+    } else if gamma {
+        srgb_variant(format).unwrap_or(vk::Format::R8G8B8A8_SRGB)
+    } else {
+        unorm_bits(format).unwrap_or(format)
+    };
+    if !KNOWN.contains(&format)
+        && !is_compressed(format)
+        && UNSUPPORTED.lock().unwrap().insert(format)
+    {
+        warn!("Unhandled texture format: {format:?}");
+    }
+    // It decides the game's brightness, so it's worth knowing from the log.
+    if SEEN.lock().unwrap().insert((format, color_space.0)) {
+        log::info!(
+            "{format:?} textures with color space {color_space:?} hold {} values, using {swapchain:?} swapchains",
+            if gamma { "sRGB encoded" } else { "linear" }
+        );
+    }
+    swapchain
+}
+
+/// Formats to use when the runtime lacks a swapchain's format, best first: ones keeping the data's
+/// encoding and precision. The eye copy converts into any of them.
+pub(super) fn fallback_formats(format: vk::Format) -> &'static [vk::Format] {
+    use vk::Format as F;
+    if unorm_variant(format).is_some() {
+        // 8-bit linear storage of sRGB data bands in the dark.
+        &[
+            F::R8G8B8A8_SRGB,
+            F::B8G8R8A8_SRGB,
+            F::A8B8G8R8_SRGB_PACK32,
+            F::R16G16B16A16_SFLOAT,
+            F::A2B10G10R10_UNORM_PACK32,
+            F::R8G8B8A8_UNORM,
+            F::B8G8R8A8_UNORM,
+        ]
+    } else if srgb_variant(format).is_some() {
+        &[
+            F::R8G8B8A8_UNORM,
+            F::B8G8R8A8_UNORM,
+            F::A8B8G8R8_UNORM_PACK32,
+            F::A2B10G10R10_UNORM_PACK32,
+            F::R16G16B16A16_SFLOAT,
+            F::R8G8B8A8_SRGB,
+            F::B8G8R8A8_SRGB,
+        ]
+    } else {
+        &[
+            F::R16G16B16A16_SFLOAT,
+            F::R32G32B32A32_SFLOAT,
+            F::A2B10G10R10_UNORM_PACK32,
+            F::R8G8B8A8_SRGB,
+            F::B8G8R8A8_SRGB,
+            F::R8G8B8A8_UNORM,
+            F::B8G8R8A8_UNORM,
+        ]
+    }
+}
+
+/// Barriers for one of our own single layer images. `write` makes it a transfer destination,
+/// dropping its contents once earlier copies from it are done, otherwise a source for what was
+/// written.
+///
+/// # Safety
+/// `buf` must be recording.
+unsafe fn staging_barrier(
+    device: &ash::Device,
+    buf: vk::CommandBuffer,
+    image: vk::Image,
+    write: bool,
+) {
+    let barrier = if write {
+        vk::ImageMemoryBarrier {
+            src_access_mask: vk::AccessFlags::empty(),
+            dst_access_mask: vk::AccessFlags::TRANSFER_WRITE,
+            old_layout: vk::ImageLayout::UNDEFINED,
+            new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            ..Default::default()
+        }
+    } else {
+        vk::ImageMemoryBarrier {
+            src_access_mask: vk::AccessFlags::TRANSFER_WRITE,
+            dst_access_mask: vk::AccessFlags::TRANSFER_READ,
+            old_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            new_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            ..Default::default()
+        }
+    };
+    unsafe {
+        device.cmd_pipeline_barrier(
+            buf,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[vk::ImageMemoryBarrier {
+                image,
+                subresource_range: vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+                ..barrier
+            }],
+        )
+    };
 }
 
 /// Whether an eye's layer of a swapchain image has to be cleared before copying `new` to it.

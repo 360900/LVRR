@@ -3,6 +3,7 @@ use super::{
     profiles::{
         frame_controller::FrameController, knuckles::Knuckles, oculus_touch::OculusTouch,
         simple_controller::SimpleController, vive_controller::ViveWands,
+        xbox_controller::XboxController,
     },
 };
 use crate::{
@@ -22,6 +23,8 @@ use std::f32::consts::FRAC_PI_4;
 use std::ffi::CStr;
 use std::sync::{Arc, Barrier};
 
+mod profile_loss;
+
 static ACTIONS_JSONS_DIR: &CStr = unsafe {
     CStr::from_bytes_with_nul_unchecked(
         concat!(env!("CARGO_MANIFEST_DIR"), "/tests/input_data/\0").as_bytes(),
@@ -34,6 +37,7 @@ impl std::fmt::Debug for ActionData {
             ActionData::Bool(_) => f.write_str("InputAction::Bool"),
             ActionData::Vector1 { .. } => f.write_str("InputAction::Float"),
             ActionData::Vector2 { .. } => f.write_str("InputAction::Vector2"),
+            ActionData::Vector3 { .. } => f.write_str("InputAction::Vector3"),
             ActionData::Pose => f.write_str("InputAction::Pose"),
             ActionData::Skeleton { .. } => f.write_str("InputAction::Skeleton"),
             ActionData::Haptic(_) => f.write_str("InputAction::Haptic"),
@@ -828,7 +832,7 @@ fn menu_bindings_converted_in_every_set() {
 }
 
 /// Sets an environment variable for the action manifests this thread loads.
-fn set_test_env(name: &'static str, value: &str) {
+pub(super) fn set_test_env(name: &'static str, value: &str) {
     super::action_manifest::TEST_ENV.with_borrow_mut(|env| env.insert(name, value.into()));
 }
 
@@ -887,6 +891,205 @@ fn additional_bindings() {
 }
 
 #[test]
+fn bindings_converted_for_pico() {
+    use super::profiles::pico::Pico4;
+    let f = Fixture::new();
+    f.load_actions(c"actions_vive_only.json");
+
+    let pico = Pico4::profile_path();
+    // The right menu button goes to the upper face button.
+    f.verify_bindings::<bool>(
+        pico,
+        c"/actions/main/in/boolact",
+        [
+            "/user/hand/left/input/menu/click".into(),
+            "/user/hand/right/input/b/click".into(),
+            "/user/hand/right/input/trigger/click".into(),
+        ],
+    );
+    f.verify_bindings::<xr::Vector2f>(
+        pico,
+        c"/actions/main/in/vec2act",
+        ["/user/hand/left/input/thumbstick".into()],
+    );
+    f.verify_threshold_bindings(
+        pico,
+        c"/actions/main/in/gripact",
+        ["/user/hand/left/input/squeeze/value".into()],
+    );
+}
+
+#[test]
+fn bindings_converted_for_cosmos() {
+    use super::profiles::vive_cosmos::ViveCosmos;
+    let f = Fixture::new();
+    f.load_actions(c"actions_vive_only.json");
+
+    let cosmos = ViveCosmos::profile_path();
+    f.verify_bindings::<bool>(
+        cosmos,
+        c"/actions/main/in/boolact",
+        [
+            "/user/hand/left/input/menu/click".into(),
+            "/user/hand/right/input/b/click".into(),
+            "/user/hand/right/input/trigger/click".into(),
+        ],
+    );
+    f.verify_bindings::<xr::Vector2f>(
+        cosmos,
+        c"/actions/main/in/vec2act",
+        ["/user/hand/left/input/thumbstick".into()],
+    );
+    f.verify_bindings::<bool>(
+        cosmos,
+        c"/actions/main/in/gripact",
+        ["/user/hand/left/input/squeeze/click".into()],
+    );
+}
+
+#[test]
+fn bindings_converted_from_cosmos() {
+    use super::profiles::vive_cosmos::ViveCosmos;
+    let f = Fixture::new();
+    f.load_actions(c"actions_cosmos_only.json");
+
+    // Its own, with the bumper.
+    f.verify_bindings::<bool>(
+        ViveCosmos::profile_path(),
+        c"/actions/main/in/boolact",
+        [
+            "/user/hand/left/input/x/click".into(),
+            "/user/hand/right/input/b/click".into(),
+            "/user/hand/left/input/shoulder/click".into(),
+            "/user/hand/left/input/menu/click".into(),
+        ],
+    );
+    // Others without a bumper drop it.
+    f.verify_bindings::<bool>(
+        OculusTouch::profile_path(),
+        c"/actions/main/in/boolact",
+        [
+            "/user/hand/left/input/x/click".into(),
+            "/user/hand/right/input/b/click".into(),
+            "/user/hand/left/input/menu/click".into(),
+        ],
+    );
+    f.verify_bindings::<xr::Vector2f>(
+        OculusTouch::profile_path(),
+        c"/actions/main/in/vec2act",
+        ["/user/hand/left/input/thumbstick".into()],
+    );
+    f.verify_threshold_bindings(
+        OculusTouch::profile_path(),
+        c"/actions/main/in/gripact",
+        ["/user/hand/right/input/squeeze/value".into()],
+    );
+    // Index has no X or menu button: they go to its face buttons.
+    f.verify_bindings::<bool>(
+        Knuckles::profile_path(),
+        c"/actions/main/in/boolact",
+        [
+            "/user/hand/left/input/a/click".into(),
+            "/user/hand/left/input/b/click".into(),
+            "/user/hand/right/input/b/click".into(),
+        ],
+    );
+    // The Frame has bumpers.
+    f.verify_bindings::<bool>(
+        FrameController::profile_path(),
+        c"/actions/main/in/boolact",
+        [
+            "/user/hand/left/input/dpad_down/click".into(),
+            "/user/hand/right/input/b/click".into(),
+            "/user/hand/left/input/bumper/click".into(),
+            "/user/hand/left/input/view/click".into(),
+        ],
+    );
+}
+
+#[test]
+fn converted_bindings_simulate_their_controller() {
+    use super::profiles::{
+        pico::Pico4, touch_pro::TouchPro, vive_cosmos::ViveCosmos, vive_focus3::ViveFocus3,
+    };
+    use vr::ETrackedDeviceProperty as Prop;
+
+    let get = |f: &Fixture, index, prop| {
+        f.input
+            .get_device_string_tracked_property(index, prop)
+            .map(|s| s.into_string().unwrap())
+    };
+    let identity = |f: &Fixture| {
+        [
+            get(f, 1, Prop::ControllerType_String),
+            get(f, 2, Prop::RenderModelName_String),
+            get(
+                f,
+                vr::k_unTrackedDeviceIndex_Hmd,
+                Prop::ControllerType_String,
+            ),
+        ]
+        .map(Option::unwrap)
+    };
+    fn connect<P: InteractionProfile>(f: &mut Fixture, set: &CStr) {
+        f.set_interaction_profile::<P>(LeftHand);
+        f.set_interaction_profile::<P>(RightHand);
+        let set = f.get_action_set_handle(set);
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: set,
+            ..Default::default()
+        });
+    }
+
+    // Converted from the Vive's bindings, the Pico and Cosmos controllers look like the Vive's,
+    // headset included.
+    let mut f = Fixture::new();
+    f.load_actions(c"actions_vive_only.json");
+    let vive = ["vive_controller", "vr_controller_vive_1_5", "vive"];
+    connect::<Pico4>(&mut f, c"/actions/main");
+    assert_eq!(identity(&f), vive);
+    connect::<ViveCosmos>(&mut f, c"/actions/main");
+    assert_eq!(identity(&f), vive);
+    // The other profiles show themselves.
+    connect::<ViveFocus3>(&mut f, c"/actions/main");
+    assert_eq!(
+        identity(&f),
+        [
+            "vive_focus3_controller",
+            "vive_focus3_controller_right",
+            "vive_focus3"
+        ]
+    );
+    connect::<TouchPro>(&mut f, c"/actions/main");
+    assert_eq!(
+        identity(&f),
+        ["oculus_touch", "oculus_quest_pro_controller_right", "rift"]
+    );
+
+    // With bindings of their own, they show themselves.
+    let mut f = Fixture::new();
+    f.load_actions(c"actions.json");
+    connect::<Pico4>(&mut f, c"/actions/set1");
+    assert_eq!(
+        identity(&f),
+        ["pico_controller", "pico_4_controller_right", "rift"]
+    );
+    assert_eq!(
+        get(&f, 1, Prop::ModelNumber_String).as_deref(),
+        Some("PICO 4 (Left Controller)")
+    );
+    connect::<ViveCosmos>(&mut f, c"/actions/set1");
+    assert_eq!(
+        identity(&f),
+        [
+            "vive_cosmos_controller",
+            "vive_cosmos_controller_right",
+            "vive_cosmos"
+        ]
+    );
+}
+
+#[test]
 fn controllers_tracked_without_bindings() {
     let f = Fixture::new();
     f.load_actions(c"actions_no_bindings.json");
@@ -898,6 +1101,501 @@ fn controllers_tracked_without_bindings() {
         let suggested = fakexr::get_suggested_bindings(grip, profile);
         assert!(suggested.contains(&"/user/hand/left/input/grip/pose".to_string()));
     }
+}
+
+/// A home directory in a temp dir with a Steam install where SteamVR left its settings, for the
+/// manifests this thread loads. Removed on drop.
+pub(super) struct FakeSteam {
+    pub home: std::path::PathBuf,
+}
+
+impl FakeSteam {
+    pub const APP_KEY: &str = "steam.app.4242";
+
+    pub fn new(test: &str) -> Self {
+        let home =
+            std::env::temp_dir().join(format!("xrizer-steamvr-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join(".local/share/Steam/config")).unwrap();
+        set_test_env("HOME", home.to_str().unwrap());
+        set_test_env("SteamAppId", "4242");
+        Self { home }
+    }
+
+    fn root(&self) -> std::path::PathBuf {
+        self.home.join(".local/share/Steam")
+    }
+
+    /// Saves bindings choices for the app, as `(key, url)`.
+    pub fn choose(&self, choices: &[(&str, &str)]) {
+        self.choose_for(Self::APP_KEY, choices);
+    }
+
+    /// Saves bindings choices for the app key `app_key`, as `(key, url)`.
+    fn choose_for(&self, app_key: &str, choices: &[(&str, &str)]) {
+        let section: serde_json::Map<_, _> = choices
+            .iter()
+            .map(|(key, url)| (key.to_string(), (*url).into()))
+            .collect();
+        let settings = serde_json::json!({
+            "steamvr": { "enableHomeApp": false },
+            app_key: section,
+        });
+        std::fs::write(
+            self.root().join("config/steamvr.vrsettings"),
+            serde_json::to_string_pretty(&settings).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Puts a Workshop item of SteamVR's in a second library, like Steam downloads them.
+    fn add_workshop_item(&self, item: &str, file: &str, contents: &[u8]) {
+        let library = self.home.join("games/SteamLibrary");
+        let dir = library.join("steamapps/workshop/content/250820").join(item);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(file), contents).unwrap();
+        let root = self.root();
+        std::fs::create_dir_all(root.join("steamapps")).unwrap();
+        std::fs::write(
+            root.join("steamapps/libraryfolders.vdf"),
+            format!(
+                "\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t\t\"apps\"\n\t\t{{\n\t\t\t\"228980\"\t\t\"181169252\"\n\t\t}}\n\t}}\n\t\"1\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t\t\"apps\"\n\t\t{{\n\t\t\t\"250820\"\t\t\"5636124391\"\n\t\t}}\n\t}}\n}}\n",
+                root.display(),
+                library.display()
+            ),
+        )
+        .unwrap();
+    }
+}
+
+impl Drop for FakeSteam {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.home);
+    }
+}
+
+pub(super) fn input_data(file: &str) -> String {
+    format!("{}/tests/input_data/{file}", env!("CARGO_MANIFEST_DIR"))
+}
+
+#[test]
+fn steamvr_chosen_bindings() {
+    let steam = FakeSteam::new("chosen");
+    // A file the user picked, at a path SteamVR escapes in the URL.
+    let picked = steam.home.join("my bindings/vive.json");
+    std::fs::create_dir_all(picked.parent().unwrap()).unwrap();
+    std::fs::copy(input_data("vive_only_single.json"), &picked).unwrap();
+    let url = format!("file://{}", picked.display()).replace(' ', "%20");
+    steam.add_workshop_item(
+        "3822741892",
+        "4573893327432113271_legacy.bin",
+        &std::fs::read(input_data("steamvr_workshop_knuckles.json")).unwrap(),
+    );
+    steam.choose(&[
+        ("vive_controller_250820_CurrentURL_steamvrinput", &url),
+        // Older SteamVR's key loses to the current one.
+        (
+            "vive_controller_CurrentURL_steamvrinput",
+            "file:///nonexistent.json",
+        ),
+        // The game has no bindings for Index controllers.
+        (
+            "knuckles_250820_CurrentURL_steamvrinput",
+            "vr-input-workshop://3822741892",
+        ),
+        // A legacy app's choice.
+        (
+            "oculus_touch_250820_CurrentURL_legacy",
+            "vr-input-workshop://3822741892",
+        ),
+    ]);
+    let f = Fixture::new();
+    f.load_actions(c"actions_vive_only.json");
+
+    f.verify_bindings::<bool>(
+        ViveWands::profile_path(),
+        c"/actions/main/in/boolact",
+        ["/user/hand/left/input/trigger/click".into()],
+    );
+    f.verify_bindings::<bool>(
+        Knuckles::profile_path(),
+        c"/actions/main/in/boolact",
+        ["/user/hand/right/input/b/click".into()],
+    );
+    // Converted from the chosen bindings, which replace the game's like custom ones do.
+    f.verify_bindings::<bool>(
+        OculusTouch::profile_path(),
+        c"/actions/main/in/boolact",
+        ["/user/hand/left/input/trigger/value".into()],
+    );
+}
+
+#[test]
+fn custom_bindings_over_steamvr_choice() {
+    let steam = FakeSteam::new("custom");
+    steam.add_workshop_item(
+        "3822741892",
+        "1_legacy.bin",
+        &std::fs::read(input_data("steamvr_workshop_knuckles.json")).unwrap(),
+    );
+    steam.choose(&[(
+        "knuckles_250820_CurrentURL_steamvrinput",
+        "vr-input-workshop://3822741892",
+    )]);
+    set_test_env("XRIZER_CUSTOM_BINDINGS_DIR", &input_data("custom_bindings"));
+    let f = Fixture::new();
+    f.load_actions(c"actions_vive_only.json");
+
+    f.verify_bindings::<bool>(
+        Knuckles::profile_path(),
+        c"/actions/main/in/boolact",
+        ["/user/hand/left/input/a/click".into()],
+    );
+}
+
+#[test]
+fn unusable_steamvr_choice_uses_the_default() {
+    let steam = FakeSteam::new("unusable");
+    // The item is for another controller.
+    steam.add_workshop_item(
+        "3822741892",
+        "1_legacy.bin",
+        &std::fs::read(input_data("steamvr_workshop_knuckles.json")).unwrap(),
+    );
+    steam.choose(&[
+        (
+            "vive_controller_250820_CurrentURL_steamvrinput",
+            "file:///nonexistent/bindings.json",
+        ),
+        (
+            "oculus_touch_250820_CurrentURL_steamvrinput",
+            "vr-input-workshop://3822741892",
+        ),
+        (
+            "knuckles_250820_CurrentURL_steamvrinput",
+            "vr-input-workshop://111",
+        ),
+    ]);
+    let f = Fixture::new();
+    f.load_actions(c"actions_vive_only.json");
+
+    f.verify_bindings::<bool>(
+        ViveWands::profile_path(),
+        c"/actions/main/in/boolact",
+        [
+            "/user/hand/left/input/menu/click".into(),
+            "/user/hand/right/input/menu/click".into(),
+            "/user/hand/right/input/trigger/click".into(),
+        ],
+    );
+    f.verify_bindings::<bool>(
+        OculusTouch::profile_path(),
+        c"/actions/main/in/boolact",
+        [
+            "/user/hand/left/input/menu/click".into(),
+            "/user/hand/right/input/b/click".into(),
+            "/user/hand/right/input/trigger/value".into(),
+        ],
+    );
+}
+
+/// Puts custom bindings for the app key in the per-app directory under `config`.
+pub(super) fn add_app_bindings(config: &std::path::Path, key: &str, file: &str, from: &str) {
+    let dir = config.join("xrizer/bindings").join(key);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::copy(input_data(from), dir.join(file)).unwrap();
+}
+
+#[test]
+fn per_app_custom_bindings() {
+    let steam = FakeSteam::new("per-app");
+    let url = format!("file://{}", input_data("knuckles.json"));
+    steam.choose(&[("knuckles_250820_CurrentURL_steamvrinput", &url)]);
+    add_app_bindings(
+        &steam.home.join(".config"),
+        FakeSteam::APP_KEY,
+        "knuckles.json",
+        "steamvr_workshop_knuckles.json",
+    );
+    let f = Fixture::new();
+    f.load_actions(c"actions_vive_only.json");
+
+    // Over the choice in SteamVR.
+    f.verify_bindings::<bool>(
+        Knuckles::profile_path(),
+        c"/actions/main/in/boolact",
+        ["/user/hand/right/input/b/click".into()],
+    );
+}
+
+#[test]
+fn per_app_custom_bindings_in_xdg_config_home() {
+    let steam = FakeSteam::new("per-app-xdg");
+    let xdg = steam.home.join("xdg");
+    set_test_env("XDG_CONFIG_HOME", xdg.to_str().unwrap());
+    add_app_bindings(
+        &xdg,
+        FakeSteam::APP_KEY,
+        "knuckles.json",
+        "steamvr_workshop_knuckles.json",
+    );
+    // Not where XDG_CONFIG_HOME points.
+    add_app_bindings(
+        &steam.home.join(".config"),
+        FakeSteam::APP_KEY,
+        "oculus_touch.json",
+        "steamvr_workshop_knuckles.json",
+    );
+    let f = Fixture::new();
+    f.load_actions(c"actions_vive_only.json");
+
+    f.verify_bindings::<bool>(
+        Knuckles::profile_path(),
+        c"/actions/main/in/boolact",
+        ["/user/hand/right/input/b/click".into()],
+    );
+    f.verify_bindings::<bool>(
+        OculusTouch::profile_path(),
+        c"/actions/main/in/boolact",
+        [
+            "/user/hand/left/input/menu/click".into(),
+            "/user/hand/right/input/b/click".into(),
+            "/user/hand/right/input/trigger/value".into(),
+        ],
+    );
+}
+
+#[test]
+fn custom_bindings_dir_over_per_app_bindings() {
+    let steam = FakeSteam::new("dir-over-per-app");
+    add_app_bindings(
+        &steam.home.join(".config"),
+        FakeSteam::APP_KEY,
+        "knuckles.json",
+        "steamvr_workshop_knuckles.json",
+    );
+    set_test_env("XRIZER_CUSTOM_BINDINGS_DIR", &input_data("custom_bindings"));
+    let f = Fixture::new();
+    f.load_actions(c"actions_vive_only.json");
+
+    f.verify_bindings::<bool>(
+        Knuckles::profile_path(),
+        c"/actions/main/in/boolact",
+        ["/user/hand/left/input/a/click".into()],
+    );
+}
+
+/// The Vive bindings of actions_vive_only.json.
+fn default_vive_boolact() -> [String; 3] {
+    [
+        "/user/hand/left/input/menu/click".into(),
+        "/user/hand/right/input/menu/click".into(),
+        "/user/hand/right/input/trigger/click".into(),
+    ]
+}
+
+/// Vivecraft loads its action manifest, then adds its application manifest and identifies as
+/// its app. The bindings chosen for that app key replace the ones loaded before.
+#[test]
+fn bindings_chosen_for_key_identified_after_manifest() {
+    const KEY: &str = "org.example.vivecraft";
+    const OTHER_KEY: &str = "org.example.other";
+    let steam = FakeSteam::new("identified");
+    let url = format!("file://{}", input_data("vive_only_single.json"));
+    steam.choose_for(
+        KEY,
+        &[("vive_controller_250820_CurrentURL_steamvrinput", &url)],
+    );
+    add_app_bindings(
+        &steam.home.join(".config"),
+        OTHER_KEY,
+        "knuckles.json",
+        "steamvr_workshop_knuckles.json",
+    );
+    let f = Fixture::new();
+    f.input.openxr.restart_session().unwrap(); // get to real session
+    f.load_actions(c"actions_vive_only.json");
+    let boolact = f.get_action_handle(c"/actions/main/in/boolact");
+    let action = || f.get_action::<bool>(boolact);
+    f.verify_bindings::<bool>(
+        ViveWands::profile_path(),
+        c"/actions/main/in/boolact",
+        default_vive_boolact(),
+    );
+
+    f.input.app_identified(KEY);
+    f.verify_bindings::<bool>(
+        ViveWands::profile_path(),
+        c"/actions/main/in/boolact",
+        ["/user/hand/left/input/trigger/click".into()],
+    );
+    let reloaded = action();
+    f.input.app_identified(KEY);
+    assert_eq!(action(), reloaded, "same key, nothing to reload");
+
+    // An app changing its key gets the custom bindings in the other key's directory, and loses
+    // the first key's choice.
+    f.input.app_identified(OTHER_KEY);
+    f.verify_bindings::<bool>(
+        ViveWands::profile_path(),
+        c"/actions/main/in/boolact",
+        default_vive_boolact(),
+    );
+    f.verify_bindings::<bool>(
+        Knuckles::profile_path(),
+        c"/actions/main/in/boolact",
+        ["/user/hand/right/input/b/click".into()],
+    );
+}
+
+/// Before the first frame, the session restart for the real session loads the bindings chosen for
+/// the key.
+#[test]
+fn bindings_chosen_for_key_identified_before_real_session() {
+    const KEY: &str = "org.example.vivecraft";
+    let steam = FakeSteam::new("identified-early");
+    let url = format!("file://{}", input_data("vive_only_single.json"));
+    steam.choose_for(
+        KEY,
+        &[("vive_controller_250820_CurrentURL_steamvrinput", &url)],
+    );
+    let f = Fixture::new();
+    f.load_actions(c"actions_vive_only.json");
+    let boolact = f.get_action_handle(c"/actions/main/in/boolact");
+    let loaded = f.get_action::<bool>(boolact);
+
+    f.input.app_identified(KEY);
+    assert_eq!(
+        f.get_action::<bool>(boolact),
+        loaded,
+        "no restart before the real session"
+    );
+    f.input.openxr.restart_session().unwrap(); // get to real session
+    f.verify_bindings::<bool>(
+        ViveWands::profile_path(),
+        c"/actions/main/in/boolact",
+        ["/user/hand/left/input/trigger/click".into()],
+    );
+}
+
+/// A key nothing is chosen for keeps the bindings loaded.
+#[test]
+fn identified_key_without_bindings_keeps_them() {
+    let steam = FakeSteam::new("identified-nothing");
+    let url = format!("file://{}", input_data("vive_only_single.json"));
+    steam.choose(&[("vive_controller_250820_CurrentURL_steamvrinput", &url)]);
+    let f = Fixture::new();
+    f.input.openxr.restart_session().unwrap(); // get to real session
+    f.load_actions(c"actions_vive_only.json");
+    let boolact = f.get_action_handle(c"/actions/main/in/boolact");
+    let loaded = f.get_action::<bool>(boolact);
+
+    // The Steam app id's choice still applies.
+    f.input.app_identified("org.example.unknown");
+    assert_eq!(f.get_action::<bool>(boolact), loaded);
+    f.verify_bindings::<bool>(
+        ViveWands::profile_path(),
+        c"/actions/main/in/boolact",
+        ["/user/hand/left/input/trigger/click".into()],
+    );
+}
+
+#[test]
+fn steamvr_choice_disabled() {
+    let steam = FakeSteam::new("disabled");
+    let url = format!("file://{}", input_data("vive_only_single.json"));
+    steam.choose(&[("vive_controller_250820_CurrentURL_steamvrinput", &url)]);
+    set_test_env("XRIZER_STEAMVR_BINDINGS", "0");
+    let f = Fixture::new();
+    f.load_actions(c"actions_vive_only.json");
+
+    f.verify_bindings::<bool>(
+        ViveWands::profile_path(),
+        c"/actions/main/in/boolact",
+        [
+            "/user/hand/left/input/menu/click".into(),
+            "/user/hand/right/input/menu/click".into(),
+            "/user/hand/right/input/trigger/click".into(),
+        ],
+    );
+}
+
+/// The binding variant `device` reports, and the result with a buffer that's too small for it.
+fn binding_variant(f: &Fixture, device: vr::VRInputValueHandle_t) -> (String, vr::EVRInputError) {
+    use vr::IVRInput011_Interface as Input;
+    let mut buffer = [1 as std::ffi::c_char; 64];
+    assert_eq!(
+        Input::GetBindingVariant(&*f.input, device, buffer.as_mut_ptr(), buffer.len() as u32),
+        vr::EVRInputError::None
+    );
+    let variant = unsafe { CStr::from_ptr(buffer.as_ptr()) }
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let mut small = [1 as std::ffi::c_char; 1];
+    let small_result = Input::GetBindingVariant(&*f.input, device, small.as_mut_ptr(), 1);
+    assert_eq!(small[0], 0);
+    (variant, small_result)
+}
+
+fn sync_main_set(f: &mut Fixture) {
+    let set = f.get_action_set_handle(c"/actions/main");
+    f.sync(vr::VRActiveActionSet_t {
+        ulActionSet: set,
+        ..Default::default()
+    });
+}
+
+#[test]
+fn binding_variant_of_the_first_bindings() {
+    let mut f = Fixture::new();
+    f.load_actions(c"actions_variants.json");
+    f.set_interaction_profile::<ViveWands>(LeftHand);
+    sync_main_set(&mut f);
+
+    // Like SteamVR, the first file listed is the default, and it has no variant.
+    f.verify_bindings::<bool>(
+        ViveWands::profile_path(),
+        c"/actions/main/in/boolact",
+        [
+            "/user/hand/left/input/menu/click".into(),
+            "/user/hand/right/input/menu/click".into(),
+            "/user/hand/right/input/trigger/click".into(),
+        ],
+    );
+    let left = f.get_input_source_handle(c"/user/hand/left");
+    assert_eq!(
+        binding_variant(&f, left),
+        (String::new(), vr::EVRInputError::None)
+    );
+}
+
+#[test]
+fn binding_variant_chosen_in_steamvr() {
+    let steam = FakeSteam::new("variant");
+    let url = format!("file://{}", input_data("vive_only_single.json"));
+    steam.choose(&[("vive_controller_250820_CurrentURL_steamvrinput", &url)]);
+    let mut f = Fixture::new();
+    f.load_actions(c"actions_variants.json");
+    f.set_interaction_profile::<ViveWands>(LeftHand);
+    f.set_interaction_profile::<Knuckles>(RightHand);
+    sync_main_set(&mut f);
+
+    f.verify_bindings::<bool>(
+        ViveWands::profile_path(),
+        c"/actions/main/in/boolact",
+        ["/user/hand/left/input/trigger/click".into()],
+    );
+    let left = f.get_input_source_handle(c"/user/hand/left");
+    let single = (
+        "singlecontroller".to_string(),
+        vr::EVRInputError::BufferTooSmall,
+    );
+    assert_eq!(binding_variant(&f, left), single);
+    // Bindings converted from them are the same variant.
+    let right = f.get_input_source_handle(c"/user/hand/right/input/trigger");
+    assert_eq!(binding_variant(&f, right), single);
+    assert_eq!(binding_variant(&f, vr::k_ulInvalidInputValueHandle), single);
 }
 
 #[track_caller]
@@ -1424,20 +2122,24 @@ fn pose_action_inactive_without_its_device() {
     assert_eq!(active(&f, skeleton, 0), (true, left));
     fakexr::set_hand_tracked(f.raw_session(), LeftHand, None);
 
-    // Only the left controller, whose bindings are used for the right hand too.
+    // Only the left controller, whose bindings are used for the right hand too. The origin is
+    // the bound pose source.
+    let left_raw = f.get_input_source_handle(c"/user/hand/left/pose/raw");
+    let right_raw = f.get_input_source_handle(c"/user/hand/right/pose/raw");
     f.set_interaction_profile::<OculusTouch>(LeftHand);
     sync(&mut f);
-    assert_eq!(active(&f, pose, left), (true, left));
+    assert_eq!(active(&f, pose, left), (true, left_raw));
     assert_eq!(active(&f, pose, right), inactive);
-    assert_eq!(active(&f, pose, 0), (true, left));
+    assert_eq!(active(&f, pose, 0), (true, left_raw));
 
     // Only the right one: unrestricted reads use it.
     fakexr::set_interaction_profile(f.raw_session(), LeftHand, xr::Path::NULL);
     f.set_interaction_profile::<OculusTouch>(RightHand);
     sync(&mut f);
+    f.input.expire_connection_grace();
     assert_eq!(active(&f, pose, left), inactive);
-    assert_eq!(active(&f, pose, right), (true, right));
-    assert_eq!(active(&f, pose, 0), (true, right));
+    assert_eq!(active(&f, pose, right), (true, right_raw));
+    assert_eq!(active(&f, pose, 0), (true, right_raw));
     assert_eq!(active(&f, skeleton, 0), inactive);
 }
 
@@ -2074,7 +2776,7 @@ fn get_action_origins(
     set: vr::VRActionSetHandle_t,
     action: vr::VRActionHandle_t,
 ) -> Vec<vr::VRInputValueHandle_t> {
-    let mut origins = [vr::k_ulInvalidInputValueHandle; 8];
+    let mut origins = [vr::k_ulInvalidInputValueHandle; vr::k_unMaxActionOriginCount as usize];
     assert_eq!(
         vr::IVRInput011_Interface::GetActionOrigins(
             f.input.as_ref(),
@@ -2204,6 +2906,17 @@ fn action_origins() {
     let info = get_origin_info(&f, origins[0]);
     assert_eq!(info.trackedDeviceIndex, Hand::Left as u32);
     assert_eq!(buf_str(&info.rchRenderModelComponentName), "trigger");
+    // The device, not the input, which Unity looks up to find the hand.
+    assert_ne!(origins[0], f.get_input_source_handle(c"/user/hand/left"));
+    assert_eq!(
+        info.devicePath,
+        f.get_input_source_handle(c"/user/hand/left")
+    );
+    let proximity = f.get_input_source_handle(c"/user/head/proximity");
+    assert_eq!(
+        get_origin_info(&f, proximity).devicePath,
+        f.get_input_source_handle(c"/user/head")
+    );
 
     let mut name = [0 as std::ffi::c_char; 256];
     assert_eq!(
@@ -2216,10 +2929,7 @@ fn action_origins() {
         ),
         vr::EVRInputError::None
     );
-    assert_eq!(
-        buf_str(&name),
-        "Left Hand / touch controller / /user/hand/left/input/trigger/touch"
-    );
+    assert_eq!(buf_str(&name), "Left Hand Oculus Touch Trigger");
 
     // IVRInput_004 has no section mask and gets the whole name.
     let mut name_004 = [0 as std::ffi::c_char; 256];
@@ -2251,11 +2961,16 @@ fn dpad_action_binding_info() {
     let action = f.get_action_handle(c"/actions/set1/in/boolact");
     let info = get_binding_info(&f, action);
 
-    assert_eq!(info.len(), 1);
-    assert_eq!(buf_str(&info[0].rchDevicePathName), "/user/hand/left");
-    assert_eq!(buf_str(&info[0].rchInputPathName), "/input/trackpad");
-    assert_eq!(buf_str(&info[0].rchModeName), "trackpad");
-    assert_eq!(buf_str(&info[0].rchSlotName), "position");
+    assert_eq!(
+        binding_info_rows(&info),
+        [[
+            "/user/hand/left",
+            "/input/trackpad",
+            "dpad",
+            "north",
+            "trackpad"
+        ]]
+    );
 
     let origins = get_action_origins(&f, set1, action);
     assert!(!origins.is_empty());
@@ -2264,6 +2979,879 @@ fn dpad_action_binding_info() {
     assert_eq!(
         buf_str(&origin_info.rchRenderModelComponentName),
         "trackpad"
+    );
+}
+
+/// Device, input, mode, slot and input type of each binding.
+fn binding_info_rows(info: &[vr::InputBindingInfo_t]) -> Vec<[String; 5]> {
+    info.iter()
+        .map(|info| {
+            [
+                buf_str(&info.rchDevicePathName),
+                buf_str(&info.rchInputPathName),
+                buf_str(&info.rchModeName),
+                buf_str(&info.rchSlotName),
+                buf_str(&info.rchInputSourceType),
+            ]
+        })
+        .collect()
+}
+
+/// Loads `actions`, makes both controllers `P` and syncs `set`.
+fn fixture_with<P: InteractionProfile>(actions: &CStr, set: &CStr) -> Fixture {
+    let mut f = Fixture::new();
+    let set = f.get_action_set_handle(set);
+    f.load_actions(actions);
+    f.set_interaction_profile::<P>(LeftHand);
+    f.set_interaction_profile::<P>(RightHand);
+    f.sync(vr::VRActiveActionSet_t {
+        ulActionSet: set,
+        ..Default::default()
+    });
+    f
+}
+
+#[track_caller]
+fn binding_info_of<P: InteractionProfile>(
+    actions: &CStr,
+    set: &CStr,
+    action: &CStr,
+) -> Vec<[String; 5]> {
+    let f = fixture_with::<P>(actions, set);
+    let action = f.get_action_handle(action);
+    binding_info_rows(&get_binding_info(&f, action))
+}
+
+#[test]
+fn binding_info_modes() {
+    let set1 = c"/actions/set1";
+    let main = c"/actions/main";
+    let touch = |action| binding_info_of::<OculusTouch>(c"actions.json", set1, action);
+
+    assert_eq!(
+        touch(c"/actions/set1/in/boolact"),
+        [
+            ["/user/hand/left", "/input/x", "button", "click", "button"],
+            ["/user/hand/left", "/input/y", "button", "click", "button"],
+            ["/user/hand/right", "/input/a", "button", "click", "button"],
+            ["/user/hand/right", "/input/b", "button", "click", "button"],
+            // The Touch's left menu button is its system button in SteamVR.
+            [
+                "/user/hand/left",
+                "/input/system",
+                "button",
+                "click",
+                "button"
+            ],
+            [
+                "/user/hand/left",
+                "/input/trigger",
+                "trigger",
+                "click",
+                "trigger"
+            ],
+            [
+                "/user/hand/left",
+                "/input/thumbrest",
+                "button",
+                "touch",
+                "button"
+            ],
+            [
+                "/user/hand/left",
+                "/input/grip",
+                "button",
+                "click",
+                "trigger"
+            ],
+            [
+                "/user/hand/right",
+                "/input/grip",
+                "button",
+                "click",
+                "trigger"
+            ],
+            [
+                "/user/hand/left",
+                "/input/trigger",
+                "button",
+                "click",
+                "trigger"
+            ],
+            [
+                "/user/hand/right",
+                "/input/trigger",
+                "button",
+                "click",
+                "trigger"
+            ],
+            [
+                "/user/hand/right",
+                "/input/joystick",
+                "joystick",
+                "click",
+                "joystick"
+            ],
+            [
+                "/user/hand/right",
+                "/input/joystick",
+                "joystick",
+                "touch",
+                "joystick"
+            ],
+        ]
+    );
+    assert_eq!(
+        touch(c"/actions/set1/in/vec1act"),
+        [
+            [
+                "/user/hand/left",
+                "/input/trigger",
+                "trigger",
+                "pull",
+                "trigger"
+            ],
+            [
+                "/user/hand/right",
+                "/input/trigger",
+                "trigger",
+                "pull",
+                "trigger"
+            ],
+        ]
+    );
+    assert_eq!(
+        touch(c"/actions/set1/in/vec2act"),
+        [
+            [
+                "/user/hand/right",
+                "/input/joystick",
+                "joystick",
+                "position",
+                "joystick"
+            ],
+            [
+                "/user/hand/left",
+                "/input/joystick",
+                "joystick",
+                "position",
+                "joystick"
+            ],
+        ]
+    );
+    assert_eq!(
+        touch(c"/actions/set1/in/vib"),
+        [
+            ["/user/hand/left", "/output/haptic", "", "", "vibration"],
+            ["/user/hand/right", "/output/haptic", "", "", "vibration"],
+        ]
+    );
+    // The Vive's grip is a button.
+    assert_eq!(
+        binding_info_of::<ViveWands>(c"actions.json", set1, c"/actions/set1/in/boolact"),
+        [
+            [
+                "/user/hand/left",
+                "/input/grip",
+                "button",
+                "click",
+                "button"
+            ],
+            [
+                "/user/hand/right",
+                "/input/grip",
+                "button",
+                "click",
+                "button"
+            ],
+            [
+                "/user/hand/left",
+                "/input/application_menu",
+                "button",
+                "click",
+                "button"
+            ],
+            [
+                "/user/hand/right",
+                "/input/application_menu",
+                "button",
+                "click",
+                "button"
+            ],
+            [
+                "/user/hand/left",
+                "/input/trigger",
+                "button",
+                "click",
+                "trigger"
+            ],
+            [
+                "/user/hand/right",
+                "/input/trigger",
+                "button",
+                "click",
+                "trigger"
+            ],
+            [
+                "/user/hand/left",
+                "/input/trackpad",
+                "trackpad",
+                "click",
+                "trackpad"
+            ],
+            [
+                "/user/hand/left",
+                "/input/trackpad",
+                "trackpad",
+                "touch",
+                "trackpad"
+            ],
+        ]
+    );
+
+    assert_eq!(
+        binding_info_of::<Knuckles>(c"actions_scroll.json", main, c"/actions/main/in/scroll_pad"),
+        [[
+            "/user/hand/left",
+            "/input/trackpad",
+            "scroll",
+            "scroll",
+            "trackpad"
+        ]]
+    );
+    assert_eq!(
+        binding_info_of::<Knuckles>(
+            c"actions_scroll.json",
+            main,
+            c"/actions/main/in/scroll_stick"
+        ),
+        [[
+            "/user/hand/right",
+            "/input/thumbstick",
+            "scroll",
+            "scroll",
+            "joystick"
+        ]]
+    );
+    assert_eq!(
+        binding_info_of::<Knuckles>(c"actions_scroll.json", main, c"/actions/main/in/move"),
+        [[
+            "/user/hand/left",
+            "/input/thumbstick",
+            "joystick",
+            "position",
+            "joystick"
+        ]]
+    );
+    assert_eq!(
+        binding_info_of::<OculusTouch>(c"actions_grab_mode.json", set1, c"/actions/set1/in/grab"),
+        [["/user/hand/left", "/input/grip", "grab", "grab", "trigger"]]
+    );
+    assert_eq!(
+        binding_info_of::<Knuckles>(c"actions_toggle.json", set1, c"/actions/set1/in/boolact"),
+        [
+            [
+                "/user/hand/left",
+                "/input/a",
+                "toggle_button",
+                "click",
+                "button"
+            ],
+            [
+                "/user/hand/right",
+                "/input/a",
+                "toggle_button",
+                "click",
+                "button"
+            ],
+        ]
+    );
+    let scalar =
+        |action| binding_info_of::<OculusTouch>(c"actions_scalar_constant.json", main, action);
+    assert_eq!(
+        scalar(c"/actions/main/in/alternateuse"),
+        [[
+            "/user/hand/right",
+            "/input/a",
+            "scalar_constant",
+            "value",
+            "button"
+        ]]
+    );
+    // Values other than 1 are bound too.
+    assert_eq!(
+        scalar(c"/actions/main/in/reverse"),
+        [[
+            "/user/hand/left",
+            "/input/x",
+            "scalar_constant",
+            "value",
+            "button"
+        ]]
+    );
+}
+
+#[test]
+fn binding_info_chords() {
+    let chord =
+        |action| binding_info_of::<Knuckles>(c"actions_chords.json", c"/actions/main", action);
+    assert_eq!(
+        chord(c"/actions/main/in/dodge"),
+        [
+            [
+                "/user/hand/left",
+                "/input/grip",
+                "button",
+                "click",
+                "trigger"
+            ],
+            ["/user/hand/right", "/input/a", "button", "click", "button"],
+        ]
+    );
+    assert_eq!(
+        chord(c"/actions/main/in/facepiece"),
+        [
+            [
+                "/user/hand/right",
+                "/input/grip",
+                "button",
+                "click",
+                "trigger"
+            ],
+            [
+                "/user/hand/right",
+                "/input/thumbstick",
+                "dpad",
+                "south",
+                "joystick"
+            ],
+        ]
+    );
+    // Ignored chords have no bindings.
+    assert!(chord(c"/actions/main/in/sit").is_empty());
+    assert!(chord(c"/actions/main/in/bad").is_empty());
+}
+
+#[test]
+fn binding_info_of_converted_bindings() {
+    // Vive wand bindings on the Touch report the Touch's inputs.
+    let vive_only = |action| {
+        binding_info_of::<OculusTouch>(c"actions_vive_only.json", c"/actions/main", action)
+    };
+    assert_eq!(
+        vive_only(c"/actions/main/in/vec2act"),
+        [[
+            "/user/hand/left",
+            "/input/joystick",
+            "trackpad",
+            "position",
+            "joystick"
+        ]]
+    );
+    assert_eq!(
+        vive_only(c"/actions/main/in/gripact"),
+        [[
+            "/user/hand/left",
+            "/input/grip",
+            "button",
+            "click",
+            "trigger"
+        ]]
+    );
+}
+
+/// GetOriginLocalizedName's result and name.
+fn origin_name(
+    f: &Fixture,
+    origin: vr::VRInputValueHandle_t,
+    sections: i32,
+) -> (vr::EVRInputError, String) {
+    let mut name = [0x55 as std::ffi::c_char; 256];
+    let err = vr::IVRInput011_Interface::GetOriginLocalizedName(
+        f.input.as_ref(),
+        origin,
+        name.as_mut_ptr(),
+        name.len() as u32,
+        sections,
+    );
+    (err, buf_str(&name))
+}
+
+#[track_caller]
+fn names_on<P: InteractionProfile>(paths: &[(&CStr, &str)]) {
+    let f = fixture_with::<P>(c"actions.json", c"/actions/set1");
+    for (path, expected) in paths {
+        let origin = f.get_input_source_handle(path);
+        assert_eq!(
+            origin_name(&f, origin, -1),
+            (vr::EVRInputError::None, expected.to_string()),
+            "{path:?} on {}",
+            P::profile_path()
+        );
+    }
+}
+
+#[test]
+fn origin_names_per_controller() {
+    use crate::input::profiles::{
+        meta_touch_plus::MetaTouchPlus,
+        pico::Pico4,
+        vive_cosmos::ViveCosmos,
+        vive_focus3::ViveFocus3,
+        wmr::{
+            hp_motion_controller::ReverbG2Controller, ms_motion_controller::HolographicController,
+        },
+    };
+
+    names_on::<Knuckles>(&[
+        (
+            c"/user/hand/left/input/thumbstick",
+            "Left Hand Index Controller Thumb Stick",
+        ),
+        (
+            c"/user/hand/right/input/a",
+            "Right Hand Index Controller A Button",
+        ),
+        (
+            c"/user/hand/right/input/b/click",
+            "Right Hand Index Controller B Button",
+        ),
+        (
+            c"/user/hand/left/input/trigger",
+            "Left Hand Index Controller Trigger",
+        ),
+        (
+            c"/user/hand/left/input/trackpad",
+            "Left Hand Index Controller Trackpad",
+        ),
+        (
+            c"/user/hand/left/input/grip",
+            "Left Hand Index Controller Grip",
+        ),
+        (
+            c"/user/hand/left/input/system",
+            "Left Hand Index Controller System",
+        ),
+        (
+            c"/user/hand/left/input/finger/index",
+            "Left Hand Index Controller Index Finger",
+        ),
+        (
+            c"/user/hand/left/input/pinch",
+            "Left Hand Index Controller Pinch Gesture",
+        ),
+    ]);
+    names_on::<OculusTouch>(&[
+        (
+            c"/user/hand/left/input/joystick",
+            "Left Hand Oculus Touch Joystick",
+        ),
+        (c"/user/hand/left/input/grip", "Left Hand Oculus Touch Grip"),
+        (
+            c"/user/hand/left/input/x",
+            "Left Hand Oculus Touch X Button",
+        ),
+        (
+            c"/user/hand/right/input/b",
+            "Right Hand Oculus Touch B Button",
+        ),
+        (
+            c"/user/hand/left/input/system",
+            "Left Hand Oculus Touch System",
+        ),
+        (
+            c"/user/hand/left/input/thumbrest",
+            "Left Hand Oculus Touch Thumbrest",
+        ),
+        // OpenXR's spelling.
+        (
+            c"/user/hand/left/input/squeeze/value",
+            "Left Hand Oculus Touch Grip",
+        ),
+        (
+            c"/user/hand/right/output/haptic",
+            "Right Hand Oculus Touch Haptics",
+        ),
+    ]);
+    names_on::<Pico4>(&[(
+        c"/user/hand/left/input/joystick",
+        "Left Hand Pico Controller Joystick",
+    )]);
+    names_on::<ViveCosmos>(&[(
+        c"/user/hand/right/input/bumper",
+        "Right Hand Vive Cosmos Controller Bumper Button",
+    )]);
+    names_on::<MetaTouchPlus>(&[(
+        c"/user/hand/left/input/trigger",
+        "Left Hand Oculus Touch Trigger",
+    )]);
+    names_on::<ViveWands>(&[
+        (
+            c"/user/hand/left/input/trackpad",
+            "Left Hand Vive Controller Trackpad",
+        ),
+        (
+            c"/user/hand/left/input/trigger",
+            "Left Hand Vive Controller Trigger",
+        ),
+        (
+            c"/user/hand/left/input/grip",
+            "Left Hand Vive Controller Grip",
+        ),
+        (
+            c"/user/hand/left/input/application_menu",
+            "Left Hand Vive Controller Menu",
+        ),
+        (
+            c"/user/hand/left/input/system",
+            "Left Hand Vive Controller System",
+        ),
+    ]);
+    names_on::<FrameController>(&[
+        (
+            c"/user/hand/left/input/system",
+            "Left Hand Frame Controller Steam Button",
+        ),
+        (
+            c"/user/hand/left/input/thumbstick",
+            "Left Hand Frame Controller Thumb Stick",
+        ),
+        (
+            c"/user/hand/left/input/dpad_up",
+            "Left Hand Frame Controller Dpad Up",
+        ),
+        (
+            c"/user/hand/right/input/bumper",
+            "Right Hand Frame Controller Bumper",
+        ),
+    ]);
+    names_on::<HolographicController>(&[
+        (
+            c"/user/hand/left/input/joystick",
+            "Left Hand Windows Mixed Reality Controller Joystick",
+        ),
+        (
+            c"/user/hand/left/input/application_menu",
+            "Left Hand Windows Mixed Reality Controller Menu",
+        ),
+    ]);
+    names_on::<ReverbG2Controller>(&[(
+        c"/user/hand/right/input/a",
+        "Right Hand HP Motion Controller A Button",
+    )]);
+    names_on::<ViveFocus3>(&[(
+        c"/user/hand/left/input/joystick",
+        "Left Hand Vive Focus 3 Controller Joystick",
+    )]);
+    // Inputs and controllers SteamVR has no name for.
+    names_on::<OculusTouch>(&[(
+        c"/user/hand/left/input/pinch_ext/value",
+        "Left Hand Oculus Touch Pinch Ext",
+    )]);
+    names_on::<SimpleController>(&[(
+        c"/user/hand/left/input/select/click",
+        "Left Hand Controller Select",
+    )]);
+}
+
+#[test]
+fn origin_name_sections() {
+    use vr::EVRInputError::*;
+    let f = fixture_with::<OculusTouch>(c"actions.json", c"/actions/set1");
+    let trigger = f.get_input_source_handle(c"/user/hand/left/input/trigger");
+    for (sections, expected) in [
+        (0x1, "Left Hand"),
+        (0x2, "Oculus Touch"),
+        (0x3, "Left Hand Oculus Touch"),
+        (0x4, "Trigger"),
+        (0x5, "Left Hand Trigger"),
+        (0x6, "Oculus Touch Trigger"),
+        (0x7, "Left Hand Oculus Touch Trigger"),
+        (-1, "Left Hand Oculus Touch Trigger"),
+        // Unknown bits are ignored.
+        (0x9, "Left Hand"),
+    ] {
+        assert_eq!(
+            origin_name(&f, trigger, sections),
+            (None, expected.to_owned()),
+            "0x{sections:x}"
+        );
+    }
+    // No sections.
+    assert_eq!(origin_name(&f, trigger, 0), (InvalidParam, String::new()));
+    assert_eq!(origin_name(&f, trigger, 0x8), (InvalidParam, String::new()));
+
+    // A whole hand has no input.
+    let left = f.get_input_source_handle(c"/user/hand/left");
+    assert_eq!(
+        origin_name(&f, left, -1),
+        (None, "Left Hand Oculus Touch".into())
+    );
+    assert_eq!(origin_name(&f, left, 0x4), (None, "Left Hand".into()));
+
+    // The headset has no hand.
+    let head = f.get_input_source_handle(c"/user/head");
+    assert_eq!(origin_name(&f, head, -1), (None, "Oculus Headset".into()));
+    let proximity = f.get_input_source_handle(c"/user/head/proximity");
+    assert_eq!(
+        origin_name(&f, proximity, -1),
+        (None, "Oculus Headset Proximity Sensor".into())
+    );
+    assert_eq!(
+        origin_name(&f, proximity, 0x1),
+        (None, "Oculus Headset".into())
+    );
+
+    assert_eq!(origin_name(&f, 0, -1), (InvalidHandle, String::new()));
+    assert_eq!(
+        origin_name(&f, 0xdead_beef, -1),
+        (InvalidHandle, String::new())
+    );
+    let treadmill = f.get_input_source_handle(c"/user/treadmill/input/a");
+    assert_eq!(
+        origin_name(&f, treadmill, -1),
+        (InvalidDevice, String::new())
+    );
+    // The gamepad has no tracked device, but SteamVR's driver names it and its inputs.
+    let gamepad = f.get_input_source_handle(c"/user/gamepad/input/a");
+    assert_eq!(
+        origin_name(&f, gamepad, -1),
+        (None, "Gamepad A Button".into())
+    );
+    let stick = f.get_input_source_handle(c"/user/gamepad/input/joystick_left");
+    assert_eq!(
+        origin_name(&f, stick, -1),
+        (None, "Gamepad Left Thumbstick".into())
+    );
+}
+
+#[test]
+fn origin_name_buffer() {
+    use vr::EVRInputError::*;
+    let f = fixture_with::<OculusTouch>(c"actions.json", c"/actions/set1");
+    let trigger = f.get_input_source_handle(c"/user/hand/left/input/trigger");
+    let get = |size: usize| {
+        let mut name = vec![0x55 as std::ffi::c_char; size + 1];
+        let err = vr::IVRInput011_Interface::GetOriginLocalizedName(
+            f.input.as_ref(),
+            trigger,
+            name.as_mut_ptr(),
+            size as u32,
+            -1,
+        );
+        // Nothing is written past the buffer.
+        assert_eq!(name[size], 0x55);
+        let name = (size > 0 && name[size - 1] != 0x55).then(|| buf_str(&name));
+        (err, name)
+    };
+
+    let full = "Left Hand Oculus Touch Trigger";
+    assert_eq!(get(full.len() + 1), (None, Some(full.into())));
+    assert_eq!(
+        get(full.len()),
+        (BufferTooSmall, Some(full[..full.len() - 1].into()))
+    );
+    assert_eq!(get(10), (BufferTooSmall, Some("Left Hand".into())));
+    assert_eq!(get(1), (BufferTooSmall, Some(String::new())));
+    assert_eq!(get(0), (InvalidParam, Option::None));
+    assert_eq!(
+        vr::IVRInput011_Interface::GetOriginLocalizedName(
+            f.input.as_ref(),
+            trigger,
+            std::ptr::null_mut(),
+            64,
+            -1
+        ),
+        InvalidParam
+    );
+}
+
+#[track_caller]
+fn origin_path(f: &Fixture, origin: vr::VRInputValueHandle_t) -> String {
+    f.input.input_source_map.read().unwrap()[super::InputSourceKey::from(KeyData::from_ffi(origin))]
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[test]
+fn action_origins_are_openvr_inputs() {
+    let f = fixture_with::<OculusTouch>(c"actions.json", c"/actions/set1");
+    let set1 = f.get_action_set_handle(c"/actions/set1");
+    let origins_of = |action| {
+        let action = f.get_action_handle(action);
+        get_action_origins(&f, set1, action)
+            .into_iter()
+            .map(|origin| {
+                let info = get_origin_info(&f, origin);
+                (
+                    origin_path(&f, origin),
+                    origin_name(&f, origin, -1).1,
+                    buf_str(&info.rchRenderModelComponentName),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let owned = |list: &[(&str, &str, &str)]| {
+        list.iter()
+            .map(|(a, b, c)| (a.to_string(), b.to_string(), c.to_string()))
+            .collect::<Vec<_>>()
+    };
+
+    // Bound to the grip's value in OpenXR, on one hand only.
+    assert_eq!(
+        origins_of(c"/actions/set1/in/boolact2"),
+        owned(&[(
+            "/user/hand/left/input/grip",
+            "Left Hand Oculus Touch Grip",
+            "button_grip"
+        )])
+    );
+    // Bound to /input/thumbstick, which SteamVR's Touch calls a joystick.
+    assert_eq!(
+        origins_of(c"/actions/set1/in/vec2act"),
+        owned(&[
+            (
+                "/user/hand/left/input/joystick",
+                "Left Hand Oculus Touch Joystick",
+                "thumbstick"
+            ),
+            (
+                "/user/hand/right/input/joystick",
+                "Right Hand Oculus Touch Joystick",
+                "thumbstick"
+            ),
+        ])
+    );
+    // Every bound input, left hand first.
+    assert_eq!(
+        origins_of(c"/actions/set1/in/boolact"),
+        owned(&[
+            (
+                "/user/hand/left/input/x",
+                "Left Hand Oculus Touch X Button",
+                "button_x"
+            ),
+            (
+                "/user/hand/left/input/y",
+                "Left Hand Oculus Touch Y Button",
+                "button_y"
+            ),
+            (
+                "/user/hand/left/input/system",
+                "Left Hand Oculus Touch System",
+                "button_enter"
+            ),
+            (
+                "/user/hand/left/input/trigger",
+                "Left Hand Oculus Touch Trigger",
+                "trigger"
+            ),
+            (
+                "/user/hand/left/input/thumbrest",
+                "Left Hand Oculus Touch Thumbrest",
+                "thumbrest"
+            ),
+            (
+                "/user/hand/left/input/grip",
+                "Left Hand Oculus Touch Grip",
+                "button_grip"
+            ),
+            (
+                "/user/hand/right/input/a",
+                "Right Hand Oculus Touch A Button",
+                "button_a"
+            ),
+            (
+                "/user/hand/right/input/b",
+                "Right Hand Oculus Touch B Button",
+                "button_b"
+            ),
+            (
+                "/user/hand/right/input/grip",
+                "Right Hand Oculus Touch Grip",
+                "button_grip"
+            ),
+            (
+                "/user/hand/right/input/trigger",
+                "Right Hand Oculus Touch Trigger",
+                "trigger"
+            ),
+            (
+                "/user/hand/right/input/joystick",
+                "Right Hand Oculus Touch Joystick",
+                "thumbstick"
+            ),
+        ])
+    );
+
+    // Like SteamVR, a buffer too small for them all fails.
+    let boolact = f.get_action_handle(c"/actions/set1/in/boolact");
+    let mut origins = [vr::k_ulInvalidInputValueHandle; 4];
+    assert_eq!(
+        vr::IVRInput011_Interface::GetActionOrigins(
+            f.input.as_ref(),
+            set1,
+            boolact,
+            origins.as_mut_ptr(),
+            origins.len() as u32,
+        ),
+        vr::EVRInputError::BufferTooSmall
+    );
+    assert_eq!(
+        origins.to_vec(),
+        get_action_origins(&f, set1, boolact)[..4].to_vec()
+    );
+}
+
+#[test]
+fn origin_render_model_components() {
+    let components = |f: &Fixture, paths: &[&CStr]| {
+        paths
+            .iter()
+            .map(|path| {
+                let origin = f.get_input_source_handle(path);
+                buf_str(&get_origin_info(f, origin).rchRenderModelComponentName)
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let f = fixture_with::<Knuckles>(c"actions.json", c"/actions/set1");
+    assert_eq!(
+        components(
+            &f,
+            &[
+                c"/user/hand/left/input/grip",
+                c"/user/hand/left/input/thumbstick",
+                c"/user/hand/right/input/a",
+                c"/user/hand/right/input/system",
+                c"/user/hand/right/input/trackpad",
+            ]
+        ),
+        [
+            "squeeze",
+            "thumbstick",
+            "button_a",
+            "sys_button",
+            "trackpad"
+        ]
+    );
+    let f = fixture_with::<ViveWands>(c"actions.json", c"/actions/set1");
+    assert_eq!(
+        components(
+            &f,
+            &[
+                c"/user/hand/left/input/grip",
+                c"/user/hand/left/input/application_menu",
+                c"/user/hand/left/input/system",
+            ]
+        ),
+        ["lgrip", "button", "sys_button"]
+    );
+    // Models SteamVR has no components for keep the input's name.
+    let f = fixture_with::<SimpleController>(c"actions.json", c"/actions/set1");
+    assert_eq!(
+        components(&f, &[c"/user/hand/left/input/select"]),
+        ["select"]
     );
 }
 
@@ -2349,8 +3937,6 @@ fn unrestricted_digital_action_origin() {
     f.load_actions(c"actions.json");
     f.set_interaction_profile::<Knuckles>(LeftHand);
     f.set_interaction_profile::<Knuckles>(RightHand);
-    let left = f.get_input_source_handle(c"/user/hand/left");
-    let right = f.get_input_source_handle(c"/user/hand/right");
     let action = f.get_action::<bool>(boolact);
     let sync = |f: &mut Fixture| {
         f.sync(vr::VRActiveActionSet_t {
@@ -2358,41 +3944,202 @@ fn unrestricted_digital_action_origin() {
             ..Default::default()
         })
     };
+    // OpenXR combines the inputs bound directly, so it's the first one on the hand.
+    let origin = |f: &Fixture| origin_path(f, f.get_bool_state(boolact).unwrap().activeOrigin);
+    let set = |hand, pressed: bool, secs: i64| {
+        let time = xr::Time::from_nanos(secs * 1_000_000_000);
+        fakexr::set_action_state_with_time(action, pressed.into(), hand, time);
+    };
 
     sync(&mut f);
     let state = f.get_bool_state(boolact).unwrap();
     assert!(!state.bActive);
     assert_eq!(state.activeOrigin, 0);
 
-    fakexr::set_action_state(action, true.into(), RightHand);
+    set(RightHand, true, 1);
     sync(&mut f);
     let state = f.get_bool_state(boolact).unwrap();
     assert!(state.bState);
-    assert_eq!(state.activeOrigin, right);
+    assert_eq!(origin(&f), "/user/hand/right/input/a");
+    let info = get_origin_info(&f, state.activeOrigin);
+    assert_eq!(info.trackedDeviceIndex, Hand::Right as u32);
     assert_eq!(
-        get_origin_info(&f, state.activeOrigin).trackedDeviceIndex,
-        Hand::Right as u32
+        info.devicePath,
+        f.get_input_source_handle(c"/user/hand/right")
     );
 
-    // Active but not pressed still has an origin.
-    fakexr::set_action_state(action, false.into(), RightHand);
+    // Active but not pressed still has an origin: the input released last.
+    set(RightHand, false, 2);
     sync(&mut f);
     sync(&mut f);
     let state = f.get_bool_state(boolact).unwrap();
     assert!(state.bActive && !state.bState);
-    assert_ne!(state.activeOrigin, 0);
+    assert_eq!(origin(&f), "/user/hand/right/input/a");
 
-    fakexr::set_action_state(action, true.into(), LeftHand);
+    set(LeftHand, true, 3);
     sync(&mut f);
-    assert_eq!(f.get_bool_state(boolact).unwrap().activeOrigin, left);
+    assert_eq!(origin(&f), "/user/hand/left/input/a");
 
     // Left wins ties.
-    fakexr::set_action_state(action, false.into(), LeftHand);
+    set(LeftHand, false, 4);
     sync(&mut f);
-    fakexr::set_action_state(action, true.into(), LeftHand);
-    fakexr::set_action_state(action, true.into(), RightHand);
+    set(LeftHand, true, 5);
+    set(RightHand, true, 5);
     sync(&mut f);
-    assert_eq!(f.get_bool_state(boolact).unwrap().activeOrigin, left);
+    assert_eq!(origin(&f), "/user/hand/left/input/a");
+
+    // A read restricted to a hand reports that hand's input.
+    let right = f.get_input_source_handle(c"/user/hand/right");
+    let state = f.get_bool_state_hand(boolact, right).unwrap();
+    assert_eq!(
+        origin_path(&f, state.activeOrigin),
+        "/user/hand/right/input/a"
+    );
+}
+
+#[test]
+fn action_data_origin_is_the_driving_input() {
+    let mut f = fixture_with::<OculusTouch>(c"actions_origins.json", c"/actions/main");
+    let main = f.get_action_set_handle(c"/actions/main");
+    let sync = |f: &mut Fixture| {
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: main,
+            ..Default::default()
+        })
+    };
+    let fire = f.get_action_handle(c"/actions/main/in/fire");
+    let throttle = f.get_action_handle(c"/actions/main/in/throttle");
+    let move_ = f.get_action_handle(c"/actions/main/in/move");
+    let pose = f.get_action_handle(c"/actions/main/in/pose");
+    let [left, right] =
+        [c"/user/hand/left", c"/user/hand/right"].map(|hand| f.get_input_source_handle(hand));
+    // Button mode on the analog trigger is a threshold xrizer evaluates.
+    let trigger_click = f.custom_binding_action(fire, OculusTouch::profile_path(), |ty| {
+        matches!(ty, BoolBindingType::ThresholdFloat(_))
+    });
+    let fire_xr = f.get_action::<bool>(fire);
+    let throttle_xr = f.get_action::<f32>(throttle);
+    let move_xr = f.get_action::<xr::Vector2f>(move_);
+    let fire_origin = |f: &Fixture| {
+        let state = f.get_bool_state(fire).unwrap();
+        (state.bState, origin_path(f, state.activeOrigin))
+    };
+    let named = |f: &Fixture, origin| origin_name(f, origin, -1).1;
+    let at = |secs: i64| xr::Time::from_nanos(secs * 1_000_000_000);
+    let trigger = |value, secs| {
+        let value = fakexr::ActionState::Float(value);
+        fakexr::set_action_state_with_time(trigger_click, value, RightHand, at(secs));
+    };
+
+    // Nothing changed yet: the first hand's first input.
+    for hand in [LeftHand, RightHand] {
+        fakexr::set_action_state(fire_xr, false.into(), hand);
+    }
+    trigger(0.0, 0);
+    sync(&mut f);
+    sync(&mut f);
+    assert_eq!(fire_origin(&f), (false, "/user/hand/left/input/x".into()));
+
+    // The trigger's threshold drives it, and Unity names the origin after it.
+    trigger(1.0, 1);
+    sync(&mut f);
+    assert_eq!(
+        fire_origin(&f),
+        (true, "/user/hand/right/input/trigger".into())
+    );
+    let state = f.get_bool_state(fire).unwrap();
+    assert_eq!(
+        named(&f, state.activeOrigin),
+        "Right Hand Oculus Touch Trigger"
+    );
+    let info = get_origin_info(&f, state.activeOrigin);
+    assert_eq!(buf_str(&info.rchRenderModelComponentName), "trigger");
+    assert_eq!(info.devicePath, right);
+    // An origin action data reports is one GetActionOrigins lists.
+    assert!(get_action_origins(&f, main, fire).contains(&state.activeOrigin));
+
+    // Released, it stays the origin until another input changes.
+    trigger(0.0, 2);
+    sync(&mut f);
+    sync(&mut f);
+    assert_eq!(
+        fire_origin(&f),
+        (false, "/user/hand/right/input/trigger".into())
+    );
+
+    // A pressed button wins over a released threshold.
+    fakexr::set_action_state_with_time(fire_xr, true.into(), RightHand, at(3));
+    sync(&mut f);
+    assert_eq!(fire_origin(&f), (true, "/user/hand/right/input/a".into()));
+    let state = f.get_bool_state_hand(fire, left).unwrap();
+    assert_eq!(
+        origin_path(&f, state.activeOrigin),
+        "/user/hand/left/input/x"
+    );
+
+    // Analog actions.
+    fakexr::set_action_state(throttle_xr, fakexr::ActionState::Float(0.5), RightHand);
+    fakexr::set_action_state(move_xr, fakexr::ActionState::Vector2(0.0, 1.0), RightHand);
+    sync(&mut f);
+    let state = get_analog_state(&f, throttle, 0);
+    assert_eq!(
+        origin_path(&f, state.activeOrigin),
+        "/user/hand/right/input/trigger"
+    );
+    let state = get_analog_state(&f, move_, right);
+    assert_eq!(
+        origin_path(&f, state.activeOrigin),
+        "/user/hand/right/input/joystick"
+    );
+    assert_eq!(
+        named(&f, state.activeOrigin),
+        "Right Hand Oculus Touch Joystick"
+    );
+
+    // Poses report their pose source.
+    f.input
+        .openxr
+        .set_tracking_space(vr::ETrackingUniverseOrigin::Seated);
+    f.input.frame_start_update();
+    for (restrict, expected, name, hand) in [
+        (
+            left,
+            "/user/hand/left/pose/raw",
+            "Left Hand Oculus Touch Raw",
+            left,
+        ),
+        (
+            right,
+            "/user/hand/right/pose/tip",
+            "Right Hand Oculus Touch Tip",
+            right,
+        ),
+        (
+            0,
+            "/user/hand/left/pose/raw",
+            "Left Hand Oculus Touch Raw",
+            left,
+        ),
+    ] {
+        let data = f.get_pose(pose, restrict).unwrap();
+        assert!(data.bActive);
+        assert_eq!(origin_path(&f, data.activeOrigin), expected);
+        assert_eq!(named(&f, data.activeOrigin), name);
+        assert_eq!(get_origin_info(&f, data.activeOrigin).devicePath, hand);
+    }
+    let tip = f.get_pose(pose, right).unwrap().activeOrigin;
+    assert_eq!(
+        buf_str(&get_origin_info(&f, tip).rchRenderModelComponentName),
+        "tip"
+    );
+    let origins = get_action_origins(&f, main, pose);
+    assert_eq!(
+        origins
+            .iter()
+            .map(|origin| origin_path(&f, *origin))
+            .collect::<Vec<_>>(),
+        ["/user/hand/left/pose/raw", "/user/hand/right/pose/tip"]
+    );
 }
 
 #[test]
@@ -2553,6 +4300,199 @@ fn analog_action_update_time() {
     sync(&mut f);
     assert_eq!(get_analog_state(&f, vec1, 0).fUpdateTime, 0.0);
     assert_eq!(get_analog_state(&f, vec2, 0).fUpdateTime, 0.0);
+}
+
+#[test]
+fn scalar_constant_values() {
+    let mut f = Fixture::new();
+    let main = f.get_action_set_handle(c"/actions/main");
+    let [reverse, offset, throttle, steer] = [
+        c"/actions/main/in/reverse",
+        c"/actions/main/in/offset",
+        c"/actions/main/in/throttle",
+        c"/actions/main/in/steer",
+    ]
+    .map(|name| f.get_action_handle(name));
+    let [left, right] =
+        [c"/user/hand/left", c"/user/hand/right"].map(|hand| f.get_input_source_handle(hand));
+    f.load_actions(c"actions_scalar_constant.json");
+    f.set_interaction_profile::<OculusTouch>(LeftHand);
+    f.set_interaction_profile::<OculusTouch>(RightHand);
+
+    let input = |path: &CStr| f.get_action::<f32>(f.get_action_handle(path));
+    let x = input(c"/user/hand/left/input/x/click-/actions/main");
+    let y = input(c"/user/hand/left/input/y/click-/actions/main");
+    let b = input(c"/user/hand/right/input/b/click-/actions/main");
+    let grip = input(c"/user/hand/left/input/squeeze/value-/actions/main");
+    let trigger = f.get_action::<f32>(throttle);
+    let stick = f.get_action::<xr::Vector2f>(steer);
+    let set = |action, hand, value| {
+        fakexr::set_action_state(action, fakexr::ActionState::Float(value), hand)
+    };
+    for (action, hand) in [
+        (x, LeftHand),
+        (y, LeftHand),
+        (grip, LeftHand),
+        (b, RightHand),
+        (trigger, RightHand),
+    ] {
+        set(action, hand, 0.0);
+    }
+    fakexr::set_action_state(stick, fakexr::ActionState::Vector2(0.3, 0.0), LeftHand);
+    let sync = |f: &mut Fixture| {
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: main,
+            ..Default::default()
+        })
+    };
+    let xyz = |f: &Fixture, action, restrict| {
+        let s = get_analog_state(f, action, restrict);
+        assert!(s.bActive);
+        (s.x, s.y, s.z)
+    };
+
+    // Released inputs report the off values.
+    sync(&mut f);
+    assert_eq!(xyz(&f, reverse, left), (0.0, 0.0, 0.0));
+    assert_eq!(xyz(&f, offset, left), (0.25, 0.0, 0.0));
+
+    // Pressed ones the on values: -1 reverses.
+    set(x, LeftHand, 1.0);
+    set(y, LeftHand, 1.0);
+    sync(&mut f);
+    assert_eq!(xyz(&f, reverse, left), (-1.0, 0.0, 0.0));
+    assert_eq!(xyz(&f, reverse, 0), (-1.0, 0.0, 0.0));
+    assert_eq!(xyz(&f, offset, left), (0.5, 0.0, 0.0));
+
+    // The largest value wins among an action's bindings, like OpenXR's own.
+    set(b, RightHand, 1.0);
+    set(trigger, RightHand, 0.3);
+    sync(&mut f);
+    assert_eq!(xyz(&f, throttle, right), (-0.5, 0.0, 0.0));
+    set(trigger, RightHand, 0.8);
+    sync(&mut f);
+    assert_eq!(xyz(&f, throttle, right), (0.8, 0.0, 0.0));
+    set(b, RightHand, 0.0);
+    sync(&mut f);
+    assert_eq!(xyz(&f, throttle, right), (0.8, 0.0, 0.0));
+
+    // Vector2 actions get every axis, 1 by default.
+    assert_eq!(xyz(&f, steer, left), (0.3, 0.0, 0.0));
+    set(grip, LeftHand, 1.0);
+    sync(&mut f);
+    assert_eq!(xyz(&f, steer, left), (-1.0, 1.0, 0.0));
+    fakexr::set_action_state(stick, fakexr::ActionState::Vector2(0.0, -1.0), LeftHand);
+    set(grip, LeftHand, 0.0);
+    sync(&mut f);
+    let steer_state = get_analog_state(&f, steer, left);
+    assert_eq!(
+        (
+            steer_state.x,
+            steer_state.y,
+            steer_state.deltaX,
+            steer_state.deltaY
+        ),
+        (0.0, -1.0, 1.0, -2.0)
+    );
+
+    // Deltas and update times follow the presses.
+    let secs = |secs: f64| xr::Time::from_nanos((secs * 1e9) as i64);
+    f.input.openxr.set_display_time(secs(10.0));
+    fakexr::set_action_state_with_time(x, fakexr::ActionState::Float(0.0), LeftHand, secs(9.75));
+    sync(&mut f);
+    let s = get_analog_state(&f, reverse, left);
+    assert_eq!((s.x, s.deltaX, s.fUpdateTime), (0.0, 1.0, -0.25));
+    sync(&mut f);
+    let s = get_analog_state(&f, reverse, left);
+    assert_eq!((s.x, s.deltaX, s.fUpdateTime), (0.0, 0.0, 0.0));
+    fakexr::set_action_state_with_time(x, fakexr::ActionState::Float(1.0), LeftHand, secs(9.5));
+    sync(&mut f);
+    let s = get_analog_state(&f, reverse, left);
+    assert_eq!((s.x, s.deltaX, s.fUpdateTime), (-1.0, -1.0, -0.5));
+}
+
+#[test]
+fn vector3_actions() {
+    let mut f = Fixture::new();
+    let main = f.get_action_set_handle(c"/actions/main");
+    let menu = f.get_action_set_handle(c"/actions/menu");
+    let look = f.get_action_handle(c"/actions/main/in/look");
+    let unbound = f.get_action_handle(c"/actions/main/in/unbound");
+    let [left, right] =
+        [c"/user/hand/left", c"/user/hand/right"].map(|hand| f.get_input_source_handle(hand));
+    f.load_actions(c"actions_scalar_constant.json");
+    f.set_interaction_profile::<OculusTouch>(RightHand);
+    let grip = f.get_action::<f32>(
+        f.get_action_handle(c"/user/hand/right/input/squeeze/value-/actions/main"),
+    );
+    fakexr::set_action_state(grip, fakexr::ActionState::Float(0.0), RightHand);
+    let sync = |f: &mut Fixture, menu_priority| {
+        f.sync_sets(&mut [
+            vr::VRActiveActionSet_t {
+                ulActionSet: main,
+                ..Default::default()
+            },
+            vr::VRActiveActionSet_t {
+                ulActionSet: menu,
+                nPriority: menu_priority,
+                ..Default::default()
+            },
+        ])
+    };
+
+    // Before any sync, and without bindings, the action is valid but inactive.
+    for action in [look, unbound] {
+        assert!(!get_analog_state(&f, action, 0).bActive);
+    }
+    // Scalar constants drive every axis.
+    let xyz = |s: vr::InputAnalogActionData_t| (s.x, s.y, s.z);
+    sync(&mut f, 0);
+    let s = get_analog_state(&f, look, right);
+    assert!(s.bActive);
+    assert_eq!(xyz(s), (0.0, 0.0, -1.0));
+    fakexr::set_action_state(grip, fakexr::ActionState::Float(1.0), RightHand);
+    sync(&mut f, 0);
+    let s = get_analog_state(&f, look, right);
+    assert_eq!(xyz(s), (0.5, -0.5, 1.0));
+    assert_eq!((s.deltaX, s.deltaY, s.deltaZ), (0.5, -0.5, 2.0));
+    // The grip's, which drives the scalar constants.
+    assert_eq!(
+        s.activeOrigin,
+        f.get_input_source_handle(c"/user/hand/right/input/grip")
+    );
+    assert_eq!(xyz(get_analog_state(&f, look, 0)), (0.5, -0.5, 1.0));
+    assert!(!get_analog_state(&f, look, left).bActive);
+
+    let s = get_analog_state(&f, unbound, 0);
+    assert!(!s.bActive);
+    assert_eq!((s.x, s.y, s.z), (0.0, 0.0, 0.0));
+    assert!(get_action_origins(&f, main, unbound).is_empty());
+    assert!(get_binding_info(&f, unbound).is_empty());
+
+    let origins = get_action_origins(&f, main, look);
+    assert!(
+        origins
+            .iter()
+            .any(|origin| get_origin_info(&f, *origin).trackedDeviceIndex == Hand::Right as u32)
+    );
+    assert_eq!(get_binding_info(&f, look).len(), 1);
+
+    let mut digital = vr::InputDigitalActionData_t::default();
+    assert_eq!(
+        f.input.GetDigitalActionData(
+            look,
+            &mut digital,
+            std::mem::size_of_val(&digital) as u32,
+            0
+        ),
+        vr::EVRInputError::WrongType
+    );
+
+    // The menu binds the grip too, so it masks the action while it takes priority.
+    sync(&mut f, 1);
+    assert!(!get_analog_state(&f, look, right).bActive);
+    sync(&mut f, 0);
+    assert!(get_analog_state(&f, look, right).bActive);
 }
 
 #[test]
@@ -2755,6 +4695,8 @@ fn action_set_priorities() {
     f.custom_binding_action(select, Knuckles::profile_path(), |_| true);
     let left = f.get_input_source_handle(c"/user/hand/left");
     let right = f.get_input_source_handle(c"/user/hand/right");
+    // Fire and throttle are bound to the trigger.
+    let trigger = f.get_input_source_handle(c"/user/hand/left/input/trigger");
     f.set_interaction_profile::<Knuckles>(LeftHand);
     f.set_interaction_profile::<Knuckles>(RightHand);
 
@@ -2792,7 +4734,7 @@ fn action_set_priorities() {
     };
 
     sync(&mut f, 0, 0);
-    assert_eq!(digital(&f, 0), (true, true, true, left));
+    assert_eq!(digital(&f, 0), (true, true, true, trigger));
 
     // The menu binds the trigger and thumbstick: actions bound to them are masked, and a held
     // button is released.
@@ -2809,17 +4751,17 @@ fn action_set_priorities() {
 
     // Unmasking a held button doesn't press it.
     sync(&mut f, 0, 0);
-    assert_eq!(digital(&f, 0), (true, true, false, left));
+    assert_eq!(digital(&f, 0), (true, true, false, trigger));
     assert!(get_analog_state(&f, throttle, 0).bActive);
 
     // A set restricted to one hand only masks that hand.
     sync(&mut f, 1, right);
-    assert_eq!(digital(&f, left), (true, true, false, left));
+    assert_eq!(digital(&f, left), (true, true, false, trigger));
     assert_eq!(digital(&f, right), (false, false, true, 0));
-    assert_eq!(digital(&f, 0), (true, true, false, left));
+    assert_eq!(digital(&f, 0), (true, true, false, trigger));
     let throttle_state = get_analog_state(&f, throttle, 0);
     assert!(throttle_state.bActive);
-    assert_eq!(throttle_state.activeOrigin, left);
+    assert_eq!(throttle_state.activeOrigin, trigger);
     assert!(!get_analog_state(&f, move_, right).bActive);
 }
 
@@ -2991,7 +4933,6 @@ fn head_proximity() {
     f.set_interaction_profile::<Knuckles>(RightHand);
     let head = f.get_input_source_handle(c"/user/head");
     let left = f.get_input_source_handle(c"/user/hand/left");
-    let right = f.get_input_source_handle(c"/user/hand/right");
 
     let sync = |f: &mut Fixture, set| {
         f.sync(vr::VRActiveActionSet_t {
@@ -3016,7 +4957,8 @@ fn head_proximity() {
     sync(&mut f, main);
     let s = state(&f, on_head, 0);
     assert_eq!(flags(s), (true, true, true));
-    assert_eq!(s.activeOrigin, head);
+    let proximity_origin = f.get_input_source_handle(c"/user/head/proximity");
+    assert_eq!(s.activeOrigin, proximity_origin);
     sync(&mut f, main);
     assert_eq!(flags(state(&f, on_head, 0)), (true, true, false));
 
@@ -3041,7 +4983,10 @@ fn head_proximity() {
     sync(&mut f, main);
     let s = state(&f, on_head_or_a, 0);
     assert_eq!(flags(s), (true, true, true));
-    assert_eq!(s.activeOrigin, right);
+    assert_eq!(
+        s.activeOrigin,
+        f.get_input_source_handle(c"/user/hand/right/input/a")
+    );
     assert_eq!(flags(state(&f, on_head_or_a, head)), (true, false, false));
     set_present(&f, true);
     sync(&mut f, main);
@@ -3050,7 +4995,7 @@ fn head_proximity() {
     sync(&mut f, main);
     let s = state(&f, on_head_or_a, 0);
     assert_eq!(flags(s), (true, true, false));
-    assert_eq!(s.activeOrigin, head);
+    assert_eq!(s.activeOrigin, proximity_origin);
 
     // Inactive with its set, or with the set restricted to a hand.
     sync(&mut f, other);
@@ -3074,4 +5019,427 @@ fn generic_hmd_controller_type() {
     assert_eq!(ty, ControllerType::GenericHmd);
     assert_eq!("generic_hmd".parse::<ControllerType>(), Ok(ty.clone()));
     assert_eq!(ty.to_string(), "generic_hmd");
+}
+
+/// A fixture whose runtime reports actions active per hand like Monado, with both hands on `P`.
+fn stick_fixture<P: InteractionProfile>(actions: &CStr) -> Fixture {
+    fakexr::set_binding_activity(true);
+    let mut f = Fixture::new();
+    f.load_actions(actions);
+    f.set_interaction_profile::<P>(LeftHand);
+    f.set_interaction_profile::<P>(RightHand);
+    f
+}
+
+/// Moves a thumbstick: every action bound to it or its touch sees the change.
+fn move_stick(
+    f: &mut Fixture,
+    sets: &mut [vr::VRActiveActionSet_t],
+    hand: &str,
+    touched: bool,
+    [x, y]: [f32; 2],
+) {
+    let session = f.raw_session();
+    let input = format!("/user/hand/{hand}/input/thumbstick");
+    fakexr::set_input(
+        session,
+        &format!("{input}/touch"),
+        fakexr::InputValue::Bool(touched),
+    );
+    fakexr::set_input(session, &input, fakexr::InputValue::Vector2(x, y));
+    f.sync_sets(sets);
+}
+
+/// The unrestricted value of an analog action, rounded off.
+fn stick_value(f: &Fixture, name: &CStr) -> [f32; 2] {
+    let state = get_analog_state(f, f.get_action_handle(name), 0);
+    assert!(state.bActive, "{name:?} inactive");
+    [state.x, state.y].map(|v| (v * 100.0).round() / 100.0)
+}
+
+/// The boolean actions of `names` that are pressed, unrestricted.
+fn pressed_of(f: &Fixture, names: &[&CStr]) -> Vec<String> {
+    names
+        .iter()
+        .filter(|name| f.get_bool_state(f.get_action_handle(name)).unwrap().bState)
+        .map(|name| {
+            name.to_string_lossy()
+                .rsplit('/')
+                .next()
+                .unwrap()
+                .to_owned()
+        })
+        .collect()
+}
+
+/// Half-Life: Alyx turns, dashes and scrolls with the right stick: two touch dpads, a joystick
+/// with a deadzone and a plain joystick in another set, all on the same input (#321).
+fn turn_stick_bindings<P: InteractionProfile>() {
+    let mut f = stick_fixture::<P>(c"actions_turn_stick.json");
+    let mut sets = ["/actions/move", "/actions/scroll", "/actions/weapon"].map(|set| {
+        vr::VRActiveActionSet_t {
+            ulActionSet: f.get_action_set_handle(&std::ffi::CString::new(set).unwrap()),
+            ..Default::default()
+        }
+    });
+    let buttons = [
+        c"/actions/move/in/TurnLeft",
+        c"/actions/move/in/TurnRight",
+        c"/actions/move/in/WalkMantle",
+        c"/actions/move/in/ShiftDashJump",
+        c"/actions/move/in/MoveBack",
+        c"/actions/move/in/Teleport",
+        c"/actions/move/in/Walk",
+    ];
+    let turn = c"/actions/move/in/ContinuousTurn";
+    let teleport_turn = c"/actions/move/in/TeleportTurn";
+    let scroll = c"/actions/scroll/in/Scroll";
+    let right = f.get_input_source_handle(c"/user/hand/right");
+    let left = f.get_input_source_handle(c"/user/hand/left");
+
+    for (direction, [x, y], expected) in [
+        ("east", [1.0, 0.0], vec!["TurnRight"]),
+        ("west", [-1.0, 0.0], vec!["TurnLeft"]),
+        ("north", [0.0, 1.0], vec!["WalkMantle"]),
+        ("south", [0.0, -1.0], vec!["ShiftDashJump", "MoveBack"]),
+    ] {
+        move_stick(&mut f, &mut sets, "right", true, [x, y]);
+        assert_eq!(
+            pressed_of(&f, &buttons),
+            expected,
+            "right stick {direction}"
+        );
+        assert_eq!(stick_value(&f, turn), [x, y], "right stick {direction}");
+        assert_eq!(stick_value(&f, scroll), [x, y], "right stick {direction}");
+        assert_eq!(stick_value(&f, teleport_turn), [0.0, 0.0]);
+        let turn_right = f.get_action_handle(c"/actions/move/in/TurnRight");
+        assert_eq!(
+            [right, left].map(|hand| f.get_bool_state_hand(turn_right, hand).unwrap().bState),
+            [direction == "east", false]
+        );
+        // Sticky dpads let go in the middle.
+        move_stick(&mut f, &mut sets, "right", true, [0.0, 0.0]);
+        assert_eq!(pressed_of(&f, &buttons), Vec::<String>::new());
+    }
+
+    // Inside the 75% deadzone.
+    move_stick(&mut f, &mut sets, "right", true, [0.5, 0.0]);
+    assert_eq!(pressed_of(&f, &buttons), Vec::<String>::new());
+    assert_eq!(stick_value(&f, turn), [0.0, 0.0]);
+    assert_eq!(stick_value(&f, scroll), [0.5, 0.0]);
+    // The dpads need the stick touched, the joysticks don't.
+    move_stick(&mut f, &mut sets, "right", false, [1.0, 0.0]);
+    assert_eq!(pressed_of(&f, &buttons), Vec::<String>::new());
+    assert_eq!(stick_value(&f, turn), [1.0, 0.0]);
+    move_stick(&mut f, &mut sets, "right", false, [0.0, 0.0]);
+
+    // The left stick teleports and walks, and doesn't turn.
+    move_stick(&mut f, &mut sets, "left", true, [0.0, 1.0]);
+    assert_eq!(pressed_of(&f, &buttons), ["Teleport", "Walk"]);
+    assert_eq!(stick_value(&f, teleport_turn), [0.0, 1.0]);
+    assert_eq!(stick_value(&f, scroll), [0.0, 1.0]);
+    assert_eq!(stick_value(&f, turn), [0.0, 0.0]);
+}
+
+#[test]
+fn turn_stick_bindings_touch() {
+    turn_stick_bindings::<OculusTouch>();
+}
+
+#[test]
+fn turn_stick_bindings_touch_plus() {
+    turn_stick_bindings::<super::profiles::meta_touch_plus::MetaTouchPlus>();
+}
+
+/// The Unreal SteamVR Input plugin names a stick's action like
+/// "MoveForward_X,MoveForward_Y X Y_axis2d" and reads it unrestricted. The Walking Dead: Saints &
+/// Sinners turns with the right stick and inverts the left one's Y axis (#321).
+fn axis2d_bindings<P: InteractionProfile>() {
+    let mut f = stick_fixture::<P>(c"actions_axis2d.json");
+    let mut sets = [vr::VRActiveActionSet_t {
+        ulActionSet: f.get_action_set_handle(c"/actions/main"),
+        ..Default::default()
+    }];
+    let buttons = [
+        c"/actions/main/in/TurnAxisLeft",
+        c"/actions/main/in/TouchMovementActive",
+    ];
+    let turn = c"/actions/main/in/ConfigurableTurnAxis_X,ConfigurableTurnAxis_Y X Y_axis2d";
+    let movement = c"/actions/main/in/MoveForward_X,MoveForward_Y X Y_axis2d";
+
+    for [x, y] in [[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -0.5]] {
+        move_stick(&mut f, &mut sets, "right", true, [x, y]);
+        assert_eq!(stick_value(&f, turn), [x, y]);
+        assert_eq!(stick_value(&f, movement), [0.0, 0.0]);
+        assert_eq!(pressed_of(&f, &buttons), ["TurnAxisLeft"]);
+    }
+    move_stick(&mut f, &mut sets, "right", false, [0.0, 0.0]);
+
+    move_stick(&mut f, &mut sets, "left", true, [0.25, 1.0]);
+    assert_eq!(stick_value(&f, movement), [0.25, -1.0]);
+    assert_eq!(stick_value(&f, turn), [0.0, 0.0]);
+    assert_eq!(pressed_of(&f, &buttons), ["TouchMovementActive"]);
+}
+
+#[test]
+fn axis2d_bindings_touch() {
+    axis2d_bindings::<OculusTouch>();
+}
+
+#[test]
+fn axis2d_bindings_touch_plus() {
+    axis2d_bindings::<super::profiles::meta_touch_plus::MetaTouchPlus>();
+}
+
+/// Loads actions_gamepad.json with Touch controllers and a gamepad, and syncs the main set.
+fn gamepad_fixture() -> (Fixture, vr::VRActionSetHandle_t) {
+    let mut f = Fixture::new();
+    let main = f.get_action_set_handle(c"/actions/main");
+    f.load_actions(c"actions_gamepad.json");
+    f.set_interaction_profile::<OculusTouch>(LeftHand);
+    f.set_interaction_profile::<OculusTouch>(RightHand);
+    f.set_interaction_profile::<XboxController>(Gamepad);
+    sync_set(&mut f, main);
+    (f, main)
+}
+
+fn sync_set(f: &mut Fixture, set: vr::VRActionSetHandle_t) {
+    f.sync(vr::VRActiveActionSet_t {
+        ulActionSet: set,
+        ..Default::default()
+    });
+}
+
+#[test]
+fn gamepad_actions() {
+    use fakexr::ActionState::*;
+    let (mut f, main) = gamepad_fixture();
+    let jump = f.get_action_handle(c"/actions/main/in/jump");
+    let throttle = f.get_action_handle(c"/actions/main/in/throttle");
+    let move_ = f.get_action_handle(c"/actions/main/in/move");
+    let turn = f.get_action_handle(c"/actions/main/in/turn");
+    let left = f.get_input_source_handle(c"/user/hand/left");
+    let gamepad = f.get_input_source_handle(c"/user/gamepad");
+
+    fakexr::set_action_state(f.get_action::<bool>(jump), true.into(), Gamepad);
+    fakexr::set_action_state(f.get_action::<f32>(throttle), Float(0.25), Gamepad);
+    fakexr::set_action_state(f.get_action::<f32>(throttle), Float(0.5), LeftHand);
+    let stick = f.get_action::<xr::Vector2f>(move_);
+    fakexr::set_action_state(stick, Vector2(0.0, 1.0), Gamepad);
+    sync_set(&mut f, main);
+
+    // Pressed on the gamepad's A, which is the origin.
+    let a = f.get_input_source_handle(c"/user/gamepad/input/a");
+    let s = f.get_bool_state(jump).unwrap();
+    assert_eq!((s.bActive, s.bState, s.activeOrigin), (true, true, a));
+    let s = f.get_bool_state_hand(jump, gamepad).unwrap();
+    assert_eq!((s.bActive, s.bState, s.activeOrigin), (true, true, a));
+    assert!(!f.get_bool_state_hand(jump, left).unwrap().bState);
+    assert!(f.get_bool_state_hand(jump, a).unwrap().bState);
+
+    // Each device's own value, and the largest one unrestricted.
+    assert_eq!(get_analog_state(&f, throttle, gamepad).x, 0.25);
+    assert_eq!(get_analog_state(&f, throttle, left).x, 0.5);
+    let s = get_analog_state(&f, throttle, 0);
+    let left_trigger = f.get_input_source_handle(c"/user/hand/left/input/trigger");
+    assert_eq!((s.x, s.activeOrigin), (0.5, left_trigger));
+    let s = get_analog_state(&f, move_, 0);
+    let left_stick = f.get_input_source_handle(c"/user/gamepad/input/joystick_left");
+    assert_eq!((s.y, s.activeOrigin), (1.0, left_stick));
+    assert_eq!(get_analog_state(&f, move_, gamepad).y, 1.0);
+    assert_eq!(get_analog_state(&f, move_, left).y, 0.0);
+
+    // A dpad on the right stick, which xrizer computes.
+    let right_stick = f.custom_binding_action(turn, XboxController::profile_path(), |ty| {
+        matches!(ty, BoolBindingType::Dpad(_))
+    });
+    fakexr::set_action_state(right_stick, Vector2(1.0, 0.0), Gamepad);
+    sync_set(&mut f, main);
+    let s = f.get_bool_state(turn).unwrap();
+    let right_stick_origin = f.get_input_source_handle(c"/user/gamepad/input/joystick_right");
+    assert_eq!(
+        (s.bState, s.bChanged, s.activeOrigin),
+        (true, true, right_stick_origin)
+    );
+    assert!(f.get_bool_state_hand(turn, gamepad).unwrap().bState);
+    assert!(!f.get_bool_state_hand(turn, left).unwrap().bState);
+    fakexr::set_action_state(right_stick, Vector2(0.0, 0.0), Gamepad);
+    sync_set(&mut f, main);
+    let s = f.get_bool_state(turn).unwrap();
+    assert_eq!((s.bState, s.bChanged), (false, true));
+
+    // The gamepad has no pose.
+    let pose = f.get_action_handle(c"/actions/main/in/pose");
+    assert!(!f.get_pose(pose, gamepad).unwrap().bActive);
+}
+
+#[test]
+fn gamepad_sets_restricted_and_prioritized() {
+    let (mut f, main) = gamepad_fixture();
+    let menu = f.get_action_set_handle(c"/actions/menu");
+    let jump = f.get_action_handle(c"/actions/main/in/jump");
+    let fire = f.get_action_handle(c"/actions/main/in/fire");
+    let gamepad = f.get_input_source_handle(c"/user/gamepad");
+    fakexr::set_action_state(f.get_action::<bool>(jump), true.into(), Gamepad);
+
+    // A set can be restricted to the gamepad, as its actions have its subaction path.
+    f.sync(vr::VRActiveActionSet_t {
+        ulActionSet: main,
+        ulRestrictedToDevice: gamepad,
+        ..Default::default()
+    });
+    assert!(f.get_bool_state_hand(jump, gamepad).unwrap().bState);
+
+    // A higher priority set's binding on the gamepad's trigger masks the game's there.
+    let trigger = f.custom_binding_action(fire, XboxController::profile_path(), |ty| {
+        matches!(ty, BoolBindingType::ThresholdFloat(_))
+    });
+    fakexr::set_action_state(trigger, fakexr::ActionState::Float(1.0), Gamepad);
+    let sync = |f: &mut Fixture, menu_priority| {
+        f.sync_sets(&mut [
+            vr::VRActiveActionSet_t {
+                ulActionSet: main,
+                ..Default::default()
+            },
+            vr::VRActiveActionSet_t {
+                ulActionSet: menu,
+                nPriority: menu_priority,
+                ..Default::default()
+            },
+        ])
+    };
+    sync(&mut f, 0);
+    let s = f.get_bool_state(fire).unwrap();
+    let trigger_origin = f.get_input_source_handle(c"/user/gamepad/input/trigger_right");
+    assert_eq!(
+        (s.bActive, s.bState, s.activeOrigin),
+        (true, true, trigger_origin)
+    );
+    sync(&mut f, 1);
+    let s = f.get_bool_state_hand(fire, gamepad).unwrap();
+    assert_eq!((s.bActive, s.bState, s.bChanged), (false, false, true));
+    // Jump is on A, which the menu doesn't use.
+    assert!(f.get_bool_state_hand(jump, gamepad).unwrap().bState);
+}
+
+#[test]
+fn gamepad_haptics() {
+    let (mut f, main) = gamepad_fixture();
+    let vib = f.get_action_handle(c"/actions/main/in/vib");
+    let gamepad = f.get_input_source_handle(c"/user/gamepad");
+    assert_eq!(
+        f.input
+            .TriggerHapticVibrationAction(vib, 0.0, 0.1, 160.0, 0.5, gamepad),
+        vr::EVRInputError::None
+    );
+    let feedback = fakexr::take_haptic_feedback(f.get_action::<xr::Haptic>(vib));
+    assert_eq!(feedback.len(), 1);
+    assert_eq!(feedback[0].hand, Some(Gamepad));
+
+    // SteamVR's binding haptic for a click from the gamepad's trigger.
+    let fire = f.get_action_handle(c"/actions/main/in/fire");
+    let trigger = f.custom_binding_action(fire, XboxController::profile_path(), |ty| {
+        matches!(ty, BoolBindingType::ThresholdFloat(_))
+    });
+    let haptic = f
+        .input
+        .openxr
+        .session_data
+        .get()
+        .input_data
+        .get_loaded_actions()
+        .unwrap()
+        .haptic_action
+        .as_raw();
+    sync_set(&mut f, main);
+    fakexr::set_action_state(trigger, fakexr::ActionState::Float(1.0), Gamepad);
+    sync_set(&mut f, main);
+    let feedback = fakexr::take_haptic_feedback(haptic);
+    assert_eq!(feedback.len(), 1);
+    assert_eq!(feedback[0].hand, Some(Gamepad));
+}
+
+#[test]
+fn gamepad_origins() {
+    let (mut f, main) = gamepad_fixture();
+    let jump = f.get_action_handle(c"/actions/main/in/jump");
+    let a = f.get_input_source_handle(c"/user/gamepad/input/a");
+    let gamepad_row = [
+        "/user/gamepad".to_owned(),
+        "/input/a".to_owned(),
+        "button".to_owned(),
+        "click".to_owned(),
+        "button".to_owned(),
+    ];
+
+    // WiVRn binds the gamepad's profile while none is connected, which its inputs show.
+    assert!(!get_action_origins(&f, main, jump).contains(&a));
+    assert!(!binding_info_rows(&get_binding_info(&f, jump)).contains(&gamepad_row));
+    // Only bound on the gamepad.
+    let turn = f.get_action_handle(c"/actions/main/in/turn");
+    assert!(get_action_origins(&f, main, turn).is_empty());
+
+    let presence = f
+        .input
+        .openxr
+        .session_data
+        .get()
+        .input_data
+        .get_loaded_actions()
+        .unwrap()
+        .gamepad_presence
+        .as_raw();
+    fakexr::set_action_state(presence, false.into(), Gamepad);
+    sync_set(&mut f, main);
+    let origins = get_action_origins(&f, main, jump);
+    assert!(origins.contains(&a), "{origins:?}");
+    let rows = binding_info_rows(&get_binding_info(&f, jump));
+    assert!(rows.contains(&gamepad_row), "{rows:?}");
+    // The hands' come first.
+    assert_eq!(rows[0][0], "/user/hand/right");
+    let right_stick = f.get_input_source_handle(c"/user/gamepad/input/joystick_right");
+    assert_eq!(get_action_origins(&f, main, turn), [right_stick]);
+
+    let info = get_origin_info(&f, a);
+    assert_eq!(info.trackedDeviceIndex, vr::k_unTrackedDeviceIndexInvalid);
+    assert_eq!(info.devicePath, f.get_input_source_handle(c"/user/gamepad"));
+}
+
+#[test]
+fn gamepad_controller_type() {
+    use super::action_manifest::ControllerType;
+    let ty: ControllerType = serde_json::from_str(r#""gamepad""#).unwrap();
+    assert_eq!(ty, ControllerType::Gamepad);
+    assert_eq!("gamepad".parse::<ControllerType>(), Ok(ty.clone()));
+    assert_eq!(ty.to_string(), "gamepad");
+}
+
+/// SteamVR's profiles of these controllers name the left menu button `/input/system`, so game
+/// bindings on it go to OpenXR's left menu button. The right one stays the system button.
+#[test]
+fn left_system_binds_the_menu_button() {
+    use super::profiles::{
+        meta_touch_plus::MetaTouchPlus,
+        pico::{Pico4, PicoNeo3},
+        vive_focus3::ViveFocus3,
+    };
+
+    fn check<P: InteractionProfile>(f: &Fixture) {
+        f.verify_bindings::<bool>(
+            P::profile_path(),
+            c"/actions/main/in/menu",
+            [
+                "/user/hand/left/input/menu/click".to_owned(),
+                "/user/hand/right/input/system/click".to_owned(),
+            ],
+        );
+    }
+
+    let f = Fixture::new();
+    f.load_actions(c"actions_left_system.json");
+    check::<OculusTouch>(&f);
+    check::<MetaTouchPlus>(&f);
+    check::<ViveFocus3>(&f);
+    check::<Pico4>(&f);
+    check::<PicoNeo3>(&f);
 }

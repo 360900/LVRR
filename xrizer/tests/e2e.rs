@@ -967,6 +967,38 @@ fn scene_app() {
     );
     println!("frame timing: index={index} interval={interval}ms presents={presents}");
     assert!(index > 0 && interval > 0.0);
+    let mut timings = [vr::Compositor_FrameTiming::default(); 4];
+    timings[0].m_nSize = size::<vr::Compositor_FrameTiming>();
+    let count = vcall!(
+        comp,
+        IVRCompositor_GetFrameTimings,
+        timings.as_mut_ptr(),
+        timings.len() as u32
+    );
+    assert_eq!(count, timings.len() as u32);
+    for timing in timings {
+        let phases = [
+            timing.m_flWaitGetPosesCalledMs,
+            timing.m_flNewPosesReadyMs,
+            timing.m_flNewFrameReadyMs,
+            timing.m_flCompositorUpdateStartMs,
+            timing.m_flCompositorUpdateEndMs,
+        ];
+        let (gpu, idle, flags) = (
+            timing.m_flTotalRenderGpuMs,
+            timing.m_flCompositorIdleCpuMs,
+            timing.m_nReprojectionFlags,
+        );
+        println!(
+            "frame {}: system time {:.4}s, gpu {gpu}ms, waited {idle}ms, presents {}, flags \
+             {flags:#x}, phases {phases:?}",
+            { timing.m_nFrameIndex },
+            { timing.m_flSystemTimeInSeconds },
+            { timing.m_nNumFramePresents },
+        );
+        assert!(phases.is_sorted() && phases.iter().all(|phase| phase.is_finite()));
+        assert!(gpu > 0.0 && gpu < 1000.0);
+    }
     let mut stats = vr::Compositor_CumulativeStats::default();
     vcall!(
         comp,
@@ -975,8 +1007,12 @@ fn scene_app() {
         size::<vr::Compositor_CumulativeStats>()
     );
     println!(
-        "cumulative stats: pid={} presents={} dropped={}",
-        stats.m_nPid, stats.m_nNumFramePresents, stats.m_nNumDroppedFrames
+        "cumulative stats: pid={} presents={} reprojected={} submits={} app gpu={:.1}ms",
+        stats.m_nPid,
+        stats.m_nNumFramePresents,
+        stats.m_nNumReprojectedFrames,
+        stats.m_nNumFrameSubmits,
+        stats.m_flSumApplicationGPUTimeMS.0
     );
     let remaining = vcall!(comp, IVRCompositor_GetFrameTimeRemaining);
     println!("frame time remaining: {remaining}s");

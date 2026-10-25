@@ -1,0 +1,40 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/main",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/main/in/MoveForward_X,MoveForward_Y X Y_axis2d",
+			"type": "vector2"
+		},
+		{
+			"name": "/actions/main/in/ConfigurableTurnAxis_X,ConfigurableTurnAxis_Y X Y_axis2d",
+			"type": "vector2"
+		},
+		{
+			"name": "/actions/main/in/SprintToggleMirror",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/TouchMovementActive",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/SelectDialogue",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/TurnAxisLeft",
+			"type": "boolean"
+		}
+	],
+	"default_bindings": [
+		{
+			"controller_type": "oculus_touch",
+			"binding_url": "oculus_touch_axis2d.json"
+		}
+	]
+}

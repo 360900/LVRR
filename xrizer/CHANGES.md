@@ -91,7 +91,7 @@ Status: `pending` | `merged` | `superseded-by-<n>` | `blocked` | `dropped` | `re
 | `3348188` | refresh rate fallback returns Hz instead of seconds |
 | `3950c0c` | gl: apps rendering on another GPU than the runtime (hybrid laptops) get frames copied through host memory |
 | `e193c84` | session the runtime stops (WiVRn's stop button) ended right away instead of after WiVRn's 10 s loss |
-| `2b3e8e4` | refresh rate cached and updated from runtime events; no queries once the session is lost |
+| `2b3e8e4` `5cb67b7` | refresh rate cached and updated from runtime events, which apps get as a display frequency change; no queries once the session is lost |
 | `a7c8ef3` | gaps in converted bindings logged at debug, in the game's own once at info; quieter repeated manifest loads and routine events |
 | `31c311f` | libmonado found through the host's runtime file inside Steam's container (Proton battery, trackers) |
 | `23ad894` | Index `/input/pinch` bound to the trigger, like SteamVR |
@@ -128,3 +128,34 @@ From a full review of the code against the OpenVR headers, Monado, WiVRn and Pro
 | build and CI | version embedded and checked in `vrclient.so`; MSRV `cargo check` of all targets; tests of every workspace member; edition 2024 resolver; releases built from the tag with CI's tests and lints, write token only in the draft job; `:latest` image only pushed from main, other refs build in a per-commit image; xbuild replaces a stale `vrclient.so` link | `b852906` `09f4596` `6129a27` `3b5770e` `4df4190` `a437336` |
 | tests | end-to-end test against a real runtime (`XRIZER_E2E=1`); fakexr gained events, moved spaces, headless sessions, session and instance loss, Vulkan extension checks and hand joints; under Miri, fakexr's pointer provenance and the factory's C-unwind ABI fixed, timing, lock contention and dlopen tests skipped | `9a6d924` `b657e1e` `80561cc` `fcd9302` `28c764c` `d742b99` |
 | docs | pressure-vessel runtime import and socket limits; build requirements, 32-bit build, install prefix, static loader config path; custom bindings for controllers the game has none for; only scene apps probe; `XRIZER_HMD_PRESENT`; `XRIZER_RECENTER_STANDING`; canting opt-in skips the widened FOV | `064f94b` `b522695` `5981f7a` `baad68f` `0fcc34e` `b026477` |
+
+## TODO section 1 (2026-10-25, `dde4ab2`..)
+
+Gaps that broke games, checked against SteamVR's shipped files (binding UI defaults, profiles, localization, vrclient strings), Proton, Unity's plugin, WiVRn and Monado.
+
+| Area | Change | Commits |
+|------|--------|---------|
+| binding modes | `touchy_click` and `sticky_click`; dpad `deadzone_pct`, `overlap_pct`, `sticky` with SteamVR's defaults (25%, 50%); grab `force_hold_threshold`/`force_release_threshold`, so a light touch on the Index force sensor no longer grabs (#208, partly); Index trackpad dpad haptic restored; scalar_constant `on/*` and `off/*` on every axis; vector3 actions; radial menus skipped with one warning (format unknown, see second pass) | `d11463e` `e2a0d8f` `4e7a324` `64b6acd` `65a560a` `f310342` `f0be19c` `14fa2dd` |
+| controller profiles | Pico 4 and Neo 3 (`XR_BD_controller_interaction`), Quest Pro (`XR_FB_touch_controller_pro`), Vive Cosmos (`XR_HTC_vive_cosmos_controller_interaction`); `pico_controller` and `vive_cosmos_controller` bindings load and convert; converted Pico and Cosmos bindings report the controller they were made for, like SteamVR | `73d97fb` `cb2233c` `1f4c35a` `0ff0de8` |
+| binding sources | bindings chosen in SteamVR (`steamvr.vrsettings`, Workshop items) used after custom ones, `XRIZER_STEAMVR_BINDINGS=0` opts out; `GetBindingVariant` reports `options.variant` (Alyx single controller) | `dde4ab2` `9ae9259` |
+| frame timing | measured from the frame loop: GPU time from Vulkan fences and GL timestamps, CPU phases, presents, reprojection and mispresents from predicted display times; cumulative stats and `GetFrameTimeRemaining` from the same records; `ShouldAppRenderWithLowResources` while the runtime has the input focus | `c288f34` `aaaff85` `dd60dd1` `cf3c8f1` `7655329` `fe7ad43` |
+| haptics | legacy pulse length scales the amplitude (full strength since the second pass); zero, NaN and sub-10 ms vibrations made playable, frequencies clamped like SteamVR's drivers; `start_seconds_from_now` honoured; SteamVR's threshold click haptics on button, toggle, trigger and grab bindings (`haptic_*`, `off_haptic_*`, `haptic_delay`; VRChat menu feedback, #371, #420) | `e40ea9e` `02cd032` `78fa1a7` `19507a8` |
+| origin names | `GetOriginLocalizedName` returns SteamVR's names ("Left Hand Oculus Touch Trigger", #162, #331); action origins are OpenVR inputs; `GetActionBindingInfo` reports the binding's mode, slot and input type; render model component names from SteamVR's models | `351011b` `a647acd` `ef24d18` |
+| color space | Linear textures shown as linear; gamma float textures and runtimes missing a swapchain format keep the right brightness; Auto 8-bit UNORM stays sRGB per the OpenVR header (#441), `XRIZER_LINEAR_UNORM=1` opts out | `f9061f1` `6287b37` `3392fd9` |
+| gl | GL sessions the runtime rejects fall back to the Vulkan bridge instead of a black screen, e.g. no-error EGL contexts (Sodium on Minecraft 26.x under Wayland) on Monado based runtimes with NVIDIA; on the runtime's GPU the bridge reads into memory shared with it and waits on the GPU, not the CPU | `ed169f5` `45191a7` |
+
+## TODO section 1, second pass (2026-10-25, `e8a7789`..)
+
+What was left of section 1, plus WiVRn reports whose cause is on our side.
+
+| Area | Change | Commits |
+|------|--------|---------|
+| binding modes | `radial` and `radial_menu` bind as dpads with `num_buttons` zones (output names guessed; SteamVR ignores `radial`); Index grabs drop when the squeeze is let go while moving (`drop_speed`, `downgrade_speed`, read from SteamVR's tooltips) | `32200bd` `4bebb46` `9498293` |
+| controller profiles | Xbox gamepad (`/user/gamepad`): `gamepad` bindings drive actions, haptics and priorities, no tracked device, origins only while one is connected; Cosmos reports `vive_eyes` and `vive_cosmos`; SteamVR's left `/input/system` binds the menu button on Touch, Focus 3 and Pico | `8748b24` `2693912` `5ce6287` `0d48890` `7ebc2c2` `7befc07` `6cd7ff8` |
+| binding sources | per-app custom bindings in `~/.config/xrizer/bindings/<app key>/` (WiVRn #1191); bindings chosen again when an app identifies after loading them; `IdentifyApplication` pid 0 is the caller; legacy games (Skyrim VR, Fallout 4 VR) take custom or SteamVR-chosen legacy bindings through SteamVR's legacy actions, including mirrored mode and `simulated_controller_type` | `fd8aa05` `b80271b` `55cbc88` `5f628c9` `1732e7c` `a3a91d2` |
+| controller presence | short interaction profile losses (Quest system menu, WiVRn #1100) keep controllers connected for 0.5 s and while the runtime has the input focus; a controller replaced by another is reported as reconnected; custom bindings follow the profile of the current sync; hands without a profile (WiVRn #1134) get activation events; Monado trackers keep their index | `b248aaa` `5d332d5` `c3afa1d` `b75bd5a` `b735fe1` |
+| frame timing | `VSyncsReadyForUse` and `VSyncsToFirstView`; mispresents count frames handed over after their display time; `TransferLatencyMs` and `WaitForPresentCpuMs` stay 0 like SteamVR without Steam Link | `e8a7789` |
+| haptics | trigger mode clicks on analog inputs bump like button mode; legacy pulses at full strength like SteamVR | `05e4ae5` `de42240` |
+| origin names | action data's `activeOrigin` is the input driving it, the pose source for poses; `GetActionOrigins` lists every bound input; `GetOriginTrackedDeviceInfo` reports the device as `devicePath`; HP, Cosmos and Focus 3 input names pinned to SteamVR's | `58c0f7c` `bc23f30` `a1b142d` `f650111` `7e445b2` |
+| color space | Outer Wilds' Auto UNORM textures shown as linear (#441), `XRIZER_LINEAR_UNORM=0` opts out; `A2R10G10B10_UINT`, `A2B10G10R10_UINT` and GL `RGB10_A2UI` shown as UNORM | `ed83bc4` `cf14941` `6860b0a` |
+| tests | Alyx's Index weapon wheel reads trackpad force at 0.38 (#208); right stick turn and axis2d bindings on Touch (#321, not reproduced); hand joints derived from controllers (WiVRn #1178) estimated on Touch, tracked joints give SteamVR's bones; fakexr routes inputs and reports actions per hand like Monado | `f73db24` `fbfb3fc` `c967d17` `9cbcc2d` `8591bdf` `daee804` `e9bfd85` |

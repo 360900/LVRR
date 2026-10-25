@@ -1,0 +1,32 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/main",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/main/in/boolact",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/vec2act",
+			"type": "vector2"
+		},
+		{
+			"name": "/actions/main/in/dpadact",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/gripact",
+			"type": "boolean"
+		}
+	],
+	"default_bindings": [
+		{
+			"controller_type": "vive_cosmos_controller",
+			"binding_url": "cosmos_only.json"
+		}
+	]
+}

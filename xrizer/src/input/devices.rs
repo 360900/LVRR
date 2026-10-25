@@ -7,6 +7,7 @@ use std::sync::{
     Mutex,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::{Duration, Instant};
 
 use glam::{Mat4, Quat, Vec3};
 use openvr as vr;
@@ -20,7 +21,7 @@ use crate::input::profiles::vive_tracker::ViveTracker;
 #[cfg(feature = "monado")]
 use openxr_mndx_xdev_space::{SessionXDevExtensionMNDX, XDev, XR_MNDX_XDEV_SPACE_EXTENSION_NAME};
 
-use crate::input::profiles::{PoseTransformations, ProfileProperties};
+use crate::input::profiles::{InputDevice, PoseTransformations, ProfileProperties};
 use crate::openxr_data::{self, Hand, OpenXrData, SessionData};
 use crate::tracy_span;
 use log::trace;
@@ -173,11 +174,29 @@ impl ProfileData {
     }
 }
 
+/// How long a controller stays connected after it was last seen, bound to an interaction profile
+/// or tracked as a hand. WiVRn unbinds the profiles whenever the headset reports none for a
+/// moment, and SteamVR only reports a device gone when its driver does, so a blip mustn't make the
+/// app drop and set up its controllers again.
+pub(super) const CONNECTION_GRACE: Duration = Duration::from_millis(500);
+
 pub struct TrackedDevice {
     device_type: TrackedDeviceType,
     pub profile_data: Option<ProfileData>,
+    /// The bound interaction profile, NULL while there is none.
     pub profile_path: xr::Path,
+    /// The last interaction profile that was bound, which the device's identity comes from.
+    pub last_profile_path: xr::Path,
+    /// For a controller, bound to an interaction profile. It can be there without one, see
+    /// [TrackedDevice::is_connected].
     pub connected: bool,
+    /// When the controller was last seen. It stays connected for [CONNECTION_GRACE] after.
+    last_seen: Mutex<Option<Instant>>,
+    /// Kept connected while the runtime holds the input focus, see
+    /// [TrackedDevice::hold_connection].
+    held: AtomicBool,
+    /// Another controller took this one's place, so the app should see this one go.
+    replaced: AtomicBool,
     /// The connection state last reported to the app. Atomic so polling events only needs a read
     /// lock on the device list.
     previous_connected: AtomicBool,
@@ -472,11 +491,16 @@ impl TrackedDevice {
         profile_path: Option<xr::Path>,
         profile_data: Option<ProfileData>,
     ) -> Self {
+        let profile_path = profile_path.unwrap_or(xr::Path::NULL);
         Self {
             profile_data,
-            profile_path: profile_path.unwrap_or(xr::Path::NULL),
+            profile_path,
+            last_profile_path: profile_path,
             connected: matches!(device_type, TrackedDeviceType::Hmd),
             device_type,
+            last_seen: Mutex::default(),
+            held: false.into(),
+            replaced: false.into(),
             previous_connected: false.into(),
             tracked_hand: false.into(),
             pose_cache: Mutex::default(),
@@ -524,7 +548,14 @@ impl TrackedDevice {
         // Like SteamVR, a device that loses tracking stays connected, and is reported out of range
         // at its last known pose.
         let mut has_pose = pose.bPoseIsValid;
-        pose.bDeviceIsConnected = self.connected || pose.bPoseIsValid;
+        pose.bDeviceIsConnected = match self.device_type {
+            TrackedDeviceType::Controller { .. } if self.connected || pose.bPoseIsValid => {
+                self.seen();
+                true
+            }
+            TrackedDeviceType::Controller { .. } => self.recently_seen(),
+            _ => self.connected || pose.bPoseIsValid,
+        };
         if pose.bDeviceIsConnected && !pose.bPoseIsValid {
             pose.eTrackingResult = vr::ETrackingResult::Running_OutOfRange;
             if let Some(last) = pose_cache.last_valid.get(&origin) {
@@ -626,6 +657,8 @@ impl TrackedDevice {
         }
     }
 
+    /// Whether the device is there. A controller is while it's bound to an interaction profile or
+    /// tracked as a hand, and for [CONNECTION_GRACE] after, see [TrackedDevice::hold_connection].
     pub fn is_connected(
         &self,
         xr_data: &OpenXrData<impl openxr_data::Compositor>,
@@ -633,19 +666,68 @@ impl TrackedDevice {
     ) -> bool {
         match self.get_type() {
             TrackedDeviceType::Controller { .. } => {
-                self.connected
+                let seen = self.connected
                     || self
                         .get_hand_skeleton(xr_data, session_data.tracking_space())
-                        .is_some()
+                        .is_some();
+                if seen {
+                    self.seen();
+                }
+                seen || self.recently_seen()
             }
             _ => self.connected,
         }
     }
 
-    pub fn has_connected_changed(&self) -> bool {
-        self.previous_connected
-            .swap(self.connected, Ordering::Relaxed)
-            != self.connected
+    pub(super) fn seen(&self) {
+        *self.last_seen.lock().unwrap() = Some(Instant::now());
+    }
+
+    pub(super) fn recently_seen(&self) -> bool {
+        self.held.load(Ordering::Relaxed)
+            || self
+                .last_seen
+                .lock()
+                .unwrap()
+                .is_some_and(|seen| seen.elapsed() < CONNECTION_GRACE)
+    }
+
+    /// Keeps a controller that is still there connected while the runtime holds the input focus:
+    /// SteamVR keeps devices connected while its dashboard has it, but runtimes may unbind their
+    /// profiles meanwhile (WiVRn does). Once the app has the focus back, the grace starts over.
+    pub(super) fn hold_connection(&self, focus_captured: bool) {
+        if focus_captured {
+            if !self.held.load(Ordering::Relaxed) && self.recently_seen() {
+                self.held.store(true, Ordering::Relaxed);
+            }
+        } else if self.held.swap(false, Ordering::Relaxed) {
+            self.seen();
+        }
+    }
+
+    /// Marks the device as one the app should see go, and come back as a new one.
+    pub(super) fn replace(&self) {
+        self.replaced.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the device was replaced since the last call.
+    pub(super) fn take_replaced(&self) -> bool {
+        self.replaced.swap(false, Ordering::Relaxed)
+    }
+
+    /// Whether `connected` differs from the state last reported to the app, which it becomes.
+    pub fn has_connected_changed(&self, connected: bool) -> bool {
+        self.previous_connected.swap(connected, Ordering::Relaxed) != connected
+    }
+
+    #[cfg(test)]
+    pub(super) fn expire_connection_grace(&self) {
+        let mut last_seen = self.last_seen.lock().unwrap();
+        if let Some(seen) = last_seen.as_mut() {
+            *seen = Instant::now()
+                .checked_sub(CONNECTION_GRACE)
+                .unwrap_or(*seen);
+        }
     }
 
     pub fn get_type(&self) -> &TrackedDeviceType {
@@ -953,21 +1035,38 @@ impl TrackedDevice {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct SubactionPaths {
     pub left: xr::Path,
     pub right: xr::Path,
+    pub gamepad: xr::Path,
 }
 
 impl SubactionPaths {
     pub fn new(instance: &xr::Instance) -> Self {
-        let left = instance
-            .string_to_path("/user/hand/left")
-            .expect("Failed to convert string to path");
-        let right = instance
-            .string_to_path("/user/hand/right")
-            .expect("Failed to convert string to path");
+        let [left, right, gamepad] = InputDevice::ALL.map(|device| {
+            instance
+                .string_to_path(device.path())
+                .expect("Failed to convert string to path")
+        });
+        Self {
+            left,
+            right,
+            gamepad,
+        }
+    }
 
-        Self { left, right }
+    pub fn get(&self, device: InputDevice) -> xr::Path {
+        match device {
+            InputDevice::Hand(Hand::Left) => self.left,
+            InputDevice::Hand(Hand::Right) => self.right,
+            InputDevice::Gamepad => self.gamepad,
+        }
+    }
+
+    /// In the order of [InputDevice::ALL].
+    pub fn all(&self) -> [xr::Path; 3] {
+        InputDevice::ALL.map(|device| self.get(device))
     }
 }
 
@@ -1116,9 +1215,12 @@ impl TrackedDeviceList {
             return Ok(());
         }
 
-        self.devices.retain(|device| {
-            !matches!(device.device_type, TrackedDeviceType::GenericTracker { .. })
-        });
+        fn tracker_serial(device: &TrackedDevice) -> Option<&[u8]> {
+            match &device.device_type {
+                TrackedDeviceType::GenericTracker { serial, .. } => Some(serial.to_bytes()),
+                _ => None,
+            }
+        }
 
         // Trackers identify as Vive Trackers, which some games sniff to pick a
         // controller scheme (e.g. SUPERHOT VR switches to its Vive scheme when
@@ -1132,7 +1234,14 @@ impl TrackedDeviceList {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(default_max)
-            .min(vr::k_unMaxTrackedDeviceCount as usize - self.devices.len());
+            .min(
+                vr::k_unMaxTrackedDeviceCount as usize
+                    - self
+                        .devices
+                        .iter()
+                        .filter(|device| tracker_serial(device).is_none())
+                        .count(),
+            );
         let extra_tracker_serials = std::env::var("XRIZER_TRACKER_SERIALS")
             .map_or(vec![], |trackers| {
                 trackers.split(";").map(|t| t.to_string()).collect()
@@ -1151,6 +1260,23 @@ impl TrackedDeviceList {
             .collect();
 
         xdevs.truncate(max_generic_trackers);
+
+        // Listed again on every interaction profile change. Trackers seen before keep their device
+        // and index, like in SteamVR, and stay there disconnected once they aren't listed.
+        for device in &mut self.devices {
+            let listed = tracker_serial(device)
+                .map(|serial| xdevs.iter().any(|xdev| xdev.serial().as_bytes() == serial));
+            if let Some(listed) = listed {
+                device.connected = listed;
+            }
+        }
+        xdevs.retain(|xdev| {
+            !self
+                .devices
+                .iter()
+                .any(|device| tracker_serial(device) == Some(xdev.serial().as_bytes()))
+        });
+        xdevs.truncate(vr::k_unMaxTrackedDeviceCount as usize - self.devices.len());
 
         // Checked on every interaction profile change, which mostly finds none.
         let level = if xdevs.is_empty() {
@@ -1188,6 +1314,12 @@ impl TrackedDeviceList {
     }
 }
 
+/// The pose that legacy bindings chosen for the app give `device`, if another than its own.
+fn legacy_pose_type(session_data: &SessionData, device: &TrackedDevice) -> Option<BoundPoseType> {
+    let loaded = session_data.input_data.get_loaded_actions()?;
+    loaded.legacy.as_ref()?.pose_type(loaded, device)
+}
+
 impl<C: openxr_data::Compositor> Input<C> {
     pub fn get_poses(
         &self,
@@ -1208,7 +1340,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                         xr_time,
                         &session_data,
                         origin.unwrap_or(session_data.current_origin),
-                        None,
+                        legacy_pose_type(&session_data, device),
                     )
                 })
                 .unwrap_or_default();
@@ -1244,12 +1376,13 @@ impl<C: openxr_data::Compositor> Input<C> {
 
         let session_data = self.openxr.session_data.get();
         let devices = session_data.input_data.devices.read().unwrap();
+        let device = devices.get_device(index)?;
 
-        Some(devices.get_device(index)?.get_pose(
+        Some(device.get_pose(
             xr_time,
             &session_data,
             origin.unwrap_or(session_data.current_origin),
-            pose_type,
+            pose_type.or_else(|| legacy_pose_type(&session_data, device)),
         ))
     }
 

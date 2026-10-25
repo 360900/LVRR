@@ -113,6 +113,14 @@
 		{
 			"binding_url": "holographiccontroller.json",
 			"controller_type": "holographic_controller"
+		},
+		{
+			"binding_url": "pico.json",
+			"controller_type": "pico_controller"
+		},
+		{
+			"binding_url": "cosmos.json",
+			"controller_type": "vive_cosmos_controller"
 		}
 	],
 	"localization": []

@@ -1,0 +1,72 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/move",
+			"usage": "leftright"
+		},
+		{
+			"name": "/actions/scroll",
+			"usage": "leftright"
+		},
+		{
+			"name": "/actions/weapon",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/move/in/Teleport",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/move/in/TeleportTurn",
+			"type": "vector2"
+		},
+		{
+			"name": "/actions/move/in/AdjustHeight",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/move/in/Walk",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/move/in/TurnLeft",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/move/in/TurnRight",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/move/in/WalkMantle",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/move/in/ShiftDashJump",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/move/in/MoveBack",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/move/in/ContinuousTurn",
+			"type": "vector2"
+		},
+		{
+			"name": "/actions/scroll/in/Scroll",
+			"type": "vector2"
+		},
+		{
+			"name": "/actions/weapon/in/ShowInventory",
+			"type": "boolean"
+		}
+	],
+	"default_bindings": [
+		{
+			"controller_type": "oculus_touch",
+			"binding_url": "oculus_touch_turn_stick.json"
+		}
+	]
+}

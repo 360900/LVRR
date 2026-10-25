@@ -19,6 +19,14 @@ pub struct Quirks {
     /// correct even on runtimes without the problem, just redundant.
     /// Env override: XRIZER_SYNTHESIZED_VELOCITY=1/0.
     pub synthesized_velocity: bool,
+
+    /// Treat 8-bit UNORM textures submitted with ColorSpace_Auto as linear. The OpenVR header
+    /// defines Auto as gamma for them, which games rendering sRGB encoded values into UNORM
+    /// textures rely on, but a game writing linear values looks too dark that way. Proton hands
+    /// over D3D11 TYPELESS and UNORM textures alike as Vulkan UNORM with the game's color space,
+    /// so the two can't be told apart from what's submitted.
+    /// Env override: XRIZER_LINEAR_UNORM=1/0.
+    pub linear_unorm: bool,
 }
 
 /// Tracking glitches can teleport the controller for a frame; without a cap, a
@@ -33,6 +41,13 @@ pub fn synthesized_velocity() -> bool {
     *ENABLED.get_or_init(|| {
         env_override("XRIZER_SYNTHESIZED_VELOCITY").unwrap_or(get().synthesized_velocity)
     })
+}
+
+/// Whether 8-bit UNORM textures with ColorSpace_Auto hold linear rather than gamma encoded
+/// values, honouring the XRIZER_LINEAR_UNORM override.
+pub fn linear_unorm() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_override("XRIZER_LINEAR_UNORM").unwrap_or(get().linear_unorm))
 }
 
 /// A boolean environment override, if one is set. Anything other than 1/true
@@ -50,24 +65,35 @@ pub fn get() -> Quirks {
             return Quirks::default();
         };
 
-        let quirks = match exe.to_lowercase().as_str() {
-            "superhotvr.exe" => Quirks {
-                no_generic_trackers: true,
-                ..Default::default()
-            },
-            // Half-Life 2: VR Mod (and episodes) computes throws from hand velocity
-            "hl2.exe" => Quirks {
-                synthesized_velocity: true,
-                ..Default::default()
-            },
-            _ => Quirks::default(),
-        };
-
-        if quirks.no_generic_trackers || quirks.synthesized_velocity {
+        let quirks = for_exe(&exe);
+        if quirks.no_generic_trackers || quirks.synthesized_velocity || quirks.linear_unorm {
             log::info!("Applying game quirks for {exe}: {quirks:?}");
         }
         quirks
     })
+}
+
+/// The quirks of the game with the executable `exe`.
+fn for_exe(exe: &str) -> Quirks {
+    match exe.to_lowercase().as_str() {
+        "superhotvr.exe" => Quirks {
+            no_generic_trackers: true,
+            ..Default::default()
+        },
+        // Half-Life 2: VR Mod (and episodes) computes throws from hand velocity
+        "hl2.exe" => Quirks {
+            synthesized_velocity: true,
+            ..Default::default()
+        },
+        // Outer Wilds, in VR only with NomaiVR, renders linear values into UNORM textures it
+        // submits with ColorSpace_Auto, which look too dark as gamma (upstream issue 441). The
+        // Epic build's exe has a space.
+        "outerwilds.exe" | "outer wilds.exe" => Quirks {
+            linear_unorm: true,
+            ..Default::default()
+        },
+        _ => Quirks::default(),
+    }
 }
 
 /// The basename of the game's executable. Wine rewrites argv[0] to the
@@ -98,6 +124,18 @@ fn game_exe_name() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::for_exe;
+
+    #[test]
+    fn quirks_follow_the_exe_name() {
+        assert!(for_exe("OuterWilds.exe").linear_unorm);
+        assert!(for_exe("Outer Wilds.exe").linear_unorm);
+        assert!(for_exe("SUPERHOTVR.exe").no_generic_trackers);
+        assert!(for_exe("hl2.exe").synthesized_velocity);
+        let none = for_exe("BladeAndSorcery.exe");
+        assert!(!none.linear_unorm && !none.no_generic_trackers && !none.synthesized_velocity);
+    }
+
     #[test]
     fn exe_name_resolves() {
         // The test runner is a normal Linux process, so this should always

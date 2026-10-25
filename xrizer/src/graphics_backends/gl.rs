@@ -1,4 +1,5 @@
 use super::GraphicsBackend;
+use crate::compositor::GpuDone;
 use derive_more::Deref;
 use gl::types::{GLenum, GLint, GLuint};
 use glutin_glx_sys::{
@@ -16,6 +17,7 @@ use xr::sys::Handle as _;
 use xr::sys::platform::{EGLConfig, EGLContext, EGLDisplay, EglGetProcAddressMNDX};
 
 mod bridge;
+mod timing;
 pub use bridge::GlBridgeData;
 
 /// None if GLX isn't installed (EGL-only systems).
@@ -457,13 +459,16 @@ pub struct GlData {
     read_fbo: u32,
     draw_fbo: u32,
     resolved: Mutex<Resolved>,
+    reinterpreted: Mutex<Resolved>,
     /// The extent last copied to each eye's layer of each swapchain image.
     eye_extents: Mutex<Vec<[Option<xr::Extent2Di>; 2]>>,
     /// Copies flip rows, so the images read back top to bottom like Vulkan's, see [bridge].
     flip: bool,
+    gpu_timer: timing::GpuTimer,
 }
 
-/// Single-sample copy of a multisampled renderbuffer, see [GlData::resolve].
+/// A renderbuffer the app's texture is copied into on the way, see [GlData::resolve] and
+/// [GlData::reinterpret].
 #[derive(Default)]
 struct Resolved {
     renderbuffer: GLuint,
@@ -508,14 +513,19 @@ impl GlData {
             read_fbo: fbos[0],
             draw_fbo: fbos[1],
             resolved: Default::default(),
+            reinterpreted: Default::default(),
             eye_extents: Default::default(),
             flip: false,
+            gpu_timer: Default::default(),
         })
     }
 }
 
 const NUM_DEVICE_UUIDS_EXT: GLenum = 0x9596;
 const DEVICE_UUID_EXT: GLenum = 0x9597;
+const DRIVER_UUID_EXT: GLenum = 0x9598;
+/// GL_KHR_no_error
+const CONTEXT_FLAG_NO_ERROR_BIT: GLint = 0x8;
 
 /// Runtimes import their swapchain memory into the app's context, which can't work across GPUs
 /// (Monado based ones crash in xrCreateSwapchain), e.g. when a hybrid laptop runs the app on the
@@ -603,11 +613,37 @@ unsafe fn gl_device_uuids(session_info: &SessionCreateInfo) -> Option<Vec<[u8; 1
     }
 }
 
+/// The driver of the current context per GL_EXT_memory_object.
+unsafe fn gl_driver_uuid(session_info: &SessionCreateInfo) -> Option<[u8; 16]> {
+    type GetUnsignedBytev = unsafe extern "system" fn(GLenum, *mut u8);
+    unsafe {
+        let get = session_info.get_proc_address("glGetUnsignedBytevEXT");
+        if !has_gl_extension(c"GL_EXT_memory_object") || get.is_null() {
+            return None;
+        }
+        let get = std::mem::transmute::<*const c_void, GetUnsignedBytev>(get);
+        let mut uuid = [0; 16];
+        get(DRIVER_UUID_EXT, uuid.as_mut_ptr());
+        Some(uuid)
+    }
+}
+
 impl GlData {
     /// Whether the runtime can use swapchain images in this context directly, see
     /// [same_device_as_runtime].
     pub(crate) fn on_runtime_device(&self, instance: &xr::Instance) -> bool {
         same_device_as_runtime(instance, &self.session_info)
+    }
+
+    /// Whether this is a no-error EGL context (e.g. Sodium's). Monado based runtimes create a
+    /// context sharing with EGL ones, which NVIDIA refuses for these as theirs isn't one.
+    pub(crate) fn is_no_error_egl(&self) -> bool {
+        if !matches!(self.session_info, SessionCreateInfo::Egl { .. }) {
+            return false;
+        }
+        let mut flags = 0;
+        unsafe { gl::GetIntegerv(gl::CONTEXT_FLAGS, &mut flags) };
+        flags & CONTEXT_FLAG_NO_ERROR_BIT != 0
     }
 
     /// Starts reading the bottom-left `extent` of layer `layer` of swapchain image `image_index`
@@ -678,14 +714,17 @@ impl Drop for GlData {
     fn drop(&mut self) {
         // Framebuffers aren't shared between contexts, in another one these could be the app's.
         if self.session_info.is_current() {
-            let resolved = self
-                .resolved
-                .get_mut()
-                .unwrap_or_else(PoisonError::into_inner);
+            let renderbuffers = [&mut self.resolved, &mut self.reinterpreted].map(|cache| {
+                cache
+                    .get_mut()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .renderbuffer
+            });
             unsafe {
                 gl::DeleteFramebuffers(2, [self.read_fbo, self.draw_fbo].as_ptr());
-                gl::DeleteRenderbuffers(1, &resolved.renderbuffer);
+                gl::DeleteRenderbuffers(2, renderbuffers.as_ptr());
             }
+            self.gpu_timer.destroy();
         }
     }
 }
@@ -862,6 +901,13 @@ impl GraphicsBackend for GlData {
             )
         };
         rect.extent
+    }
+
+    fn frame_submitted(&mut self, done: GpuDone) {
+        // Queries belong to the context they were created in.
+        if self.session_info.is_current() {
+            self.gpu_timer.frame_submitted(done);
+        }
     }
 }
 
@@ -1043,8 +1089,16 @@ impl GlData {
         } else {
             (src, src_layer)
         };
+        let (src, src_layer, format) = match unorm_bits(info.format) {
+            Some(unorm) => (
+                unsafe { self.reinterpret(src, src_layer, info, rect, unorm) },
+                0,
+                unorm,
+            ),
+            None => (src, src_layer, info.format),
+        };
 
-        match copy_method(info.format, color_space, self.format) {
+        match copy_method(format, color_space, self.format) {
             // Only blits can mirror. Without GL_FRAMEBUFFER_SRGB they don't convert either.
             CopyMethod::Copy if mirror != Mirror::default() => unsafe {
                 self.blit(src, src_layer, rect, dst, dst_layer, false, mirror)
@@ -1100,31 +1154,69 @@ impl GlData {
         }
     }
 
+    /// The renderbuffer of `cache`, with the size in `info` and `format`.
+    unsafe fn renderbuffer(cache: &mut Resolved, info: &TextureInfo, format: GLenum) -> GlTexture {
+        unsafe {
+            if cache.renderbuffer == 0 {
+                gl::GenRenderbuffers(1, &mut cache.renderbuffer);
+            }
+            if (cache.width, cache.height, cache.format) != (info.width, info.height, format) {
+                let mut bound = 0;
+                gl::GetIntegerv(gl::RENDERBUFFER_BINDING, &mut bound);
+                gl::BindRenderbuffer(gl::RENDERBUFFER, cache.renderbuffer);
+                gl::RenderbufferStorage(gl::RENDERBUFFER, format, info.width, info.height);
+                gl::BindRenderbuffer(gl::RENDERBUFFER, bound as GLuint);
+                (cache.width, cache.height, cache.format) = (info.width, info.height, format);
+            }
+        }
+        GlTexture {
+            name: cache.renderbuffer,
+            target: gl::RENDERBUFFER,
+            layer: None,
+        }
+    }
+
+    /// Copies `rect` of layer `src_layer` of the integer texture `src`, described by `info`, to the
+    /// same place in a renderbuffer of `format`, the UNORM format of its bits. Blits can't convert
+    /// integers, but copies between formats of one size keep the bits.
+    unsafe fn reinterpret(
+        &self,
+        src: GlTexture,
+        src_layer: GLint,
+        info: &TextureInfo,
+        rect: xr::Rect2Di,
+        format: GLenum,
+    ) -> GlTexture {
+        let mut reinterpreted = self.reinterpreted.lock().unwrap();
+        unsafe {
+            let dst = Self::renderbuffer(&mut reinterpreted, info, format);
+            gl::CopyImageSubData(
+                src.name,
+                src.target,
+                0, // level
+                rect.offset.x,
+                rect.offset.y,
+                src_layer,
+                dst.name,
+                dst.target,
+                0, // level
+                rect.offset.x,
+                rect.offset.y,
+                0, // layer
+                rect.extent.width,
+                rect.extent.height,
+                1,
+            );
+            dst
+        }
+    }
+
     /// Resolves a multisampled renderbuffer into a single-sample one with the same size and
     /// format, since resolving blits can't convert formats or move the rect.
     unsafe fn resolve(&self, src: GlTexture, info: &TextureInfo) -> GlTexture {
         let mut resolved = self.resolved.lock().unwrap();
         unsafe {
-            if resolved.renderbuffer == 0 {
-                gl::GenRenderbuffers(1, &mut resolved.renderbuffer);
-            }
-            let dst = GlTexture {
-                name: resolved.renderbuffer,
-                target: gl::RENDERBUFFER,
-                layer: None,
-            };
-            if (resolved.width, resolved.height, resolved.format)
-                != (info.width, info.height, info.format)
-            {
-                let mut bound = 0;
-                gl::GetIntegerv(gl::RENDERBUFFER_BINDING, &mut bound);
-                gl::BindRenderbuffer(gl::RENDERBUFFER, dst.name);
-                gl::RenderbufferStorage(gl::RENDERBUFFER, info.format, info.width, info.height);
-                gl::BindRenderbuffer(gl::RENDERBUFFER, bound as GLuint);
-                (resolved.width, resolved.height, resolved.format) =
-                    (info.width, info.height, info.format);
-            }
-
+            let dst = Self::renderbuffer(&mut resolved, info, info.format);
             let rect = xr::Rect2Di {
                 offset: Default::default(),
                 extent: xr::Extent2Di {
@@ -1233,14 +1325,20 @@ fn sized_format(format: GLenum) -> GLenum {
     }
 }
 
+/// The UNORM format of an integer format's bits, which apps fill with UNORM values like the
+/// Vulkan A2R10G10B10_UINT textures the OpenVR wiki lists.
+fn unorm_bits(format: GLenum) -> Option<GLenum> {
+    (format == gl::RGB10_A2UI).then_some(gl::RGB10_A2)
+}
+
 /// Whether the texture holds gamma-encoded data in a format GL treats as linear.
 fn holds_gamma(format: GLenum, color_space: vr::EColorSpace) -> bool {
-    let format = sized_format(format);
+    let format = sized_format(unorm_bits(format).unwrap_or(format));
     match color_space {
         vr::EColorSpace::Linear => false,
         vr::EColorSpace::Gamma => format != gl::SRGB8_ALPHA8,
         // Auto: 8-bit formats are gamma, everything else linear.
-        _ => format == gl::RGBA8,
+        _ => format == gl::RGBA8 && !crate::quirks::linear_unorm(),
     }
 }
 
@@ -1250,7 +1348,7 @@ fn swapchain_format(format: GLenum, color_space: vr::EColorSpace) -> GLenum {
     if holds_gamma(format, color_space) {
         gl::SRGB8_ALPHA8
     } else {
-        sized_format(format)
+        sized_format(unorm_bits(format).unwrap_or(format))
     }
 }
 
@@ -1428,6 +1526,10 @@ mod tests {
             (gl::RGB10_A2, Space::Gamma, gl::SRGB8_ALPHA8),
             (gl::RGBA16, Space::Gamma, gl::SRGB8_ALPHA8),
             (gl::RGB565, Space::Gamma, gl::SRGB8_ALPHA8),
+            // Integers hold the bits of UNORM values, which a swapchain can show.
+            (gl::RGB10_A2UI, Space::Auto, gl::RGB10_A2),
+            (gl::RGB10_A2UI, Space::Linear, gl::RGB10_A2),
+            (gl::RGB10_A2UI, Space::Gamma, gl::SRGB8_ALPHA8),
         ] {
             assert_eq!(
                 swapchain_format(format, color_space),

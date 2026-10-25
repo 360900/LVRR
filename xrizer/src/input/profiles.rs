@@ -2,13 +2,17 @@ pub mod frame_controller;
 pub mod knuckles;
 pub mod meta_touch_plus;
 pub mod oculus_touch;
+pub mod pico;
 pub mod simple_controller;
+pub mod touch_pro;
 pub mod vive_controller;
+pub mod vive_cosmos;
 pub mod vive_focus3;
 #[cfg(feature = "monado")]
 pub mod vive_tracker;
 pub mod vrlink_hand;
 pub mod wmr;
+pub mod xbox_controller;
 use super::{
     BoundPoseType, action_manifest::ControllerType, legacy::LegacyBindings,
     skeletal::SkeletalInputBindings,
@@ -21,15 +25,19 @@ use knuckles::Knuckles;
 use meta_touch_plus::MetaTouchPlus;
 use oculus_touch::OculusTouch;
 use openxr as xr;
+use pico::{Pico4, PicoNeo3};
 use simple_controller::SimpleController;
 use std::ffi::CStr;
 use std::marker::PhantomData;
+use touch_pro::TouchPro;
 use vive_controller::ViveWands;
+use vive_cosmos::ViveCosmos;
 use vive_focus3::ViveFocus3;
 use wmr::{
     hp_motion_controller::ReverbG2Controller, ms_motion_controller::HolographicController,
     samsung_odyssey_controller::SamsungOdysseyController,
 };
+use xbox_controller::XboxController;
 
 #[allow(private_interfaces)]
 pub trait InteractionProfile: SupportedProfile + Sized + 'static {
@@ -45,6 +53,16 @@ pub trait InteractionProfile: SupportedProfile + Sized + 'static {
     const LEGACY_TRIGGER_CLICK: Option<(f32, f32)> = None;
     /// Likewise for k_EButton_Grip and the legacy squeeze value.
     const LEGACY_GRIP_CLICK: Option<(f32, f32)> = None;
+    /// Whether a game whose bindings for this controller were converted from another
+    /// controller's sees that controller, like SteamVR's remapping layouts do with
+    /// `simulate_controller_type`, `simulate_render_model` and `simulate_HMD`. Only for profiles
+    /// games rarely know, so far: the others keep reporting themselves.
+    const SIMULATE_CONVERTED: bool = false;
+    /// Whether this is the gamepad's profile (`/user/gamepad`) rather than a hand controller's.
+    const GAMEPAD: bool = false;
+    /// Whether SteamVR's profile of this controller names its left menu button `/input/system`,
+    /// which OpenXR calls `menu` (`system` is the runtime's reserved button there, if any).
+    const LEFT_MENU_IS_SYSTEM: bool = false;
     type LegalPaths: LegalPathsT;
     fn profile_path() -> &'static str;
     fn has_required_extensions(enabled_extensions: &xr::ExtensionSet) -> bool;
@@ -97,6 +115,7 @@ impl ControllerType {
             }
             Self::OculusTouch => {
                 runner.run::<MetaTouchPlus>();
+                runner.run::<TouchPro>();
                 runner.run::<OculusTouch>();
             }
             Self::Knuckles => runner.run::<Knuckles>(),
@@ -107,8 +126,32 @@ impl ControllerType {
                 runner.run::<HolographicController>();
             }
             Self::HPMotionController => runner.run::<ReverbG2Controller>(),
+            Self::ViveCosmosController => runner.run::<ViveCosmos>(),
+            Self::PicoController => {
+                runner.run::<Pico4>();
+                runner.run::<PicoNeo3>();
+            }
+            Self::Gamepad => runner.run::<XboxController>(),
             Self::GenericHmd | Self::Unknown(_) => {}
         }
+    }
+
+    /// The identity SteamVR gives controllers that simulate this type, from the
+    /// `simulation_settings` of its input profile, e.g. the Quest 2 for oculus_touch.
+    pub fn simulated_properties(&self) -> Option<&'static ProfileProperties> {
+        Some(match self {
+            Self::ViveController => ViveWands::properties(),
+            Self::OculusTouch => OculusTouch::properties(),
+            Self::Knuckles => Knuckles::properties(),
+            Self::FrameController => FrameController::properties(),
+            Self::ViveFocus3 => ViveFocus3::properties(),
+            Self::HolographicController => HolographicController::properties(),
+            Self::HPMotionController => ReverbG2Controller::properties(),
+            Self::ViveCosmosController => ViveCosmos::properties(),
+            Self::PicoController => Pico4::properties(),
+            // Nothing converts to or from the gamepad's bindings.
+            Self::Gamepad | Self::GenericHmd | Self::Unknown(_) => return None,
+        })
     }
 }
 
@@ -124,6 +167,11 @@ pub trait SupportedProfile {}
 // tracker profile.
 #[cfg(feature = "monado")]
 impl SupportedProfile for vive_tracker::ViveTracker {}
+
+// The gamepad isn't a hand controller: the profiles below are probed for the hands, get legacy
+// bindings and stand in for each other's bindings, none of which applies to it. Its bindings are
+// only loaded from the game's gamepad bindings, see ControllerType::run_for_profile.
+impl SupportedProfile for XboxController {}
 
 pub fn run_for_all_profiles(runner: &mut impl RunWithProfile) {
     macro_rules! profile {
@@ -143,8 +191,12 @@ pub fn run_for_all_profiles(runner: &mut impl RunWithProfile) {
     profile!(Knuckles);
     profile!(vrlink_hand::VRLinkHand);
     profile!(MetaTouchPlus);
+    profile!(TouchPro);
     profile!(OculusTouch);
     profile!(ViveFocus3);
+    profile!(ViveCosmos);
+    profile!(Pico4);
+    profile!(PicoNeo3);
     profile!(SimpleController);
     profile!(wmr::hp_motion_controller::ReverbG2Controller);
     profile!(wmr::ms_motion_controller::HolographicController);
@@ -200,6 +252,14 @@ impl<'a, P: InteractionProfile> InputToXrPath<'a, P> {
         ]
     }
 
+    /// Both rumble motors of the gamepad.
+    pub fn gamepad_haptics(&self) -> Vec<xr::Path> {
+        GAMEPAD_HAPTICS
+            .iter()
+            .map(|path| self.instance.string_to_path(path).unwrap())
+            .collect()
+    }
+
     pub fn pose(&self) -> Vec<xr::Path> {
         vec![
             self.instance
@@ -211,6 +271,12 @@ impl<'a, P: InteractionProfile> InputToXrPath<'a, P> {
         ]
     }
 }
+
+/// The gamepad's rumble motors, which its one SteamVR haptic output (`/output/haptic`) drives.
+pub const GAMEPAD_HAPTICS: [&str; 2] = [
+    "/user/gamepad/output/haptic_left",
+    "/user/gamepad/output/haptic_right",
+];
 
 pub trait LegalPathsT {
     fn is_legal(path: DynInputPath) -> bool;
@@ -239,6 +305,14 @@ where
 }
 
 macro_rules! legal_paths {
+    (Gamepad::<($first_s:ty, $first_c:ty) $(, ($rest_s:ty, $rest_c:ty) )*$(,)?>) => {
+        $crate::input::profiles::__recursify_tuple![
+            $crate::input::profiles::Gamepad<$first_s, $first_c>,
+            $(
+                $crate::input::profiles::Gamepad<$rest_s, $rest_c>,
+            )*
+        ]
+    };
     (
         $(Both::<($both_first_s:ty, $both_first_c:ty) $(, ($both_rest_s:ty, $both_rest_c:ty) )*$(,)?>)?
         $(,Left::<($left_first_s:ty, $left_first_c:ty) $(, ($left_rest_s:ty, $left_rest_c:ty) )*$(,)?>)?
@@ -381,6 +455,7 @@ pub struct PoseTransformations {
 
 pub struct Left<Sub = (), Comp = ()>(PhantomData<(Sub, Comp)>);
 pub struct Right<Sub = (), Comp = ()>(PhantomData<(Sub, Comp)>);
+pub struct Gamepad<Sub = (), Comp = ()>(PhantomData<(Sub, Comp)>);
 
 /// Represents the input subpath of a path, i.e. the `trigger` part of
 /// /user/hand/left/input/trigger/click
@@ -405,7 +480,7 @@ impl Component for () {
 #[diagnostic::on_unimplemented(message = "{Self} is not a legal component for {P}")]
 trait LegalComponentFor<P: Subpath>: Component {}
 
-/// Represents a complete input path: hand, subpath, and component
+/// Represents a complete input path: device, subpath, and component
 trait InputPath {
     const DYN: DynInputPath;
 }
@@ -416,7 +491,7 @@ where
     C: LegalComponentFor<S>,
 {
     const DYN: DynInputPath = DynInputPath {
-        hand: Hand::Left,
+        device: InputDevice::Hand(Hand::Left),
         subpath: S::DYN,
         component: C::DYN,
     };
@@ -428,10 +503,50 @@ where
     C: LegalComponentFor<S>,
 {
     const DYN: DynInputPath = DynInputPath {
-        hand: Hand::Right,
+        device: InputDevice::Hand(Hand::Right),
         subpath: S::DYN,
         component: C::DYN,
     };
+}
+
+impl<S, C> InputPath for Gamepad<S, C>
+where
+    S: Subpath,
+    C: LegalComponentFor<S>,
+{
+    const DYN: DynInputPath = DynInputPath {
+        device: InputDevice::Gamepad,
+        subpath: S::DYN,
+        component: C::DYN,
+    };
+}
+
+/// The device an input is on, named by its top level path.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum InputDevice {
+    Hand(Hand),
+    /// `/user/gamepad`
+    Gamepad,
+}
+
+impl InputDevice {
+    /// The hands, left first, then the gamepad: the order of [devices::SubactionPaths::all],
+    /// which priority masks and analog action states index devices by.
+    ///
+    /// [devices::SubactionPaths::all]: super::devices::SubactionPaths::all
+    pub const ALL: [Self; 3] = [
+        Self::Hand(Hand::Left),
+        Self::Hand(Hand::Right),
+        Self::Gamepad,
+    ];
+
+    pub fn path(self) -> &'static str {
+        match self {
+            Self::Hand(Hand::Left) => "/user/hand/left",
+            Self::Hand(Hand::Right) => "/user/hand/right",
+            Self::Gamepad => "/user/gamepad",
+        }
+    }
 }
 
 /// A dynamic representation of an input path, typically parsed from a string.
@@ -439,7 +554,7 @@ where
 /// This is not guaranteed to be an actually valid path!
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub struct DynInputPath {
-    pub hand: Hand,
+    pub device: InputDevice,
     pub subpath: paths::DynSubpath,
     pub component: Option<paths::DynComponent>,
 }
@@ -455,11 +570,7 @@ impl DynInputPath {
 
 impl std::fmt::Display for DynInputPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let hand = match self.hand {
-            Hand::Left => "/user/hand/left",
-            Hand::Right => "/user/hand/right",
-        };
-        write!(f, "{hand}/input/{}", self.subpath)?;
+        write!(f, "{}/input/{}", self.device.path(), self.subpath)?;
         if let Some(component) = &self.component {
             write!(f, "/{component}")?;
         }
@@ -485,21 +596,32 @@ impl std::str::FromStr for DynInputPath {
 
         verify_next!("");
         verify_next!("user");
-        verify_next!("hand");
 
-        let hand = match split
+        let device = match split
             .next()
-            .ok_or_else(|| "missing hand component".to_string())?
+            .ok_or_else(|| "missing device component".to_string())?
         {
-            "left" => Hand::Left,
-            "right" => Hand::Right,
-            other => return Err(format!("expected left or right hand, got {other}")),
+            "gamepad" => InputDevice::Gamepad,
+            "hand" => match split
+                .next()
+                .ok_or_else(|| "missing hand component".to_string())?
+            {
+                "left" => InputDevice::Hand(Hand::Left),
+                "right" => InputDevice::Hand(Hand::Right),
+                other => return Err(format!("expected left or right hand, got {other}")),
+            },
+            other => return Err(format!("expected hand or gamepad, got {other}")),
         };
 
         verify_next!("input");
 
         let subpath_str = split.next();
         let subpath = match subpath_str {
+            // SteamVR's names for the gamepad's view, menu and Xbox buttons
+            // (drivers/gamepad/resources/input/gamepad_profile.json).
+            Some("back") if device == InputDevice::Gamepad => paths::DynSubpath::View,
+            Some("start") if device == InputDevice::Gamepad => paths::DynSubpath::Menu,
+            Some("guide") if device == InputDevice::Gamepad => paths::DynSubpath::System,
             // Index finger curls have no OpenXR input. They follow the trigger and grip values,
             // which finger curl is estimated from anyway.
             Some("finger") => match split.next() {
@@ -525,7 +647,7 @@ impl std::str::FromStr for DynInputPath {
             .transpose()?;
 
         Ok(DynInputPath {
-            hand,
+            device,
             subpath,
             component,
         })
@@ -642,6 +764,8 @@ pub mod paths {
         View::<Click, Touch>,
         System::<Click, Touch>,
         Bumper::<Click, Touch>,
+        // The Cosmos bumpers, which SteamVR calls bumper.
+        Shoulder::<Click>,
         DpadUp::<Click, Touch>,
         DpadLeft::<Click, Touch>,
         DpadDown::<Click, Touch>,
@@ -653,12 +777,21 @@ pub mod paths {
         Trackpad::<Click, Touch, Force, Vec2X, Vec2Y>,
         Thumbrest::<Touch>,
         PinchExt("pinch_ext")::<Value>,
-        GraspExt("grasp_ext")::<Value>
+        GraspExt("grasp_ext")::<Value>,
+        // The gamepad's.
+        ShoulderLeft::<Click>,
+        ShoulderRight::<Click>,
+        TriggerLeft::<Value>,
+        TriggerRight::<Value>,
+        ThumbstickLeft::<Click, Vec2X, Vec2Y>,
+        ThumbstickRight::<Click, Vec2X, Vec2Y>
     );
 
     // Vec2 impls
     impl LegalComponentFor<Thumbstick> for () {}
     impl LegalComponentFor<Trackpad> for () {}
+    impl LegalComponentFor<ThumbstickLeft> for () {}
+    impl LegalComponentFor<ThumbstickRight> for () {}
 
     impl DynSubpath {
         pub fn from_openvr_str(s: &str) -> Option<Self> {
@@ -680,8 +813,47 @@ pub mod paths {
                 "thumbstick" | "joystick" => Some(Self::Thumbstick),
                 "thumbrest" => Some(Self::Thumbrest),
                 "trackpad" => Some(Self::Trackpad),
+                "shoulder_left" => Some(Self::ShoulderLeft),
+                "shoulder_right" => Some(Self::ShoulderRight),
+                "trigger_left" => Some(Self::TriggerLeft),
+                "trigger_right" => Some(Self::TriggerRight),
+                "joystick_left" | "thumbstick_left" => Some(Self::ThumbstickLeft),
+                "joystick_right" | "thumbstick_right" => Some(Self::ThumbstickRight),
                 _ => None,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DynInputPath, InputDevice};
+    use crate::openxr_data::Hand;
+
+    #[test]
+    fn gamepad_paths() {
+        let parse = |path: &str| path.parse::<DynInputPath>();
+        let path = |path: &str| parse(path).unwrap().to_string();
+        assert!(parse("/user/gamepad/input/a/click").unwrap().device == InputDevice::Gamepad);
+        assert_eq!(
+            path("/user/gamepad/input/joystick_left/click"),
+            "/user/gamepad/input/thumbstick_left/click"
+        );
+        assert_eq!(
+            path("/user/gamepad/input/trigger_right/pull"),
+            "/user/gamepad/input/trigger_right/value"
+        );
+        // SteamVR's names for the view and menu buttons, only on the gamepad.
+        assert_eq!(path("/user/gamepad/input/back"), "/user/gamepad/input/view");
+        assert_eq!(
+            path("/user/gamepad/input/start/click"),
+            "/user/gamepad/input/menu/click"
+        );
+        assert!(parse("/user/hand/left/input/back").is_err());
+        assert!(
+            parse("/user/hand/right/input/a/click").unwrap().device
+                == InputDevice::Hand(Hand::Right)
+        );
+        assert!(parse("/user/head/input/a/click").is_err());
     }
 }

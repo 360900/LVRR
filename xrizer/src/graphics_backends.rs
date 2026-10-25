@@ -2,6 +2,7 @@ mod gl;
 mod headless;
 mod vulkan;
 
+use crate::compositor::GpuDone;
 use derive_more::{From, TryInto};
 pub use gl::{GlBridgeData, GlData};
 pub use headless::HeadlessData;
@@ -72,6 +73,12 @@ pub trait GraphicsBackend: Into<SupportedBackend> {
         info
     }
 
+    /// The format to use when the runtime doesn't offer `format`, out of the `offered` ones in the
+    /// runtime's order of preference. None takes the runtime's first.
+    fn fallback_format(_format: Self::Format, _offered: &[Self::Format]) -> Option<Self::Format> {
+        None
+    }
+
     /// Called with the create info of a new swapchain, before its images are stored.
     fn swapchain_created(&mut self, _info: &xr::SwapchainCreateInfo<Self::Api>) {}
 
@@ -101,6 +108,11 @@ pub trait GraphicsBackend: Into<SupportedBackend> {
 
     /// Waits for the copies into the swapchain images to finish, so the swapchain can be destroyed.
     fn wait_for_copies(&self) {}
+
+    /// Called once the app submitted every eye of a frame, while its queue or context is ours.
+    /// Backends that can tell when the GPU finished the work submitted so far report it to
+    /// `done` later, without waiting for it here.
+    fn frame_submitted(&mut self, _done: GpuDone) {}
 }
 
 #[derive(macros::Backends, TryInto, From)]
@@ -200,5 +212,18 @@ impl SupportedBackend {
             )),
             _ => None,
         }
+    }
+
+    /// The GL bridge for the context current on this thread, for when the runtime rejected a
+    /// session with it, e.g. Monado based ones with no-error EGL contexts on NVIDIA.
+    pub fn gl_bridge(instance: &xr::Instance) -> Option<Self> {
+        let gl = GlData::new(instance)?;
+        let kind = if gl.is_no_error_egl() {
+            "no-error EGL context"
+        } else {
+            "OpenGL context"
+        };
+        log::warn!("The runtime rejected the app's {kind}, copying frames through Vulkan instead");
+        GlBridgeData::new(gl, instance).map(Self::GlBridge)
     }
 }

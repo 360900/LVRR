@@ -4,7 +4,7 @@
 use super::actions::ControllerType;
 use super::bindings::{Bindings, MaybeInputPath};
 use crate::input::InteractionProfile;
-use crate::input::profiles::{DynInputPath, RunWithProfile, paths::DynSubpath};
+use crate::input::profiles::{DynInputPath, InputDevice, RunWithProfile, paths::DynSubpath};
 use crate::openxr_data::Hand;
 
 impl ControllerType {
@@ -21,8 +21,8 @@ impl ControllerType {
         finder.1
     }
 
-    /// Every controller type a game can list bindings for.
-    pub fn known() -> [Self; 7] {
+    /// Every hand controller type a game can list bindings for.
+    pub fn known() -> [Self; 9] {
         [
             Self::ViveController,
             Self::ViveFocus3,
@@ -31,10 +31,15 @@ impl ControllerType {
             Self::OculusTouch,
             Self::HolographicController,
             Self::HPMotionController,
+            Self::ViveCosmosController,
+            Self::PicoController,
         ]
     }
 
     /// Controller types whose bindings convert best to this one, closest first.
+    ///
+    /// Pico bindings come right after the Touch ones, or first for the Touch, as in SteamVR's
+    /// remapping files. SteamVR never converts the Cosmos ones, which go after the Focus 3's.
     pub fn conversion_sources(&self) -> Vec<Self> {
         use ControllerType::*;
         let order = match self {
@@ -42,15 +47,19 @@ impl ControllerType {
             ViveController => [
                 Knuckles,
                 HolographicController,
+                PicoController,
                 OculusTouch,
                 ViveFocus3,
+                ViveCosmosController,
                 HPMotionController,
                 FrameController,
                 ViveController,
             ],
             Knuckles => [
                 OculusTouch,
+                PicoController,
                 ViveFocus3,
+                ViveCosmosController,
                 HPMotionController,
                 FrameController,
                 HolographicController,
@@ -61,15 +70,19 @@ impl ControllerType {
                 HPMotionController,
                 HolographicController,
                 OculusTouch,
+                PicoController,
                 Knuckles,
                 ViveFocus3,
+                ViveCosmosController,
                 FrameController,
                 ViveController,
             ],
             _ => [
                 OculusTouch,
+                PicoController,
                 Knuckles,
                 ViveFocus3,
+                ViveCosmosController,
                 HPMotionController,
                 HolographicController,
                 FrameController,
@@ -110,8 +123,8 @@ pub fn convert(
                 Some(subpath) => {
                     input.subpath = subpath;
                     // Every menu binding on a hand goes to the same button, wherever it is.
-                    if !menu {
-                        taken.push((input.hand, subpath));
+                    if let (false, InputDevice::Hand(hand)) = (menu, input.device) {
+                        taken.push((hand, subpath));
                     }
                 }
                 None => {
@@ -132,7 +145,10 @@ fn convert_input(
     target_has: &impl Fn(Hand, DynSubpath) -> bool,
 ) -> Option<DynSubpath> {
     use DynSubpath::*;
-    let hand = input.hand;
+    // Only hand controllers' bindings convert.
+    let InputDevice::Hand(hand) = input.device else {
+        return None;
+    };
     // Without face buttons (the Frame's left hand), the d-pad stands in for them, like in
     // SteamVR's legacy bindings.
     let (lower_face, upper_face) = match hand {
@@ -179,7 +195,7 @@ mod tests {
         let vive = ControllerType::ViveController;
         let convert = |subpath, hand, source: &ControllerType, taken: &[(Hand, DynSubpath)]| {
             let input = DynInputPath {
-                hand,
+                device: InputDevice::Hand(hand),
                 subpath,
                 component: None,
             };
@@ -204,7 +220,7 @@ mod tests {
         use DynSubpath::*;
         let convert = |subpath, hand, source: &ControllerType| {
             let input = DynInputPath {
-                hand,
+                device: InputDevice::Hand(hand),
                 subpath,
                 component: None,
             };
@@ -238,7 +254,7 @@ mod tests {
         use DynSubpath::*;
         let convert = |subpath, hand, source: &ControllerType, target_has: &dyn Fn(_, _) -> _| {
             let input = DynInputPath {
-                hand,
+                device: InputDevice::Hand(hand),
                 subpath,
                 component: None,
             };
@@ -269,5 +285,47 @@ mod tests {
         assert_eq!(convert(B, Hand::Right, &knuckles, wmr), None);
         let vive = ControllerType::ViveController;
         assert_eq!(convert(Trackpad, Hand::Left, &vive, wmr), Some(Thumbstick));
+    }
+
+    #[test]
+    fn conversion_sources() {
+        use ControllerType::*;
+        // Like SteamVR's remapping files: Pico right after the Touch, or first for it.
+        assert_eq!(
+            OculusTouch.conversion_sources()[..2],
+            [PicoController, Knuckles]
+        );
+        assert_eq!(
+            PicoController.conversion_sources()[..2],
+            [OculusTouch, Knuckles]
+        );
+        assert_eq!(
+            ViveCosmosController.conversion_sources()[..3],
+            [OculusTouch, PicoController, Knuckles]
+        );
+        assert_eq!(
+            Knuckles.conversion_sources()[..2],
+            [OculusTouch, PicoController]
+        );
+        assert_eq!(
+            ViveController.conversion_sources()[2..4],
+            [PicoController, OculusTouch]
+        );
+
+        let known = ControllerType::known();
+        for ty in &known {
+            let sources = ty.conversion_sources();
+            assert_eq!(sources.len(), known.len() - 1, "{ty}");
+            assert!(
+                known
+                    .iter()
+                    .all(|other| other == ty || sources.contains(other)),
+                "{ty}"
+            );
+            // The names games list them under.
+            assert_eq!(ty.to_string().parse::<ControllerType>(), Ok(ty.clone()));
+            let json: ControllerType = serde_json::from_str(&format!("\"{ty}\"")).unwrap();
+            assert_eq!(&json, ty);
+        }
     }
 }

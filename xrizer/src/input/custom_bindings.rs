@@ -1,12 +1,11 @@
-use super::action_manifest::{ClickThresholdParams, GrabParameters};
-use crate::input::inactive_state;
-use crate::openxr_data::SessionData;
+use super::action_manifest::{ClickThresholdParams, GrabParameters, StringOrTyped};
+use crate::input::{inactive_state, origins};
+use crate::openxr_data::{Hand, SessionData};
 use log::{error, warn};
 use openvr as vr;
 use openxr as xr;
-use std::f32::consts::{FRAC_PI_4, PI};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use xr::{Haptic, HapticVibration};
 
@@ -59,6 +58,8 @@ pub(super) struct Vector2BindingData {
     pub action: xr::Action<xr::Vector2f>,
     pub profile: xr::Path,
     pub hand: xr::Path,
+    /// The handle of the input's source path, see [BoolBindingData::origin].
+    pub origin: vr::VRInputValueHandle_t,
     pub transform: Vector2Transform,
 }
 
@@ -285,10 +286,27 @@ impl ScrollData {
 #[derive(Default)]
 pub(super) struct Vector2ActionData {
     pub bindings: Vec<Vector2BindingData>,
-    // Left, right, unrestricted. OpenVR deltas are relative to UpdateActionState,
+    // See [AnalogStates]. OpenVR deltas are relative to UpdateActionState,
     // so reads must neither consume deltas nor share history between subactions.
-    pub state: Mutex<[vr::InputAnalogActionData_t; 3]>,
+    pub state: Mutex<AnalogStates>,
     input_only: bool,
+}
+
+/// An analog action's state on the left hand, the right hand, the gamepad (the order of
+/// `SubactionPaths::all`) and unrestricted.
+pub(super) type AnalogStates = [vr::InputAnalogActionData_t; 4];
+
+/// The state of an analog action read without a device: the one `prefer` picks among the
+/// devices'. The first one wins ties.
+pub(super) fn unrestricted_analog(
+    devices: &[vr::InputAnalogActionData_t],
+    prefer: impl Fn(&vr::InputAnalogActionData_t, &vr::InputAnalogActionData_t) -> bool,
+) -> vr::InputAnalogActionData_t {
+    devices
+        .iter()
+        .copied()
+        .reduce(|best, state| if prefer(&state, &best) { state } else { best })
+        .unwrap_or_default()
 }
 
 impl Vector2ActionData {
@@ -301,12 +319,15 @@ impl Vector2ActionData {
         }
     }
 
+    /// `devices` are each device's subaction path, interaction profile and the origin of the
+    /// inputs the action is bound to directly, in the order of [AnalogStates].
     pub fn sync(
         &self,
         direct: &xr::Action<xr::Vector2f>,
         session: &xr::Session<xr::AnyGraphics>,
-        hands: [(xr::Path, xr::Path, vr::VRInputValueHandle_t); 2],
-        masked: [bool; 2],
+        devices: [(xr::Path, xr::Path, vr::VRInputValueHandle_t); 3],
+        masked: [bool; 3],
+        constants: &[ScalarConstantBinding],
         update_time: impl Fn(bool, xr::Time) -> f32,
     ) {
         if self.input_only {
@@ -324,13 +345,13 @@ impl Vector2ActionData {
                         > best.x * best.x + best.y * best.y)
         }
 
-        let mut next = [vr::InputAnalogActionData_t::default(); 3];
-        for (index, (hand, profile, origin)) in hands.into_iter().enumerate() {
+        let mut next = AnalogStates::default();
+        for (index, (hand, profile, origin)) in devices.into_iter().enumerate() {
             // By a higher priority action set.
             if masked[index] {
                 continue;
             }
-            let mut consider = |state: xr::ActionState<xr::Vector2f>| {
+            let mut consider = |state: xr::ActionState<xr::Vector2f>, origin| {
                 let candidate = vr::InputAnalogActionData_t {
                     bActive: state.is_active,
                     activeOrigin: origin,
@@ -343,7 +364,10 @@ impl Vector2ActionData {
                     next[index] = candidate;
                 }
             };
-            consider(direct.state(session, hand).unwrap_or_else(inactive_state));
+            consider(
+                direct.state(session, hand).unwrap_or_else(inactive_state),
+                origin,
+            );
             for binding in &self.bindings {
                 if binding.hand != hand || binding.profile != profile {
                     continue;
@@ -353,14 +377,16 @@ impl Vector2ActionData {
                     .state(session, hand)
                     .unwrap_or_else(inactive_state);
                 state.current_state = binding.transform.apply(state.current_state, session, hand);
-                consider(state);
+                consider(state, origins::origin_or(binding.origin, origin));
+            }
+            if let Some(constant) =
+                scalar_constants_state(constants, session, hand, profile, origin, &update_time)
+                && prefer(&constant, &next[index])
+            {
+                next[index] = constant;
             }
         }
-        next[2] = if prefer(&next[1], &next[0]) {
-            next[1]
-        } else {
-            next[0]
-        };
+        next[3] = unrestricted_analog(&next[..3], prefer);
 
         let mut previous = self.state.lock().unwrap();
         for (next, previous) in next.iter_mut().zip(previous.iter()) {
@@ -371,12 +397,91 @@ impl Vector2ActionData {
     }
 }
 
+/// A scalar_constant binding: an analog value that is one constant while its input is pressed and
+/// another one otherwise. Axes the action doesn't have are 0.
+pub(super) struct ScalarConstantBinding {
+    pub press: BoolBindingType,
+    pub profile: xr::Path,
+    pub hand: xr::Path,
+    /// The handle of the press's source path, see [BoolBindingData::origin].
+    pub origin: vr::VRInputValueHandle_t,
+    pub on: [f32; 3],
+    pub off: [f32; 3],
+}
+
+impl ScalarConstantBinding {
+    /// The value on `hand` with `profile`, if the binding is for them and its input is active.
+    /// Its origin is the press's, or `hand_origin` without one.
+    fn state(
+        &self,
+        session: &xr::Session<xr::AnyGraphics>,
+        hand: xr::Path,
+        profile: xr::Path,
+        hand_origin: vr::VRInputValueHandle_t,
+        update_time: &impl Fn(bool, xr::Time) -> f32,
+    ) -> Option<vr::InputAnalogActionData_t> {
+        if self.hand != hand || self.profile != profile {
+            return None;
+        }
+        let press = self
+            .press
+            .state(session, hand)
+            .ok()
+            .flatten()
+            .filter(|press| press.is_active)?;
+        let [x, y, z] = if press.current_state {
+            self.on
+        } else {
+            self.off
+        };
+        let changed = press.changed_since_last_sync && self.on != self.off;
+        Some(vr::InputAnalogActionData_t {
+            bActive: true,
+            activeOrigin: origins::origin_or(self.origin, hand_origin),
+            x,
+            y,
+            z,
+            fUpdateTime: update_time(changed, press.last_change_time),
+            ..Default::default()
+        })
+    }
+}
+
+/// The value of an action's scalar_constant bindings on a hand: the largest one, like OpenXR
+/// combines the bindings of an action. The first one wins ties.
+pub(super) fn scalar_constants_state(
+    constants: &[ScalarConstantBinding],
+    session: &xr::Session<xr::AnyGraphics>,
+    hand: xr::Path,
+    profile: xr::Path,
+    hand_origin: vr::VRInputValueHandle_t,
+    update_time: &impl Fn(bool, xr::Time) -> f32,
+) -> Option<vr::InputAnalogActionData_t> {
+    // Every binding is read, as their inputs keep their own state between syncs.
+    constants
+        .iter()
+        .filter_map(|constant| constant.state(session, hand, profile, hand_origin, update_time))
+        .reduce(|best, state| {
+            if analog_magnitude(&state) > analog_magnitude(&best) {
+                state
+            } else {
+                best
+            }
+        })
+}
+
+/// The squared length of an analog state.
+pub(super) fn analog_magnitude(state: &vr::InputAnalogActionData_t) -> f32 {
+    state.x * state.x + state.y * state.y + state.z * state.z
+}
+
 /// A custom binding: a boolean OpenVR state that xrizer computes from OpenXR actions, each of
 /// which is bound to a single input.
 pub enum BoolBindingType {
     Dpad(DpadData),
     DoubleTap(DoubleTapData),
     Toggle(ToggleData),
+    Latch(LatchData),
     Grab(GrabBindingData),
     ThresholdFloat(ThresholdBindingData<f32>),
     ThresholdVec2(ThresholdBindingData<xr::Vector2f>),
@@ -394,6 +499,7 @@ impl BoolBindingType {
             Self::Dpad(dpad) => dpad.state(session, subaction_path),
             Self::DoubleTap(double) => double.state(session, subaction_path),
             Self::Toggle(toggle) => toggle.state(session, subaction_path),
+            Self::Latch(latch) => latch.state(session, subaction_path),
             Self::Grab(grab) => grab.state(session, subaction_path),
             Self::ThresholdFloat(threshold) => threshold.state(session, subaction_path),
             Self::ThresholdVec2(threshold) => threshold.state(session, subaction_path),
@@ -411,6 +517,10 @@ impl BoolBindingType {
                 .collect(),
             Self::DoubleTap(double) => vec![double.action.as_raw()],
             Self::Toggle(toggle) => vec![toggle.action.as_raw()],
+            Self::Latch(latch) => [&latch.press, &latch.hold]
+                .into_iter()
+                .flat_map(|part| part.actions())
+                .collect(),
             Self::Grab(grab) => grab
                 .force_action
                 .iter()
@@ -432,6 +542,8 @@ pub(super) enum DpadDirection {
     South,
     West,
     Center,
+    /// A radial menu button, numbered clockwise from the one at the north.
+    Button(usize),
 }
 
 #[derive(Clone)]
@@ -441,25 +553,195 @@ pub(super) struct DpadActions {
     pub haptic: Option<xr::Action<Haptic>>,
 }
 
+/// How a dpad splits its input into north, east, south and west zones. A radial menu splits it
+/// into more, like SteamVR's dpad, which is a radial menu of four buttons.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct DpadZones {
+    /// Fraction of full deflection to pass before a direction engages.
+    pub deadzone: f32,
+    /// Fraction of side to side overlap of neighbouring zones: 0 gives 90 degree zones, 1 gives
+    /// 180 degree zones (for a dpad).
+    pub overlap: f32,
+    /// An engaged direction stays engaged until the input returns to the deadzone or is released.
+    pub sticky: bool,
+}
+
+impl Default for DpadZones {
+    /// SteamVR's defaults, as its binding UI shows them.
+    fn default() -> Self {
+        Self {
+            deadzone: 0.25,
+            overlap: 0.5,
+            sticky: false,
+        }
+    }
+}
+
+impl DpadZones {
+    // Hysteresis around the zone edges, from VapoR's reimplementation of SteamVR's dpad. The
+    // angle is 3% of a turn for a dpad's zones, like the radius is 3% of full deflection.
+    const RADIUS_HYSTERESIS: f32 = 0.03;
+    const ANGLE_HYSTERESIS: f32 = 10.8;
+
+    /// Updates which zones are engaged at `x`, `y`: as many as `engaged` has, the first centered
+    /// on the north and the others clockwise (a dpad's north, east, south and west). Updating
+    /// again with the same input changes nothing, so every output of a dpad can update it.
+    fn update(&self, engaged: &mut [bool], x: f32, y: f32) {
+        let radius = x.hypot(y);
+        // Never engaged at rest, even without a deadzone.
+        let hold_radius = (self.deadzone - Self::RADIUS_HYSTERESIS).max(0.0);
+        if self.sticky && engaged.contains(&true) && radius > hold_radius {
+            return;
+        }
+        // Half the angle a zone spans without overlap
+        let half = 180.0 / engaged.len() as f32;
+        let boundary = half + half * self.overlap;
+        // In proportion for the narrower zones of radial menus, so they still engage.
+        let hysteresis = Self::ANGLE_HYSTERESIS * half / 45.0;
+        // Degrees clockwise from the north
+        let direction = x.atan2(y).to_degrees();
+        for (zone, engaged) in engaged.iter_mut().enumerate() {
+            let off_center = (direction - zone as f32 * 2.0 * half).rem_euclid(360.0);
+            let angle = off_center.min(360.0 - off_center);
+            *engaged = if *engaged {
+                radius > hold_radius && angle < boundary + hysteresis
+            } else {
+                radius > self.deadzone + Self::RADIUS_HYSTERESIS && angle < boundary - hysteresis
+            };
+        }
+    }
+}
+
+/// The zones of one dpad binding and which of them are engaged, shared by its outputs: a sticky
+/// direction holds off the others, and the center is where no direction is engaged.
+pub(super) struct DpadZoneState {
+    zones: DpadZones,
+    engaged: Mutex<DpadEngaged>,
+}
+
+struct DpadEngaged {
+    /// The click or touch that activates the dpad is held.
+    pressed: bool,
+    /// North, east, south, west, or a radial menu's buttons
+    directions: Vec<bool>,
+}
+
+impl DpadZoneState {
+    pub fn new(zones: DpadZones) -> Self {
+        Self::radial(zones, 4)
+    }
+
+    /// The zones of a radial menu with `buttons` buttons.
+    pub fn radial(zones: DpadZones, buttons: usize) -> Self {
+        Self {
+            zones,
+            engaged: Mutex::new(DpadEngaged {
+                pressed: false,
+                directions: vec![false; buttons],
+            }),
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn dpad_zones() {
+    // The engaged directions after moving through `path`, at each point, updating twice per
+    // point like two outputs of the dpad would.
+    let walk = |zones: DpadZones, path: &[(f32, f32)]| {
+        let mut engaged = [false; 4];
+        path.iter()
+            .map(|&(x, y)| {
+                zones.update(&mut engaged, x, y);
+                let once = engaged;
+                zones.update(&mut engaged, x, y);
+                assert_eq!(once, engaged, "updating again changed ({x}, {y})");
+                engaged
+            })
+            .collect::<Vec<_>>()
+    };
+    const NONE: [bool; 4] = [false; 4];
+    const N: [bool; 4] = [true, false, false, false];
+    const E: [bool; 4] = [false, true, false, false];
+    const NE: [bool; 4] = [true, true, false, false];
+    const S: [bool; 4] = [false, false, true, false];
+    const W: [bool; 4] = [false, false, false, true];
+    // Points at a distance of 0.9, `degrees` clockwise from north.
+    let at = |degrees: f32| {
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        (0.9 * sin, 0.9 * cos)
+    };
+
+    // SteamVR's defaults: the deadzone is a quarter of the way out, and neighbouring zones
+    // overlap by half, so diagonals engage both.
+    let defaults = DpadZones::default();
+    assert_eq!(
+        walk(defaults, &[(0.0, 0.2), (0.0, 0.3), (0.0, 0.24), (0.0, 0.2)]),
+        [NONE, N, N, NONE]
+    );
+    assert_eq!(
+        walk(
+            defaults,
+            &[at(0.0), at(45.0), at(75.0), at(80.0), at(180.0), at(270.0)]
+        ),
+        [N, NE, NE, E, S, W]
+    );
+    // From rest, a direction only engages well inside its zone.
+    assert_eq!(walk(defaults, &[at(60.0)]), [E]);
+
+    // Without overlap, the zones are 90 degrees wide, with hysteresis at their edges.
+    let no_overlap = DpadZones {
+        overlap: 0.0,
+        ..defaults
+    };
+    assert_eq!(walk(no_overlap, &[at(30.0), at(50.0), at(60.0)]), [N, N, E]);
+    assert_eq!(walk(no_overlap, &[at(45.0)]), [NONE]);
+
+    // A sticky direction holds off the others until the input returns to the center.
+    let sticky = DpadZones {
+        deadzone: 0.75,
+        overlap: 0.0,
+        sticky: true,
+    };
+    assert_eq!(
+        walk(
+            sticky,
+            &[(0.0, 0.7), at(0.0), at(90.0), (0.0, 0.0), at(90.0)]
+        ),
+        [NONE, N, N, NONE, E]
+    );
+    // Even without a deadzone, nothing is engaged at rest.
+    let no_deadzone = DpadZones {
+        deadzone: 0.0,
+        ..defaults
+    };
+    assert_eq!(walk(no_deadzone, &[at(0.0), (0.0, 0.0)]), [N, NONE]);
+}
+
 pub(super) struct DpadData {
     pub actions: DpadActions,
     direction: DpadDirection,
+    zones: Arc<DpadZoneState>,
     last_state: AtomicBool,
 }
 
 impl DpadData {
-    const CENTER_ZONE: f32 = 0.5;
-
     // Thresholds for force-activated dpads, experimentally chosen to match SteamVR
     const DPAD_CLICK_THRESHOLD: f32 = 0.33;
     const DPAD_RELEASE_THRESHOLD: f32 = 0.2;
 
-    pub fn new(actions: DpadActions, direction: DpadDirection) -> Self {
+    pub fn new(actions: DpadActions, direction: DpadDirection, zones: Arc<DpadZoneState>) -> Self {
         Self {
             actions,
             direction,
+            zones,
             last_state: false.into(),
         }
+    }
+
+    #[cfg(test)]
+    pub fn zones(&self) -> DpadZones {
+        self.zones.zones
     }
 
     fn state(
@@ -476,58 +758,43 @@ impl DpadData {
             is_active: parent_state.is_active,
         };
 
-        let last_active = self.last_state.load(Ordering::Relaxed);
-        let active_threshold = if last_active {
+        let click_or_touch = action
+            .click_or_touch
+            .as_ref()
+            .map(|a| a.state(session, subaction_path))
+            .transpose()?;
+
+        let mut shared = self.zones.engaged.lock().unwrap();
+        let active_threshold = if shared.pressed {
             Self::DPAD_RELEASE_THRESHOLD
         } else {
             Self::DPAD_CLICK_THRESHOLD
         };
+        // If this action isn't bound in the current interaction profile, is_active will be
+        // false - in this case, it's probably a joystick touch dpad, in which case we still want
+        // to read the current state.
+        let active =
+            click_or_touch.is_none_or(|s| !s.is_active || s.current_state > active_threshold);
+        shared.pressed = active;
 
-        let active = action
-            .click_or_touch
-            .as_ref()
-            .map(|a| {
-                // If this action isn't bound in the current interaction profile,
-                // is_active will be false - in this case, it's probably a joystick touch dpad, in
-                // which case we still want to read the current state.
-                a.state(session, subaction_path)
-                    .map(|s| !s.is_active || s.current_state > active_threshold)
-            })
-            .unwrap_or(Ok(true))?;
-
-        if !active {
-            // Still bound, so report the release edge like any other button.
-            ret_state.changed_since_last_sync = self
-                .last_state
-                .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok();
-            return Ok(Some(ret_state));
-        }
-
-        // convert to polar coordinates
-        let xr::Vector2f { x, y } = parent_state.current_state;
-        let radius = x.hypot(y);
-        let angle = y.atan2(x);
-
-        // pi/2 wedges, no overlap
-        let in_bounds = match self.direction {
-            DpadDirection::North => {
-                radius >= Self::CENTER_ZONE && (FRAC_PI_4..=3.0 * FRAC_PI_4).contains(&angle)
+        let in_bounds = if active {
+            let xr::Vector2f { x, y } = parent_state.current_state;
+            self.zones.zones.update(&mut shared.directions, x, y);
+            let engaged = |zone: usize| shared.directions.get(zone).copied().unwrap_or(false);
+            match self.direction {
+                DpadDirection::North => engaged(0),
+                DpadDirection::East => engaged(1),
+                DpadDirection::South => engaged(2),
+                DpadDirection::West => engaged(3),
+                DpadDirection::Button(button) => engaged(button),
+                DpadDirection::Center => !shared.directions.contains(&true),
             }
-            DpadDirection::East => {
-                radius >= Self::CENTER_ZONE && (-FRAC_PI_4..=FRAC_PI_4).contains(&angle)
-            }
-            DpadDirection::South => {
-                radius >= Self::CENTER_ZONE && (-3.0 * FRAC_PI_4..=-FRAC_PI_4).contains(&angle)
-            }
-            // west section is disjoint with atan2
-            DpadDirection::West => {
-                radius >= Self::CENTER_ZONE
-                    && ((3.0 * FRAC_PI_4..=PI).contains(&angle)
-                        || (-PI..=-3.0 * FRAC_PI_4).contains(&angle))
-            }
-            DpadDirection::Center => radius < Self::CENTER_ZONE,
+        } else {
+            // Still bound, so the release edge is reported like any other button.
+            shared.directions.fill(false);
+            false
         };
+        drop(shared);
 
         ret_state.current_state = in_bounds;
         if self
@@ -551,13 +818,53 @@ impl DpadData {
     }
 }
 
+/// Each controller's speed in m/s as of the last action sync, which grab bindings drop with.
+#[derive(Default)]
+pub struct HandSpeeds([AtomicU32; 2]);
+
+impl HandSpeeds {
+    pub fn set(&self, hand: Hand, speed: f32) {
+        self.0[Self::index(hand)].store(speed.to_bits(), Ordering::Relaxed);
+    }
+
+    fn get(&self, hand: Hand) -> f32 {
+        f32::from_bits(self.0[Self::index(hand)].load(Ordering::Relaxed))
+    }
+
+    fn index(hand: Hand) -> usize {
+        match hand {
+            Hand::Left => 0,
+            Hand::Right => 1,
+        }
+    }
+}
+
 pub(super) struct GrabBindingData {
     /// Missing on controllers without a force sensor, which then grab by value alone.
     force_action: Option<xr::Action<f32>>,
     value_action: xr::Action<f32>,
     hold_threshold: f32,
     release_threshold: f32,
-    last_state: AtomicBool,
+    force_hold_threshold: f32,
+    force_release_threshold: f32,
+    /// m/s
+    downgrade_speed: f32,
+    drop_speed: f32,
+    speeds: Arc<HandSpeeds>,
+    hand: Hand,
+    state: Mutex<GrabState>,
+}
+
+#[derive(Default)]
+struct GrabState {
+    grabbed: bool,
+    /// The force passed its hold threshold and hasn't dropped below its release threshold since.
+    force_engaged: bool,
+    /// The grab is held by the value alone after the force held it.
+    downgraded: bool,
+    /// The grab was dropped for moving, and the value alone can't grab again until it falls to
+    /// the release threshold.
+    dropped: bool,
 }
 
 impl GrabBindingData {
@@ -566,25 +873,58 @@ impl GrabBindingData {
     const DEFAULT_GRAB_THRESHOLD: f32 = 0.70;
     /// How much the value component needs to be to release the grab.
     const DEFAULT_RELEASE_THRESHOLD: f32 = 0.65;
+    /// The pressure from which the force counts, on top of the value, so a light touch on the
+    /// force sensor doesn't grab.
+    const DEFAULT_FORCE_HOLD_THRESHOLD: f32 = 0.1;
+    /// The pressure below which the force stops counting.
+    const DEFAULT_FORCE_RELEASE_THRESHOLD: f32 = 0.05;
+    /// How fast the controller may move while a grab that the force held is held by the value
+    /// alone.
+    const DEFAULT_DOWNGRADE_SPEED: f32 = 1.0;
+    /// How fast the controller must move when the force is let go for the grab to drop, even
+    /// though the value still holds it: a throw.
+    const DEFAULT_DROP_SPEED: f32 = 0.1;
 
     pub fn new(
         force_action: Option<xr::Action<f32>>,
         value_action: xr::Action<f32>,
         params: Option<&GrabParameters>,
+        speeds: Arc<HandSpeeds>,
+        hand: Hand,
     ) -> Self {
-        let hold_threshold = params
-            .and_then(|p| p.value_hold_threshold.as_deref().copied())
-            .unwrap_or(Self::DEFAULT_GRAB_THRESHOLD);
+        let param = |get: fn(&GrabParameters) -> Option<StringOrTyped<f32>>, default: f32| {
+            params
+                .and_then(get)
+                .map(|value| *value)
+                .filter(|value| value.is_finite())
+                .unwrap_or(default)
+        };
+        let hold_threshold = param(|p| p.value_hold_threshold, Self::DEFAULT_GRAB_THRESHOLD);
+        let force_hold_threshold = param(
+            |p| p.force_hold_threshold,
+            Self::DEFAULT_FORCE_HOLD_THRESHOLD,
+        );
         Self {
             force_action,
             value_action,
             hold_threshold,
-            release_threshold: params
-                .and_then(|p| p.value_release_threshold.as_deref().copied())
-                .unwrap_or(Self::DEFAULT_RELEASE_THRESHOLD)
-                // Releasing above the grab point would flip the state at every sync between them.
-                .min(hold_threshold),
-            last_state: false.into(),
+            // Releasing above the grab point would flip the state at every sync between them.
+            release_threshold: param(
+                |p| p.value_release_threshold,
+                Self::DEFAULT_RELEASE_THRESHOLD,
+            )
+            .min(hold_threshold),
+            force_hold_threshold,
+            force_release_threshold: param(
+                |p| p.force_release_threshold,
+                Self::DEFAULT_FORCE_RELEASE_THRESHOLD,
+            )
+            .min(force_hold_threshold),
+            downgrade_speed: param(|p| p.downgrade_speed, Self::DEFAULT_DOWNGRADE_SPEED),
+            drop_speed: param(|p| p.drop_speed, Self::DEFAULT_DROP_SPEED),
+            speeds,
+            hand,
+            state: Default::default(),
         }
     }
 
@@ -599,22 +939,56 @@ impl GrabBindingData {
             .map(|force| force.state(session, subaction_path))
             .transpose()?;
         let value_state = self.value_action.state(session, subaction_path)?;
+        let mut state = self.state.lock().unwrap();
         if !value_state.is_active || force_state.is_some_and(|s| !s.is_active) {
-            self.last_state.store(false, Ordering::Relaxed);
+            *state = Default::default();
             return Ok(None);
         }
 
-        let prev_grabbed = self.last_state.load(Ordering::Relaxed);
+        let prev_grabbed = state.grabbed;
+        // The value and the force share one scale for the grab thresholds: the value (proximity)
+        // is 0 to 1, a force that counts is 1 to 2.
+        let force_engaged = force_state.is_some_and(|force| {
+            let force = force.current_state;
+            force > 0.0
+                && if state.force_engaged {
+                    force > self.force_release_threshold
+                } else {
+                    force >= self.force_hold_threshold
+                }
+        });
+        let force_let_go = state.force_engaged && !force_engaged;
+        state.force_engaged = force_engaged;
+        let proximity = value_state.current_state;
         let value = match force_state {
-            Some(force) if force.current_state > 0.0 => force.current_state + 1.0,
-            _ => value_state.current_state,
+            Some(force) if force_engaged => force.current_state + 1.0,
+            _ => proximity,
         };
 
-        let grabbed = (prev_grabbed && value > self.release_threshold)
-            || (!prev_grabbed && value >= self.hold_threshold);
+        if state.dropped && (force_engaged || proximity <= self.release_threshold) {
+            state.dropped = false;
+        }
+        let held = if prev_grabbed {
+            value > self.release_threshold
+        } else {
+            !state.dropped && value >= self.hold_threshold
+        };
+        // SteamVR drops a grab that the force held once only the value holds it, if the
+        // controller moves: at drop_speed when the force is let go, at downgrade_speed after.
+        let moving = held && prev_grabbed && !force_engaged && {
+            let speed = self.speeds.get(self.hand);
+            if force_let_go {
+                speed >= self.drop_speed
+            } else {
+                state.downgraded && speed > self.downgrade_speed
+            }
+        };
+        let grabbed = held && !moving;
+        state.dropped |= moving;
+        state.downgraded = grabbed && !force_engaged && (force_let_go || state.downgraded);
 
         let changed_since_last_sync = grabbed != prev_grabbed;
-        self.last_state.store(grabbed, Ordering::Relaxed);
+        state.grabbed = grabbed;
 
         Ok(Some(xr::ActionState {
             current_state: grabbed,
@@ -669,6 +1043,59 @@ impl ToggleData {
             current_state,
             changed_since_last_sync,
             last_change_time: state.last_change_time,
+            is_active: true,
+        }))
+    }
+}
+
+/// A press that stays held while another input is, once the press set it: touchy_click keeps a
+/// click while the input is touched, sticky_click while the stick is deflected.
+pub(super) struct LatchData {
+    press: Box<BoolBindingType>,
+    hold: Box<BoolBindingType>,
+    last_state: AtomicBool,
+}
+
+impl LatchData {
+    pub fn new(press: BoolBindingType, hold: BoolBindingType) -> Self {
+        Self {
+            press: press.into(),
+            hold: hold.into(),
+            last_state: false.into(),
+        }
+    }
+
+    fn state(
+        &self,
+        session: &xr::Session<xr::AnyGraphics>,
+        subaction_path: xr::Path,
+    ) -> xr::Result<Option<xr::ActionState<bool>>> {
+        // Both are read, as they keep their own state between syncs.
+        let press = self.press.state(session, subaction_path)?;
+        let hold = self
+            .hold
+            .state(session, subaction_path)?
+            .filter(|hold| hold.is_active);
+        let Some(press) = press.filter(|press| press.is_active) else {
+            self.last_state.store(false, Ordering::Relaxed);
+            return Ok(None);
+        };
+
+        let last_state = self.last_state.load(Ordering::Relaxed);
+        let held = hold.is_some_and(|hold| hold.current_state);
+        let current_state = press.current_state || (last_state && held);
+        self.last_state.store(current_state, Ordering::Relaxed);
+        // Whichever changed last changed the state.
+        let last_change_time = match hold {
+            Some(hold) if hold.last_change_time.as_nanos() > press.last_change_time.as_nanos() => {
+                hold.last_change_time
+            }
+            _ => press.last_change_time,
+        };
+        Ok(Some(xr::ActionState {
+            current_state,
+            changed_since_last_sync: current_state != last_state,
+            last_change_time,
             is_active: true,
         }))
     }
@@ -1016,6 +1443,10 @@ enum BindingState {
 pub struct BoolBindingData {
     pub ty: BoolBindingType,
     pub hand: xr::Path,
+    /// The handle of the input's source path in SteamVR's profile of the controller (e.g.
+    /// `/user/hand/left/input/trigger`), the origin action data reports when this binding drives
+    /// the action. 0 for none.
+    pub origin: vr::VRInputValueHandle_t,
     last_state: Mutex<BindingState>,
 }
 
@@ -1024,8 +1455,13 @@ impl BoolBindingData {
         Self {
             ty,
             hand,
+            origin: vr::k_ulInvalidInputValueHandle,
             last_state: Mutex::new(BindingState::Unsynced),
         }
+    }
+
+    pub fn with_origin(self, origin: vr::VRInputValueHandle_t) -> Self {
+        Self { origin, ..self }
     }
 
     pub fn unsync(&self) {
@@ -1263,6 +1699,7 @@ mod tests {
         assert!(state.bState);
         assert!(state.bChanged);
 
+        // The dpad is sticky: sliding east keeps north until the input returns to the center.
         fakexr::set_action_state(
             dpad_data.xy.as_raw(),
             fakexr::ActionState::Vector2(0.55, 0.0),
@@ -1275,8 +1712,450 @@ mod tests {
 
         let state = f.get_bool_state(boolact).unwrap();
         assert!(state.bActive);
-        assert!(!state.bState);
-        assert!(state.bChanged);
+        assert!(state.bState);
+        assert!(!state.bChanged);
+
+        for (x, north) in [(0.1, false), (0.55, false)] {
+            fakexr::set_action_state(
+                dpad_data.xy.as_raw(),
+                fakexr::ActionState::Vector2(x, 0.0),
+                LeftHand,
+            );
+            f.sync(vr::VRActiveActionSet_t {
+                ulActionSet: set1,
+                ..Default::default()
+            });
+            let state = f.get_bool_state(boolact).unwrap();
+            assert!(state.bActive);
+            assert_eq!(state.bState, north, "{x}");
+        }
+    }
+
+    /// The zones and actions of the only dpad binding of `handle` in `profile`.
+    fn dpad_of(
+        f: &Fixture,
+        handle: vr::VRActionHandle_t,
+        profile: &str,
+    ) -> (DpadZones, DpadActions) {
+        let data = f.input.openxr.session_data.get();
+        let actions = data.input_data.get_loaded_actions().unwrap();
+        let profile = f.input.openxr.instance.string_to_path(profile).unwrap();
+        let dpads: Vec<_> = actions
+            .try_get_bindings(handle, profile)
+            .unwrap()
+            .iter()
+            .filter_map(|b| match &b.ty {
+                BoolBindingType::Dpad(dpad) => Some((dpad.zones(), dpad.actions.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dpads.len(), 1, "expected one dpad binding");
+        dpads.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn dpad_zones_from_bindings() {
+        let mut f = Fixture::new();
+        let set = vr::VRActiveActionSet_t {
+            ulActionSet: f.get_action_set_handle(c"/actions/main"),
+            ..Default::default()
+        };
+        let [north, east, south, west, left_north, left_east, left_center] = [
+            c"/actions/main/in/north",
+            c"/actions/main/in/east",
+            c"/actions/main/in/south",
+            c"/actions/main/in/west",
+            c"/actions/main/in/left_north",
+            c"/actions/main/in/left_east",
+            c"/actions/main/in/left_center",
+        ]
+        .map(|name| f.get_action_handle(name));
+        f.load_actions(c"actions_dpad_zones.json");
+        f.set_interaction_profile::<Knuckles>(LeftHand);
+        f.set_interaction_profile::<Knuckles>(RightHand);
+
+        let (zones, left) = dpad_of(&f, left_north, Knuckles::profile_path());
+        assert_eq!(zones, DpadZones::default());
+        let (zones, right) = dpad_of(&f, north, Knuckles::profile_path());
+        assert_eq!(
+            zones,
+            DpadZones {
+                deadzone: 0.75,
+                overlap: 0.0,
+                sticky: true,
+            }
+        );
+        // Every direction of a binding shares its zones.
+        let (_, right_east) = dpad_of(&f, east, Knuckles::profile_path());
+        assert_eq!(right.xy.as_raw(), right_east.xy.as_raw());
+
+        let input = |actions: &DpadActions, hand, x, y, touched: bool| {
+            let touch = actions.click_or_touch.as_ref().unwrap().as_raw();
+            fakexr::set_action_state(touch, ActionState::Float(touched as u8 as f32), hand);
+            fakexr::set_action_state(actions.xy.as_raw(), ActionState::Vector2(x, y), hand);
+        };
+        let states = |f: &mut Fixture, handles: &[vr::VRActionHandle_t]| {
+            f.sync(set);
+            handles
+                .iter()
+                .map(|&handle| f.get_bool_state(handle).unwrap().bState)
+                .collect::<Vec<_>>()
+        };
+
+        // Without parameters, diagonals engage both directions, and the center is the deadzone.
+        let left_handles = [left_north, left_east, left_center];
+        for ((x, y), expected) in [
+            ((0.0, 0.0), [false, false, true]),
+            ((0.0, 0.2), [false, false, true]),
+            ((0.0, 0.3), [true, false, false]),
+            ((0.6, 0.5), [true, true, false]),
+            ((0.8, 0.0), [false, true, false]),
+        ] {
+            input(&left, LeftHand, x, y, true);
+            assert_eq!(states(&mut f, &left_handles), expected, "({x}, {y})");
+        }
+        input(&left, LeftHand, 0.0, 0.0, false);
+        assert_eq!(states(&mut f, &left_handles), [false; 3]);
+
+        // Alyx's turning: a deep deadzone, no overlap, and sticky directions.
+        let right_handles = [north, east, south, west];
+        for ((x, y), expected) in [
+            ((0.0, 0.7), [false; 4]),
+            ((0.0, 0.9), [true, false, false, false]),
+            ((0.9, 0.0), [true, false, false, false]),
+            ((0.0, 0.0), [false; 4]),
+            ((0.9, 0.0), [false, true, false, false]),
+            ((0.0, 0.0), [false; 4]),
+            ((0.64, 0.64), [false; 4]),
+            ((0.0, -0.9), [false, false, true, false]),
+        ] {
+            input(&right, RightHand, x, y, true);
+            assert_eq!(states(&mut f, &right_handles), expected, "({x}, {y})");
+        }
+        // Lifting the thumb releases the direction.
+        input(&right, RightHand, 0.0, -0.9, false);
+        assert_eq!(states(&mut f, &right_handles), [false; 4]);
+    }
+
+    #[test]
+    fn index_trackpad_dpad_clicks_by_force() {
+        let mut f = Fixture::new();
+        let set = vr::VRActiveActionSet_t {
+            ulActionSet: f.get_action_set_handle(c"/actions/main"),
+            ..Default::default()
+        };
+        let pad_north = f.get_action_handle(c"/actions/main/in/pad_north");
+        f.load_actions(c"actions_dpad_zones.json");
+        f.set_interaction_profile::<Knuckles>(LeftHand);
+
+        let (_, pad) = dpad_of(&f, pad_north, Knuckles::profile_path());
+        let force = pad.click_or_touch.as_ref().unwrap().as_raw();
+        assert_eq!(
+            force,
+            f.get_action::<f32>(
+                f.get_action_handle(c"/user/hand/left/input/trackpad/force-/actions/main")
+            )
+        );
+        let haptic = pad.haptic.as_ref().expect("no dpad haptic").as_raw();
+
+        fakexr::set_action_state(pad.xy.as_raw(), ActionState::Vector2(0.0, 0.8), LeftHand);
+        let mut check = |pressure, state| {
+            fakexr::set_action_state(force, ActionState::Float(pressure), LeftHand);
+            f.sync(set);
+            assert_eq!(
+                f.get_bool_state(pad_north).unwrap().bState,
+                state,
+                "{pressure}"
+            );
+        };
+        check(0.3, false);
+        assert!(!fakexr::is_haptic_activated(haptic, LeftHand));
+        check(0.4, true);
+        // Engaging a direction plays a tick.
+        assert!(fakexr::is_haptic_activated(haptic, LeftHand));
+        check(0.25, true);
+        check(0.15, false);
+    }
+
+    /// Half-Life: Alyx opens its weapon wheel (#208) with a press of the right Index trackpad: a
+    /// button mode click read from the trackpad's force at 0.38, released at 0.3. Touching the
+    /// trackpad, or scrolling on it, doesn't open it.
+    #[test]
+    fn alyx_inventory_opens_by_trackpad_force() {
+        let mut f = Fixture::new();
+        let mut sets =
+            [c"/actions/weapon", c"/actions/scroll"].map(|name| vr::VRActiveActionSet_t {
+                ulActionSet: f.get_action_set_handle(name),
+                ..Default::default()
+            });
+        let inventory = f.get_action_handle(c"/actions/weapon/in/showinventory");
+        f.load_actions(c"actions_alyx_inventory.json");
+        f.set_interaction_profile::<Knuckles>(RightHand);
+
+        let profile = Knuckles::profile_path();
+        f.verify_custom_bindings(
+            profile,
+            c"/actions/weapon/in/showinventory",
+            ["/user/hand/right/input/trackpad/force".into()],
+        );
+        // Not bound to the trackpad directly, which would leave the click point to the runtime.
+        let profile_path = f.input.openxr.instance.string_to_path(profile).unwrap();
+        assert!(fakexr::check_no_suggested_bindings(
+            f.get_action::<bool>(inventory),
+            profile_path
+        ));
+
+        let force = f.get_action::<f32>(
+            f.get_action_handle(c"/user/hand/right/input/trackpad/force-/actions/weapon"),
+        );
+        let touch = f.get_action::<f32>(
+            f.get_action_handle(c"/user/hand/right/input/trackpad/touch-/actions/scroll"),
+        );
+        let mut check = |touched: bool, pressure: f32, open: bool| {
+            let touched_value = if touched { 1.0 } else { 0.0 };
+            fakexr::set_action_state(touch, ActionState::Float(touched_value), RightHand);
+            fakexr::set_action_state(force, ActionState::Float(pressure), RightHand);
+            f.sync_sets(&mut sets);
+            let state = f.get_bool_state(inventory).unwrap();
+            assert!(state.bActive);
+            assert_eq!(state.bState, open, "touched {touched}, force {pressure}");
+        };
+
+        check(true, 0.0, false);
+        check(true, 0.2, false);
+        check(true, 0.37, false);
+        check(true, 0.38, true);
+        check(true, 0.31, true);
+        check(true, 0.29, false);
+        check(false, 0.0, false);
+    }
+
+    #[test]
+    fn radial_menu() {
+        let mut f = Fixture::new();
+        let set = vr::VRActiveActionSet_t {
+            ulActionSet: f.get_action_set_handle(c"/actions/menu"),
+            ..Default::default()
+        };
+        let [item0, item1, item3, center, unnumbered] = [
+            c"/actions/menu/in/item0",
+            c"/actions/menu/in/item1",
+            c"/actions/menu/in/item3",
+            c"/actions/menu/in/center",
+            c"/actions/menu/in/unnumbered",
+        ]
+        .map(|name| f.get_action_handle(name));
+        f.load_actions(c"actions_radial.json");
+        f.set_interaction_profile::<Knuckles>(LeftHand);
+        f.set_interaction_profile::<Knuckles>(RightHand);
+
+        let profile = Knuckles::profile_path();
+        f.verify_custom_bindings(
+            profile,
+            c"/actions/menu/in/item0",
+            [
+                "/user/hand/right/input/thumbstick".into(),
+                "/user/hand/right/input/thumbstick/touch".into(),
+            ],
+        );
+        // Without num_buttons, or beyond it, nothing is bound.
+        f.verify_custom_bindings(profile, c"/actions/menu/in/unnumbered", []);
+        f.verify_custom_bindings(profile, c"/actions/menu/in/beyond", []);
+
+        let (zones, actions) = dpad_of(&f, item0, profile);
+        assert_eq!(
+            zones,
+            DpadZones {
+                deadzone: 0.25,
+                overlap: 0.0,
+                sticky: false,
+            }
+        );
+        // Every button of a menu shares its zones.
+        let (_, item3_actions) = dpad_of(&f, item3, profile);
+        assert_eq!(actions.xy.as_raw(), item3_actions.xy.as_raw());
+
+        let touch = actions.click_or_touch.as_ref().unwrap().as_raw();
+        let mut input = |(x, y): (f32, f32), touched: bool| {
+            let touched = if touched { 1.0 } else { 0.0 };
+            fakexr::set_action_state(touch, ActionState::Float(touched), RightHand);
+            fakexr::set_action_state(actions.xy.as_raw(), ActionState::Vector2(x, y), RightHand);
+            f.sync(set);
+            [item0, item1, item3, center].map(|handle| f.get_bool_state(handle).unwrap().bState)
+        };
+        // Points at a distance of 0.9, `degrees` clockwise from north.
+        let at = |degrees: f32| {
+            let (sin, cos) = degrees.to_radians().sin_cos();
+            (0.9 * sin, 0.9 * cos)
+        };
+
+        // Six buttons of 60 degrees, the first at the north.
+        assert_eq!(input((0.0, 0.0), true), [false, false, false, true]);
+        assert_eq!(input(at(0.0), true), [true, false, false, false]);
+        assert_eq!(input(at(60.0), true), [false, true, false, false]);
+        assert_eq!(input(at(180.0), true), [false, false, true, false]);
+        // A button stays engaged a little past its edge.
+        assert_eq!(input(at(0.0), true), [true, false, false, false]);
+        assert_eq!(input(at(35.0), true), [true, false, false, false]);
+        assert_eq!(input(at(40.0), true), [false, true, false, false]);
+        // Engaged by touch.
+        assert_eq!(input(at(60.0), false), [false; 4]);
+        assert!(!f.get_bool_state(unnumbered).unwrap().bActive);
+    }
+
+    #[test]
+    fn grab_force_thresholds() {
+        let mut f = Fixture::new();
+        let set = vr::VRActiveActionSet_t {
+            ulActionSet: f.get_action_set_handle(c"/actions/main"),
+            ..Default::default()
+        };
+        let grab = f.get_action_handle(c"/actions/main/in/grab");
+        let grab_firmly = f.get_action_handle(c"/actions/main/in/grab_firmly");
+        let [left, right] =
+            [c"/user/hand/left", c"/user/hand/right"].map(|hand| f.get_input_source_handle(hand));
+        f.load_actions(c"actions_grab_force.json");
+        f.set_interaction_profile::<Knuckles>(LeftHand);
+        f.set_interaction_profile::<Knuckles>(RightHand);
+
+        let mut check = |handle, hand, restrict, force, value, state| {
+            let (force_action, value_action) = grab_actions_hand(&f, handle, Some(hand));
+            let user_path = match hand {
+                Hand::Left => LeftHand,
+                Hand::Right => RightHand,
+            };
+            fakexr::set_action_state(force_action, ActionState::Float(force), user_path);
+            fakexr::set_action_state(value_action, ActionState::Float(value), user_path);
+            f.sync(set);
+            let s = f.get_bool_state_hand(handle, restrict).unwrap();
+            assert!(s.bActive);
+            assert_eq!(s.bState, state, "force {force}, value {value}");
+        };
+
+        // A light touch on the force sensor isn't a grab, a press is, until it's let go.
+        check(grab, Hand::Left, left, 0.05, 0.0, false);
+        check(grab, Hand::Left, left, 0.1, 0.0, true);
+        check(grab, Hand::Left, left, 0.06, 0.0, true);
+        check(grab, Hand::Left, left, 0.04, 0.0, false);
+        // The value grabs alone.
+        check(grab, Hand::Left, left, 0.0, 0.7, true);
+
+        // VRChat's grab: only a firm press counts, even with a closed hand.
+        check(grab_firmly, Hand::Right, right, 0.12, 1.0, false);
+        check(grab_firmly, Hand::Right, right, 0.15, 1.0, true);
+        check(grab_firmly, Hand::Right, right, 0.0, 1.0, true);
+        check(grab_firmly, Hand::Right, right, 0.0, 0.6, false);
+    }
+
+    #[test]
+    fn grab_drops_when_moved() {
+        let mut f = Fixture::new();
+        let set = vr::VRActiveActionSet_t {
+            ulActionSet: f.get_action_set_handle(c"/actions/main"),
+            ..Default::default()
+        };
+        let grab = f.get_action_handle(c"/actions/main/in/grab");
+        f.load_actions(c"actions_grab_force.json");
+        f.set_interaction_profile::<Knuckles>(LeftHand);
+        let (force_action, value_action) = grab_actions_hand(&f, grab, Some(Hand::Left));
+
+        // Speed in m/s, force, proximity
+        let mut frame = 0;
+        let mut check = |speed: f32, force, value, state, line| {
+            let velocity = xr::Vector3f {
+                x: speed,
+                y: 0.0,
+                z: 0.0,
+            };
+            // A frame per sync, so the controller is located anew.
+            frame += 1;
+            f.input
+                .openxr
+                .set_display_time(xr::Time::from_nanos(frame * 11_000_000));
+            fakexr::set_grip_velocity(f.raw_session(), LeftHand, Some(velocity));
+            fakexr::set_action_state(force_action, ActionState::Float(force), LeftHand);
+            fakexr::set_action_state(value_action, ActionState::Float(value), LeftHand);
+            f.sync(set);
+            let s = f.get_bool_state(grab).unwrap();
+            assert!(s.bActive);
+            assert_eq!(s.bState, state, "line {line}");
+        };
+
+        // A grab that only the proximity held never drops for moving.
+        check(0.0, 0.0, 0.9, true, line!());
+        check(2.0, 0.0, 0.9, true, line!());
+        // Letting go of the force while holding still keeps the grab, until the controller moves
+        // faster than the downgrade speed.
+        check(0.0, 0.3, 0.9, true, line!());
+        check(0.05, 0.0, 0.9, true, line!());
+        check(0.8, 0.0, 0.9, true, line!());
+        check(1.5, 0.0, 0.9, false, line!());
+        // The proximity alone only grabs again once the hand opened.
+        check(0.0, 0.0, 0.9, false, line!());
+        check(0.0, 0.0, 0.5, false, line!());
+        check(0.0, 0.0, 0.9, true, line!());
+        // Letting go of the force while moving drops it: a throw.
+        check(0.0, 0.3, 0.9, true, line!());
+        check(0.5, 0.3, 0.9, true, line!());
+        check(0.5, 0.0, 0.9, false, line!());
+        // The force grabs again right away.
+        check(0.5, 0.3, 0.9, true, line!());
+        // Without a velocity, the grab never drops for moving.
+        f.input
+            .openxr
+            .set_display_time(xr::Time::from_nanos(1_000_000_000));
+        fakexr::set_grip_velocity(f.raw_session(), LeftHand, None);
+        fakexr::set_action_state(force_action, ActionState::Float(0.0), LeftHand);
+        f.sync(set);
+        assert!(f.get_bool_state(grab).unwrap().bState);
+    }
+
+    #[test]
+    fn grab_drop_speeds_from_parameters() {
+        let mut f = Fixture::new();
+        let set = vr::VRActiveActionSet_t {
+            ulActionSet: f.get_action_set_handle(c"/actions/main"),
+            ..Default::default()
+        };
+        let [grab, swing, lightly] = [
+            c"/actions/main/in/grab",
+            c"/actions/main/in/grab_swing",
+            c"/actions/main/in/grab_lightly",
+        ]
+        .map(|name| f.get_action_handle(name));
+        f.load_actions(c"actions_grab_force.json");
+        f.set_interaction_profile::<Knuckles>(LeftHand);
+        // Every grab on the left grip reads the same inputs.
+        let (force_action, value_action) = grab_actions_hand(&f, grab, Some(Hand::Left));
+
+        let mut frame = 0;
+        let mut check = |speed: f32, force, expected: [bool; 3], line| {
+            let velocity = xr::Vector3f {
+                x: 0.0,
+                y: speed,
+                z: 0.0,
+            };
+            frame += 1;
+            f.input
+                .openxr
+                .set_display_time(xr::Time::from_nanos(frame * 11_000_000));
+            fakexr::set_grip_velocity(f.raw_session(), LeftHand, Some(velocity));
+            fakexr::set_action_state(force_action, ActionState::Float(force), LeftHand);
+            fakexr::set_action_state(value_action, ActionState::Float(0.9), LeftHand);
+            f.sync(set);
+            let states = [grab, swing, lightly].map(|h| f.get_bool_state(h).unwrap().bState);
+            assert_eq!(states, expected, "line {line}");
+        };
+
+        check(0.0, 0.3, [true; 3], line!());
+        // drop_speed 1: letting go at 0.5 m/s keeps it.
+        check(0.5, 0.0, [false, false, true], line!());
+        // downgrade_speed 10, like Blade & Sorcery's weapon grabs: swinging keeps a grab that
+        // was let go of while holding still.
+        check(0.0, 0.3, [true; 3], line!());
+        check(0.05, 0.0, [true; 3], line!());
+        check(5.0, 0.0, [false, true, false], line!());
+        check(11.0, 0.0, [false, false, false], line!());
     }
 
     #[test]
@@ -1579,6 +2458,7 @@ mod tests {
             let (force_action, value_action) = match hand {
                 LeftHand => left_actions,
                 RightHand => right_actions,
+                Gamepad => unreachable!(),
             };
             fakexr::set_action_state(force_action, fakexr::ActionState::Float(force), hand);
             fakexr::set_action_state(value_action, fakexr::ActionState::Float(value), hand);
@@ -1590,6 +2470,7 @@ mod tests {
             let restrict = match hand {
                 LeftHand => left,
                 RightHand => right,
+                Gamepad => unreachable!(),
             };
             let s = f.get_bool_state_hand(boolact, restrict).unwrap();
             assert_eq!(s.bState, state, "State wrong (line {line})");
@@ -2460,7 +3341,8 @@ mod tests {
             c"/actions/main/in/alternateuse",
             ["/user/hand/right/input/a/click".into()],
         );
-        // Other constants than 1 can't be reported, so they aren't bound.
+        // Other values than 1 read the input through a scalar constant binding instead (see
+        // input::tests::scalar_constant_values).
         let reverse = c"/actions/main/in/reverse";
         let profile = f
             .input
@@ -2491,6 +3373,186 @@ mod tests {
             assert!(data.bActive);
             assert_eq!(data.x, expected, "{pull}");
         }
+    }
+
+    #[test]
+    fn touchy_click_vrchat_grip() {
+        // VRChat's Index bindings drag with a squeeze of the grip that lasts while the hand stays
+        // on it. The grip has no touch in OpenXR, so the slightest pull stands in for it.
+        let mut f = Fixture::new();
+        let set = vr::VRActiveActionSet_t {
+            ulActionSet: f.get_action_set_handle(c"/actions/Menu"),
+            ..Default::default()
+        };
+        let drag = f.get_action_handle(c"/actions/Menu/in/Drag");
+        let left = f.get_input_source_handle(c"/user/hand/left");
+        f.load_actions(c"actions_touchy.json");
+        f.verify_custom_bindings(
+            Knuckles::profile_path(),
+            c"/actions/menu/in/drag",
+            [
+                "/user/hand/left/input/squeeze/force".into(),
+                "/user/hand/left/input/squeeze/value".into(),
+                "/user/hand/right/input/squeeze/force".into(),
+                "/user/hand/right/input/squeeze/value".into(),
+            ],
+        );
+        f.set_interaction_profile::<Knuckles>(LeftHand);
+
+        let input = |path: &CStr| f.get_action::<f32>(f.get_action_handle(path));
+        let force = input(c"/user/hand/left/input/squeeze/force-/actions/menu");
+        let value = input(c"/user/hand/left/input/squeeze/value-/actions/menu");
+        let mut check = |squeeze, grip, state, changed| {
+            fakexr::set_action_state(force, ActionState::Float(squeeze), LeftHand);
+            fakexr::set_action_state(value, ActionState::Float(grip), LeftHand);
+            f.sync(set);
+            let s = f.get_bool_state_hand(drag, left).unwrap();
+            assert!(s.bActive);
+            assert_eq!(
+                (s.bState, s.bChanged),
+                (state, changed),
+                "force {squeeze}, value {grip}"
+            );
+        };
+        // Holding the grip doesn't drag, squeezing it does.
+        check(0.0, 0.8, false, false);
+        check(0.3, 1.0, true, true);
+        // Relaxing the squeeze with the hand still on the grip keeps dragging.
+        check(0.0, 0.8, true, false);
+        check(0.0, 0.01, true, false);
+        // Letting go ends it, and touching again doesn't start it.
+        check(0.0, 0.0, false, true);
+        check(0.0, 0.8, false, false);
+        // Letting go of both at once ends it too.
+        check(0.3, 1.0, true, true);
+        check(0.0, 0.0, false, true);
+    }
+
+    #[test]
+    fn touchy_click_touch_sensor() {
+        let mut f = Fixture::new();
+        let set = vr::VRActiveActionSet_t {
+            ulActionSet: f.get_action_set_handle(c"/actions/main"),
+            ..Default::default()
+        };
+        let grab = f.get_action_handle(c"/actions/main/in/grab");
+        let left = f.get_input_source_handle(c"/user/hand/left");
+        f.load_actions(c"actions_touchy.json");
+        f.verify_custom_bindings(
+            Knuckles::profile_path(),
+            c"/actions/main/in/grab",
+            [
+                "/user/hand/left/input/a/click".into(),
+                "/user/hand/left/input/a/touch".into(),
+            ],
+        );
+        // Without a touch, the click is bound as usual.
+        f.verify_bindings::<bool>(
+            ViveWands::profile_path(),
+            c"/actions/main/in/grab",
+            ["/user/hand/left/input/menu/click".into()],
+        );
+        f.verify_custom_bindings(ViveWands::profile_path(), c"/actions/main/in/grab", []);
+
+        f.set_interaction_profile::<Knuckles>(LeftHand);
+        let input = |path: &CStr| f.get_action::<f32>(f.get_action_handle(path));
+        let click = input(c"/user/hand/left/input/a/click-/actions/main");
+        let touch = input(c"/user/hand/left/input/a/touch-/actions/main");
+        let mut check = |clicked: bool, touched: bool, state| {
+            fakexr::set_action_state(click, ActionState::Float(clicked as u8 as f32), LeftHand);
+            fakexr::set_action_state(touch, ActionState::Float(touched as u8 as f32), LeftHand);
+            f.sync(set);
+            let s = f.get_bool_state_hand(grab, left).unwrap();
+            assert!(s.bActive);
+            assert_eq!(s.bState, state, "click {clicked}, touch {touched}");
+        };
+        check(false, true, false);
+        check(true, true, true);
+        check(false, true, true);
+        check(false, false, false);
+        check(false, true, false);
+    }
+
+    #[test]
+    fn sticky_click() {
+        let mut f = Fixture::new();
+        let set = vr::VRActiveActionSet_t {
+            ulActionSet: f.get_action_set_handle(c"/actions/main"),
+            ..Default::default()
+        };
+        let [sprint, crouch] = [c"/actions/main/in/sprint", c"/actions/main/in/crouch"]
+            .map(|name| f.get_action_handle(name));
+        let [left, right] =
+            [c"/user/hand/left", c"/user/hand/right"].map(|hand| f.get_input_source_handle(hand));
+        f.load_actions(c"actions_sticky_click.json");
+        f.verify_custom_bindings(
+            Knuckles::profile_path(),
+            c"/actions/main/in/sprint",
+            [
+                "/user/hand/left/input/thumbstick/click".into(),
+                "/user/hand/left/input/thumbstick".into(),
+            ],
+        );
+        // The position and clicks that aren't sticky are bound as usual.
+        f.verify_bindings::<xr::Vector2f>(
+            Knuckles::profile_path(),
+            c"/actions/main/in/move",
+            ["/user/hand/left/input/thumbstick".into()],
+        );
+        f.verify_bindings::<bool>(
+            Knuckles::profile_path(),
+            c"/actions/main/in/jump",
+            ["/user/hand/left/input/trackpad/force".into()],
+        );
+        f.set_interaction_profile::<Knuckles>(LeftHand);
+        f.set_interaction_profile::<Knuckles>(RightHand);
+
+        let input = |path: &CStr| f.get_action_handle(path);
+        let sprint_inputs = (
+            LeftHand,
+            f.get_action::<f32>(input(
+                c"/user/hand/left/input/thumbstick/click-/actions/main",
+            )),
+            f.get_action::<xr::Vector2f>(input(c"/user/hand/left/input/thumbstick-/actions/main")),
+            sprint,
+            left,
+        );
+        let crouch_inputs = (
+            RightHand,
+            f.get_action::<f32>(input(
+                c"/user/hand/right/input/thumbstick/click-/actions/main",
+            )),
+            f.get_action::<xr::Vector2f>(input(c"/user/hand/right/input/thumbstick-/actions/main")),
+            crouch,
+            right,
+        );
+        let check = |f: &mut Fixture, (hand, click, stick, action, origin), clicked: bool, y| {
+            fakexr::set_action_state(click, ActionState::Float(clicked as u8 as f32), hand);
+            fakexr::set_action_state(stick, ActionState::Vector2(0.0, y), hand);
+            f.sync(set);
+            let s = f.get_bool_state_hand(action, origin).unwrap();
+            assert!(s.bActive);
+            s.bState
+        };
+
+        // A click at rest is a plain click.
+        assert!(!check(&mut f, sprint_inputs, false, 0.0));
+        assert!(check(&mut f, sprint_inputs, true, 0.0));
+        assert!(!check(&mut f, sprint_inputs, false, 0.0));
+        // Clicked while deflected, it lasts until the stick is mostly let go of.
+        assert!(check(&mut f, sprint_inputs, true, 0.5));
+        assert!(check(&mut f, sprint_inputs, false, 0.5));
+        assert!(check(&mut f, sprint_inputs, false, 0.35));
+        assert!(!check(&mut f, sprint_inputs, false, 0.25));
+        // Deflecting alone doesn't click.
+        assert!(!check(&mut f, sprint_inputs, false, 0.9));
+
+        // The binding's own thresholds.
+        assert!(check(&mut f, crouch_inputs, true, 0.55));
+        assert!(!check(&mut f, crouch_inputs, false, 0.55));
+        assert!(check(&mut f, crouch_inputs, true, 0.7));
+        assert!(check(&mut f, crouch_inputs, false, 0.55));
+        assert!(!check(&mut f, crouch_inputs, false, 0.45));
     }
 
     #[test]
