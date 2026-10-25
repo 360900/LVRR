@@ -1,19 +1,20 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- LVRR placeholder splash, rendered to WayVR's dashboard/splash.png (862x256). -->
+<!-- LVRR splash: the logo from lvrr.svg, rendered to WayVR's dashboard/splash.png (862x256). -->
 <svg xmlns="http://www.w3.org/2000/svg" width="862" height="256" viewBox="0 0 862 256">
   <defs>
-    <linearGradient id="lvrr-accent" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#4f8cff"/>
-      <stop offset="1" stop-color="#a06bff"/>
+    <linearGradient id="lvrr-fill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#23a9f6"/>
+      <stop offset="1" stop-color="#1a8bcf"/>
     </linearGradient>
   </defs>
-  <g transform="translate(161,-142.75) scale(3)">
-    <g fill="none" stroke="#f2f4f8" stroke-width="9" stroke-linejoin="round" stroke-linecap="round">
-      <path d="M19,62 V100 H37"/>
-      <path d="M55,62 L68,100 L81,62"/>
-      <path d="M99,100 V62 H110 A10.5,10.5 0 0 1 110,83 H99 M109,83 L121,100"/>
-      <path d="M139,100 V62 H150 A10.5,10.5 0 0 1 150,83 H139 M149,83 L161,100"/>
+  <g transform="translate(331 28) scale(1.1111)">
+    <circle cx="90" cy="90" r="86" fill="url(#lvrr-fill)"/>
+    <circle cx="90" cy="90" r="84" fill="none" stroke="#0e5f8e" stroke-width="4"/>
+    <g transform="translate(90 90) scale(3.6) translate(-15 -15)" fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round">
+      <path d="M7,4.5 V13.5 H13"/>
+      <path d="M16,4.5 L19.5,13.5 L23,4.5"/>
+      <path d="M7,25.5 V16.5 H11 A2.7,2.7 0 0 1 11,21.9 H7 M10.5,21.9 L13.5,25.5"/>
+      <path d="M16.5,25.5 V16.5 H20.5 A2.7,2.7 0 0 1 20.5,21.9 H16.5 M20,21.9 L23,25.5"/>
     </g>
-    <rect x="19" y="116" width="142" height="7" rx="3.5" fill="url(#lvrr-accent)"/>
   </g>
 </svg>

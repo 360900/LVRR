@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- LVRR placeholder monochrome icon, used for WayVR's dashboard buttons. -->
+<!-- LVRR logo in one color: the dashboard's home button and the watch. lvrr.svg puts it on its circle. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 30 30">
   <g fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round">
     <path d="M7,4.5 V13.5 H13"/>
