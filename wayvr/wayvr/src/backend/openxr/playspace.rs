@@ -17,7 +17,15 @@ struct MoverData<T> {
     pose: Affine3A,
     hand: usize,
     hand_pose: T,
+    /// LVRR: the hand left the dead zone; until then `hand_pose` stays where it was pressed
+    moved: bool,
 }
+
+/// LVRR: how far the hand moves before a drag moves the playspace. Every move tells all apps
+/// that their reference spaces changed, and the button may be meant for the game.
+const DRAG_DEADZONE: f32 = 0.03;
+/// LVRR: how far the hand turns before a rotate turns the playspace, in radians
+const ROTATE_DEADZONE: f32 = 0.09;
 
 pub(super) struct PlayspaceMover {
     drag: Option<MoverData<Vec3A>>,
@@ -94,6 +102,19 @@ impl PlayspaceMover {
             }
 
             let new_hand = data.pose * app.input_state.pointers[data.hand].raw_pose;
+            if !data.moved {
+                let turned = Quat::from_affine3(&new_hand)
+                    .normalize()
+                    .angle_between(Quat::from_affine3(&data.hand_pose).normalize());
+                let shifted = new_hand.translation.distance(data.hand_pose.translation);
+                if turned >= ROTATE_DEADZONE || shifted >= DRAG_DEADZONE {
+                    // rotate from here, without a jump
+                    data.moved = true;
+                    data.hand_pose = new_hand;
+                }
+                self.rotate = Some(data);
+                return;
+            }
             let before_pose = data.pose;
 
             if app.session.config.space_rotate_unlocked {
@@ -156,6 +177,7 @@ impl PlayspaceMover {
                         pose,
                         hand: i,
                         hand_pose,
+                        moved: false,
                     });
                     self.drag = None;
                     log::info!("Start space rotate");
@@ -176,12 +198,14 @@ impl PlayspaceMover {
             let pointer = &app.input_state.pointers[data.hand];
 
             if !pointer.now.space_drag {
-                self.gravity.mark_end_drag(
-                    &app.session.config,
-                    relative_pos,
-                    data.pose.translation,
-                    app.delta_time,
-                );
+                if data.moved {
+                    self.gravity.mark_end_drag(
+                        &app.session.config,
+                        relative_pos,
+                        data.pose.translation,
+                        app.delta_time,
+                    );
+                }
 
                 log::info!("End space drag");
                 return;
@@ -192,6 +216,16 @@ impl PlayspaceMover {
                 return;
             }
 
+            if !data.moved {
+                if new_hand.distance(data.hand_pose) >= DRAG_DEADZONE {
+                    // drag from here, without a jump
+                    data.moved = true;
+                    data.hand_pose = new_hand;
+                }
+                self.drag = Some(data);
+                return;
+            }
+
             let before_pose = data.pose;
             data.pose.translation += relative_pos;
             if !app.session.config.space_drag_affects_world {
@@ -199,7 +233,10 @@ impl PlayspaceMover {
             }
             data.hand_pose = new_hand;
 
-            apply_offset(data.pose, &mut monado.ipc);
+            // LVRR: a drag multiplier of 0 doesn't move anything
+            if relative_pos != Vec3A::ZERO {
+                apply_offset(data.pose, &mut monado.ipc);
+            }
             self.drag = Some(data);
         } else {
             // start space drag
@@ -224,6 +261,7 @@ impl PlayspaceMover {
                         pose,
                         hand: i,
                         hand_pose: hand_pos,
+                        moved: false,
                     });
                     log::info!("Start space drag");
                     return;
