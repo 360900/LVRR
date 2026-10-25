@@ -3,7 +3,8 @@ pub mod vulkan;
 mod hand_tracking;
 mod monado_xdev;
 pub use hand_tracking::{
-    hand_joints_located, hand_trackers_created, set_hand_tracked, set_hand_tracking_supported,
+    hand_joints_located, hand_trackers_created, set_hand_joints, set_hand_tracked,
+    set_hand_tracking_supported,
 };
 pub use monado_xdev::add_trackers;
 

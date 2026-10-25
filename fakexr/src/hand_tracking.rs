@@ -1,5 +1,5 @@
 //! XR_EXT_hand_tracking and XR_EXT_hand_tracking_data_source, with all joints at the origin of
-//! LOCAL.
+//! LOCAL unless a test places them.
 
 use super::{
     Handle, LOCATION_FLAGS_TRACKED, UserPath, destroy_handle, get_handle, impl_handle, is_lost,
@@ -20,6 +20,11 @@ thread_local! {
 /// Active hands and their data source, by session and hand.
 static TRACKED: Mutex<Option<HashMap<(u64, usize), xr::HandTrackingDataSourceEXT>>> =
     Mutex::new(None);
+
+type Joints = [xr::Posef; xr::HAND_JOINT_COUNT_EXT];
+
+/// Joint poses in LOCAL, by session and hand.
+static JOINTS: Mutex<Option<HashMap<(u64, usize), Joints>>> = Mutex::new(None);
 
 /// Sets whether systems queried and hand trackers created on this thread support hand tracking.
 pub fn set_hand_tracking_supported(supported: bool) {
@@ -48,6 +53,18 @@ pub fn set_hand_tracked(
     match source {
         Some(source) => tracked.insert(key, source),
         None => tracked.remove(&key),
+    };
+}
+
+/// Places the hand's joints at `joints`, indexed by XrHandJointEXT and given in LOCAL, or all at
+/// the origin of LOCAL if `None`. They are only located while the hand is tracked.
+pub fn set_hand_joints(session: xr::Session, hand: UserPath, joints: Option<Joints>) {
+    let mut placed = JOINTS.lock().unwrap();
+    let placed = placed.get_or_insert_default();
+    let key = (session.into_raw(), hand as usize);
+    match joints {
+        Some(joints) => placed.insert(key, joints),
+        None => placed.remove(&key),
     };
 }
 
@@ -167,14 +184,22 @@ pub(super) extern "system" fn locate_hand_joints_e_x_t(
     locations.is_active = source.is_some().into();
     // Like locate_space, joints can only be located in a base space that is.
     let located = source.is_some() && base.location_flags.contains(*LOCATION_FLAGS_TRACKED);
-    let (flags, pose) = if located {
-        let pose = mat_to_pose(pose_to_mat(base.pose).inverse());
-        (*LOCATION_FLAGS_TRACKED, pose)
-    } else {
-        (xr::SpaceLocationFlags::EMPTY, xr::Posef::IDENTITY)
-    };
+    let base_from_local = pose_to_mat(base.pose).inverse();
+    let joints = JOINTS.lock().unwrap().as_ref().and_then(|j| {
+        j.get(&(tracker.session.into_raw(), tracker.hand as usize))
+            .copied()
+    });
     // The output arrays may be uninitialized.
     for i in 0..locations.joint_count as usize {
+        let (flags, pose) = if located {
+            let joint = joints
+                .and_then(|joints| joints.get(i).copied())
+                .unwrap_or(xr::Posef::IDENTITY);
+            let pose = mat_to_pose(base_from_local * pose_to_mat(joint));
+            (*LOCATION_FLAGS_TRACKED, pose)
+        } else {
+            (xr::SpaceLocationFlags::EMPTY, xr::Posef::IDENTITY)
+        };
         unsafe {
             locations
                 .joint_locations
