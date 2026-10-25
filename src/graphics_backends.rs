@@ -2,6 +2,7 @@ mod gl;
 mod headless;
 mod vulkan;
 
+use crate::compositor::GpuDone;
 use derive_more::{From, TryInto};
 pub use gl::{GlBridgeData, GlData};
 pub use headless::HeadlessData;
@@ -107,6 +108,11 @@ pub trait GraphicsBackend: Into<SupportedBackend> {
 
     /// Waits for the copies into the swapchain images to finish, so the swapchain can be destroyed.
     fn wait_for_copies(&self) {}
+
+    /// Called once the app submitted every eye of a frame, while its queue or context is ours.
+    /// Backends that can tell when the GPU finished the work submitted so far report it to
+    /// `done` later, without waiting for it here.
+    fn frame_submitted(&mut self, _done: GpuDone) {}
 }
 
 #[derive(macros::Backends, TryInto, From)]
