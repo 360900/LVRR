@@ -1,8 +1,8 @@
 use super::actions::{LoadedActionDataMap, XrNames};
 use super::bindings::{ActionPath, DpadParameters, DpadSubMode};
 use crate::input::custom_bindings::{
-    BoolBindingData, BoolBindingType, DpadActions, ScalarConstantBinding, Vector2ActionData,
-    Vector2BindingData, Vector2Transform,
+    BoolBindingData, BoolBindingType, DpadActions, HandSpeeds, ScalarConstantBinding,
+    Vector2ActionData, Vector2BindingData, Vector2Transform,
 };
 use crate::input::haptics::{BindingHaptic, BindingHapticData, BindingPress};
 use crate::input::origins::BindingInfo;
@@ -14,6 +14,7 @@ use log::{debug, info, trace, warn};
 use openxr as xr;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 pub(super) struct BindingsLoadContext<'a> {
     pub action_sets: &'a HashMap<String, xr::ActionSet>,
@@ -40,6 +41,9 @@ pub(super) struct BindingsLoadContext<'a> {
     pub simulated_properties: HashMap<xr::Path, &'static ProfileProperties>,
     /// SteamVR's binding haptics, with the set and action of their binding.
     pub binding_haptics: Vec<(String, String, BindingHapticData)>,
+    /// The controller speeds grab bindings drop with, if any binding reads them.
+    pub hand_speeds: Arc<HandSpeeds>,
+    pub uses_hand_speeds: bool,
     pub grip_action: &'a xr::Action<xr::Posef>,
     pub info_action: &'a xr::Action<bool>,
     pub haptic_action: &'a xr::Action<xr::Haptic>,
@@ -70,6 +74,8 @@ impl<'a> BindingsLoadContext<'a> {
             scalar_constants: Default::default(),
             simulated_properties: Default::default(),
             binding_haptics: Default::default(),
+            hand_speeds: Default::default(),
+            uses_hand_speeds: false,
             grip_action,
             info_action,
             haptic_action,
@@ -150,6 +156,8 @@ impl BindingsLoadContext<'_> {
             binding_info_out,
             scalar_constants: &mut self.scalar_constants,
             binding_haptics: &mut self.binding_haptics,
+            hand_speeds: &self.hand_speeds,
+            uses_hand_speeds: &mut self.uses_hand_speeds,
             grip_action: self.grip_action,
             info_action: self.info_action,
             haptic_action: self.haptic_action,
@@ -180,6 +188,8 @@ pub(super) struct BindingsProfileLoadContext<'a> {
     pub binding_info_out: &'a mut HashMap<String, Vec<BindingInfo>>,
     scalar_constants: &'a mut HashMap<String, Vec<ScalarConstantBinding>>,
     binding_haptics: &'a mut Vec<(String, String, BindingHapticData)>,
+    hand_speeds: &'a Arc<HandSpeeds>,
+    uses_hand_speeds: &'a mut bool,
     pub grip_action: &'a xr::Action<xr::Posef>,
     pub info_action: &'a xr::Action<bool>,
     pub haptic_action: &'a xr::Action<xr::Haptic>,
@@ -281,6 +291,13 @@ impl BindingsProfileLoadContext<'_> {
         } else {
             crate::log_unique!(log::Level::Info, "{}: {message}", self.profile_name);
         }
+    }
+
+    /// The controller speeds that grab bindings drop with, which are measured at each action
+    /// sync once a binding reads them.
+    pub fn hand_speeds(&mut self) -> Arc<HandSpeeds> {
+        *self.uses_hand_speeds = true;
+        self.hand_speeds.clone()
     }
 
     pub fn hand_path(&self, hand: Hand) -> xr::Path {

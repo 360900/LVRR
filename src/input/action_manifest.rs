@@ -5,7 +5,7 @@ mod fallback;
 pub(super) mod legacy_actions;
 
 pub(super) use actions::ControllerType;
-pub(super) use bindings::{ClickThresholdParams, GrabParameters};
+pub(super) use bindings::{ClickThresholdParams, GrabParameters, StringOrTyped};
 
 use crate::input::InteractionProfile;
 use crate::input::action_manifest::context::BindingsLoadContext;
@@ -207,6 +207,8 @@ impl<C: openxr_data::Compositor> Input<C> {
             scalar_constants,
             simulated_properties,
             binding_haptics,
+            hand_speeds,
+            uses_hand_speeds,
             ..
         } = binding_context;
 
@@ -380,6 +382,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             binding_choices,
             legacy: None,
             simulated_properties,
+            hand_speeds: uses_hand_speeds.then_some(hand_speeds),
         })
     }
 }

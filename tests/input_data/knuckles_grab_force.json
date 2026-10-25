@@ -23,6 +23,31 @@
 						"force_hold_threshold": "0.15",
 						"value_hold_threshold": "1.1"
 					}
+				},
+				{
+					"mode": "grab",
+					"path": "/user/hand/left/input/grip",
+					"inputs": {
+						"grab": {
+							"output": "/actions/main/in/grab_swing"
+						}
+					},
+					"parameters": {
+						"downgrade_speed": "10"
+					}
+				},
+				{
+					"mode": "grab",
+					"path": "/user/hand/left/input/grip",
+					"inputs": {
+						"grab": {
+							"output": "/actions/main/in/grab_lightly"
+						}
+					},
+					"parameters": {
+						"drop_speed": "1",
+						"capsense_enable_threshold": "0.9"
+					}
 				}
 			]
 		}

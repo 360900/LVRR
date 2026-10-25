@@ -1,10 +1,10 @@
-use super::action_manifest::{ClickThresholdParams, GrabParameters};
+use super::action_manifest::{ClickThresholdParams, GrabParameters, StringOrTyped};
 use crate::input::inactive_state;
-use crate::openxr_data::SessionData;
+use crate::openxr_data::{Hand, SessionData};
 use log::{error, warn};
 use openvr as vr;
 use openxr as xr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use xr::{Haptic, HapticVibration};
@@ -780,6 +780,27 @@ impl DpadData {
     }
 }
 
+/// Each controller's speed in m/s as of the last action sync, which grab bindings drop with.
+#[derive(Default)]
+pub struct HandSpeeds([AtomicU32; 2]);
+
+impl HandSpeeds {
+    pub fn set(&self, hand: Hand, speed: f32) {
+        self.0[Self::index(hand)].store(speed.to_bits(), Ordering::Relaxed);
+    }
+
+    fn get(&self, hand: Hand) -> f32 {
+        f32::from_bits(self.0[Self::index(hand)].load(Ordering::Relaxed))
+    }
+
+    fn index(hand: Hand) -> usize {
+        match hand {
+            Hand::Left => 0,
+            Hand::Right => 1,
+        }
+    }
+}
+
 pub(super) struct GrabBindingData {
     /// Missing on controllers without a force sensor, which then grab by value alone.
     force_action: Option<xr::Action<f32>>,
@@ -788,9 +809,24 @@ pub(super) struct GrabBindingData {
     release_threshold: f32,
     force_hold_threshold: f32,
     force_release_threshold: f32,
-    last_state: AtomicBool,
+    /// m/s
+    downgrade_speed: f32,
+    drop_speed: f32,
+    speeds: Arc<HandSpeeds>,
+    hand: Hand,
+    state: Mutex<GrabState>,
+}
+
+#[derive(Default)]
+struct GrabState {
+    grabbed: bool,
     /// The force passed its hold threshold and hasn't dropped below its release threshold since.
-    force_engaged: AtomicBool,
+    force_engaged: bool,
+    /// The grab is held by the value alone after the force held it.
+    downgraded: bool,
+    /// The grab was dropped for moving, and the value alone can't grab again until it falls to
+    /// the release threshold.
+    dropped: bool,
 }
 
 impl GrabBindingData {
@@ -804,34 +840,53 @@ impl GrabBindingData {
     const DEFAULT_FORCE_HOLD_THRESHOLD: f32 = 0.1;
     /// The pressure below which the force stops counting.
     const DEFAULT_FORCE_RELEASE_THRESHOLD: f32 = 0.05;
+    /// How fast the controller may move while a grab that the force held is held by the value
+    /// alone.
+    const DEFAULT_DOWNGRADE_SPEED: f32 = 1.0;
+    /// How fast the controller must move when the force is let go for the grab to drop, even
+    /// though the value still holds it: a throw.
+    const DEFAULT_DROP_SPEED: f32 = 0.1;
 
     pub fn new(
         force_action: Option<xr::Action<f32>>,
         value_action: xr::Action<f32>,
         params: Option<&GrabParameters>,
+        speeds: Arc<HandSpeeds>,
+        hand: Hand,
     ) -> Self {
-        let hold_threshold = params
-            .and_then(|p| p.value_hold_threshold.as_deref().copied())
-            .unwrap_or(Self::DEFAULT_GRAB_THRESHOLD);
-        let force_hold_threshold = params
-            .and_then(|p| p.force_hold_threshold.as_deref().copied())
-            .unwrap_or(Self::DEFAULT_FORCE_HOLD_THRESHOLD);
+        let param = |get: fn(&GrabParameters) -> Option<StringOrTyped<f32>>, default: f32| {
+            params
+                .and_then(get)
+                .map(|value| *value)
+                .filter(|value| value.is_finite())
+                .unwrap_or(default)
+        };
+        let hold_threshold = param(|p| p.value_hold_threshold, Self::DEFAULT_GRAB_THRESHOLD);
+        let force_hold_threshold = param(
+            |p| p.force_hold_threshold,
+            Self::DEFAULT_FORCE_HOLD_THRESHOLD,
+        );
         Self {
             force_action,
             value_action,
             hold_threshold,
-            release_threshold: params
-                .and_then(|p| p.value_release_threshold.as_deref().copied())
-                .unwrap_or(Self::DEFAULT_RELEASE_THRESHOLD)
-                // Releasing above the grab point would flip the state at every sync between them.
-                .min(hold_threshold),
+            // Releasing above the grab point would flip the state at every sync between them.
+            release_threshold: param(
+                |p| p.value_release_threshold,
+                Self::DEFAULT_RELEASE_THRESHOLD,
+            )
+            .min(hold_threshold),
             force_hold_threshold,
-            force_release_threshold: params
-                .and_then(|p| p.force_release_threshold.as_deref().copied())
-                .unwrap_or(Self::DEFAULT_FORCE_RELEASE_THRESHOLD)
-                .min(force_hold_threshold),
-            last_state: false.into(),
-            force_engaged: false.into(),
+            force_release_threshold: param(
+                |p| p.force_release_threshold,
+                Self::DEFAULT_FORCE_RELEASE_THRESHOLD,
+            )
+            .min(force_hold_threshold),
+            downgrade_speed: param(|p| p.downgrade_speed, Self::DEFAULT_DOWNGRADE_SPEED),
+            drop_speed: param(|p| p.drop_speed, Self::DEFAULT_DROP_SPEED),
+            speeds,
+            hand,
+            state: Default::default(),
         }
     }
 
@@ -846,35 +901,56 @@ impl GrabBindingData {
             .map(|force| force.state(session, subaction_path))
             .transpose()?;
         let value_state = self.value_action.state(session, subaction_path)?;
+        let mut state = self.state.lock().unwrap();
         if !value_state.is_active || force_state.is_some_and(|s| !s.is_active) {
-            self.last_state.store(false, Ordering::Relaxed);
-            self.force_engaged.store(false, Ordering::Relaxed);
+            *state = Default::default();
             return Ok(None);
         }
 
-        let prev_grabbed = self.last_state.load(Ordering::Relaxed);
+        let prev_grabbed = state.grabbed;
         // The value and the force share one scale for the grab thresholds: the value (proximity)
         // is 0 to 1, a force that counts is 1 to 2.
         let force_engaged = force_state.is_some_and(|force| {
             let force = force.current_state;
             force > 0.0
-                && if self.force_engaged.load(Ordering::Relaxed) {
+                && if state.force_engaged {
                     force > self.force_release_threshold
                 } else {
                     force >= self.force_hold_threshold
                 }
         });
-        self.force_engaged.store(force_engaged, Ordering::Relaxed);
+        let force_let_go = state.force_engaged && !force_engaged;
+        state.force_engaged = force_engaged;
+        let proximity = value_state.current_state;
         let value = match force_state {
             Some(force) if force_engaged => force.current_state + 1.0,
-            _ => value_state.current_state,
+            _ => proximity,
         };
 
-        let grabbed = (prev_grabbed && value > self.release_threshold)
-            || (!prev_grabbed && value >= self.hold_threshold);
+        if state.dropped && (force_engaged || proximity <= self.release_threshold) {
+            state.dropped = false;
+        }
+        let held = if prev_grabbed {
+            value > self.release_threshold
+        } else {
+            !state.dropped && value >= self.hold_threshold
+        };
+        // SteamVR drops a grab that the force held once only the value holds it, if the
+        // controller moves: at drop_speed when the force is let go, at downgrade_speed after.
+        let moving = held && prev_grabbed && !force_engaged && {
+            let speed = self.speeds.get(self.hand);
+            if force_let_go {
+                speed >= self.drop_speed
+            } else {
+                state.downgraded && speed > self.downgrade_speed
+            }
+        };
+        let grabbed = held && !moving;
+        state.dropped |= moving;
+        state.downgraded = grabbed && !force_engaged && (force_let_go || state.downgraded);
 
         let changed_since_last_sync = grabbed != prev_grabbed;
-        self.last_state.store(grabbed, Ordering::Relaxed);
+        state.grabbed = grabbed;
 
         Ok(Some(xr::ActionState {
             current_state: grabbed,
@@ -1884,6 +1960,117 @@ mod tests {
         check(grab_firmly, Hand::Right, right, 0.15, 1.0, true);
         check(grab_firmly, Hand::Right, right, 0.0, 1.0, true);
         check(grab_firmly, Hand::Right, right, 0.0, 0.6, false);
+    }
+
+    #[test]
+    fn grab_drops_when_moved() {
+        let mut f = Fixture::new();
+        let set = vr::VRActiveActionSet_t {
+            ulActionSet: f.get_action_set_handle(c"/actions/main"),
+            ..Default::default()
+        };
+        let grab = f.get_action_handle(c"/actions/main/in/grab");
+        f.load_actions(c"actions_grab_force.json");
+        f.set_interaction_profile::<Knuckles>(LeftHand);
+        let (force_action, value_action) = grab_actions_hand(&f, grab, Some(Hand::Left));
+
+        // Speed in m/s, force, proximity
+        let mut frame = 0;
+        let mut check = |speed: f32, force, value, state, line| {
+            let velocity = xr::Vector3f {
+                x: speed,
+                y: 0.0,
+                z: 0.0,
+            };
+            // A frame per sync, so the controller is located anew.
+            frame += 1;
+            f.input
+                .openxr
+                .set_display_time(xr::Time::from_nanos(frame * 11_000_000));
+            fakexr::set_grip_velocity(f.raw_session(), LeftHand, Some(velocity));
+            fakexr::set_action_state(force_action, ActionState::Float(force), LeftHand);
+            fakexr::set_action_state(value_action, ActionState::Float(value), LeftHand);
+            f.sync(set);
+            let s = f.get_bool_state(grab).unwrap();
+            assert!(s.bActive);
+            assert_eq!(s.bState, state, "line {line}");
+        };
+
+        // A grab that only the proximity held never drops for moving.
+        check(0.0, 0.0, 0.9, true, line!());
+        check(2.0, 0.0, 0.9, true, line!());
+        // Letting go of the force while holding still keeps the grab, until the controller moves
+        // faster than the downgrade speed.
+        check(0.0, 0.3, 0.9, true, line!());
+        check(0.05, 0.0, 0.9, true, line!());
+        check(0.8, 0.0, 0.9, true, line!());
+        check(1.5, 0.0, 0.9, false, line!());
+        // The proximity alone only grabs again once the hand opened.
+        check(0.0, 0.0, 0.9, false, line!());
+        check(0.0, 0.0, 0.5, false, line!());
+        check(0.0, 0.0, 0.9, true, line!());
+        // Letting go of the force while moving drops it: a throw.
+        check(0.0, 0.3, 0.9, true, line!());
+        check(0.5, 0.3, 0.9, true, line!());
+        check(0.5, 0.0, 0.9, false, line!());
+        // The force grabs again right away.
+        check(0.5, 0.3, 0.9, true, line!());
+        // Without a velocity, the grab never drops for moving.
+        f.input
+            .openxr
+            .set_display_time(xr::Time::from_nanos(1_000_000_000));
+        fakexr::set_grip_velocity(f.raw_session(), LeftHand, None);
+        fakexr::set_action_state(force_action, ActionState::Float(0.0), LeftHand);
+        f.sync(set);
+        assert!(f.get_bool_state(grab).unwrap().bState);
+    }
+
+    #[test]
+    fn grab_drop_speeds_from_parameters() {
+        let mut f = Fixture::new();
+        let set = vr::VRActiveActionSet_t {
+            ulActionSet: f.get_action_set_handle(c"/actions/main"),
+            ..Default::default()
+        };
+        let [grab, swing, lightly] = [
+            c"/actions/main/in/grab",
+            c"/actions/main/in/grab_swing",
+            c"/actions/main/in/grab_lightly",
+        ]
+        .map(|name| f.get_action_handle(name));
+        f.load_actions(c"actions_grab_force.json");
+        f.set_interaction_profile::<Knuckles>(LeftHand);
+        // Every grab on the left grip reads the same inputs.
+        let (force_action, value_action) = grab_actions_hand(&f, grab, Some(Hand::Left));
+
+        let mut frame = 0;
+        let mut check = |speed: f32, force, expected: [bool; 3], line| {
+            let velocity = xr::Vector3f {
+                x: 0.0,
+                y: speed,
+                z: 0.0,
+            };
+            frame += 1;
+            f.input
+                .openxr
+                .set_display_time(xr::Time::from_nanos(frame * 11_000_000));
+            fakexr::set_grip_velocity(f.raw_session(), LeftHand, Some(velocity));
+            fakexr::set_action_state(force_action, ActionState::Float(force), LeftHand);
+            fakexr::set_action_state(value_action, ActionState::Float(0.9), LeftHand);
+            f.sync(set);
+            let states = [grab, swing, lightly].map(|h| f.get_bool_state(h).unwrap().bState);
+            assert_eq!(states, expected, "line {line}");
+        };
+
+        check(0.0, 0.3, [true; 3], line!());
+        // drop_speed 1: letting go at 0.5 m/s keeps it.
+        check(0.5, 0.0, [false, false, true], line!());
+        // downgrade_speed 10, like Blade & Sorcery's weapon grabs: swinging keeps a grab that
+        // was let go of while holding still.
+        check(0.0, 0.3, [true; 3], line!());
+        check(0.05, 0.0, [true; 3], line!());
+        check(5.0, 0.0, [false, true, false], line!());
+        check(11.0, 0.0, [false, false, false], line!());
     }
 
     #[test]

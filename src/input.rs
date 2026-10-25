@@ -892,6 +892,40 @@ impl<C: openxr_data::Compositor> Input<C> {
 }
 
 impl<C: openxr_data::Compositor> Input<C> {
+    /// Measures each controller's speed for the grab bindings that drop with it, like
+    /// xrSyncActions samples their inputs.
+    fn sync_hand_speeds(&self, data: &SessionData, loaded: &ManifestLoadedActions) {
+        let Some(speeds) = &loaded.hand_speeds else {
+            return;
+        };
+        let devices = data.input_data.devices.read().unwrap();
+        let pose_data = &data.input_data.pose_data;
+        let time = self.openxr.get_display_time();
+        // Reference spaces don't move, so any of them gives the speed.
+        let base = data.get_space_for_origin(data.current_origin);
+        for (hand, spaces) in [
+            (Hand::Left, &pose_data.left_space),
+            (Hand::Right, &pose_data.right_space),
+        ] {
+            let speed = devices
+                .get_controller(hand)
+                .and_then(|controller| {
+                    spaces.try_get_or_init_raw(&controller.profile_data, data, pose_data)
+                })
+                .and_then(|raw| raw.relate(base, time).ok())
+                .filter(|(_, velocity)| {
+                    velocity
+                        .velocity_flags
+                        .contains(xr::SpaceVelocityFlags::LINEAR_VALID)
+                })
+                .map_or(0.0, |(_, velocity)| {
+                    let xr::Vector3f { x, y, z } = velocity.linear_velocity;
+                    glam::Vec3::new(x, y, z).length()
+                });
+            speeds.set(hand, speed);
+        }
+    }
+
     /// Samples user presence for the actions bound to the headset's proximity sensor, like
     /// xrSyncActions samples the inputs of the others. Sets restricted to a hand don't apply to
     /// the headset.
@@ -2535,6 +2569,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             }
         }
         self.sync_head_proximity(actions, &activated_sets);
+        self.sync_hand_speeds(&data, actions);
         *self.active_sets.write().unwrap() = activated_sets;
 
         let hands = [
@@ -3630,6 +3665,8 @@ struct ManifestLoadedActions {
     /// The identity of the controller that converted bindings were made for, per interaction
     /// profile that shows it instead of its own, like SteamVR.
     simulated_properties: HashMap<xr::Path, &'static ProfileProperties>,
+    /// The controller speeds grab bindings drop with, if any binding reads them.
+    hand_speeds: Option<Arc<custom_bindings::HandSpeeds>>,
 }
 
 /// A boolean action bound to the headset's proximity sensor, which has no OpenXR input. It reads

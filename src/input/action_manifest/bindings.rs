@@ -772,6 +772,13 @@ pub struct GrabParameters {
     pub value_release_threshold: Option<StringOrTyped<f32>>,
     pub force_hold_threshold: Option<StringOrTyped<f32>>,
     pub force_release_threshold: Option<StringOrTyped<f32>>,
+    /// m/s, see GrabBindingData
+    pub downgrade_speed: Option<StringOrTyped<f32>>,
+    pub drop_speed: Option<StringOrTyped<f32>>,
+    // capsense_enable_threshold is ignored: SteamVR's binding UI only offers it on pinch sources
+    // (the Index's /input/pinch), where the index finger's proximity enables the grab. OpenXR only
+    // has the trigger's touch for that, and xrizer reads pinch as the trigger, whose pull needs
+    // the finger on it anyway.
     #[serde(flatten)]
     pub haptic: HapticParameters,
 }
@@ -1705,6 +1712,11 @@ pub fn handle_sources(
                     force_path.is_some(),
                     grab.output.path
                 );
+                // Only a grab that the force held drops for moving.
+                let speeds = match force_action {
+                    Some(_) => context.hand_speeds(),
+                    None => Default::default(),
+                };
                 context.add_custom_binding(
                     &grab.output,
                     path.hand,
@@ -1713,6 +1725,8 @@ pub fn handle_sources(
                         force_action,
                         value_action,
                         parameters,
+                        speeds,
+                        path.hand,
                     )),
                 );
             }
@@ -2141,7 +2155,17 @@ pub fn handle_binding_haptics(
                 else {
                     continue;
                 };
-                let grab = GrabBindingData::new(force_action, value_action, Some(parameters));
+                let speeds = match force_action {
+                    Some(_) => context.hand_speeds(),
+                    None => Default::default(),
+                };
+                let grab = GrabBindingData::new(
+                    force_action,
+                    value_action,
+                    Some(parameters),
+                    speeds,
+                    path.hand,
+                );
                 let press =
                     BoolBindingData::new(BoolBindingType::Grab(grab), context.hand_path(path.hand));
                 (&output.output, path, haptic, BindingPress::Custom(press))
