@@ -286,6 +286,17 @@ fn gl_scene_app() {
         submit_time[0] / frames_run,
         submit_time[1] / frames_run,
     );
+    if frames > 2 {
+        // Timestamp queries are read a frame or more later.
+        let mut timing = vr::Compositor_FrameTiming {
+            m_nSize: size_of::<vr::Compositor_FrameTiming>() as u32,
+            ..Default::default()
+        };
+        assert!(vcall!(comp, IVRCompositor_GetFrameTiming, &mut timing, 1));
+        let gpu = timing.m_flTotalRenderGpuMs;
+        println!("gpu time of the frame before the last: {gpu}ms");
+        assert!(gpu > 0.0 && gpu < 1000.0);
+    }
     vcall!(core, IVRClientCore_Cleanup);
     unsafe { gl::DeleteTextures(2, eyes.as_ptr()) };
     // The library has leaked state and background threads by design; a game process just exits.
