@@ -1433,8 +1433,10 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         _: *const c_char,
         _: *const c_char,
     ) -> vr::VRMessageOverlayResponse {
+        // Nothing shows the message box (TODO.md, notifications and message boxes), so don't
+        // pretend the user pressed its first button.
         crate::warn_unimplemented!("ShowMessageOverlay");
-        vr::VRMessageOverlayResponse::ButtonPress_0
+        vr::VRMessageOverlayResponse::CouldntFindSystemOverlay
     }
     fn SetKeyboardPositionForOverlay(&self, _: vr::VROverlayHandle_t, _: vr::HmdRect2_t) {
         crate::warn_unimplemented!("SetKeyboardPositionForOverlay");
@@ -1674,23 +1676,34 @@ impl vr::IVROverlay028_Interface for OverlayMan {
     }
     fn SetOverlayInputMethod(
         &self,
-        _: vr::VROverlayHandle_t,
+        handle: vr::VROverlayHandle_t,
         input_method: vr::VROverlayInputMethod,
     ) -> vr::EVROverlayError {
-        if input_method == vr::VROverlayInputMethod::Mouse {
-            crate::warn_unimplemented!("SetOverlayInputMethod::Mouse");
-        } else if input_method == vr::VROverlayInputMethod::None {
-            crate::warn_unimplemented!("SetOverlayInputMethod::None");
+        get_overlay!(self, handle, overlay);
+        // Overlays get no laser or mouse events yet (TODO.md, overlay input), so an app asking
+        // for them finds out here rather than waiting for events that never come.
+        if input_method == vr::VROverlayInputMethod::None {
+            vr::EVROverlayError::None
+        } else {
+            crate::warn_once!(
+                "Overlay {:?} asked for input method {:?}, which isn't supported",
+                overlay.name,
+                input_method.0
+            );
+            vr::EVROverlayError::RequestFailed
         }
-        vr::EVROverlayError::None
     }
     fn GetOverlayInputMethod(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: *mut vr::VROverlayInputMethod,
+        handle: vr::VROverlayHandle_t,
+        input_method: *mut vr::VROverlayInputMethod,
     ) -> vr::EVROverlayError {
-        crate::warn_unimplemented!("GetOverlayInputMethod");
-        vr::EVROverlayError::RequestFailed
+        get_overlay!(self, handle, _overlay);
+        if input_method.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        unsafe { input_method.write(vr::VROverlayInputMethod::None) };
+        vr::EVROverlayError::None
     }
     fn PollNextOverlayEvent(
         &self,
@@ -2521,6 +2534,40 @@ mod tests {
         let name = |e| unsafe { CStr::from_ptr(man.GetOverlayErrorNameFromEnum(e)) };
         assert_eq!(name(vr::EVROverlayError::KeyInUse), c"KeyInUse");
         assert_eq!(name(vr::EVROverlayError(9999)), c"Unknown");
+    }
+
+    #[test]
+    fn message_overlay_and_input_method_arent_faked() {
+        let man = overlay_man();
+        let handle = create(&man, c"key", c"name");
+        let text = c"text".as_ptr();
+        assert_eq!(
+            man.ShowMessageOverlay(text, text, text, text, text, text),
+            vr::VRMessageOverlayResponse::CouldntFindSystemOverlay
+        );
+
+        assert_eq!(
+            man.SetOverlayInputMethod(handle, vr::VROverlayInputMethod::None),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(
+            man.SetOverlayInputMethod(handle, vr::VROverlayInputMethod::Mouse),
+            vr::EVROverlayError::RequestFailed
+        );
+        assert_eq!(
+            man.SetOverlayInputMethod(handle + 1, vr::VROverlayInputMethod::None),
+            vr::EVROverlayError::UnknownOverlay
+        );
+        let mut method = vr::VROverlayInputMethod::Mouse;
+        assert_eq!(
+            man.GetOverlayInputMethod(handle, &mut method),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(method, vr::VROverlayInputMethod::None);
+        assert_eq!(
+            man.GetOverlayInputMethod(handle, std::ptr::null_mut()),
+            vr::EVROverlayError::InvalidParameter
+        );
     }
 
     #[test]

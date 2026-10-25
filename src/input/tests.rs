@@ -5443,3 +5443,59 @@ fn left_system_binds_the_menu_button() {
     check::<Pico4>(&f);
     check::<PicoNeo3>(&f);
 }
+
+#[test]
+fn component_state_for_binding() {
+    use vr::IVRInput011_Interface as Input;
+    let f = Fixture::new();
+    let state = |model: *const std::ffi::c_char,
+                 component: *const std::ffi::c_char,
+                 count: u32,
+                 size: u32| {
+        let mut state = vr::RenderModel_ComponentState_t {
+            mTrackingToComponentRenderModel: vr::HmdMatrix34_t { m: [[7.0; 4]; 3] },
+            mTrackingToComponentLocal: vr::HmdMatrix34_t { m: [[7.0; 4]; 3] },
+            uProperties: u32::MAX,
+        };
+        let info = vr::InputBindingInfo_t::default();
+        let result = Input::GetComponentStateForBinding(
+            &*f.input, model, component, &info, count, size, &mut state,
+        );
+        (result, state)
+    };
+    let model = c"oculus_quest2_controller_right".as_ptr();
+
+    // Our models are static, so the state is the component's transform and nothing else.
+    let (result, tip) = state(model, c"tip".as_ptr(), 0, 0);
+    assert_eq!(result, vr::EVRInputError::None);
+    assert_eq!(
+        tip.uProperties,
+        (vr::EVRComponentProperty::IsVisible | vr::EVRComponentProperty::IsStatic).0
+    );
+    assert_eq!(
+        tip.mTrackingToComponentLocal.m,
+        tip.mTrackingToComponentRenderModel.m
+    );
+    assert_ne!(tip.mTrackingToComponentLocal.m[1][3], 0.0);
+
+    let size = std::mem::size_of::<vr::InputBindingInfo_t>() as u32;
+    let (result, body) = state(model, c"xrizer_component".as_ptr(), 1, size);
+    assert_eq!(result, vr::EVRInputError::None);
+    assert_eq!(body.mTrackingToComponentLocal.m[1][3], 0.0);
+
+    let (result, unknown) = state(model, c"not_a_component".as_ptr(), 0, 0);
+    assert_eq!(result, vr::EVRInputError::InvalidRenderModel);
+    assert_eq!(unknown.uProperties, 0);
+    assert_eq!(
+        state(c"not_a_model".as_ptr(), c"tip".as_ptr(), 0, 0).0,
+        vr::EVRInputError::InvalidRenderModel
+    );
+    assert_eq!(
+        state(std::ptr::null(), c"tip".as_ptr(), 0, 0).0,
+        vr::EVRInputError::InvalidParam
+    );
+    assert_eq!(
+        state(model, c"tip".as_ptr(), 1, size - 1).0,
+        vr::EVRInputError::InvalidParam
+    );
+}
