@@ -180,12 +180,14 @@ impl ResolveImage {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum EyeCopy {
     Resolve,
-    /// The swapchain has the texture's format, or its sRGB variant for gamma encoded textures.
+    /// The swapchain has the texture's format, its sRGB variant for gamma encoded textures, or the
+    /// UNORM format of an integer texture's bits.
     Copy,
     /// The swapchain format was substituted, and the texture's values are linear as read.
     Blit,
     /// Gamma encoded data for a swapchain that isn't sRGB: copied into an image of this format,
-    /// the texture's _SRGB variant, which decodes it, then blitted.
+    /// the texture's _SRGB variant, which decodes it, then blitted. Integer textures are copied
+    /// into their UNORM format this way, since integers can't be blitted.
     CopyBlit(vk::Format),
     /// Gamma encoded data for an sRGB swapchain of another layout: blitted into an image of this
     /// format, the swapchain's UNORM variant, which keeps the encoded values, then copied.
@@ -203,6 +205,19 @@ impl EyeCopy {
         swapchain_format: vk::Format,
         multisampled: bool,
     ) -> Self {
+        if let Some(unorm) = unorm_bits(texture_format) {
+            if gamma {
+                crate::warn_once!(
+                    "Can't decode gamma encoded {:?} textures, they show too bright",
+                    texture_format
+                );
+            }
+            return if swapchain_format == unorm {
+                Self::Copy
+            } else {
+                Self::CopyBlit(unorm)
+            };
+        }
         let same_data = if gamma {
             srgb_variant(texture_format) == Some(swapchain_format)
         } else {
@@ -693,6 +708,13 @@ impl GraphicsBackend for VulkanData {
         if extent.width == 0 || extent.height == 0 {
             return xr_extent;
         }
+        let format = vk::Format::from_raw(texture.m_nFormat as _);
+        // Sampling them as colors is undefined, and a view of another format needs an image
+        // created for it.
+        if unorm_bits(format).is_some() {
+            crate::warn_once!("Can't draw {:?} overlay textures", format);
+            return xr_extent;
+        }
         let data = self.real_data.as_mut().unwrap();
         let buf = data.bufs[image_index];
         // The image's resources can only be replaced once its previous copy has finished.
@@ -720,7 +742,7 @@ impl GraphicsBackend for VulkanData {
                 .create_image_view(
                     &vk::ImageViewCreateInfo::default()
                         .image(game_image)
-                        .format(vk::Format::from_raw(texture.m_nFormat as _))
+                        .format(format)
                         .view_type(vk::ImageViewType::TYPE_2D)
                         .components(vk::ComponentMapping::default())
                         .subresource_range(game_range),
@@ -765,7 +787,7 @@ impl GraphicsBackend for VulkanData {
         let OverlaySlot {
             set, framebuffer, ..
         } = *slot;
-        let decode_srgb = holds_gamma(vk::Format::from_raw(texture.m_nFormat as _), color_space);
+        let decode_srgb = holds_gamma(format, color_space);
         let clear = [vk::ClearValue::default()];
         let render_pass_info = vk::RenderPassBeginInfo::default()
             .render_pass(renderpass)
@@ -1589,6 +1611,17 @@ fn unorm_variant(format: vk::Format) -> Option<vk::Format> {
         .map(|&(unorm, _)| unorm)
 }
 
+/// The UNORM format of an integer format's bits. The OpenVR wiki lists A2R10G10B10_UINT among the
+/// formats apps can submit, and integers can't be blitted or sampled as colors, so their bits are
+/// copied as the UNORM format's, which copies between formats of one size allow.
+fn unorm_bits(format: vk::Format) -> Option<vk::Format> {
+    match format {
+        vk::Format::A2R10G10B10_UINT_PACK32 => Some(vk::Format::A2R10G10B10_UNORM_PACK32),
+        vk::Format::A2B10G10R10_UINT_PACK32 => Some(vk::Format::A2B10G10R10_UNORM_PACK32),
+        _ => None,
+    }
+}
+
 /// Whether the texture's values, as its format reads them, are sRGB encoded rather than linear,
 /// so they need decoding before they can be blended, blitted or shown. Formats with an _SRGB
 /// variant are 8-bit, which ColorSpace_Auto assumes to be gamma encoded ("This mirrors the DXGI
@@ -1598,6 +1631,7 @@ fn holds_gamma(format: vk::Format, color_space: vr::EColorSpace) -> bool {
 }
 
 fn holds_gamma_with(format: vk::Format, color_space: vr::EColorSpace, linear_unorm: bool) -> bool {
+    let format = unorm_bits(format).unwrap_or(format);
     if unorm_variant(format).is_some() {
         return false;
     }
@@ -1619,8 +1653,9 @@ fn is_compressed(format: vk::Format) -> bool {
 /// _SRGB swapchains, so gamma encoded data goes into one whatever its format, and everything else
 /// into a swapchain of its own format.
 fn swapchain_format(format: vk::Format, color_space: vr::EColorSpace) -> vk::Format {
-    // https://github.com/ValveSoftware/openvr/wiki/Vulkan#image-formats, and their variants
-    const KNOWN: [vk::Format; 10] = {
+    // https://github.com/ValveSoftware/openvr/wiki/Vulkan#image-formats, their variants, and what
+    // Proton makes of D3D11's other common render target formats
+    const KNOWN: [vk::Format; 15] = {
         use vk::Format as F;
         [
             F::R8G8B8A8_UNORM,
@@ -1632,7 +1667,12 @@ fn swapchain_format(format: vk::Format, color_space: vr::EColorSpace) -> vk::For
             F::R32G32B32A32_SFLOAT,
             F::R32G32B32_SFLOAT,
             F::R16G16B16A16_SFLOAT,
+            F::R16G16B16A16_UNORM,
+            F::A2R10G10B10_UINT_PACK32,
+            F::A2R10G10B10_UNORM_PACK32,
+            F::A2B10G10R10_UINT_PACK32,
             F::A2B10G10R10_UNORM_PACK32,
+            F::B10G11R11_UFLOAT_PACK32,
         ]
     };
     static UNSUPPORTED: LazyLock<Mutex<HashSet<vk::Format>>> = LazyLock::new(Mutex::default);
@@ -1648,7 +1688,7 @@ fn swapchain_format(format: vk::Format, color_space: vr::EColorSpace) -> vk::For
     } else if gamma {
         srgb_variant(format).unwrap_or(vk::Format::R8G8B8A8_SRGB)
     } else {
-        format
+        unorm_bits(format).unwrap_or(format)
     };
     if !KNOWN.contains(&format)
         && !is_compressed(format)

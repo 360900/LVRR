@@ -1015,6 +1015,18 @@ fn overlay_shader_decodes_unorm_textures() {
     finish(vk);
 }
 
+/// Integer overlay textures can't be sampled, so nothing reads them.
+#[test]
+fn integer_overlay_is_not_sampled() {
+    let mut vk = fake_vulkan();
+    store_images(&mut vk, 1);
+    let texture = with_format(vk::Format::A2R10G10B10_UINT_PACK32, texture(16, 16));
+    let extent = copy_overlay(&mut vk, &texture, FULL_BOUNDS, 0);
+    assert_eq!((extent.width, extent.height), (16, 16));
+    gpu(|gpu| assert_eq!((gpu.draws, gpu.refs.len()), (0, 0)));
+    finish(vk);
+}
+
 #[test]
 fn teardown_after_device_lost() {
     use crate::clientcore::Injector;
@@ -1084,6 +1096,25 @@ fn eye_copies_keep_the_brightness() {
         ),
         // Nothing to decode with on either side.
         (float, true, float, EyeCopy::Blit),
+        // Integers can't be blitted, their bits are copied as their UNORM format's.
+        (
+            F::A2B10G10R10_UINT_PACK32,
+            false,
+            F::A2B10G10R10_UNORM_PACK32,
+            EyeCopy::Copy,
+        ),
+        (
+            F::A2R10G10B10_UINT_PACK32,
+            false,
+            float,
+            EyeCopy::CopyBlit(F::A2R10G10B10_UNORM_PACK32),
+        ),
+        (
+            F::A2R10G10B10_UINT_PACK32,
+            true,
+            srgb,
+            EyeCopy::CopyBlit(F::A2R10G10B10_UNORM_PACK32),
+        ),
     ] {
         assert_eq!(
             EyeCopy::new(texture, gamma, swapchain, false),
@@ -1118,6 +1149,10 @@ fn color_space_tells_whether_values_are_gamma_encoded() {
         (F::R16G16B16A16_SFLOAT, C::Gamma, true),
         (F::A2B10G10R10_UNORM_PACK32, C::Auto, false),
         (F::A2B10G10R10_UNORM_PACK32, C::Gamma, true),
+        // Integers hold the bits of UNORM values.
+        (F::A2R10G10B10_UINT_PACK32, C::Auto, false),
+        (F::A2B10G10R10_UINT_PACK32, C::Auto, false),
+        (F::A2R10G10B10_UINT_PACK32, C::Gamma, true),
     ] {
         assert_eq!(
             holds_gamma_with(format, color_space, false),
@@ -1166,6 +1201,18 @@ fn swapchain_formats() {
         // Gamma encoded data in formats without an sRGB variant needs an sRGB swapchain too.
         (F::R16G16B16A16_SFLOAT, C::Gamma, F::R8G8B8A8_SRGB),
         (F::A2B10G10R10_UNORM_PACK32, C::Gamma, F::R8G8B8A8_SRGB),
+        (F::A2R10G10B10_UINT_PACK32, C::Gamma, F::R8G8B8A8_SRGB),
+        // Integers can't be shown, the UNORM format of their bits can.
+        (
+            F::A2R10G10B10_UINT_PACK32,
+            C::Auto,
+            F::A2R10G10B10_UNORM_PACK32,
+        ),
+        (
+            F::A2B10G10R10_UINT_PACK32,
+            C::Linear,
+            F::A2B10G10R10_UNORM_PACK32,
+        ),
         // Compressed formats can't be rendered to.
         (F::BC3_SRGB_BLOCK, C::Auto, F::R8G8B8A8_SRGB),
         (F::BC7_UNORM_BLOCK, C::Auto, F::R8G8B8A8_SRGB),
@@ -1288,6 +1335,51 @@ fn multisampled_eye_resolves_before_converting() {
         assert_eq!(copy.dst_offset, offset(0, 0, 0));
         assert_eq!(copy.dst_subresource.base_array_layer, 1);
         assert_eq!((copy.extent.width, copy.extent.height), (16, 16));
+    });
+    finish(vk);
+}
+
+/// An integer texture's bits are copied into an image of their UNORM format, which the blit into
+/// the swapchain reads as colors.
+#[test]
+fn integer_eye_is_copied_as_unorm_before_converting() {
+    let texture = with_format(vk::Format::A2R10G10B10_UINT_PACK32, texture(16, 16));
+    let vk = copy_right_eye(
+        vk::Format::R16G16B16A16_SFLOAT,
+        &texture,
+        vr::EColorSpace::Auto,
+        FULL_BOUNDS,
+    );
+    gpu(|gpu| {
+        let [(src, staging, _)] = gpu.copies[..] else {
+            panic!("copied {:?}", gpu.copies);
+        };
+        assert_eq!(src, GAME_IMAGE);
+        assert_eq!(
+            gpu.image_formats[&staging],
+            vk::Format::A2R10G10B10_UNORM_PACK32
+        );
+        let [(blitted, dst, _)] = gpu.blits[..] else {
+            panic!("blitted {:?}", gpu.blits);
+        };
+        assert_eq!((blitted, dst), (staging, APP_HANDLE));
+    });
+    finish(vk);
+}
+
+/// Into a swapchain of the UNORM format of its bits, an integer texture is copied as it is.
+#[test]
+fn integer_eye_is_copied_into_its_unorm_swapchain() {
+    let format = vk::Format::A2B10G10R10_UINT_PACK32;
+    let swapchain = swapchain_format(format, vr::EColorSpace::Auto);
+    let texture = with_format(format, texture(16, 16));
+    let vk = copy_right_eye(swapchain, &texture, vr::EColorSpace::Auto, FULL_BOUNDS);
+    gpu(|gpu| {
+        let [(src, dst, _)] = gpu.copies[..] else {
+            panic!("copied {:?}", gpu.copies);
+        };
+        assert_eq!((src, dst), (GAME_IMAGE, APP_HANDLE));
+        assert!(gpu.blits.is_empty());
     });
     finish(vk);
 }
