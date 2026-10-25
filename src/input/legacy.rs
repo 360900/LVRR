@@ -1011,7 +1011,7 @@ mod tests {
 
     #[test]
     fn touch_like_bindings() {
-        use crate::input::profiles::pico::Pico4;
+        use crate::input::profiles::{pico::Pico4, touch_pro::TouchPro};
         let (f, _) = legacy_fixture(|actions| actions.a.as_raw());
         fn check<P: InteractionProfile>(f: &Fixture) {
             assert_legacy_bindings::<P>(
@@ -1051,6 +1051,7 @@ mod tests {
         check::<OculusTouch>(&f);
         // SteamVR's Pico legacy bindings are the Touch's.
         check::<Pico4>(&f);
+        check::<TouchPro>(&f);
     }
 
     #[test]

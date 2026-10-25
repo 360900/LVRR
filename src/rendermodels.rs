@@ -217,6 +217,9 @@ fn fallback_model(model_name: &str) -> Option<&'static str> {
         // Ringed like the Quest 2 ones, whose raw pose the Pico profiles use.
         "pico_4_controller_left" => Some("oculus_quest2_controller_left"),
         "pico_4_controller_right" => Some("oculus_quest2_controller_right"),
+        // Ringless like the Quest 3 ones.
+        "oculus_quest_pro_controller_left" => Some("oculus_quest_plus_controller_left"),
+        "oculus_quest_pro_controller_right" => Some("oculus_quest_plus_controller_right"),
         // WMR reports the path the driver extracted the model to.
         name if name.ends_with("\\controller.obj") => Some("generic_controller"),
         _ => None,

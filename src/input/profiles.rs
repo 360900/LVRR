@@ -4,6 +4,7 @@ pub mod meta_touch_plus;
 pub mod oculus_touch;
 pub mod pico;
 pub mod simple_controller;
+pub mod touch_pro;
 pub mod vive_controller;
 pub mod vive_focus3;
 #[cfg(feature = "monado")]
@@ -26,6 +27,7 @@ use pico::{Pico4, PicoNeo3};
 use simple_controller::SimpleController;
 use std::ffi::CStr;
 use std::marker::PhantomData;
+use touch_pro::TouchPro;
 use vive_controller::ViveWands;
 use vive_focus3::ViveFocus3;
 use wmr::{
@@ -99,6 +101,7 @@ impl ControllerType {
             }
             Self::OculusTouch => {
                 runner.run::<MetaTouchPlus>();
+                runner.run::<TouchPro>();
                 runner.run::<OculusTouch>();
             }
             Self::Knuckles => runner.run::<Knuckles>(),
@@ -149,6 +152,7 @@ pub fn run_for_all_profiles(runner: &mut impl RunWithProfile) {
     profile!(Knuckles);
     profile!(vrlink_hand::VRLinkHand);
     profile!(MetaTouchPlus);
+    profile!(TouchPro);
     profile!(OculusTouch);
     profile!(ViveFocus3);
     profile!(Pico4);
