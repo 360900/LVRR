@@ -1125,13 +1125,18 @@ impl FakeSteam {
 
     /// Saves bindings choices for the app, as `(key, url)`.
     fn choose(&self, choices: &[(&str, &str)]) {
+        self.choose_for(Self::APP_KEY, choices);
+    }
+
+    /// Saves bindings choices for the app key `app_key`, as `(key, url)`.
+    fn choose_for(&self, app_key: &str, choices: &[(&str, &str)]) {
         let section: serde_json::Map<_, _> = choices
             .iter()
             .map(|(key, url)| (key.to_string(), (*url).into()))
             .collect();
         let settings = serde_json::json!({
             "steamvr": { "enableHomeApp": false },
-            Self::APP_KEY: section,
+            app_key: section,
         });
         std::fs::write(
             self.root().join("config/steamvr.vrsettings"),
@@ -1374,6 +1379,121 @@ fn custom_bindings_dir_over_per_app_bindings() {
         Knuckles::profile_path(),
         c"/actions/main/in/boolact",
         ["/user/hand/left/input/a/click".into()],
+    );
+}
+
+/// The Vive bindings of actions_vive_only.json.
+fn default_vive_boolact() -> [String; 3] {
+    [
+        "/user/hand/left/input/menu/click".into(),
+        "/user/hand/right/input/menu/click".into(),
+        "/user/hand/right/input/trigger/click".into(),
+    ]
+}
+
+/// Vivecraft loads its action manifest, then adds its application manifest and identifies as
+/// its app. The bindings chosen for that app key replace the ones loaded before.
+#[test]
+fn bindings_chosen_for_key_identified_after_manifest() {
+    const KEY: &str = "org.example.vivecraft";
+    const OTHER_KEY: &str = "org.example.other";
+    let steam = FakeSteam::new("identified");
+    let url = format!("file://{}", input_data("vive_only_single.json"));
+    steam.choose_for(
+        KEY,
+        &[("vive_controller_250820_CurrentURL_steamvrinput", &url)],
+    );
+    add_app_bindings(
+        &steam.home.join(".config"),
+        OTHER_KEY,
+        "knuckles.json",
+        "steamvr_workshop_knuckles.json",
+    );
+    let f = Fixture::new();
+    f.input.openxr.restart_session().unwrap(); // get to real session
+    f.load_actions(c"actions_vive_only.json");
+    let boolact = f.get_action_handle(c"/actions/main/in/boolact");
+    let action = || f.get_action::<bool>(boolact);
+    f.verify_bindings::<bool>(
+        ViveWands::profile_path(),
+        c"/actions/main/in/boolact",
+        default_vive_boolact(),
+    );
+
+    f.input.app_identified(KEY);
+    f.verify_bindings::<bool>(
+        ViveWands::profile_path(),
+        c"/actions/main/in/boolact",
+        ["/user/hand/left/input/trigger/click".into()],
+    );
+    let reloaded = action();
+    f.input.app_identified(KEY);
+    assert_eq!(action(), reloaded, "same key, nothing to reload");
+
+    // An app changing its key gets the custom bindings in the other key's directory, and loses
+    // the first key's choice.
+    f.input.app_identified(OTHER_KEY);
+    f.verify_bindings::<bool>(
+        ViveWands::profile_path(),
+        c"/actions/main/in/boolact",
+        default_vive_boolact(),
+    );
+    f.verify_bindings::<bool>(
+        Knuckles::profile_path(),
+        c"/actions/main/in/boolact",
+        ["/user/hand/right/input/b/click".into()],
+    );
+}
+
+/// Before the first frame, the session restart for the real session loads the bindings chosen for
+/// the key.
+#[test]
+fn bindings_chosen_for_key_identified_before_real_session() {
+    const KEY: &str = "org.example.vivecraft";
+    let steam = FakeSteam::new("identified-early");
+    let url = format!("file://{}", input_data("vive_only_single.json"));
+    steam.choose_for(
+        KEY,
+        &[("vive_controller_250820_CurrentURL_steamvrinput", &url)],
+    );
+    let f = Fixture::new();
+    f.load_actions(c"actions_vive_only.json");
+    let boolact = f.get_action_handle(c"/actions/main/in/boolact");
+    let loaded = f.get_action::<bool>(boolact);
+
+    f.input.app_identified(KEY);
+    assert_eq!(
+        f.get_action::<bool>(boolact),
+        loaded,
+        "no restart before the real session"
+    );
+    f.input.openxr.restart_session().unwrap(); // get to real session
+    f.verify_bindings::<bool>(
+        ViveWands::profile_path(),
+        c"/actions/main/in/boolact",
+        ["/user/hand/left/input/trigger/click".into()],
+    );
+}
+
+/// A key nothing is chosen for keeps the bindings loaded.
+#[test]
+fn identified_key_without_bindings_keeps_them() {
+    let steam = FakeSteam::new("identified-nothing");
+    let url = format!("file://{}", input_data("vive_only_single.json"));
+    steam.choose(&[("vive_controller_250820_CurrentURL_steamvrinput", &url)]);
+    let f = Fixture::new();
+    f.input.openxr.restart_session().unwrap(); // get to real session
+    f.load_actions(c"actions_vive_only.json");
+    let boolact = f.get_action_handle(c"/actions/main/in/boolact");
+    let loaded = f.get_action::<bool>(boolact);
+
+    // The Steam app id's choice still applies.
+    f.input.app_identified("org.example.unknown");
+    assert_eq!(f.get_action::<bool>(boolact), loaded);
+    f.verify_bindings::<bool>(
+        ViveWands::profile_path(),
+        c"/actions/main/in/boolact",
+        ["/user/hand/left/input/trigger/click".into()],
     );
 }
 

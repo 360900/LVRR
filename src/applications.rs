@@ -1,3 +1,6 @@
+use crate::clientcore::{Injected, Injector};
+use crate::compositor::Compositor;
+use crate::input::Input;
 use openvr as vr;
 use std::ffi::{CStr, CString, c_char};
 use std::path::PathBuf;
@@ -6,7 +9,7 @@ use std::sync::Mutex;
 use log::{info, warn};
 use std::process::Command;
 
-#[derive(Default, macros::InterfaceImpl)]
+#[derive(macros::InterfaceImpl)]
 #[interface = "IVRApplications"]
 #[versions(008, 007, 006, 005, 004, 003, 002)]
 pub struct Applications {
@@ -16,6 +19,7 @@ pub struct Applications {
     apps: Mutex<Vec<(CString, PathBuf)>>,
     /// The app key this process identified as.
     identity: Mutex<Option<CString>>,
+    input: Injected<Input<Compositor>>,
 }
 
 /// The app key this process last identified as, for code without a handle to the interface.
@@ -27,6 +31,15 @@ pub fn identified_app_key() -> Option<String> {
 }
 
 impl Applications {
+    pub fn new(injector: &Injector) -> Self {
+        Self {
+            vtables: Default::default(),
+            apps: Default::default(),
+            identity: Default::default(),
+            input: injector.inject(),
+        }
+    }
+
     fn is_installed(&self, key: &CStr) -> bool {
         self.apps
             .lock()
@@ -276,7 +289,12 @@ impl vr::IVRApplications008_Interface for Applications {
         if pid == 0 || pid == std::process::id() {
             info!("Application identified as {key:?}");
             *self.identity.lock().unwrap() = Some(key.to_owned());
-            *IDENTIFIED_KEY.lock().unwrap() = Some(key.to_string_lossy().into_owned());
+            let key = key.to_string_lossy().into_owned();
+            *IDENTIFIED_KEY.lock().unwrap() = Some(key.clone());
+            // The bindings chosen for the app may differ for its key.
+            if let Some(input) = self.input.get() {
+                input.app_identified(&key);
+            }
         }
         vr::EVRApplicationError::None
     }
@@ -418,7 +436,7 @@ mod tests {
     /// Vivecraft adds its manifest, checks it's installed and identifies as its app.
     #[test]
     fn manifests_and_identity() {
-        let apps = Applications::default();
+        let apps = Applications::new(&Injector::default());
         let dir = std::env::temp_dir().join(format!("xrizer-manifest-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let manifest = dir.join("app.vrmanifest");
@@ -471,7 +489,10 @@ mod tests {
         apps.IdentifyApplication(pid + 1, c"org.example.launched".as_ptr());
         assert_eq!(apps.GetApplicationProcessId(key.as_ptr()), pid);
         apps.IdentifyApplication(0, c"org.example.other".as_ptr());
-        assert_eq!(apps.GetApplicationProcessId(c"org.example.other".as_ptr()), pid);
+        assert_eq!(
+            apps.GetApplicationProcessId(c"org.example.other".as_ptr()),
+            pid
+        );
         assert_eq!(apps.GetApplicationProcessId(key.as_ptr()), 0);
 
         assert_eq!(
@@ -483,7 +504,7 @@ mod tests {
 
     #[test]
     fn unknown_enum_names() {
-        let apps = Applications::default();
+        let apps = Applications::new(&Injector::default());
         let name = |ptr| unsafe { CStr::from_ptr(ptr) };
 
         let error = |e| name(apps.GetApplicationsErrorNameFromEnum(vr::EVRApplicationError(e)));

@@ -8,8 +8,8 @@ pub(super) use bindings::{ClickThresholdParams, GrabParameters};
 
 use crate::input::InteractionProfile;
 use crate::input::action_manifest::context::BindingsLoadContext;
+use crate::input::binding_sources::{BindingChoices, BindingSources};
 use crate::input::profiles::{DynInputPath, LegalPathsT, paths::DynSubpath};
-use crate::input::binding_sources::BindingSources;
 use crate::input::steamvr_bindings::Category;
 use crate::input::{ActionKey, Input, profiles::RunWithProfile, skeletal::SkeletalInputActionData};
 use crate::openxr_data::{self, Hand, SessionData};
@@ -160,7 +160,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             skeletal_input,
         );
 
-        let binding_variants = self.load_bindings(
+        let (binding_variants, binding_choices) = self.load_bindings(
             manifest_path.parent().unwrap(),
             manifest.default_bindings,
             &mut binding_context,
@@ -346,6 +346,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             skeleton_sets,
             head_proximity,
             binding_variants,
+            binding_choices,
             simulated_properties,
         };
 
@@ -429,17 +430,6 @@ pub(super) fn isolated_env_var(name: &str) -> Option<OsString> {
     TEST_ENV.with_borrow(|env| env.get(name).cloned())
 }
 
-/// The app key the app identified as. Other tests identify as their own apps.
-#[cfg(not(test))]
-fn identified_app_key() -> Option<String> {
-    crate::applications::identified_app_key()
-}
-
-#[cfg(test)]
-fn identified_app_key() -> Option<String> {
-    None
-}
-
 impl<C: openxr_data::Compositor> Input<C> {
     /// The variant (`options.variant`) of the bindings of `device`'s controller, empty if they
     /// have none. Other handles get the first hand's that has one.
@@ -485,15 +475,15 @@ pub(super) fn same_file(a: &Path, b: &Path) -> bool {
 
 impl<C: openxr_data::Compositor> Input<C> {
     /// Suggests the bindings for every profile. Returns the variant of the bindings each profile
-    /// got, for GetBindingVariant.
+    /// got, for GetBindingVariant, and the files chosen to replace the game's.
     fn load_bindings(
         &self,
         parent_path: &Path,
         bindings: Vec<actions::DefaultBindings>,
         context: &mut context::BindingsLoadContext,
-    ) -> HashMap<xr::Path, String> {
+    ) -> (HashMap<xr::Path, String>, BindingChoices) {
         // Custom bindings, then the ones chosen in SteamVR, then the game's.
-        let sources = BindingSources::new(identified_app_key(), Category::SteamVrInput);
+        let sources = BindingSources::new(self.app_key(), Category::SteamVrInput);
         let mut variants = HashMap::new();
 
         let mut bindings = bindings;
@@ -678,7 +668,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             }
         }
 
-        variants
+        (variants, sources.into_choices())
     }
 
     fn load_bindings_for_profile<P: InteractionProfile>(

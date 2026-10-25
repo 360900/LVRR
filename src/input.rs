@@ -28,6 +28,7 @@ use crate::{
     openxr_data::{self, Hand, OpenXrData, RestartError, SessionData},
     tracy_span,
 };
+use binding_sources::BindingChoices;
 use custom_bindings::{BoolBindingData, ScalarConstantBinding, Vector2ActionData};
 use glam::Quat;
 use legacy::LegacyActionData;
@@ -121,6 +122,10 @@ pub struct Input<C: openxr_data::Compositor> {
     loaded_actions_path: OnceLock<PathBuf>,
     /// An action manifest left for [Input::load_pending_manifest].
     pending_manifest: Mutex<Option<PathBuf>>,
+    /// A reload of the bindings left for [Input::load_pending_manifest].
+    pending_reload: AtomicBool,
+    /// The app key the app identified as, which bindings may be chosen for.
+    app_key: Mutex<Option<String>>,
     legacy_state: legacy::LegacyState,
     /// See [Input::current_skeletal_tracking_level], the only writer besides profile changes.
     skeletal_tracking_level: RwLock<[vr::EVRSkeletalTrackingLevel; 2]>,
@@ -195,6 +200,18 @@ fn find_or_insert<K: Key, V>(
     find(&map).unwrap_or_else(|| map.insert(new()))
 }
 
+/// The app key the app identified as before IVRInput was created. Other tests identify as their
+/// own apps.
+#[cfg(not(test))]
+fn initial_app_key() -> Option<String> {
+    crate::applications::identified_app_key()
+}
+
+#[cfg(test)]
+fn initial_app_key() -> Option<String> {
+    None
+}
+
 /// For `action.state(..).unwrap_or_else(inactive_state)`: an action whose state can't be read,
 /// e.g. because the runtime lost the session, reads as inactive.
 fn inactive_state<T: xr::ActionInput + Default>(error: xr::sys::Result) -> xr::ActionState<T> {
@@ -240,6 +257,8 @@ impl<C: openxr_data::Compositor> Input<C> {
             set_map: Default::default(),
             loaded_actions_path: OnceLock::new(),
             pending_manifest: Mutex::default(),
+            pending_reload: false.into(),
+            app_key: Mutex::new(initial_app_key()),
             left_hand_key,
             right_hand_key,
             head_key,
@@ -257,6 +276,10 @@ impl<C: openxr_data::Compositor> Input<C> {
             left_handed: false.into(),
             last_profile_properties: Mutex::new(probed_profile),
         }
+    }
+
+    fn app_key(&self) -> Option<String> {
+        self.app_key.lock().unwrap().clone()
     }
 
     fn get_subaction_path(&self, hand: Hand) -> xr::Path {
@@ -2665,9 +2688,70 @@ impl<C: openxr_data::Compositor> Input<C> {
         }
     }
 
-    /// Loads the action manifest SetActionManifestPath couldn't, on the thread the app submits
-    /// frames on, which has its graphics context current.
+    /// The app identified as `key`, which the bindings loaded so far may not have been chosen
+    /// for: Vivecraft loads its action manifest before it identifies.
+    pub fn app_identified(&self, key: &str) {
+        {
+            let mut app_key = self.app_key.lock().unwrap();
+            if app_key.as_deref() == Some(key) {
+                return;
+            }
+            *app_key = Some(key.to_owned());
+        }
+        if self.openxr.is_lost() {
+            return;
+        }
+        {
+            // Actions being loaded may not have seen the key yet.
+            let _setup = self.action_setup.lock().unwrap();
+            let data = self.openxr.session_data.get();
+            // Actions loaded later get the bindings chosen for the key.
+            let Some(choices) = data
+                .input_data
+                .actions
+                .get()
+                .and_then(LoadedActions::choices)
+            else {
+                return;
+            };
+            if !choices.changed_for(key) {
+                debug!("The bindings chosen for {key} are loaded already");
+                return;
+            }
+            // The first frame's session restart loads them.
+            if !data.is_real_session() {
+                info!("Other bindings are chosen for {key}, loading them with the real session");
+                return;
+            }
+        }
+        info!("Other bindings are chosen for {key}, reloading");
+        self.reload_bindings(true);
+    }
+
+    /// Restarts the session, which loads the actions again with the bindings chosen now. With
+    /// `defer`, a restart that can't happen on this thread is left for
+    /// [Self::load_pending_manifest].
+    fn reload_bindings(&self, defer: bool) {
+        let _setup = self.action_setup.lock().unwrap();
+        let data = self.openxr.session_data.get();
+        // Like for SetActionManifestPath, see Self::set_action_manifest.
+        if defer && !data.comp_data.is_context_current() {
+            info!("Graphics context isn't current, reloading the bindings on Submit");
+            self.pending_reload.store(true, Ordering::Relaxed);
+            return;
+        }
+        drop(data);
+        if let Err(e) = self.openxr.restart_session() {
+            warn!("Couldn't restart the session to reload the bindings: {e:?}");
+        }
+    }
+
+    /// Loads the action manifest SetActionManifestPath couldn't, or reloads the bindings, on the
+    /// thread the app submits frames on, which has its graphics context current.
     pub fn load_pending_manifest(&self) {
+        if self.pending_reload.swap(false, Ordering::Relaxed) {
+            self.reload_bindings(false);
+        }
         let Some(path) = self.pending_manifest.lock().unwrap().take() else {
             return;
         };
@@ -3477,6 +3561,16 @@ enum LoadedActions {
     Manifest(Box<ManifestLoadedActions>),
 }
 
+impl LoadedActions {
+    /// The files that replaced the app's own bindings.
+    fn choices(&self) -> Option<&BindingChoices> {
+        match self {
+            Self::Legacy(_) => None,
+            Self::Manifest(loaded) => Some(&loaded.binding_choices),
+        }
+    }
+}
+
 struct ManifestLoadedActions {
     sets: SecondaryMap<ActionSetKey, xr::ActionSet>,
     /// Sets that contain OpenXR actions (and thus the hand subaction paths).
@@ -3502,6 +3596,8 @@ struct ManifestLoadedActions {
     head_proximity: SecondaryMap<ActionKey, HeadProximity>,
     /// The variant of each profile's bindings, see [Input::binding_variant].
     binding_variants: HashMap<xr::Path, String>,
+    /// The files that replaced the game's bindings.
+    binding_choices: BindingChoices,
     /// The identity of the controller that converted bindings were made for, per interaction
     /// profile that shows it instead of its own, like SteamVR.
     simulated_properties: HashMap<xr::Path, &'static ProfileProperties>,

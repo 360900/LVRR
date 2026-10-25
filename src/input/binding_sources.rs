@@ -3,6 +3,7 @@
 
 use super::action_manifest::{ControllerType, env_var, isolated_env_var};
 use super::steamvr_bindings::{self, Category, SavedBindings};
+use std::cell::RefCell;
 use std::env::current_dir;
 use std::path::{Path, PathBuf};
 
@@ -20,6 +21,8 @@ pub(super) struct BindingSources {
     dirs: Vec<PathBuf>,
     saved: Option<SavedBindings>,
     category: Category,
+    /// The file chosen for each controller type asked about, see [Self::into_choices].
+    chosen: RefCell<Vec<(ControllerType, Option<PathBuf>)>>,
 }
 
 impl BindingSources {
@@ -43,16 +46,22 @@ impl BindingSources {
             dirs,
             saved: steamvr_saved_bindings(&keys),
             category,
+            chosen: Default::default(),
         }
     }
 
     /// The file whose bindings replace the app's own for `controller_type`, if there is one.
     pub fn file_for(&self, controller_type: &ControllerType) -> Option<PathBuf> {
-        self.custom_file(controller_type).or_else(|| {
+        let file = self.custom_file(controller_type).or_else(|| {
             self.saved
                 .as_ref()?
                 .file_for(&controller_type.to_string(), self.category)
-        })
+        });
+        let mut chosen = self.chosen.borrow_mut();
+        if !chosen.iter().any(|(ty, _)| ty == controller_type) {
+            chosen.push((controller_type.clone(), file.clone()));
+        }
+        file
     }
 
     fn custom_file(&self, controller_type: &ControllerType) -> Option<PathBuf> {
@@ -68,6 +77,31 @@ impl BindingSources {
             path.display()
         );
         Some(path)
+    }
+
+    /// The files chosen for the controller types asked about.
+    pub fn into_choices(self) -> BindingChoices {
+        BindingChoices {
+            category: self.category,
+            files: self.chosen.into_inner(),
+        }
+    }
+}
+
+/// The files that replaced an app's own bindings, to tell whether another app key changes them.
+#[derive(Debug)]
+pub(super) struct BindingChoices {
+    category: Category,
+    files: Vec<(ControllerType, Option<PathBuf>)>,
+}
+
+impl BindingChoices {
+    /// Whether the app would get other bindings as `app_key`.
+    pub fn changed_for(&self, app_key: &str) -> bool {
+        let sources = BindingSources::new(Some(app_key.to_owned()), self.category);
+        self.files
+            .iter()
+            .any(|(controller_type, file)| sources.file_for(controller_type) != *file)
     }
 }
 
@@ -109,7 +143,10 @@ mod tests {
     #[test]
     fn key_dir_names() {
         let name = |key| key_dir_name(key);
-        assert_eq!(name("steam.app.611670").as_deref(), Some("steam.app.611670"));
+        assert_eq!(
+            name("steam.app.611670").as_deref(),
+            Some("steam.app.611670")
+        );
         assert_eq!(
             name("Org.JRBudda.Vivecraft.SteamVRInput").as_deref(),
             Some("org.jrbudda.vivecraft.steamvrinput")
