@@ -1,13 +1,15 @@
-//! OpenGL apps on another GPU than the runtime, e.g. the iGPU of a hybrid laptop, whose images the
-//! runtime can't import. The session is a Vulkan one on the runtime's device instead: [GlData]
-//! copies the app's textures into textures of ours, which are read back into host memory that
-//! the runtime's device copies into the swapchain images.
+//! OpenGL apps whose context the runtime can't use: on another GPU than the runtime, e.g. the
+//! iGPU of a hybrid laptop, whose images the runtime can't import, or with a context the runtime
+//! can't share (see [GlData::runtime_accepts_context]). The session is a Vulkan one on the
+//! runtime's device instead: [GlData] copies the app's textures into textures of ours, which are
+//! read into memory that the runtime's device copies into the swapchain images. On the same GPU
+//! that's device memory GL imports, otherwise host memory.
 
 use super::{GlData, GlTexture, cvt};
 use crate::compositor::GpuDone;
 use crate::graphics_backends::{GraphicsBackend, VulkanData};
 use ash::vk::{self, Handle};
-use gl::types::{GLenum, GLint, GLuint};
+use gl::types::{GLenum, GLint, GLsizei, GLsizeiptr, GLuint};
 use openvr as vr;
 use openxr as xr;
 use std::ffi::c_void;
@@ -159,8 +161,95 @@ fn shared_device(instance: &xr::Instance) -> Result<Arc<Device>, String> {
 /// Far longer than any copy takes, so only a hung or lost GPU hits it.
 const COPY_TIMEOUT_NS: u64 = 1_000_000_000;
 
+type CreateMemoryObjects = unsafe extern "system" fn(GLsizei, *mut GLuint);
+type DeleteMemoryObjects = unsafe extern "system" fn(GLsizei, *const GLuint);
+type ImportMemoryFd = unsafe extern "system" fn(GLuint, u64, GLenum, GLint);
+type BufferStorageMem = unsafe extern "system" fn(GLenum, GLsizeiptr, GLuint, u64);
+type GenSemaphores = unsafe extern "system" fn(GLsizei, *mut GLuint);
+type DeleteSemaphores = unsafe extern "system" fn(GLsizei, *const GLuint);
+type ImportSemaphoreFd = unsafe extern "system" fn(GLuint, GLenum, GLint);
+type SignalSemaphore =
+    unsafe extern "system" fn(GLuint, GLuint, *const GLuint, GLuint, *const GLuint, *const GLenum);
+
+const HANDLE_TYPE_OPAQUE_FD_EXT: GLenum = 0x9586;
+
+/// GL_EXT_memory_object_fd, to read frames into memory of the runtime's device on the same GPU.
+#[derive(Copy, Clone)]
+struct MemoryObjects {
+    create: CreateMemoryObjects,
+    delete: DeleteMemoryObjects,
+    import_fd: ImportMemoryFd,
+    buffer_storage: BufferStorageMem,
+    /// If the device can export semaphores too.
+    semaphores: Option<Semaphores>,
+}
+
+/// GL_EXT_semaphore_fd, for uploads to wait for GL's reads on the GPU rather than the CPU.
+#[derive(Copy, Clone)]
+struct Semaphores {
+    create: GenSemaphores,
+    delete: DeleteSemaphores,
+    import_fd: ImportSemaphoreFd,
+    signal: SignalSemaphore,
+}
+
+impl MemoryObjects {
+    /// None unless the app's context runs on the device and driver of `vk`, which can export its
+    /// memory.
+    fn load(gl: &GlData, vk: &VulkanData) -> Option<Self> {
+        let ids = vk.memory_export?;
+        if !super::has_gl_extension(c"GL_EXT_memory_object_fd") {
+            return None;
+        }
+        let info = &gl.session_info;
+        let same = unsafe { super::gl_device_uuids(info) }
+            .is_some_and(|uuids| uuids.contains(&ids.device_uuid))
+            && unsafe { super::gl_driver_uuid(info) } == Some(ids.driver_uuid);
+        if !same {
+            return None;
+        }
+        let get = |name| Some(info.get_proc_address(name)).filter(|f| !f.is_null());
+        let semaphores = (vk.semaphore_export && super::has_gl_extension(c"GL_EXT_semaphore_fd"))
+            .then(|| unsafe {
+                Some(Semaphores {
+                    create: std::mem::transmute::<*const c_void, GenSemaphores>(get(
+                        "glGenSemaphoresEXT",
+                    )?),
+                    delete: std::mem::transmute::<*const c_void, DeleteSemaphores>(get(
+                        "glDeleteSemaphoresEXT",
+                    )?),
+                    import_fd: std::mem::transmute::<*const c_void, ImportSemaphoreFd>(get(
+                        "glImportSemaphoreFdEXT",
+                    )?),
+                    signal: std::mem::transmute::<*const c_void, SignalSemaphore>(get(
+                        "glSignalSemaphoreEXT",
+                    )?),
+                })
+            })
+            .flatten();
+        unsafe {
+            Some(Self {
+                create: std::mem::transmute::<*const c_void, CreateMemoryObjects>(get(
+                    "glCreateMemoryObjectsEXT",
+                )?),
+                delete: std::mem::transmute::<*const c_void, DeleteMemoryObjects>(get(
+                    "glDeleteMemoryObjectsEXT",
+                )?),
+                import_fd: std::mem::transmute::<*const c_void, ImportMemoryFd>(get(
+                    "glImportMemoryFdEXT",
+                )?),
+                buffer_storage: std::mem::transmute::<*const c_void, BufferStorageMem>(get(
+                    "glBufferStorageMemEXT",
+                )?),
+                semaphores,
+            })
+        }
+    }
+}
+
 /// A layer read into a slot's pixel buffer, not uploaded yet.
 struct Pending {
+    /// Null if the upload waits for the read on the GPU, see [Slot::semaphore].
     sync: gl::types::GLsync,
     image: vk::Image,
     layer: u32,
@@ -168,8 +257,9 @@ struct Pending {
 }
 
 /// One layer of a swapchain image on its way to the runtime's GPU: GL reads it into a pixel
-/// buffer in host memory of ours, which the runtime's device imports. Without either, the
-/// pixel buffer is copied into host memory of the runtime's device.
+/// buffer in memory of the runtime's device, on the same GPU, or else in host memory of ours,
+/// which the runtime's device imports. Without either, the pixel buffer is copied into host
+/// memory of the runtime's device.
 struct Slot {
     /// Page aligned memory the pixel buffer uses, see GL_AMD_pinned_memory.
     host: Option<(*mut c_void, usize)>,
@@ -180,6 +270,16 @@ struct Slot {
     memory: vk::DeviceMemory,
     /// Where `memory` is mapped if it isn't the pixel buffer's.
     copy_to: Option<*mut c_void>,
+    /// GL's functions for the runtime's device memory, if the pixel buffer is in it, see
+    /// [Slot::create_shared].
+    shared: Option<MemoryObjects>,
+    /// What the pixel buffer imports `memory` with.
+    memory_object: GLuint,
+    /// Signaled by GL once it has read a layer, for the upload to wait for. Null without
+    /// GL_EXT_semaphore_fd, then the CPU waits.
+    semaphore: vk::Semaphore,
+    /// GL's handle of `semaphore`.
+    gl_semaphore: GLuint,
     cmd: vk::CommandBuffer,
     /// Signaled once the last upload has finished reading `memory`.
     fence: vk::Fence,
@@ -196,7 +296,12 @@ const fn align_up(size: vk::DeviceSize, alignment: vk::DeviceSize) -> vk::Device
 const EXTERNAL_VIRTUAL_MEMORY_BUFFER_AMD: GLenum = 0x9160;
 
 impl Slot {
-    fn new(vk: &VulkanData, pool: vk::CommandPool, size: vk::DeviceSize) -> Result<Self, String> {
+    fn new(
+        vk: &VulkanData,
+        pool: vk::CommandPool,
+        size: vk::DeviceSize,
+        memory_objects: Option<&MemoryObjects>,
+    ) -> Result<Self, String> {
         let mut slot = Self {
             host: None,
             pbo: 0,
@@ -204,11 +309,15 @@ impl Slot {
             buffer: vk::Buffer::null(),
             memory: vk::DeviceMemory::null(),
             copy_to: None,
+            shared: None,
+            memory_object: 0,
+            semaphore: vk::Semaphore::null(),
+            gl_semaphore: 0,
             cmd: vk::CommandBuffer::null(),
             fence: vk::Fence::null(),
             pending: None,
         };
-        match slot.init(vk, pool, size) {
+        match slot.init(vk, pool, size, memory_objects) {
             Ok(()) => Ok(slot),
             Err(e) => {
                 slot.destroy(&vk.device, pool, true);
@@ -222,26 +331,38 @@ impl Slot {
         vk: &VulkanData,
         pool: vk::CommandPool,
         size: vk::DeviceSize,
+        memory_objects: Option<&MemoryObjects>,
     ) -> Result<(), String> {
-        let pinned = vk.host_import_alignment.is_some()
-            && super::has_gl_extension(c"GL_AMD_pinned_memory")
-            && self
-                .create_pinned(vk, size)
-                .inspect_err(|e| crate::warn_once!("Can't pin memory for OpenGL frames: {}", e))
-                .is_ok();
-        let imported = pinned
-            && self
-                .import(vk)
+        let shared = memory_objects.is_some_and(|memory_objects| {
+            self.create_shared(vk, size, memory_objects)
                 .inspect_err(|e| {
-                    crate::warn_once!("Copying OpenGL frames on the CPU: {}", e);
+                    crate::warn_once!("Copying OpenGL frames through system memory: {}", e);
                     self.free_vk(&vk.device);
+                    self.free_gl();
                 })
-                .is_ok();
-        if !pinned {
-            self.create_persistent(size)?;
-        }
-        if !imported {
-            self.allocate_copy(vk, size)?;
+                .is_ok()
+        });
+        if !shared {
+            let pinned = vk.host_import_alignment.is_some()
+                && super::has_gl_extension(c"GL_AMD_pinned_memory")
+                && self
+                    .create_pinned(vk, size)
+                    .inspect_err(|e| crate::warn_once!("Can't pin memory for OpenGL frames: {}", e))
+                    .is_ok();
+            let imported = pinned
+                && self
+                    .import(vk)
+                    .inspect_err(|e| {
+                        crate::warn_once!("Copying OpenGL frames on the CPU: {}", e);
+                        self.free_vk(&vk.device);
+                    })
+                    .is_ok();
+            if !pinned {
+                self.create_persistent(size)?;
+            }
+            if !imported {
+                self.allocate_copy(vk, size)?;
+            }
         }
 
         let device = &vk.device;
@@ -260,6 +381,117 @@ impl Slot {
                     None,
                 )
                 .map_err(|e| format!("Failed to create fence: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// A pixel buffer in device memory of the runtime's device, which GL on the same GPU imports.
+    fn create_shared(
+        &mut self,
+        vk: &VulkanData,
+        size: vk::DeviceSize,
+        memory_objects: &MemoryObjects,
+    ) -> Result<(), String> {
+        let device = &vk.device;
+        let handle_type = vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD;
+        let requirements = self.create_buffer(device, size, Some(handle_type))?;
+        let properties = unsafe {
+            vk.instance
+                .get_physical_device_memory_properties(vk.physical_device)
+        };
+        let memory_type = properties
+            .memory_types_as_slice()
+            .iter()
+            .enumerate()
+            .position(|(i, ty)| {
+                requirements.memory_type_bits & (1 << i) != 0
+                    && ty
+                        .property_flags
+                        .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
+            })
+            .ok_or_else(|| "No device memory to share".to_owned())?;
+        let mut export = vk::ExportMemoryAllocateInfo::default().handle_types(handle_type);
+        let fd = unsafe {
+            self.memory = device
+                .allocate_memory(
+                    &vk::MemoryAllocateInfo::default()
+                        .allocation_size(requirements.size)
+                        .memory_type_index(memory_type as u32)
+                        .push_next(&mut export),
+                    None,
+                )
+                .map_err(|e| format!("Failed to allocate memory to share: {e}"))?;
+            device
+                .bind_buffer_memory(self.buffer, self.memory, 0)
+                .map_err(|e| format!("Failed to bind memory to share: {e}"))?;
+            ash::khr::external_memory_fd::Device::new(&vk.instance, device)
+                .get_memory_fd(
+                    &vk::MemoryGetFdInfoKHR::default()
+                        .memory(self.memory)
+                        .handle_type(handle_type),
+                )
+                .map_err(|e| format!("Failed to export memory: {e}"))?
+        };
+        self.shared = Some(*memory_objects);
+        unsafe {
+            (memory_objects.create)(1, &mut self.memory_object);
+            // GL owns the fd once it's imported.
+            (memory_objects.import_fd)(
+                self.memory_object,
+                requirements.size,
+                HANDLE_TYPE_OPAQUE_FD_EXT,
+                fd,
+            );
+            let mut bound = 0;
+            gl::GetIntegerv(gl::PIXEL_PACK_BUFFER_BINDING, &mut bound);
+            gl::GenBuffers(1, &mut self.pbo);
+            gl::BindBuffer(gl::PIXEL_PACK_BUFFER, self.pbo);
+            (memory_objects.buffer_storage)(
+                gl::PIXEL_PACK_BUFFER,
+                size as _,
+                self.memory_object,
+                0,
+            );
+            // A buffer whose memory couldn't be imported has no storage.
+            let mut stored = 0;
+            gl::GetBufferParameteriv(gl::PIXEL_PACK_BUFFER, gl::BUFFER_SIZE, &mut stored);
+            gl::BindBuffer(gl::PIXEL_PACK_BUFFER, bound as GLuint);
+            if stored as vk::DeviceSize != size {
+                return Err("the driver didn't import it".to_owned());
+            }
+        }
+        if let Some(semaphores) = &memory_objects.semaphores {
+            let _ = self
+                .create_semaphore(vk, semaphores)
+                .inspect_err(|e| crate::warn_once!("Waiting for OpenGL frames on the CPU: {}", e));
+        }
+        Ok(())
+    }
+
+    /// See [Slot::semaphore].
+    fn create_semaphore(&mut self, vk: &VulkanData, semaphores: &Semaphores) -> Result<(), String> {
+        let device = &vk.device;
+        let handle_type = vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD;
+        let mut export = vk::ExportSemaphoreCreateInfo::default().handle_types(handle_type);
+        unsafe {
+            let semaphore = device
+                .create_semaphore(
+                    &vk::SemaphoreCreateInfo::default().push_next(&mut export),
+                    None,
+                )
+                .map_err(|e| format!("Failed to create semaphore: {e}"))?;
+            let fd = ash::khr::external_semaphore_fd::Device::new(&vk.instance, device)
+                .get_semaphore_fd(
+                    &vk::SemaphoreGetFdInfoKHR::default()
+                        .semaphore(semaphore)
+                        .handle_type(handle_type),
+                )
+                .inspect_err(|_| device.destroy_semaphore(semaphore, None))
+                .map_err(|e| format!("Failed to export semaphore: {e}"))?;
+            (semaphores.create)(1, &mut self.gl_semaphore);
+            // GL owns the fd once it's imported.
+            (semaphores.import_fd)(self.gl_semaphore, HANDLE_TYPE_OPAQUE_FD_EXT, fd);
+            self.semaphore = semaphore;
         }
         Ok(())
     }
@@ -347,15 +579,15 @@ impl Slot {
         &mut self,
         device: &ash::Device,
         size: vk::DeviceSize,
-        external: bool,
+        external: Option<vk::ExternalMemoryHandleTypeFlags>,
     ) -> Result<vk::MemoryRequirements, String> {
         let mut external_info = vk::ExternalMemoryBufferCreateInfo::default()
-            .handle_types(vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT);
+            .handle_types(external.unwrap_or_default());
         let mut info = vk::BufferCreateInfo::default()
             .size(size)
             .usage(vk::BufferUsageFlags::TRANSFER_SRC)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
-        if external {
+        if external.is_some() {
             info = info.push_next(&mut external_info);
         }
         unsafe {
@@ -387,7 +619,7 @@ impl Slot {
             .result()
         }
         .map_err(|e| format!("Can't import the pixel buffer: {e}"))?;
-        let requirements = self.create_buffer(device, size, true)?;
+        let requirements = self.create_buffer(device, size, Some(handle_type))?;
         let types = requirements.memory_type_bits & host_props.memory_type_bits;
         if types == 0 || requirements.size > size {
             return Err("No memory type to import the pixel buffer with".to_owned());
@@ -414,7 +646,7 @@ impl Slot {
     /// Makes `buffer` use host memory of its own, which reads are copied into.
     fn allocate_copy(&mut self, vk: &VulkanData, size: vk::DeviceSize) -> Result<(), String> {
         let device = &vk.device;
-        let requirements = self.create_buffer(device, size, false)?;
+        let requirements = self.create_buffer(device, size, None)?;
         let properties = unsafe {
             vk.instance
                 .get_physical_device_memory_properties(vk.physical_device)
@@ -463,9 +695,11 @@ impl Slot {
         unsafe {
             device.destroy_buffer(self.buffer, None);
             device.free_memory(self.memory, None);
+            device.destroy_semaphore(self.semaphore, None);
         }
         self.buffer = vk::Buffer::null();
         self.memory = vk::DeviceMemory::null();
+        self.semaphore = vk::Semaphore::null();
         self.copy_to = None;
     }
 
@@ -489,6 +723,16 @@ impl Slot {
         unsafe { gl::DeleteBuffers(1, &self.pbo) };
         self.pbo = 0;
         self.pbo_mapped = ptr::null_mut();
+        if let Some(shared) = self.shared.take() {
+            unsafe {
+                (shared.delete)(1, &self.memory_object);
+                if let Some(semaphores) = shared.semaphores {
+                    (semaphores.delete)(1, &self.gl_semaphore);
+                }
+            }
+            self.memory_object = 0;
+            self.gl_semaphore = 0;
+        }
     }
 
     /// The slot must not be in use by the runtime's device anymore. GL objects, and the memory
@@ -535,6 +779,8 @@ pub struct GlBridgeData {
     gl: GlData,
     device: Arc<Device>,
     pool: vk::CommandPool,
+    /// If GL can import the device's memory.
+    memory_objects: Option<MemoryObjects>,
     /// From [GraphicsBackend::swapchain_created], for the images stored next.
     created: Option<Created>,
     swapchain: Swapchain,
@@ -556,10 +802,15 @@ impl GlBridgeData {
         }
         .inspect_err(|e| log::error!("Failed to create command pool: {e}"))
         .ok()?;
+        let memory_objects = MemoryObjects::load(&gl, &device.vk);
+        if memory_objects.is_some() {
+            log::info!("Copying OpenGL frames through memory shared with the runtime's GPU");
+        }
         Some(Self {
             gl,
             device,
             pool,
+            memory_objects,
             created: None,
             swapchain: Default::default(),
         })
@@ -665,7 +916,11 @@ impl GlBridgeData {
                     format.read,
                     slot.pbo,
                 );
-                let sync = gl::FenceSync(gl::SYNC_GPU_COMMANDS_COMPLETE, 0);
+                let sync = if slot.semaphore == vk::Semaphore::null() {
+                    gl::FenceSync(gl::SYNC_GPU_COMMANDS_COMPLETE, 0)
+                } else {
+                    ptr::null()
+                };
                 gl::Flush();
                 slot.pending = Some(Pending {
                     sync,
@@ -704,18 +959,20 @@ impl GlBridgeData {
         let Some(pending) = slot.pending.take() else {
             return;
         };
-        let status = unsafe {
-            let status =
-                gl::ClientWaitSync(pending.sync, gl::SYNC_FLUSH_COMMANDS_BIT, COPY_TIMEOUT_NS);
-            gl::DeleteSync(pending.sync);
-            status
-        };
-        if status != gl::ALREADY_SIGNALED && status != gl::CONDITION_SATISFIED {
-            crate::warn_once!(
-                "Reading an OpenGL frame failed or timed out ({:#x})",
+        if !pending.sync.is_null() {
+            let status = unsafe {
+                let status =
+                    gl::ClientWaitSync(pending.sync, gl::SYNC_FLUSH_COMMANDS_BIT, COPY_TIMEOUT_NS);
+                gl::DeleteSync(pending.sync);
                 status
-            );
-            return;
+            };
+            if status != gl::ALREADY_SIGNALED && status != gl::CONDITION_SATISFIED {
+                crate::warn_once!(
+                    "Reading an OpenGL frame failed or timed out ({:#x})",
+                    status
+                );
+                return;
+            }
         }
 
         let extent = pending.extent;
@@ -742,6 +999,35 @@ impl GlBridgeData {
             image: pending.image,
             subresource_range: range,
             ..Default::default()
+        };
+        // GL writes shared memory like another queue family, which the copy takes it over from.
+        let ownership = |src_access, dst_access, src_family, dst_family| vk::BufferMemoryBarrier {
+            src_access_mask: src_access,
+            dst_access_mask: dst_access,
+            src_queue_family_index: src_family,
+            dst_queue_family_index: dst_family,
+            buffer: slot.buffer,
+            offset: 0,
+            size: vk::WHOLE_SIZE,
+            ..Default::default()
+        };
+        let family = self.device.vk.queue_family_index;
+        let acquire = [ownership(
+            vk::AccessFlags::empty(),
+            vk::AccessFlags::TRANSFER_READ,
+            vk::QUEUE_FAMILY_EXTERNAL,
+            family,
+        )];
+        let release = [ownership(
+            vk::AccessFlags::TRANSFER_READ,
+            vk::AccessFlags::empty(),
+            family,
+            vk::QUEUE_FAMILY_EXTERNAL,
+        )];
+        let (acquire, release): (&[_], &[_]) = if slot.shared.is_some() {
+            (&acquire, &release)
+        } else {
+            (&[], &[])
         };
         let region = vk::BufferImageCopy {
             buffer_offset: 0,
@@ -772,6 +1058,18 @@ impl GlBridgeData {
                     )
                 })
                 .and_then(|()| {
+                    if !acquire.is_empty() {
+                        // After the semaphore wait, which blocks transfers.
+                        device.cmd_pipeline_barrier(
+                            slot.cmd,
+                            vk::PipelineStageFlags::TRANSFER,
+                            vk::PipelineStageFlags::TRANSFER,
+                            vk::DependencyFlags::empty(),
+                            &[],
+                            acquire,
+                            &[],
+                        );
+                    }
                     device.cmd_pipeline_barrier(
                         slot.cmd,
                         vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
@@ -799,7 +1097,7 @@ impl GlBridgeData {
                         vk::PipelineStageFlags::BOTTOM_OF_PIPE,
                         vk::DependencyFlags::empty(),
                         &[],
-                        &[],
+                        release,
                         &[barrier(
                             vk::AccessFlags::TRANSFER_WRITE,
                             vk::AccessFlags::empty(),
@@ -816,18 +1114,33 @@ impl GlBridgeData {
             return;
         }
 
+        // GL signals once it's done with the read, every signal is waited for once.
+        let waits: &[_] = match slot.shared.and_then(|shared| shared.semaphores) {
+            Some(semaphores) if slot.semaphore != vk::Semaphore::null() => unsafe {
+                (semaphores.signal)(slot.gl_semaphore, 1, &slot.pbo, 0, ptr::null(), ptr::null());
+                gl::Flush();
+                std::slice::from_ref(&slot.semaphore)
+            },
+            _ => &[],
+        };
+        let stages = [vk::PipelineStageFlags::TRANSFER];
+        let wait = vk::SubmitInfo::default()
+            .wait_semaphores(waits)
+            .wait_dst_stage_mask(&stages[..waits.len()]);
+
         // Host writes before the submit are visible to it, the memory is coherent.
         let _queue = self
             .device
             .queue
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let submit = vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&slot.cmd));
+        let submit = wait.command_buffers(std::slice::from_ref(&slot.cmd));
         if let Err(e) = unsafe { device.queue_submit(self.device.vk.queue, &[submit], slot.fence) }
         {
             crate::warn_once!("Failed to submit an upload to the runtime's GPU: {}", e);
-            // An empty submit signals the fence after earlier work, so the next wait ends.
-            let _ = unsafe { device.queue_submit(self.device.vk.queue, &[], slot.fence) };
+            // An empty submit signals the fence after earlier work, so the next wait ends, and
+            // still takes GL's signal.
+            let _ = unsafe { device.queue_submit(self.device.vk.queue, &[wait], slot.fence) };
         }
     }
 }
@@ -944,7 +1257,15 @@ impl GraphicsBackend for GlBridgeData {
             * vk::DeviceSize::from(info.height)
             * vk::DeviceSize::from(format.size);
         let slots: Result<Vec<_>, String> = (0..layers)
-            .map(|_| Slot::new(&self.device.vk, self.pool, size).map(Mutex::new))
+            .map(|_| {
+                Slot::new(
+                    &self.device.vk,
+                    self.pool,
+                    size,
+                    self.memory_objects.as_ref(),
+                )
+                .map(Mutex::new)
+            })
             .collect();
         let slots = match slots {
             Ok(slots) => slots,

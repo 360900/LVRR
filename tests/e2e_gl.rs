@@ -4,7 +4,8 @@
 //! the runtime shows whether the frames arrive the right way up. `XRIZER_E2E_GL_RENDERER` picks
 //! the GPU by a part of its GL_RENDERER string, e.g. another one than the runtime's to test
 //! copying frames between GPUs. `XRIZER_E2E_GL_FRAMES` sets how many frames are submitted and
-//! `XRIZER_E2E_GL_SIZE` (e.g. `2064x2162`) the size of the eye textures.
+//! `XRIZER_E2E_GL_SIZE` (e.g. `2064x2162`) the size of the eye textures. `XRIZER_E2E_GL_NO_ERROR=1`
+//! makes the context a no-error one, like Sodium's, which runtimes can't share.
 //!
 //! ```sh
 //! XRIZER_E2E=1 XR_RUNTIME_JSON=... XRIZER_E2E_GL_RENDERER=Intel cargo test --test e2e_gl -- --nocapture
@@ -35,6 +36,7 @@ const EGL_CONTEXT_MAJOR_VERSION: i32 = 0x3098;
 const EGL_CONTEXT_MINOR_VERSION: i32 = 0x30FB;
 const EGL_CONTEXT_OPENGL_PROFILE_MASK: i32 = 0x30FD;
 const EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT: i32 = 0x1;
+const EGL_CONTEXT_OPENGL_NO_ERROR_KHR: i32 = 0x31B3;
 
 struct Egl {
     _lib: Library,
@@ -43,7 +45,7 @@ struct Egl {
 impl Egl {
     /// Makes a surfaceless GL 4.5 context current on the first device whose renderer contains
     /// `renderer`.
-    fn current_context(renderer: Option<&str>) -> Self {
+    fn current_context(renderer: Option<&str>, no_error: bool) -> Self {
         unsafe {
             let lib = Library::new("libEGL.so.1").expect("libEGL not found");
             let get_proc_address: unsafe extern "C" fn(*const c_char) -> *const c_void =
@@ -106,15 +108,18 @@ impl Egl {
                 {
                     config = null_mut();
                 }
-                let attribs = [
+                let mut attribs = vec![
                     EGL_CONTEXT_MAJOR_VERSION,
                     4,
                     EGL_CONTEXT_MINOR_VERSION,
                     5,
                     EGL_CONTEXT_OPENGL_PROFILE_MASK,
                     EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
-                    EGL_NONE,
                 ];
+                if no_error {
+                    attribs.extend([EGL_CONTEXT_OPENGL_NO_ERROR_KHR, 1]);
+                }
+                attribs.push(EGL_NONE);
                 let context = create_context(display, config, null_mut(), attribs.as_ptr());
                 if context.is_null() || make_current(display, null_mut(), null_mut(), context) == 0
                 {
@@ -173,7 +178,8 @@ fn gl_scene_app() {
         .ok()
         .and_then(|f| f.parse().ok())
         .unwrap_or(120);
-    let _egl = Egl::current_context(renderer.as_deref());
+    let no_error = std::env::var_os("XRIZER_E2E_GL_NO_ERROR").is_some_and(|v| v == "1");
+    let _egl = Egl::current_context(renderer.as_deref(), no_error);
 
     let path = test_cdylib::build_current_project();
     let lib = unsafe { Library::new(path) }.unwrap();

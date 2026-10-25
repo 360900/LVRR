@@ -520,6 +520,9 @@ impl GlData {
 
 const NUM_DEVICE_UUIDS_EXT: GLenum = 0x9596;
 const DEVICE_UUID_EXT: GLenum = 0x9597;
+const DRIVER_UUID_EXT: GLenum = 0x9598;
+/// GL_KHR_no_error
+const CONTEXT_FLAG_NO_ERROR_BIT: GLint = 0x8;
 
 /// Runtimes import their swapchain memory into the app's context, which can't work across GPUs
 /// (Monado based ones crash in xrCreateSwapchain), e.g. when a hybrid laptop runs the app on the
@@ -607,11 +610,45 @@ unsafe fn gl_device_uuids(session_info: &SessionCreateInfo) -> Option<Vec<[u8; 1
     }
 }
 
+/// The driver of the current context per GL_EXT_memory_object.
+unsafe fn gl_driver_uuid(session_info: &SessionCreateInfo) -> Option<[u8; 16]> {
+    type GetUnsignedBytev = unsafe extern "system" fn(GLenum, *mut u8);
+    unsafe {
+        let get = session_info.get_proc_address("glGetUnsignedBytevEXT");
+        if !has_gl_extension(c"GL_EXT_memory_object") || get.is_null() {
+            return None;
+        }
+        let get = std::mem::transmute::<*const c_void, GetUnsignedBytev>(get);
+        let mut uuid = [0; 16];
+        get(DRIVER_UUID_EXT, uuid.as_mut_ptr());
+        Some(uuid)
+    }
+}
+
 impl GlData {
     /// Whether the runtime can use swapchain images in this context directly, see
     /// [same_device_as_runtime].
     pub(crate) fn on_runtime_device(&self, instance: &xr::Instance) -> bool {
         same_device_as_runtime(instance, &self.session_info)
+    }
+
+    /// Whether the runtime can create a session with this context. For EGL ones, Monado based
+    /// runtimes create a context sharing with it, which EGL refuses for no-error contexts (e.g.
+    /// Sodium's) as theirs isn't one.
+    pub(crate) fn runtime_accepts_context(&self) -> bool {
+        if !matches!(self.session_info, SessionCreateInfo::Egl { .. }) {
+            return true;
+        }
+        let mut flags = 0;
+        unsafe { gl::GetIntegerv(gl::CONTEXT_FLAGS, &mut flags) };
+        let no_error = flags & CONTEXT_FLAG_NO_ERROR_BIT != 0;
+        if no_error {
+            crate::warn_once!(
+                "The app's EGL context is a no-error one, which the runtime can't share. \
+                 Copying frames through Vulkan instead."
+            );
+        }
+        !no_error
     }
 
     /// Starts reading the bottom-left `extent` of layer `layer` of swapchain image `image_index`

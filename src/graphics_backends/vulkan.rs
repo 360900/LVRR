@@ -83,6 +83,17 @@ pub struct VulkanData {
     /// The alignment of host memory the device can import, if it has VK_EXT_external_memory_host
     /// enabled.
     pub host_import_alignment: Option<vk::DeviceSize>,
+    /// Who can import the device's memory, if it can export buffer memory as opaque fds.
+    pub memory_export: Option<DeviceIds>,
+    /// Whether the device can export semaphores as opaque fds.
+    pub semaphore_export: bool,
+}
+
+/// Memory exported as an opaque fd can only be imported on the same device and driver.
+#[derive(Copy, Clone)]
+pub struct DeviceIds {
+    pub device_uuid: [u8; vk::UUID_SIZE],
+    pub driver_uuid: [u8; vk::UUID_SIZE],
 }
 
 /// A single sampled image the size of an eye texture, to resolve or reinterpret it in.
@@ -962,6 +973,8 @@ impl VulkanData {
             real_data: Default::default(),
             owns_device: false,
             host_import_alignment: None,
+            memory_export: None,
+            semaphore_export: false,
         }
     }
 
@@ -978,12 +991,13 @@ impl VulkanData {
         Self::try_new_temporary_with(xr_instance, system_id, false)
     }
 
-    /// Like [Self::try_new_temporary], with VK_EXT_external_memory_host if `host_import` and the
-    /// device has it.
+    /// Like [Self::try_new_temporary]. For the GL bridge (`bridge`), with
+    /// VK_EXT_external_memory_host if the device has it, [Self::memory_export] and
+    /// [Self::semaphore_export].
     pub fn try_new_temporary_with(
         xr_instance: &xr::Instance,
         system_id: xr::SystemId,
-        host_import: bool,
+        bridge: bool,
     ) -> Result<Self, String> {
         let entry = new_entry();
 
@@ -994,10 +1008,12 @@ impl VulkanData {
             .split_ascii_whitespace()
             .map(|ext| CString::new(ext).unwrap())
             .collect();
+        let has_inst_ext = |name: &CStr| inst_exts.iter().any(|ext| ext.as_c_str() == name);
         // The import alignment is only reported through vkGetPhysicalDeviceProperties2.
-        let has_properties2 = inst_exts
-            .iter()
-            .any(|ext| ext.as_c_str() == ash::khr::get_physical_device_properties2::NAME);
+        let has_properties2 = has_inst_ext(ash::khr::get_physical_device_properties2::NAME);
+        let has_memory_capabilities = has_inst_ext(ash::khr::external_memory_capabilities::NAME);
+        let has_semaphore_capabilities =
+            has_inst_ext(ash::khr::external_semaphore_capabilities::NAME);
         let inst_exts: Vec<*const c_char> = inst_exts.iter().map(|ext| ext.as_ptr()).collect();
 
         let instance = unsafe {
@@ -1015,17 +1031,28 @@ impl VulkanData {
                 .map_err(|e| format!("Failed to create temporary Vulkan instance: {e}"))?
         };
 
-        let (physical_device, queue_family_index, device, host_import) =
+        let (physical_device, queue_family_index, device, host_import, runtime_exts) =
             Self::create_temporary_device(
                 xr_instance,
                 system_id,
                 &instance,
-                host_import && has_properties2,
+                bridge && has_properties2,
             )
             .inspect_err(|_| {
                 unsafe { instance.destroy_instance(None) };
             })?;
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
+        let enabled = |name: &CStr| runtime_exts.iter().any(|ext| ext.as_c_str() == name);
+        let memory_export = (bridge
+            && has_properties2
+            && has_memory_capabilities
+            && enabled(ash::khr::external_memory_fd::NAME))
+        .then(|| exportable_buffer_ids(&entry, &instance, physical_device))
+        .flatten();
+        let semaphore_export = bridge
+            && has_semaphore_capabilities
+            && enabled(ash::khr::external_semaphore_fd::NAME)
+            && exportable_semaphores(&entry, &instance, physical_device);
         let host_import_alignment = host_import.then(|| {
             let mut host = vk::PhysicalDeviceExternalMemoryHostPropertiesEXT::default();
             let mut props = vk::PhysicalDeviceProperties2::default().push_next(&mut host);
@@ -1046,15 +1073,19 @@ impl VulkanData {
             real_data: Default::default(),
             owns_device: true,
             host_import_alignment,
+            memory_export,
+            semaphore_export,
         })
     }
 
+    /// Also returns whether VK_EXT_external_memory_host is enabled, and the runtime's extensions,
+    /// which are.
     fn create_temporary_device(
         xr_instance: &xr::Instance,
         system_id: xr::SystemId,
         instance: &ash::Instance,
         host_import: bool,
-    ) -> Result<(vk::PhysicalDevice, u32, ash::Device, bool), String> {
+    ) -> Result<(vk::PhysicalDevice, u32, ash::Device, bool, Vec<CString>), String> {
         let physical_device = vk::PhysicalDevice::from_raw(unsafe {
             xr_instance
                 .vulkan_graphics_device(system_id, instance.handle().as_raw() as _)
@@ -1097,9 +1128,9 @@ impl VulkanData {
             && dev_exts
                 .iter()
                 .any(|ext| ext.as_c_str() == ash::khr::external_memory::NAME);
-        let mut dev_exts: Vec<*const c_char> = dev_exts.iter().map(|ext| ext.as_ptr()).collect();
+        let mut names: Vec<*const c_char> = dev_exts.iter().map(|ext| ext.as_ptr()).collect();
         if host_import {
-            dev_exts.push(ash::ext::external_memory_host::NAME.as_ptr());
+            names.push(ash::ext::external_memory_host::NAME.as_ptr());
         }
 
         // find whatever graphics queue family
@@ -1119,14 +1150,81 @@ impl VulkanData {
                                 .queue_family_index(queue_family_index)
                                 .queue_priorities(&[1.0]),
                         ))
-                        .enabled_extension_names(&dev_exts),
+                        .enabled_extension_names(&names),
                     None,
                 )
                 .map_err(|e| format!("Could not create temporary vulkan device: {e}"))?
         };
 
-        Ok((physical_device, queue_family_index, device, host_import))
+        Ok((
+            physical_device,
+            queue_family_index,
+            device,
+            host_import,
+            dev_exts,
+        ))
     }
+}
+
+/// The IDs of `physical_device` if it can export memory of transfer source buffers as opaque fds.
+/// Needs VK_KHR_external_memory_capabilities and VK_KHR_get_physical_device_properties2.
+fn exportable_buffer_ids(
+    entry: &ash::Entry,
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+) -> Option<DeviceIds> {
+    let mut external = vk::ExternalBufferProperties::default();
+    unsafe {
+        (ash::khr::external_memory_capabilities::Instance::new(entry, instance)
+            .fp()
+            .get_physical_device_external_buffer_properties_khr)(
+            physical_device,
+            &vk::PhysicalDeviceExternalBufferInfo::default()
+                .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+                .handle_type(vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD),
+            &mut external,
+        )
+    };
+    let features = external.external_memory_properties.external_memory_features;
+    // Dedicated allocations would need GL to import them as such.
+    if !features.contains(vk::ExternalMemoryFeatureFlags::EXPORTABLE)
+        || features.contains(vk::ExternalMemoryFeatureFlags::DEDICATED_ONLY)
+    {
+        return None;
+    }
+    let mut id = vk::PhysicalDeviceIDProperties::default();
+    let mut props = vk::PhysicalDeviceProperties2::default().push_next(&mut id);
+    unsafe {
+        ash::khr::get_physical_device_properties2::Instance::new(entry, instance)
+            .get_physical_device_properties2(physical_device, &mut props)
+    };
+    Some(DeviceIds {
+        device_uuid: id.device_uuid,
+        driver_uuid: id.driver_uuid,
+    })
+}
+
+/// Whether `physical_device` can export binary semaphores as opaque fds. Needs
+/// VK_KHR_external_semaphore_capabilities.
+fn exportable_semaphores(
+    entry: &ash::Entry,
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+) -> bool {
+    let mut external = vk::ExternalSemaphoreProperties::default();
+    unsafe {
+        (ash::khr::external_semaphore_capabilities::Instance::new(entry, instance)
+            .fp()
+            .get_physical_device_external_semaphore_properties_khr)(
+            physical_device,
+            &vk::PhysicalDeviceExternalSemaphoreInfo::default()
+                .handle_type(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD),
+            &mut external,
+        )
+    };
+    external
+        .external_semaphore_features
+        .contains(vk::ExternalSemaphoreFeatureFlags::EXPORTABLE)
 }
 
 /// UUID of the device the runtime renders on, which the images it shares with other APIs live on.

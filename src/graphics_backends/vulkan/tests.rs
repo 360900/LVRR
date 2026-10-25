@@ -722,6 +722,8 @@ fn fake_vulkan() -> VulkanData {
         real_data: None,
         owns_device: false,
         host_import_alignment: None,
+        memory_export: None,
+        semaphore_export: false,
     }
 }
 

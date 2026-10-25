@@ -200,7 +200,7 @@ impl SupportedBackend {
             }
             vr::ETextureType::OpenGL => {
                 let gl = GlData::new(instance)?;
-                if gl.on_runtime_device(instance) {
+                if gl.on_runtime_device(instance) && gl.runtime_accepts_context() {
                     Some(Self::OpenGL(gl))
                 } else {
                     GlBridgeData::new(gl, instance).map(Self::GlBridge)
