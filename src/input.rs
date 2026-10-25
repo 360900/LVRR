@@ -2633,13 +2633,9 @@ impl<C: openxr_data::Compositor> Input<C> {
             }
         }
 
-        let devices = data.input_data.devices.read().unwrap();
-        let left_profile = devices
-            .get_controller(Hand::Left)
-            .map(|dev| dev.profile_path);
-        let right_profile = devices
-            .get_controller(Hand::Right)
-            .map(|dev| dev.profile_path);
+        // The bindings of the profiles just synced, which reads use. The devices only learn about
+        // a new profile from its event, after the app may have read its actions.
+        let [left_profile, right_profile] = hands.map(|(_, profile, _)| profile);
         for key in &actions.actions_with_custom_bindings {
             let unsync_custom_bindings = |key, profile| {
                 if profile == xr::Path::NULL {
@@ -2659,17 +2655,9 @@ impl<C: openxr_data::Compositor> Input<C> {
                 }
             };
 
-            match (left_profile, right_profile) {
-                (Some(profile), None) | (None, Some(profile)) => {
-                    unsync_custom_bindings(*key, profile)
-                }
-                (Some(left), Some(right)) => {
-                    unsync_custom_bindings(*key, left);
-                    if left != right {
-                        unsync_custom_bindings(*key, right);
-                    }
-                }
-                (None, None) => {}
+            unsync_custom_bindings(*key, left_profile);
+            if left_profile != right_profile {
+                unsync_custom_bindings(*key, right_profile);
             }
         }
 

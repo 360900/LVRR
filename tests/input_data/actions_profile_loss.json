@@ -1,0 +1,45 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/main",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/main/in/button",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/dpad",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/grab",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/toggle",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/pose",
+			"type": "pose"
+		},
+		{
+			"name": "/actions/main/in/skeleton_left",
+			"type": "skeleton",
+			"skeleton": "/skeleton/hand/left"
+		}
+	],
+	"default_bindings": [
+		{
+			"controller_type": "knuckles",
+			"binding_url": "knuckles_profile_loss.json"
+		},
+		{
+			"controller_type": "oculus_touch",
+			"binding_url": "oculus_profile_loss.json"
+		}
+	]
+}

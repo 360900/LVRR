@@ -1,0 +1,59 @@
+{
+	"bindings": {
+		"/actions/main": {
+			"sources": [
+				{
+					"mode": "button",
+					"path": "/user/hand/left/input/x",
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/button"
+						}
+					}
+				},
+				{
+					"mode": "dpad",
+					"path": "/user/hand/left/input/joystick",
+					"inputs": {
+						"north": {
+							"output": "/actions/main/in/dpad"
+						}
+					},
+					"parameters": {
+						"sub_mode": "click"
+					}
+				},
+				{
+					"mode": "grab",
+					"path": "/user/hand/left/input/grip",
+					"inputs": {
+						"grab": {
+							"output": "/actions/main/in/grab"
+						}
+					}
+				},
+				{
+					"mode": "toggle_button",
+					"path": "/user/hand/left/input/y",
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/toggle"
+						}
+					}
+				}
+			],
+			"poses": [
+				{
+					"output": "/actions/main/in/pose",
+					"path": "/user/hand/left/pose/raw"
+				}
+			],
+			"skeleton": [
+				{
+					"output": "/actions/main/in/skeleton_left",
+					"path": "/user/hand/left/input/skeleton/left"
+				}
+			]
+		}
+	}
+}
