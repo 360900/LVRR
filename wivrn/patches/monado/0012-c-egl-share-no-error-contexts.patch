@@ -1,0 +1,78 @@
+From b7efe1361c8762bd3772a2703a0d76d39f7f2631 Mon Sep 17 00:00:00 2001
+From: 360900 <ziyad.koca@hotmail.com>
+Date: Sun, 25 Oct 2026 16:11:59 +0300
+Subject: [PATCH] c/egl: share no-error contexts
+
+Apps that create their context with EGL_CONTEXT_OPENGL_NO_ERROR_KHR,
+such as SDL3 apps asking for SDL_GL_CONTEXT_NO_ERROR, could not create
+a session: a no-error context only shares with no-error contexts, so
+every try failed with EGL_BAD_MATCH.
+---
+ src/xrt/compositor/client/comp_egl_client.c | 23 ++++++++++++++++++++-
+ 1 file changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/src/xrt/compositor/client/comp_egl_client.c b/src/xrt/compositor/client/comp_egl_client.c
+index f4b024b78..12b13e773 100644
+--- a/src/xrt/compositor/client/comp_egl_client.c
++++ b/src/xrt/compositor/client/comp_egl_client.c
+@@ -42,6 +42,11 @@
+ 
+ static enum u_logging_level log_level;
+ 
++// From EGL_KHR_create_context_no_error, missing from the glad header
++#ifndef EGL_CONTEXT_OPENGL_NO_ERROR_KHR
++#define EGL_CONTEXT_OPENGL_NO_ERROR_KHR 0x31B3
++#endif
++
+ #define EGL_TRACE(...) U_LOG_IFL_T(log_level, __VA_ARGS__)
+ #define EGL_DEBUG(...) U_LOG_IFL_D(log_level, __VA_ARGS__)
+ #define EGL_INFO(...) U_LOG_IFL_I(log_level, __VA_ARGS__)
+@@ -208,6 +213,7 @@ struct egl_attrs
+ 	bool compat_profile; // Only for desktop OpenGL
+ 	bool robust;
+ 	bool lose_context_on_reset;
++	bool no_error;
+ 	EGLint image_prio;
+ };
+ 
+@@ -269,6 +275,10 @@ make_egl_attrs(EGLint *attrs, size_t len, const struct egl_attrs *params)
+ 		ADD_PAIR(EGL_CONTEXT_PRIORITY_LEVEL_IMG, params->image_prio);
+ 	}
+ 
++	if (params->no_error) {
++		ADD_PAIR(EGL_CONTEXT_OPENGL_NO_ERROR_KHR, EGL_TRUE);
++	}
++
+ 	ADD_ATTR(EGL_NONE);
+ 
+ #undef ADD_ATTR
+@@ -327,7 +337,7 @@ create_context(
+ 	}
+ 
+ 	const size_t attrs_len = 21;
+-	EGLint attrs[4][attrs_len];
++	EGLint attrs[5][attrs_len];
+ 	int attrc = 0;
+ 
+ 	struct egl_attrs build_attrs = {
+@@ -387,6 +397,17 @@ create_context(
+ 		}
+ 	}
+ 
++	/* A no-error context only shares with no-error contexts, and no-error
++	 * excludes robust access, so try it last, as SDL3 apps may ask for it. */
++	if (has_extension(eglQueryString(display, EGL_EXTENSIONS), "EGL_KHR_create_context_no_error")) {
++		build_attrs.robust = false;
++		build_attrs.lose_context_on_reset = (reset_strategy == EGL_LOSE_CONTEXT_ON_RESET);
++		build_attrs.no_error = true;
++		if (make_egl_attrs(attrs[attrc++], attrs_len, &build_attrs) == -1) {
++			return XRT_ERROR_OPENGL;
++		}
++	}
++
+ 	assert((unsigned)attrc <= ARRAY_SIZE(attrs));
+ 
+ 	EGLContext our_context = EGL_NO_CONTEXT;
+-- 
+2.56.0
+
