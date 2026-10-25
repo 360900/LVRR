@@ -35,6 +35,7 @@
 #include "boost/pfr/core.hpp"
 #include "decoder/shard_accumulator.h"
 #include "inplace_vector.hpp"
+#include "lvrr.h"
 #include "spdlog/spdlog.h"
 #include "utils/named_thread.h"
 #include "utils/ranges.h"
@@ -1195,7 +1196,9 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		accumulate_metrics(frame_state.predictedDisplayTime, current_blit_handles, timestamps);
 		lvrr_stats(frame_state.predictedDisplayTime);
 
-		draw_gui(frame_state.predictedDisplayTime, frame_state.predictedDisplayPeriod);
+		// LVRR: no in-stream window or toasts, the dashboard shows them
+		if constexpr (lvrr::stock_ui)
+			draw_gui(frame_state.predictedDisplayTime, frame_state.predictedDisplayPeriod);
 
 		try
 		{
@@ -1248,7 +1251,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 
 	read_actions();
 
-	if (application::get_config().enable_stream_gui)
+	if (lvrr::stock_ui and application::get_config().enable_stream_gui)
 	{
 		XrActionStateGetInfo get_info{
 		        .type = XR_TYPE_ACTION_STATE_GET_INFO,

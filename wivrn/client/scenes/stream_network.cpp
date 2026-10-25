@@ -20,6 +20,7 @@
 #include "stream.h"
 
 #include "application.h"
+#include "lvrr.h"
 #include "utils/i18n.h"
 #include "utils/named_thread.h"
 
@@ -126,7 +127,9 @@ void scenes::stream::operator()(to_headset::refresh_rate_change && rate)
 
 void scenes::stream::operator()(to_headset::stream_tab_change && tab)
 {
-	next_gui_status = tab.tab;
+	// LVRR: there is no in-stream window to switch to
+	if constexpr (lvrr::stock_ui)
+		next_gui_status = tab.tab;
 }
 
 void scenes::stream::operator()(to_headset::timesync_query && query)

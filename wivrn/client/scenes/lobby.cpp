@@ -25,6 +25,7 @@
 #include "glm/geometric.hpp"
 #include "hand_model.h"
 #include "imgui.h"
+#include "lvrr.h"
 #include "openxr/openxr.h"
 #include "protocol_version.h"
 #include "render/animation.h"
@@ -172,7 +173,7 @@ scenes::lobby::lobby() :
 
 	apply_theme_settings();
 
-	if (config.first_run)
+	if (lvrr::stock_ui and config.first_run)
 		current_tab = tab::first_run;
 
 	const auto keypair_path = application::get_config_path() / "private_key.pem";
@@ -425,6 +426,7 @@ void scenes::lobby::update_server_list()
 void scenes::lobby::connect(const configuration::server_data & data)
 {
 	server_name = data.service.name;
+	lvrr_server = data;
 	async_error.reset();
 
 	async_session = utils::async<std::unique_ptr<wivrn_session>, std::string>(
@@ -873,7 +875,10 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 		{
 			auto session = async_session.get();
 			if (session)
+			{
 				next_scene = stream::create(std::move(session), 1'000'000'000.f / frame_state.predictedDisplayPeriod, server_name, *this);
+				lvrr_connected();
+			}
 
 			async_session.reset();
 		}
@@ -881,7 +886,9 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 		{
 			spdlog::error("Error connecting to server: {}", e.what());
 			async_session.cancel();
-			async_error = e.what();
+			// LVRR: retried silently while the server restarts the session
+			if (not lvrr_connect_failed())
+				async_error = e.what();
 		}
 	}
 
@@ -898,7 +905,9 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 				break;
 
 			case scenes::stream::state::shutdown:
-				current_tab = tab::server_list;
+				// LVRR: reconnects silently when the server restarts the session
+				if (not lvrr_stream_ended())
+					current_tab = tab::server_list;
 				break;
 
 			default:
@@ -907,6 +916,7 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 	}
 
 	update_server_list();
+	lvrr_tick();
 
 	imgui_ctx->set_current();
 	if (!async_session.valid() && !next_scene && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup))
@@ -1368,6 +1378,7 @@ void scenes::lobby::on_focused()
 
 	std::ranges::sort(local_environments, std::less{});
 
+	lvrr_focused();
 	setup_passthrough();
 	discover.emplace();
 

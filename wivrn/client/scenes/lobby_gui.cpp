@@ -24,6 +24,7 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "lobby.h"
+#include "lvrr.h"
 #include "render/ui_theme.h"
 #include "render/ui_widgets.h"
 #include "scenes/stream.h" // IWYU pragma: keep
@@ -237,6 +238,12 @@ void scenes::lobby::gui_enter_pin(locked_notifiable<pin_request_data> & pin_requ
 
 void scenes::lobby::gui_connected(XrTime predicted_display_time)
 {
+	if constexpr (not lvrr::stock_ui)
+	{
+		lvrr_gui_waiting();
+		return;
+	}
+
 	assert(next_scene);
 
 	if (next_scene->apps.draw_gui(*imgui_ctx, _("Disconnect")) == app_launcher::Cancel)
@@ -912,6 +919,7 @@ void scenes::lobby::gui_licenses()
 	const auto & t = ui::current();
 
 	ui::page_header(_S("Licenses"), _S("Open-source components bundled with LVRR."));
+	lvrr_gui_version();
 
 	// Components shipping a license file, probed once
 	static const std::vector<std::string> components = [] {
@@ -1123,6 +1131,9 @@ std::vector<std::pair<int, XrCompositionLayerQuad>> scenes::lobby::draw_gui(XrTi
 
 		// feature toggle slot: reads its state, toggles on click
 		auto toggle_item = [&](const char * icon, const std::string & label, feature f) {
+			// LVRR: features are set from the dashboard
+			if constexpr (not lvrr::stock_ui)
+				return;
 			top_items.push_back({side, [icon, label, f] {
 				                     const float s = ImGui::GetFrameHeight() * wivrn::ui::metrics::control_height;
 				                     auto & config = application::get_config();
@@ -1245,7 +1256,10 @@ std::vector<std::pair<int, XrCompositionLayerQuad>> scenes::lobby::draw_gui(XrTi
 		ImGui::EndChild();
 		ImGui::PopStyleVar(2); // ImGuiStyleVar_FrameRounding, ImGuiStyleVar_WindowPadding
 
-		wivrn::ui::begin_sidebar(TopBarH, TabWidth, 3);
+		wivrn::ui::begin_sidebar(TopBarH, TabWidth, lvrr::stock_ui ? 3 : 2);
+		if constexpr (not lvrr::stock_ui)
+			lvrr_gui_sidebar();
+		else
 		{
 			if (wivrn::ui::nav_item(ICON_FA_COMPUTER, _cS("tab label", "Computers"), current_tab == tab::server_list))
 				current_tab = tab::server_list;

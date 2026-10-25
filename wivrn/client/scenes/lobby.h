@@ -33,6 +33,7 @@
 #include <vulkan/vulkan_raii.hpp>
 #include <openxr/openxr.h>
 
+#include <chrono>
 #include <compare>
 #include <optional>
 #include <uni_algo/case.h>
@@ -262,6 +263,20 @@ class lobby : public scene_impl<lobby>
 	std::optional<glm::vec3> check_recenter_gui(glm::vec3 head_position, glm::quat head_orientation);
 
 	crypto::key keypair;
+
+	// LVRR, see lobby_lvrr.cpp
+	std::optional<configuration::server_data> lvrr_server; // last server connected to
+	std::chrono::steady_clock::time_point lvrr_reconnect_until{};
+	std::chrono::steady_clock::time_point lvrr_retry_at{};
+	void lvrr_focused();
+	void lvrr_connected();
+	bool lvrr_connect_failed();
+	bool lvrr_stream_ended();
+	void lvrr_tick();
+	void lvrr_disconnect();
+	void lvrr_gui_waiting();
+	void lvrr_gui_sidebar();
+	void lvrr_gui_version();
 
 public:
 	virtual ~lobby();
