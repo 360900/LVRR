@@ -36,18 +36,39 @@ use std::time::Duration;
 pub struct Bindings {
     #[serde(deserialize_with = "lenient_sets")]
     pub bindings: HashMap<String, ActionSetBinding>,
-    /// `options.variant`, e.g. "singlecontroller" in Half-Life: Alyx's single controller
-    /// bindings, which games read with GetBindingVariant.
-    #[serde(default, rename = "options", deserialize_with = "variant_option")]
-    pub variant: Option<String>,
+    #[serde(default, deserialize_with = "binding_options")]
+    pub options: BindingOptions,
 }
 
-fn variant_option<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+/// The `options` of a bindings file that xrizer uses.
+#[derive(Clone, Default)]
+pub struct BindingOptions {
+    /// `variant`, e.g. "singlecontroller" in Half-Life: Alyx's single controller bindings, which
+    /// games read with GetBindingVariant.
+    pub variant: Option<String>,
+    /// `mirror_actions` of legacy bindings: both hands drive the actions of
+    /// /actions/legacy_mirrored, rather than their own of /actions/legacy.
+    pub mirror_actions: bool,
+    /// `simulated_controller_type`: the controller type apps are shown instead of the real one.
+    pub simulated_controller_type: Option<String>,
+}
+
+fn binding_options<'de, D: serde::Deserializer<'de>>(d: D) -> Result<BindingOptions, D::Error> {
     let options = serde_json::Value::deserialize(d)?;
-    Ok(options["variant"]
-        .as_str()
-        .filter(|variant| !variant.is_empty())
-        .map(str::to_owned))
+    let string = |name| {
+        options[name]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    Ok(BindingOptions {
+        variant: string("variant"),
+        // The binding UI saves a boolean; a string is accepted too.
+        mirror_actions: options["mirror_actions"].as_bool().unwrap_or(false)
+            || options["mirror_actions"].as_str() == Some("true"),
+        simulated_controller_type: string("simulated_controller_type")
+            .filter(|ty| !ty.eq_ignore_ascii_case("none")),
+    })
 }
 
 // SteamVR skips what it doesn't understand, so one odd entry (an unknown mode, a missing

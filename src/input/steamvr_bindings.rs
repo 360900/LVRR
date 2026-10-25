@@ -26,10 +26,12 @@ const MAX_ITEM_FILES: usize = 64;
 pub type Env<'a> = &'a dyn Fn(&str) -> Option<OsString>;
 
 /// The input API an app uses. SteamVR keeps a separate choice for each.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Category {
     /// Apps with an action manifest.
     SteamVrInput,
+    /// Apps without one, whose input goes through SteamVR's legacy action manifest.
+    Legacy,
 }
 
 impl Category {
@@ -37,6 +39,7 @@ impl Category {
     fn key_suffix(self) -> &'static str {
         match self {
             Self::SteamVrInput => "steamvrinput",
+            Self::Legacy => "legacy",
         }
     }
 
@@ -44,6 +47,7 @@ impl Category {
     fn file_category(self) -> &'static str {
         match self {
             Self::SteamVrInput => "steamvr_input",
+            Self::Legacy => "legacy",
         }
     }
 }
@@ -612,6 +616,10 @@ mod tests {
         assert_eq!(choice("knuckles_ev1"), Some("file:///ev1.json"));
         assert_eq!(choice("oculus_touch"), None);
         assert_eq!(choice("vive_controller"), None);
+        assert_eq!(
+            saved.choice("knuckles", Category::Legacy),
+            Some("file:///legacy.json")
+        );
     }
 
     /// SteamVR's config directory named in openvrpaths.vrpath, and a Workshop item with an older

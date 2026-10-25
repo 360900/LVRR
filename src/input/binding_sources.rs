@@ -66,11 +66,11 @@ impl BindingSources {
 
     fn custom_file(&self, controller_type: &ControllerType) -> Option<PathBuf> {
         let name = format!("{controller_type}.json");
-        let path = self
-            .dirs
-            .iter()
-            .map(|dir| dir.join(&name))
-            .find(|path| path.is_file())?;
+        // The custom bindings of an app that loads an action manifest after starting on legacy
+        // input aren't legacy bindings.
+        let path = self.dirs.iter().map(|dir| dir.join(&name)).find(|path| {
+            path.is_file() && (self.category != Category::Legacy || has_legacy_sets(path))
+        })?;
         crate::log_unique!(
             log::Level::Info,
             "Using custom {controller_type} bindings: {}",
@@ -103,6 +103,24 @@ impl BindingChoices {
             .iter()
             .any(|(controller_type, file)| sources.file_for(controller_type) != *file)
     }
+}
+
+/// Whether the bindings file at `path` has bindings for SteamVR's legacy action sets.
+fn has_legacy_sets(path: &Path) -> bool {
+    let Ok(data) = std::fs::read(path) else {
+        return false;
+    };
+    let Ok(serde_json::Value::Object(file)) = serde_json::from_slice(&data) else {
+        return false;
+    };
+    file.get("bindings")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|sets| {
+            sets.keys().any(|set| {
+                set.eq_ignore_ascii_case("/actions/legacy")
+                    || set.eq_ignore_ascii_case("/actions/legacy_mirrored")
+            })
+        })
 }
 
 /// The bindings the user chose for this app in SteamVR, unless XRIZER_STEAMVR_BINDINGS=0.

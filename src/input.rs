@@ -31,7 +31,7 @@ use crate::{
 use binding_sources::BindingChoices;
 use custom_bindings::{BoolBindingData, ScalarConstantBinding, Vector2ActionData};
 use glam::Quat;
-use legacy::LegacyActionData;
+use legacy::{LegacyActionData, RemappedLegacy};
 use log::{debug, info, trace, warn};
 use openvr as vr;
 use openxr as xr;
@@ -1018,6 +1018,15 @@ impl InputSessionData {
             .then_some(mask)
     }
 
+    /// Whether legacy input is set up, with the fixed mapping or with chosen bindings.
+    fn has_legacy_actions(&self) -> bool {
+        match self.actions.get() {
+            Some(LoadedActions::Legacy(..)) => true,
+            Some(LoadedActions::Manifest(loaded)) => loaded.legacy.is_some(),
+            None => false,
+        }
+    }
+
     #[inline]
     fn get_loaded_actions(&self) -> Option<&ManifestLoadedActions> {
         match self.actions.get()? {
@@ -1028,7 +1037,7 @@ impl InputSessionData {
     #[inline]
     fn get_legacy_actions(&self) -> Option<&LegacyActionData> {
         match self.actions.get()? {
-            LoadedActions::Legacy(l) => Some(l),
+            LoadedActions::Legacy(l, _) => Some(l),
             _ => None,
         }
     }
@@ -1301,13 +1310,11 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         vr::EVRInputError::None
     }
     fn IsUsingLegacyInput(&self) -> bool {
-        return self
-            .openxr
+        self.openxr
             .session_data
             .get()
             .input_data
-            .get_legacy_actions()
-            .is_some();
+            .has_legacy_actions()
     }
     fn GetComponentStateForBinding(
         &self,
@@ -2502,6 +2509,9 @@ impl<C: openxr_data::Compositor> Input<C> {
             sync_sets.push(xr::ActiveActionSet::new(&data.input_data.pose_data.set));
             sync_sets.push(xr::ActiveActionSet::new(&skeletal_input.set));
             sync_sets.push(xr::ActiveActionSet::new(&actions.haptic_set));
+            if let Some(legacy) = &actions.legacy {
+                sync_sets.push(xr::ActiveActionSet::new(legacy.fixed_set()));
+            }
             self.legacy_state.on_action_sync();
         }
 
@@ -2657,7 +2667,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         let _setup = self.action_setup.lock().unwrap();
         // We need to restart the session if the legacy actions have already been attached.
         let mut data = self.openxr.session_data.get();
-        if data.input_data.get_legacy_actions().is_some() {
+        if data.input_data.has_legacy_actions() {
             // GL runtimes make the app's context current to destroy the session's swapchains,
             // which fails while the app has it current on another thread.
             if defer && !data.comp_data.is_context_current() {
@@ -3421,6 +3431,12 @@ impl<C: openxr_data::Compositor> Input<C> {
 
         let input_data = &data.input_data;
         if let Some(loaded) = input_data.get_loaded_actions() {
+            if let Some(remap) = &loaded.legacy {
+                // Syncing reads the devices.
+                drop(devices);
+                self.update_remapped_legacy_state(&data, loaded, remap);
+                return;
+            }
             loaded
                 .pending_vibrations
                 .start_due(&data.session, |result| {
@@ -3566,7 +3582,8 @@ impl<C: openxr_data::Compositor> Input<C> {
 }
 
 enum LoadedActions {
-    Legacy(LegacyActionData),
+    /// With the legacy bindings files that could have replaced the fixed mapping.
+    Legacy(LegacyActionData, BindingChoices),
     Manifest(Box<ManifestLoadedActions>),
 }
 
@@ -3574,7 +3591,7 @@ impl LoadedActions {
     /// The files that replaced the app's own bindings.
     fn choices(&self) -> Option<&BindingChoices> {
         match self {
-            Self::Legacy(_) => None,
+            Self::Legacy(_, choices) => Some(choices),
             Self::Manifest(loaded) => Some(&loaded.binding_choices),
         }
     }
@@ -3607,6 +3624,9 @@ struct ManifestLoadedActions {
     binding_variants: HashMap<xr::Path, String>,
     /// The files that replaced the game's bindings.
     binding_choices: BindingChoices,
+    /// Set for SteamVR's legacy action manifest, which legacy input goes through when bindings
+    /// were chosen for it.
+    legacy: Option<Box<RemappedLegacy>>,
     /// The identity of the controller that converted bindings were made for, per interaction
     /// profile that shows it instead of its own, like SteamVR.
     simulated_properties: HashMap<xr::Path, &'static ProfileProperties>,

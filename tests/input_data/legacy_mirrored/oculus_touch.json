@@ -1,0 +1,73 @@
+{
+	"controller_type": "oculus_touch",
+	"category": "legacy",
+	"options": {
+		"mirror_actions": true,
+		"simulated_controller_type": "knuckles"
+	},
+	"bindings": {
+		"/actions/legacy": {
+			"sources": [
+				{
+					"mode": "button",
+					"path": "/user/hand/right/input/b",
+					"inputs": {
+						"click": {
+							"output": "/actions/legacy/in/right_system_press"
+						}
+					}
+				}
+			]
+		},
+		"/actions/legacy_mirrored": {
+			"sources": [
+				{
+					"mode": "trigger",
+					"path": "/user/hand/left/input/trigger",
+					"inputs": {
+						"pull": {
+							"output": "/actions/legacy_mirrored/in/axis1_value"
+						}
+					}
+				},
+				{
+					"mode": "trigger",
+					"path": "/user/hand/right/input/trigger",
+					"inputs": {
+						"pull": {
+							"output": "/actions/legacy_mirrored/in/axis1_value"
+						}
+					}
+				},
+				{
+					"mode": "button",
+					"path": "/user/hand/left/input/x",
+					"inputs": {
+						"click": {
+							"output": "/actions/legacy_mirrored/in/a_press"
+						}
+					}
+				},
+				{
+					"mode": "button",
+					"path": "/user/hand/right/input/a",
+					"inputs": {
+						"click": {
+							"output": "/actions/legacy_mirrored/in/a_press"
+						}
+					}
+				}
+			],
+			"haptics": [
+				{
+					"output": "/actions/legacy_mirrored/out/haptic",
+					"path": "/user/hand/left/output/haptic"
+				},
+				{
+					"output": "/actions/legacy_mirrored/out/haptic",
+					"path": "/user/hand/right/output/haptic"
+				}
+			]
+		}
+	}
+}

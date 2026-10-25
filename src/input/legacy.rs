@@ -1,16 +1,22 @@
-use super::{Input, PoseData, TrackedDeviceList, WriteOnDrop};
+use super::{
+    ActionData, ActionKey, ActionSetKey, Input, PoseData, TrackedDevice, TrackedDeviceList,
+    WriteOnDrop,
+};
 use crate::{
     input::{
         LoadedActions, ManifestLoadedActions,
+        action_manifest::legacy_actions::{self, LegacyOutput},
         devices::ProfileData,
         haptics::{self, Vibration},
         profiles::{self, RunWithProfile},
     },
-    openxr_data::{self, Hand},
+    openxr_data::{self, Hand, SessionData},
 };
 use log::{debug, trace, warn};
 use openvr as vr;
 use openxr as xr;
+use slotmap::Key;
+use std::collections::HashSet;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -69,43 +75,20 @@ impl<C: openxr_data::Compositor> Input<C> {
         );
         let input_data = &session_data.input_data;
 
-        profiles::run_for_all_profiles(&mut Runner {
-            openxr: &self.openxr,
-            input_data,
-            legacy: &legacy,
-        });
-
-        struct Runner<'a, C: openxr_data::Compositor> {
-            openxr: &'a super::OpenXrData<C>,
-            input_data: &'a super::InputSessionData,
-            legacy: &'a LegacyActionData,
-        }
-
-        impl<C: openxr_data::Compositor> RunWithProfile for Runner<'_, C> {
-            fn run<P: super::InteractionProfile>(&mut self) {
-                if !P::has_required_extensions(&self.openxr.enabled_extensions) {
-                    return;
-                }
-
-                let instance = &self.openxr.instance;
-                let conv = super::profiles::InputToXrPath::new(instance);
-                let bindings = P::legacy_bindings(&conv)
-                    .into_iter(&self.legacy.actions, &self.input_data.pose_data)
-                    .collect::<Vec<_>>();
-                // A runtime rejecting one profile shouldn't take down the others.
-                if let Err(e) = instance
-                    .string_to_path(P::profile_path())
-                    .and_then(|profile| {
-                        instance.suggest_interaction_profile_bindings(profile, &bindings)
-                    })
-                {
-                    warn!(
-                        "Couldn't suggest legacy bindings for {}, skipping it: {e}",
-                        P::profile_path()
-                    );
-                }
+        // Bindings chosen for the app go through SteamVR's legacy action manifest, like there.
+        let (chosen, choices) = self.chosen_legacy_bindings();
+        if !chosen.is_empty() {
+            match self.load_remapped_legacy(&session_data, legacy, chosen, choices) {
+                Ok(loaded) => input_data
+                    .actions
+                    .set(LoadedActions::Manifest(Box::new(loaded)))
+                    .unwrap_or_else(|_| panic!("Actions unexpectedly set up")),
+                Err(e) => warn!("Couldn't load the legacy bindings: {e:?}"),
             }
+            return;
         }
+
+        self.suggest_fixed_legacy_bindings(&legacy, input_data, &HashSet::new());
 
         let pose_set = &input_data.pose_data.set;
 
@@ -125,8 +108,57 @@ impl<C: openxr_data::Compositor> Input<C> {
 
         input_data
             .actions
-            .set(LoadedActions::Legacy(legacy))
+            .set(LoadedActions::Legacy(legacy, choices))
             .unwrap_or_else(|_| panic!("Actions unexpectedly set up"));
+    }
+
+    /// Suggests the fixed legacy bindings for every profile but those in `skip`.
+    pub(super) fn suggest_fixed_legacy_bindings(
+        &self,
+        legacy: &LegacyActionData,
+        input_data: &super::InputSessionData,
+        skip: &HashSet<xr::Path>,
+    ) {
+        profiles::run_for_all_profiles(&mut Runner {
+            openxr: &self.openxr,
+            input_data,
+            legacy,
+            skip,
+        });
+
+        struct Runner<'a, C: openxr_data::Compositor> {
+            openxr: &'a super::OpenXrData<C>,
+            input_data: &'a super::InputSessionData,
+            legacy: &'a LegacyActionData,
+            skip: &'a HashSet<xr::Path>,
+        }
+
+        impl<C: openxr_data::Compositor> RunWithProfile for Runner<'_, C> {
+            fn run<P: super::InteractionProfile>(&mut self) {
+                if !P::has_required_extensions(&self.openxr.enabled_extensions) {
+                    return;
+                }
+
+                let instance = &self.openxr.instance;
+                let Ok(profile) = instance.string_to_path(P::profile_path()) else {
+                    return;
+                };
+                if self.skip.contains(&profile) {
+                    return;
+                }
+                let conv = super::profiles::InputToXrPath::new(instance);
+                let bindings = P::legacy_bindings(&conv)
+                    .into_iter(&self.legacy.actions, &self.input_data.pose_data)
+                    .collect::<Vec<_>>();
+                // A runtime rejecting one profile shouldn't take down the others.
+                if let Err(e) = instance.suggest_interaction_profile_bindings(profile, &bindings) {
+                    warn!(
+                        "Couldn't suggest legacy bindings for {}, skipping it: {e}",
+                        P::profile_path()
+                    );
+                }
+            }
+        }
     }
 
     /// Every axis pulses the controller's one haptic: SteamVR's legacy input has a single haptic
@@ -150,8 +182,18 @@ impl<C: openxr_data::Compositor> Input<C> {
 
         let data = self.openxr.session_data.get();
         if let Some(manifest_actions) = data.input_data.get_loaded_actions() {
-            // Game provided action manifest but also calls the legacy action's pulse method.
-            self.legacy_haptic_via_manifest(&data.session, manifest_actions, hand_path, vibration);
+            match &manifest_actions.legacy {
+                Some(remap) => {
+                    self.remapped_legacy_haptic(&data, manifest_actions, remap, hand, vibration)
+                }
+                // Game provided action manifest but also calls the legacy action's pulse method.
+                None => self.legacy_haptic_via_manifest(
+                    &data.session,
+                    manifest_actions,
+                    hand_path,
+                    vibration,
+                ),
+            }
             return;
         }
 
@@ -163,6 +205,35 @@ impl<C: openxr_data::Compositor> Input<C> {
         if let Err(e) = haptics::apply(&data.session, &legacy.actions.haptic, hand_path, vibration)
         {
             warn!("Failed to trigger haptic: {e:?}");
+        }
+    }
+
+    /// Plays a legacy pulse on the hand's haptic outputs of the bindings chosen for its
+    /// controller, or on the fixed legacy haptic.
+    fn remapped_legacy_haptic(
+        &self,
+        data: &SessionData,
+        loaded: &ManifestLoadedActions,
+        remap: &RemappedLegacy,
+        hand: Hand,
+        vibration: Vibration,
+    ) {
+        let hand_path = self.get_subaction_path(hand);
+        let actions: Vec<&xr::Action<xr::Haptic>> = if remap.is_remapped(data, hand) {
+            remap
+                .keys(hand, |output| matches!(output, LegacyOutput::Haptic))
+                .filter_map(|key| match loaded.actions.get(key) {
+                    Some(ActionData::Haptic(action)) => Some(action),
+                    _ => None,
+                })
+                .collect()
+        } else {
+            vec![&remap.fixed.actions.haptic]
+        };
+        for action in actions {
+            if let Err(e) = haptics::apply(&data.session, action, hand_path, vibration) {
+                warn!("Failed to trigger haptic: {e:?}");
+            }
         }
     }
 
@@ -214,12 +285,16 @@ impl<C: openxr_data::Compositor> Input<C> {
             return false;
         }
         let data = self.openxr.session_data.get();
-        if data.input_data.get_loaded_actions().is_some() {
+        if data
+            .input_data
+            .get_loaded_actions()
+            .is_some_and(|loaded| loaded.legacy.is_none())
+        {
             debug!("not returning legacy controller state due to loaded actions");
             return false;
         }
 
-        if data.input_data.get_legacy_actions().is_none() {
+        if !data.input_data.has_legacy_actions() {
             debug!("tried getting controller state, but legacy actions aren't ready");
             return false;
         }
@@ -239,29 +314,80 @@ impl<C: openxr_data::Compositor> Input<C> {
         true
     }
 
-    /// Reads the legacy actions after they were synced and queues button events for every
-    /// change, so apps get them whether or not they poll GetControllerState.
+    /// Reads the fixed legacy actions after they were synced, see [Self::update_hand_states].
     pub(super) fn update_legacy_state(
         &self,
         session: &xr::Session<xr::AnyGraphics>,
         devices: &TrackedDeviceList,
         legacy: &LegacyActionData,
     ) {
-        let packet_num = self.legacy_state.packet_num.load(Ordering::Relaxed);
-        for hand in [Hand::Left, Hand::Right] {
-            let Some(device_index) = devices.get_controller_index(hand) else {
-                continue;
-            };
-            let mut hand_state = self.legacy_state.hands[hand as usize - 1].lock().unwrap();
-            let mut new = read_hand_state(
+        self.update_hand_states(devices, |hand, controller, previous| {
+            read_hand_state(
                 &legacy.actions,
                 session,
                 self.get_subaction_path(hand),
-                devices
-                    .get_controller(hand)
-                    .and_then(|controller| controller.profile_data.as_ref()),
-                &hand_state,
-            );
+                controller.profile_data.as_ref(),
+                previous,
+            )
+        });
+    }
+
+    /// Syncs the legacy actions of the bindings chosen for the app and updates the controller
+    /// state from them, see [Self::update_hand_states]. Controllers without chosen bindings read
+    /// the fixed legacy actions.
+    pub(super) fn update_remapped_legacy_state(
+        &self,
+        data: &SessionData,
+        loaded: &ManifestLoadedActions,
+        remap: &RemappedLegacy,
+    ) {
+        let sets: Vec<_> = remap
+            .sets
+            .iter()
+            .map(|set| vr::VRActiveActionSet_t {
+                ulActionSet: set.data().as_ffi(),
+                ulRestrictedToDevice: vr::k_ulInvalidInputValueHandle,
+                ulSecondaryActionSet: vr::k_ulInvalidActionSetHandle,
+                unPadding: 0,
+                nPriority: 0,
+            })
+            .collect();
+        if self.sync_action_sets(data, loaded, &sets) != vr::EVRInputError::None {
+            return;
+        }
+        let devices = data.input_data.devices.read().unwrap();
+        self.update_hand_states(&devices, |hand, controller, previous| {
+            if remap.profiles.contains(&controller.profile_path) {
+                remap.read_hand_state(self, hand)
+            } else {
+                read_hand_state(
+                    &remap.fixed.actions,
+                    &data.session,
+                    self.get_subaction_path(hand),
+                    controller.profile_data.as_ref(),
+                    previous,
+                )
+            }
+        });
+    }
+
+    /// Updates each controller's state with `read` and queues button events for every change, so
+    /// apps get them whether or not they poll GetControllerState.
+    fn update_hand_states(
+        &self,
+        devices: &TrackedDeviceList,
+        read: impl Fn(Hand, &TrackedDevice, &HandState) -> HandState,
+    ) {
+        let packet_num = self.legacy_state.packet_num.load(Ordering::Relaxed);
+        for hand in [Hand::Left, Hand::Right] {
+            let (Some(device_index), Some(controller)) = (
+                devices.get_controller_index(hand),
+                devices.get_controller(hand),
+            ) else {
+                continue;
+            };
+            let mut hand_state = self.legacy_state.hands[hand as usize - 1].lock().unwrap();
+            let mut new = read(hand, controller, &hand_state);
             new.state.unPacketNum = packet_num;
             let (old, new_state) = (&hand_state.state, &new.state);
 
@@ -273,7 +399,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                     data: vr::VREvent_Controller_t { button: id.0 },
                 });
             };
-            for id in LEGACY_BUTTONS {
+            for id in BUTTONS {
                 let mask = button_mask_from_id(id);
                 let touched = new_state.ulButtonTouched & mask != 0;
                 let pressed = new_state.ulButtonPressed & mask != 0;
@@ -304,14 +430,18 @@ impl<C: openxr_data::Compositor> Input<C> {
     }
 }
 
-/// The buttons the legacy actions can report, in the order their events are sent.
-const LEGACY_BUTTONS: [vr::EVRButtonId; 6] = [
+/// The buttons legacy input can report, in the order their events are sent. The fixed legacy
+/// actions only drive the first six.
+const BUTTONS: [vr::EVRButtonId; 9] = [
     vr::EVRButtonId::Axis0,
     vr::EVRButtonId::SteamVR_Trigger,
     vr::EVRButtonId::ApplicationMenu,
     vr::EVRButtonId::A,
     vr::EVRButtonId::Grip,
     vr::EVRButtonId::Axis2,
+    vr::EVRButtonId::Axis3,
+    vr::EVRButtonId::Axis4,
+    vr::EVRButtonId::System,
 ];
 
 /// Applies a threshold with hysteresis, like SteamVR's activate/deactivate thresholds.
@@ -528,6 +658,156 @@ pub(super) struct LegacyActionData {
     actions: LegacyActions,
 }
 
+/// Legacy input through the legacy action manifest, for controllers with bindings chosen for the
+/// app, see [Input::load_remapped_legacy].
+pub(super) struct RemappedLegacy {
+    /// The interaction profiles that got chosen bindings.
+    profiles: HashSet<xr::Path>,
+    /// What the other profiles are bound to.
+    fixed: LegacyActionData,
+    /// The legacy action sets.
+    sets: Vec<ActionSetKey>,
+    /// Per hand, what each action drives, with the keys of its own and its mirrored action.
+    hands: [Vec<(LegacyOutput, Vec<ActionKey>)>; 2],
+}
+
+impl RemappedLegacy {
+    pub fn new<C: openxr_data::Compositor>(
+        input: &Input<C>,
+        profiles: HashSet<xr::Path>,
+        fixed: LegacyActionData,
+    ) -> Self {
+        let action_map = input.action_map.read().unwrap();
+        let set_map = input.set_map.read().unwrap();
+        let action_key = |path: &str| {
+            action_map
+                .iter()
+                .find_map(|(key, action)| (action.path == path).then_some(key))
+        };
+        let hand = |hand| {
+            legacy_actions::HAND_ACTIONS
+                .iter()
+                .map(|(name, _, output)| {
+                    let keys = legacy_actions::action_paths(hand, name, *output)
+                        .iter()
+                        .filter_map(|path| action_key(path))
+                        .collect();
+                    (*output, keys)
+                })
+                .collect()
+        };
+        Self {
+            profiles,
+            fixed,
+            sets: legacy_actions::SETS
+                .iter()
+                .filter_map(|path| {
+                    set_map
+                        .iter()
+                        .find_map(|(key, set)| (set == path).then_some(key))
+                })
+                .collect(),
+            hands: [hand(Hand::Left), hand(Hand::Right)],
+        }
+    }
+
+    /// The set of the fixed legacy actions, synced with the legacy action sets.
+    pub fn fixed_set(&self) -> &xr::ActionSet {
+        &self.fixed.set
+    }
+
+    /// The keys of the actions of `hand` with outputs that `matches`.
+    fn keys(
+        &self,
+        hand: Hand,
+        matches: impl Fn(LegacyOutput) -> bool,
+    ) -> impl Iterator<Item = ActionKey> {
+        self.hands[hand as usize - 1]
+            .iter()
+            .filter(move |(output, _)| matches(*output))
+            .flat_map(|(_, keys)| keys.iter().copied())
+    }
+
+    /// Whether the controller of `hand` has chosen bindings.
+    fn is_remapped(&self, data: &SessionData, hand: Hand) -> bool {
+        let devices = data.input_data.devices.read().unwrap();
+        devices
+            .get_controller(hand)
+            .is_some_and(|controller| self.profiles.contains(&controller.profile_path))
+    }
+
+    /// The controller state of `hand` from the legacy actions, after they were synced.
+    fn read_hand_state<C: openxr_data::Compositor>(
+        &self,
+        input: &Input<C>,
+        hand: Hand,
+    ) -> HandState {
+        use vr::IVRInput011_Interface as _;
+        let restrict = match hand {
+            Hand::Left => input.left_hand_key,
+            Hand::Right => input.right_hand_key,
+        }
+        .data()
+        .as_ffi();
+        let mut state = vr::VRControllerState_t::default();
+        let (mut pressed, mut touched) = (0, 0);
+        for (output, keys) in &self.hands[hand as usize - 1] {
+            for key in keys {
+                let handle = key.data().as_ffi();
+                match *output {
+                    LegacyOutput::Press(id) | LegacyOutput::Touch(id) => {
+                        let mut data = vr::InputDigitalActionData_t::default();
+                        let read = input.GetDigitalActionData(
+                            handle,
+                            &mut data,
+                            std::mem::size_of_val(&data) as u32,
+                            restrict,
+                        );
+                        if read == vr::EVRInputError::None && data.bActive && data.bState {
+                            match output {
+                                LegacyOutput::Press(_) => pressed |= button_mask_from_id(id),
+                                _ => touched |= button_mask_from_id(id),
+                            }
+                        }
+                    }
+                    LegacyOutput::Axis(axis)
+                    | LegacyOutput::AxisX(axis)
+                    | LegacyOutput::AxisY(axis) => {
+                        let mut data = vr::InputAnalogActionData_t::default();
+                        let read = input.GetAnalogActionData(
+                            handle,
+                            &mut data,
+                            std::mem::size_of_val(&data) as u32,
+                            restrict,
+                        );
+                        if read != vr::EVRInputError::None || !data.bActive {
+                            continue;
+                        }
+                        match output {
+                            LegacyOutput::Axis(_) => {
+                                state.rAxis[axis] = vr::VRControllerAxis_t {
+                                    x: data.x,
+                                    y: data.y,
+                                }
+                            }
+                            LegacyOutput::AxisX(_) => state.rAxis[axis].x = data.x,
+                            _ => state.rAxis[axis].y = data.x,
+                        }
+                    }
+                    LegacyOutput::Pose | LegacyOutput::Haptic => {}
+                }
+            }
+        }
+        state.ulButtonPressed = pressed;
+        // A button can't be pressed without being touched.
+        state.ulButtonTouched = touched | pressed;
+        HandState {
+            state,
+            ..Default::default()
+        }
+    }
+}
+
 impl LegacyActionData {
     pub fn new(instance: &xr::Instance, left_hand: xr::Path, right_hand: xr::Path) -> Self {
         debug!("creating legacy actions");
@@ -604,6 +884,8 @@ mod tests {
     use crate::openxr_data::Hand;
     use openvr as vr;
     use openxr as xr;
+    use slotmap::KeyData;
+    use std::ffi::CStr;
 
     #[repr(C)]
     #[derive(Default)]
@@ -1655,5 +1937,327 @@ mod tests {
 
         // The suggestion would outlive legacy input and keep manifest bindings off hands.
         assert!(legacy_bindings_for::<VRLinkHand>(&f, |a| a.trigger.as_raw()).is_none());
+    }
+
+    /// Sets up legacy input with `L` and `R` controllers, with bindings chosen for the app.
+    fn remapped_fixture<L: InteractionProfile, R: InteractionProfile>(
+        bindings_dir: &str,
+    ) -> Fixture {
+        use crate::input::tests::{input_data, set_test_env};
+        use fakexr::UserPath::*;
+        set_test_env("XRIZER_CUSTOM_BINDINGS_DIR", &input_data(bindings_dir));
+        let mut f = Fixture::new();
+        f.input.openxr.restart_session().unwrap();
+        f.set_interaction_profile::<L>(LeftHand);
+        f.set_interaction_profile::<R>(RightHand);
+        f.input.frame_start_update();
+        f.input.openxr.poll_events();
+        while let Some(event) = next_event(&f) {
+            assert_eq!(event.ty, vr::EVREventType::TrackedDeviceActivated.0);
+        }
+        f
+    }
+
+    /// The OpenXR action of a legacy manifest action.
+    fn remapped_action(f: &Fixture, name: &CStr) -> xr::sys::Action {
+        let handle = f.get_action_handle(name);
+        let data = f.input.openxr.session_data.get();
+        let loaded = data.input_data.get_loaded_actions().unwrap();
+        assert!(loaded.legacy.is_some(), "legacy input isn't remapped");
+        match loaded.actions.get(KeyData::from_ffi(handle).into()) {
+            Some(super::ActionData::Bool(action)) => action.as_raw(),
+            Some(super::ActionData::Vector1 { action, .. }) => action.as_raw(),
+            Some(super::ActionData::Vector2 { action, .. }) => action.as_raw(),
+            Some(super::ActionData::Haptic(action)) => action.as_raw(),
+            _ => panic!("no action {name:?}"),
+        }
+    }
+
+    /// The fixed legacy actions that controllers without chosen bindings use.
+    fn fixed_action(
+        f: &Fixture,
+        get_action: impl FnOnce(&super::LegacyActions) -> xr::sys::Action,
+    ) -> xr::sys::Action {
+        let data = f.input.openxr.session_data.get();
+        let loaded = data.input_data.get_loaded_actions().unwrap();
+        get_action(&loaded.legacy.as_ref().unwrap().fixed.actions)
+    }
+
+    #[test]
+    fn remapped_buttons_and_axes() {
+        use fakexr::{ActionState::*, UserPath::*};
+        use vr::EVRButtonId as Button;
+        let f = remapped_fixture::<OculusTouch, OculusTouch>("legacy_custom");
+        // Names match in any case.
+        f.verify_bindings::<bool>(
+            OculusTouch::profile_path(),
+            c"/actions/legacy/in/Right_ApplicationMenu_Press",
+            ["/user/hand/right/input/a/click".into()],
+        );
+        f.verify_bindings::<bool>(
+            OculusTouch::profile_path(),
+            c"/actions/legacy/in/right_system_press",
+            ["/user/hand/right/input/b/click".into()],
+        );
+        let set =
+            |name, state, hand| fakexr::set_action_state(remapped_action(&f, name), state, hand);
+        set(
+            c"/actions/legacy/in/right_applicationmenu_press",
+            Bool(true),
+            RightHand,
+        );
+        set(
+            c"/actions/legacy/in/right_axis3_press",
+            Bool(true),
+            RightHand,
+        );
+        set(
+            c"/actions/legacy/in/right_axis1_value",
+            Float(0.7),
+            RightHand,
+        );
+        set(
+            c"/actions/legacy/in/right_axis0_value",
+            Vector2(0.5, -0.25),
+            RightHand,
+        );
+        set(
+            c"/actions/legacy/in/left_axis2_value2",
+            Vector2(0.1, 0.2),
+            LeftHand,
+        );
+        set(
+            c"/actions/legacy/in/left_axis4_value_e0",
+            Float(0.6),
+            LeftHand,
+        );
+        set(
+            c"/actions/legacy/in/left_axis4_value_e1",
+            Float(0.3),
+            LeftHand,
+        );
+        f.input.frame_start_update();
+
+        let right = get_state(&f, 2);
+        let pressed = super::button_mask_from_id(Button::ApplicationMenu)
+            | super::button_mask_from_id(Button::Axis3);
+        assert_eq!({ right.ulButtonPressed }, pressed);
+        assert_eq!({ right.ulButtonTouched }, pressed);
+        let axis = |state: &vr::VRControllerState_t, i: usize| {
+            let axes = state.rAxis;
+            (axes[i].x, axes[i].y)
+        };
+        assert_eq!(axis(&right, 0), (0.5, -0.25));
+        assert_eq!(axis(&right, 1), (0.7, 0.0));
+        let left = get_state(&f, 1);
+        assert_eq!({ left.ulButtonPressed }, 0);
+        assert_eq!(axis(&left, 2), (0.1, 0.2));
+        assert_eq!(axis(&left, 4), (0.6, 0.3));
+
+        for id in [Button::ApplicationMenu, Button::Axis3] {
+            expect_button_event(&f, vr::EVREventType::ButtonTouch, 2, id);
+            expect_button_event(&f, vr::EVREventType::ButtonPress, 2, id);
+        }
+        expect_no_event(&f);
+    }
+
+    /// Controllers without chosen bindings keep the fixed mapping.
+    #[test]
+    fn remapped_only_for_chosen_controllers() {
+        use fakexr::UserPath::*;
+        let f = remapped_fixture::<Knuckles, OculusTouch>("legacy_custom");
+        let trigger_click = fixed_action(&f, |actions| actions.trigger_click.as_raw());
+        assert!(fakexr::check_no_suggested_bindings(
+            trigger_click,
+            f.input
+                .openxr
+                .instance
+                .string_to_path(OculusTouch::profile_path())
+                .unwrap()
+        ));
+        fakexr::set_action_state(trigger_click, true.into(), LeftHand);
+        fakexr::set_action_state(trigger_click, true.into(), RightHand);
+        f.input.frame_start_update();
+
+        let trigger = super::button_mask_from_id(vr::EVRButtonId::SteamVR_Trigger);
+        assert_eq!({ get_state(&f, 1).ulButtonPressed }, trigger);
+        assert_eq!({ get_state(&f, 2).ulButtonPressed }, 0);
+    }
+
+    #[test]
+    fn remapped_haptics() {
+        let f = remapped_fixture::<OculusTouch, OculusTouch>("legacy_custom");
+        let left = remapped_action(&f, c"/actions/legacy/out/left_haptic");
+        let right = remapped_action(&f, c"/actions/legacy/out/right_haptic");
+        let fixed = fixed_action(&f, |actions| actions.haptic.as_raw());
+
+        f.input.legacy_haptic(1, 0, 3000);
+        let feedback = fakexr::take_haptic_feedback(left);
+        assert_eq!(feedback.len(), 1, "{feedback:?}");
+        assert_eq!(feedback[0].hand, Some(fakexr::UserPath::LeftHand));
+        // The bindings give the right hand no haptic, so its pulses go nowhere.
+        assert!(fakexr::check_no_suggested_bindings(
+            right,
+            f.input
+                .openxr
+                .instance
+                .string_to_path(OculusTouch::profile_path())
+                .unwrap()
+        ));
+        f.input.legacy_haptic(2, 0, 3000);
+        assert!(fakexr::take_haptic_feedback(left).is_empty());
+        assert!(fakexr::take_haptic_feedback(fixed).is_empty());
+    }
+
+    /// With mirror_actions, both hands drive /actions/legacy_mirrored and /actions/legacy is
+    /// ignored, like in SteamVR.
+    #[test]
+    fn remapped_mirrored() {
+        use fakexr::UserPath::*;
+        let f = remapped_fixture::<OculusTouch, OculusTouch>("legacy_mirrored");
+        let profile = OculusTouch::profile_path();
+        f.verify_bindings::<f32>(
+            profile,
+            c"/actions/legacy_mirrored/in/axis1_value",
+            [
+                "/user/hand/left/input/trigger/value".into(),
+                "/user/hand/right/input/trigger/value".into(),
+            ],
+        );
+        assert!(fakexr::check_no_suggested_bindings(
+            remapped_action(&f, c"/actions/legacy/in/right_system_press"),
+            f.input.openxr.instance.string_to_path(profile).unwrap()
+        ));
+
+        let a = remapped_action(&f, c"/actions/legacy_mirrored/in/a_press");
+        fakexr::set_action_state(a, true.into(), LeftHand);
+        fakexr::set_action_state(a, false.into(), RightHand);
+        f.input.frame_start_update();
+        let mask = super::button_mask_from_id(vr::EVRButtonId::A);
+        assert_eq!({ get_state(&f, 1).ulButtonPressed }, mask);
+        assert_eq!({ get_state(&f, 2).ulButtonPressed }, 0);
+
+        let haptic = remapped_action(&f, c"/actions/legacy_mirrored/out/haptic");
+        f.input.legacy_haptic(2, 0, 3000);
+        let feedback = fakexr::take_haptic_feedback(haptic);
+        assert_eq!(feedback.len(), 1, "{feedback:?}");
+        assert_eq!(feedback[0].hand, Some(RightHand));
+    }
+
+    /// The controller shows as the one simulated_controller_type names.
+    #[test]
+    fn remapped_simulated_controller_type() {
+        let f = remapped_fixture::<OculusTouch, OculusTouch>("legacy_mirrored");
+        let data = f.input.openxr.session_data.get();
+        let devices = data.input_data.devices.read().unwrap();
+        let properties = devices
+            .get_controller(Hand::Left)
+            .and_then(|controller| controller.profile_data.as_ref())
+            .unwrap()
+            .properties;
+        assert!(std::ptr::eq(properties, Knuckles::properties()));
+    }
+
+    #[test]
+    fn legacy_bindings_chosen_in_steamvr() {
+        use crate::input::tests::{FakeSteam, input_data};
+        let steam = FakeSteam::new("legacy");
+        let url = format!("file://{}", input_data("legacy_custom/oculus_touch.json"));
+        steam.choose(&[
+            ("oculus_touch_250820_CurrentURL_legacy", &url),
+            // The choice for manifest apps doesn't count.
+            (
+                "knuckles_250820_CurrentURL_steamvrinput",
+                &format!("file://{}", input_data("legacy_custom/oculus_touch.json")),
+            ),
+        ]);
+        let f = remapped_fixture::<OculusTouch, Knuckles>("nonexistent");
+        f.verify_bindings::<bool>(
+            OculusTouch::profile_path(),
+            c"/actions/legacy/in/right_system_press",
+            ["/user/hand/right/input/b/click".into()],
+        );
+        let data = f.input.openxr.session_data.get();
+        let remap = data
+            .input_data
+            .get_loaded_actions()
+            .unwrap()
+            .legacy
+            .as_ref()
+            .unwrap();
+        let profile = |name| f.input.openxr.instance.string_to_path(name).unwrap();
+        assert!(
+            remap
+                .profiles
+                .contains(&profile(OculusTouch::profile_path()))
+        );
+        assert!(!remap.profiles.contains(&profile(Knuckles::profile_path())));
+    }
+
+    /// Custom bindings for an action manifest aren't legacy bindings.
+    #[test]
+    fn custom_manifest_bindings_keep_fixed_legacy_input() {
+        let f = remapped_fixture::<Knuckles, Knuckles>("custom_bindings");
+        assert!(
+            f.input
+                .openxr
+                .session_data
+                .get()
+                .input_data
+                .get_legacy_actions()
+                .is_some()
+        );
+    }
+
+    /// An action manifest loaded after legacy input replaces it.
+    #[test]
+    fn manifest_after_remapped_legacy() {
+        use vr::IVRInput010_Interface;
+        let f = remapped_fixture::<OculusTouch, OculusTouch>("legacy_custom");
+        assert!(f.input.IsUsingLegacyInput());
+        f.load_actions(c"actions_vive_only.json");
+        assert!(!f.input.IsUsingLegacyInput());
+        let data = f.input.openxr.session_data.get();
+        assert!(
+            data.input_data
+                .get_loaded_actions()
+                .unwrap()
+                .legacy
+                .is_none()
+        );
+        drop(data);
+        assert!(!f.input.get_legacy_controller_state(
+            1,
+            &mut vr::VRControllerState_t::default(),
+            std::mem::size_of::<vr::VRControllerState_t>() as u32
+        ));
+    }
+
+    /// Legacy bindings chosen for the key an app identifies as after legacy input started.
+    #[test]
+    fn legacy_bindings_for_identified_key() {
+        use crate::input::tests::{FakeSteam, add_app_bindings};
+        const KEY: &str = "org.example.legacy";
+        let steam = FakeSteam::new("legacy-identified");
+        add_app_bindings(
+            &steam.home.join(".config"),
+            KEY,
+            "oculus_touch.json",
+            "legacy_custom/oculus_touch.json",
+        );
+        let f = remapped_fixture::<OculusTouch, OculusTouch>("nonexistent");
+        assert!(
+            f.input
+                .openxr
+                .session_data
+                .get()
+                .input_data
+                .get_legacy_actions()
+                .is_some()
+        );
+
+        f.input.app_identified(KEY);
+        f.input.frame_start_update();
+        remapped_action(&f, c"/actions/legacy/in/right_system_press");
     }
 }

@@ -2,6 +2,7 @@ mod actions;
 mod bindings;
 mod context;
 mod fallback;
+pub(super) mod legacy_actions;
 
 pub(super) use actions::ControllerType;
 pub(super) use bindings::{ClickThresholdParams, GrabParameters};
@@ -63,7 +64,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                 if let Some(loaded) = session_data.input_data.actions.get() {
                     error!(
                         "{} actions are already loaded!",
-                        if matches!(loaded, super::LoadedActions::Legacy(_)) {
+                        if matches!(loaded, super::LoadedActions::Legacy(..)) {
                             "Legacy"
                         } else {
                             "Manifest"
@@ -377,6 +378,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             head_proximity,
             binding_variants,
             binding_choices,
+            legacy: None,
             simulated_properties,
         })
     }
@@ -495,7 +497,7 @@ fn record_variant<C: openxr_data::Compositor, P: InteractionProfile>(
     variants: &mut HashMap<xr::Path, String>,
 ) {
     if let (Some(variant), Ok(profile)) = (
-        &bindings.variant,
+        &bindings.options.variant,
         input.openxr.instance.string_to_path(P::profile_path()),
     ) {
         variants.insert(profile, variant.clone());

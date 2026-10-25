@@ -829,7 +829,7 @@ fn menu_bindings_converted_in_every_set() {
 }
 
 /// Sets an environment variable for the action manifests this thread loads.
-fn set_test_env(name: &'static str, value: &str) {
+pub(super) fn set_test_env(name: &'static str, value: &str) {
     super::action_manifest::TEST_ENV.with_borrow_mut(|env| env.insert(name, value.into()));
 }
 
@@ -1102,14 +1102,14 @@ fn controllers_tracked_without_bindings() {
 
 /// A home directory in a temp dir with a Steam install where SteamVR left its settings, for the
 /// manifests this thread loads. Removed on drop.
-struct FakeSteam {
-    home: std::path::PathBuf,
+pub(super) struct FakeSteam {
+    pub home: std::path::PathBuf,
 }
 
 impl FakeSteam {
-    const APP_KEY: &str = "steam.app.4242";
+    pub const APP_KEY: &str = "steam.app.4242";
 
-    fn new(test: &str) -> Self {
+    pub fn new(test: &str) -> Self {
         let home =
             std::env::temp_dir().join(format!("xrizer-steamvr-{test}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
@@ -1124,7 +1124,7 @@ impl FakeSteam {
     }
 
     /// Saves bindings choices for the app, as `(key, url)`.
-    fn choose(&self, choices: &[(&str, &str)]) {
+    pub fn choose(&self, choices: &[(&str, &str)]) {
         self.choose_for(Self::APP_KEY, choices);
     }
 
@@ -1171,7 +1171,7 @@ impl Drop for FakeSteam {
     }
 }
 
-fn input_data(file: &str) -> String {
+pub(super) fn input_data(file: &str) -> String {
     format!("{}/tests/input_data/{file}", env!("CARGO_MANIFEST_DIR"))
 }
 
@@ -1297,7 +1297,7 @@ fn unusable_steamvr_choice_uses_the_default() {
 }
 
 /// Puts custom bindings for the app key in the per-app directory under `config`.
-fn add_app_bindings(config: &std::path::Path, key: &str, file: &str, from: &str) {
+pub(super) fn add_app_bindings(config: &std::path::Path, key: &str, file: &str, from: &str) {
     let dir = config.join("xrizer/bindings").join(key);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::copy(input_data(from), dir.join(file)).unwrap();
