@@ -79,6 +79,8 @@ If a launcher strips `RUST_LOG`, put the same filter string in a file named `log
 
 `XRIZER_LINEAR_UNORM` - `1` shows 8-bit UNORM textures submitted with `ColorSpace_Auto` as linear instead of sRGB encoded. Try it if a game looks much too dark.
 
+`XRIZER_NO_ERROR_BRIDGE` - `0` lets games with a no-error EGL context (e.g. Minecraft with Sodium on Wayland) render into the runtime's swapchains directly. By default their frames are copied through Vulkan, since Monado based runtimes can't share such contexts. Only set it for a runtime that can, otherwise the game shows a black screen.
+
 `XRIZER_PRESERVE_VIEW_CANTING` - `1` keeps per-eye view rotations from canted-display headsets (e.g. Pimax, Bigscreen Beyond) instead of flattening them to parallel views with a widened FOV. Saves rendering the wider FOV, may confuse games that assume parallel views.
 
 `XRIZER_MAX_TRACKERS` - Max number of generic trackers to expose. Requires a runtime with `XR_MNDX_xdev_space` (Monado, WiVRn). Trackers appear as Vive Trackers, which can confuse some games' controller detection. `0` hides them. Set automatically for games known to need it.
