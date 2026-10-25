@@ -334,6 +334,23 @@ pub fn last_frame_display_time(session: xr::Session) -> xr::Time {
     xr::Time::from_nanos(session.frames.lock().unwrap().ended_display_time)
 }
 
+/// Makes xrWaitFrame on `session` predict display times `period` nanoseconds apart, the first one
+/// `lead` nanoseconds after the current time (CLOCK_MONOTONIC, which
+/// xrConvertTimespecTimeToTimeKHR converts as is), instead of 1 ns apart.
+pub fn set_frame_period(session: xr::Session, period: i64, lead: i64) {
+    let session = session.to_handle().unwrap();
+    let mut frames = session.frames.lock().unwrap();
+    frames.pacing = Some((period, lead));
+    frames.pacing_started = true;
+}
+
+/// Makes the next xrWaitFrame on `session` predict a display time `vsyncs` periods later than an
+/// on time frame's, like a runtime after the app missed vsyncs.
+pub fn skip_vsyncs(session: xr::Session, vsyncs: u32) {
+    let session = session.to_handle().unwrap();
+    session.frames.lock().unwrap().skip = vsyncs;
+}
+
 /// The number of begun frames xrBeginFrame discarded on `session`, because they weren't ended.
 pub fn discarded_frames(session: xr::Session) -> u32 {
     let session = session.to_handle().unwrap();
@@ -909,6 +926,13 @@ struct Frames {
     waited_display_time: i64,
     /// The display time of the last frame ended, in nanoseconds.
     ended_display_time: i64,
+    /// The display period xrWaitFrame predicts and how long after the current time the first
+    /// frame is displayed, see [set_frame_period]. Without it, display times are 1 ns apart.
+    pacing: Option<(i64, i64)>,
+    /// The next waited frame is the first one with `pacing`.
+    pacing_started: bool,
+    /// Vsyncs the next waited frame's display time skips.
+    skip: u32,
 }
 
 impl Frames {
@@ -2414,7 +2438,7 @@ extern "system" fn wait_frame(
 ) -> xr::Result {
     let session = get_session!(session);
     run_hook(&session.wait_frame_hook);
-    let display_time = {
+    let (display_time, period) = {
         let mut frames = session.frames.lock().unwrap();
         // A runtime blocks until the waited frame is begun, which would hang the test.
         if frames.waited {
@@ -2422,15 +2446,29 @@ extern "system" fn wait_frame(
             return xr::Result::ERROR_CALL_ORDER_INVALID;
         }
         frames.waited = true;
-        frames.waited_display_time += 1;
-        xr::Time::from_nanos(frames.waited_display_time)
+        let skip = i64::from(std::mem::take(&mut frames.skip));
+        let (period, lead) = frames.pacing.unwrap_or((1, 0));
+        frames.waited_display_time = if std::mem::take(&mut frames.pacing_started) {
+            monotonic_nanos() + lead
+        } else {
+            frames.waited_display_time + period * (1 + skip)
+        };
+        (xr::Time::from_nanos(frames.waited_display_time), period)
     };
+    // Paced frames are released `lead` before their display time, like a runtime pacing the app.
+    if let Some((_, lead)) = session.frames.lock().unwrap().pacing {
+        let release = display_time.as_nanos() - lead;
+        let wait = release - monotonic_nanos();
+        if wait > 0 {
+            std::thread::sleep(std::time::Duration::from_nanos(wait as u64));
+        }
+    }
     unsafe {
         state.write(xr::FrameState {
             ty: xr::FrameState::TYPE,
             next: std::ptr::null_mut(),
             predicted_display_time: display_time,
-            predicted_display_period: xr::Duration::from_nanos(1),
+            predicted_display_period: xr::Duration::from_nanos(period),
             should_render: session.should_render.load(Ordering::Relaxed).into(),
         })
     }
@@ -2490,6 +2528,16 @@ extern "system" fn end_frame(session: xr::Session, info: *const xr::FrameEndInfo
         session.synchronized();
     }
     xr::Result::SUCCESS
+}
+
+/// The current time, as xrConvertTimespecTimeToTimeKHR converts it.
+fn monotonic_nanos() -> i64 {
+    let mut now = std::mem::MaybeUninit::uninit();
+    unsafe {
+        libc::clock_gettime(libc::CLOCK_MONOTONIC, now.as_mut_ptr());
+        let now: libc::timespec = now.assume_init();
+        now.tv_sec * 1_000_000_000 + now.tv_nsec
+    }
 }
 
 extern "system" fn convert_timespec_time_to_time_k_h_r(
