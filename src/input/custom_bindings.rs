@@ -3064,6 +3064,88 @@ mod tests {
     }
 
     #[test]
+    fn sticky_click() {
+        let mut f = Fixture::new();
+        let set = vr::VRActiveActionSet_t {
+            ulActionSet: f.get_action_set_handle(c"/actions/main"),
+            ..Default::default()
+        };
+        let [sprint, crouch] = [c"/actions/main/in/sprint", c"/actions/main/in/crouch"]
+            .map(|name| f.get_action_handle(name));
+        let [left, right] =
+            [c"/user/hand/left", c"/user/hand/right"].map(|hand| f.get_input_source_handle(hand));
+        f.load_actions(c"actions_sticky_click.json");
+        f.verify_custom_bindings(
+            Knuckles::profile_path(),
+            c"/actions/main/in/sprint",
+            [
+                "/user/hand/left/input/thumbstick/click".into(),
+                "/user/hand/left/input/thumbstick".into(),
+            ],
+        );
+        // The position and clicks that aren't sticky are bound as usual.
+        f.verify_bindings::<xr::Vector2f>(
+            Knuckles::profile_path(),
+            c"/actions/main/in/move",
+            ["/user/hand/left/input/thumbstick".into()],
+        );
+        f.verify_bindings::<bool>(
+            Knuckles::profile_path(),
+            c"/actions/main/in/jump",
+            ["/user/hand/left/input/trackpad/force".into()],
+        );
+        f.set_interaction_profile::<Knuckles>(LeftHand);
+        f.set_interaction_profile::<Knuckles>(RightHand);
+
+        let input = |path: &CStr| f.get_action_handle(path);
+        let sprint_inputs = (
+            LeftHand,
+            f.get_action::<f32>(input(
+                c"/user/hand/left/input/thumbstick/click-/actions/main",
+            )),
+            f.get_action::<xr::Vector2f>(input(c"/user/hand/left/input/thumbstick-/actions/main")),
+            sprint,
+            left,
+        );
+        let crouch_inputs = (
+            RightHand,
+            f.get_action::<f32>(input(
+                c"/user/hand/right/input/thumbstick/click-/actions/main",
+            )),
+            f.get_action::<xr::Vector2f>(input(c"/user/hand/right/input/thumbstick-/actions/main")),
+            crouch,
+            right,
+        );
+        let check = |f: &mut Fixture, (hand, click, stick, action, origin), clicked: bool, y| {
+            fakexr::set_action_state(click, ActionState::Float(clicked as u8 as f32), hand);
+            fakexr::set_action_state(stick, ActionState::Vector2(0.0, y), hand);
+            f.sync(set);
+            let s = f.get_bool_state_hand(action, origin).unwrap();
+            assert!(s.bActive);
+            s.bState
+        };
+
+        // A click at rest is a plain click.
+        assert!(!check(&mut f, sprint_inputs, false, 0.0));
+        assert!(check(&mut f, sprint_inputs, true, 0.0));
+        assert!(!check(&mut f, sprint_inputs, false, 0.0));
+        // Clicked while deflected, it lasts until the stick is mostly let go of.
+        assert!(check(&mut f, sprint_inputs, true, 0.5));
+        assert!(check(&mut f, sprint_inputs, false, 0.5));
+        assert!(check(&mut f, sprint_inputs, false, 0.35));
+        assert!(!check(&mut f, sprint_inputs, false, 0.25));
+        // Deflecting alone doesn't click.
+        assert!(!check(&mut f, sprint_inputs, false, 0.9));
+
+        // The binding's own thresholds.
+        assert!(check(&mut f, crouch_inputs, true, 0.55));
+        assert!(!check(&mut f, crouch_inputs, false, 0.55));
+        assert!(check(&mut f, crouch_inputs, true, 0.7));
+        assert!(check(&mut f, crouch_inputs, false, 0.55));
+        assert!(!check(&mut f, crouch_inputs, false, 0.45));
+    }
+
+    #[test]
     fn double_tap_bindings() {
         let f = Fixture::new();
         f.load_actions(c"actions.json");

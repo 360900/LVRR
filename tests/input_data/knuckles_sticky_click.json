@@ -1,0 +1,50 @@
+{
+	"bindings": {
+		"/actions/main": {
+			"sources": [
+				{
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/sprint"
+						},
+						"position": {
+							"output": "/actions/main/in/move"
+						}
+					},
+					"mode": "joystick",
+					"parameters": {
+						"sticky_click": "true"
+					},
+					"path": "/user/hand/left/input/thumbstick"
+				},
+				{
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/crouch"
+						}
+					},
+					"mode": "joystick",
+					"parameters": {
+						"sticky_click": true,
+						"sticky_activate_threshold": "0.6",
+						"sticky_deactivate_threshold": 0.5
+					},
+					"path": "/user/hand/right/input/thumbstick"
+				},
+				{
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/jump"
+						}
+					},
+					"mode": "trackpad",
+					"parameters": {
+						"sticky_click": "false"
+					},
+					"path": "/user/hand/left/input/trackpad"
+				}
+			]
+		}
+	},
+	"controller_type": "knuckles"
+}

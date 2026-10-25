@@ -699,8 +699,12 @@ struct Vector2Parameters {
     invert: Vector2Inversion,
     deadzone_pct: Option<StringOrTyped<f32>>,
     maxzone_pct: Option<StringOrTyped<f32>>,
-    #[allow(unused)]
+    /// Keeps the click held while the stick is deflected.
+    #[serde(default, deserialize_with = "lenient")]
     sticky_click: Option<StringOrTyped<bool>>,
+    /// How far the stick must be deflected to keep the click, and released to let it go.
+    sticky_activate_threshold: Option<StringOrTyped<f32>>,
+    sticky_deactivate_threshold: Option<StringOrTyped<f32>>,
 }
 
 impl Vector2Parameters {
@@ -715,6 +719,21 @@ impl Vector2Parameters {
             deadzone: fraction(self.deadzone_pct, 0.0),
             maxzone: fraction(self.maxzone_pct, 1.0),
         }
+    }
+
+    /// The deflection thresholds that keep the click held, if sticky_click is on. The defaults
+    /// are the binding UI's.
+    fn sticky_thresholds(&self) -> Option<ClickThresholdParams> {
+        self.sticky_click
+            .is_some_and(|sticky| *sticky)
+            .then(|| ClickThresholdParams {
+                click_activate_threshold: Some(
+                    self.sticky_activate_threshold.unwrap_or(0.4f32.into()),
+                ),
+                click_deactivate_threshold: Some(
+                    self.sticky_deactivate_threshold.unwrap_or(0.3f32.into()),
+                ),
+            })
     }
 }
 
@@ -774,6 +793,27 @@ fn touchy_click_parse() {
         parameters.force_input,
         Some(ButtonForceInput::Force)
     ));
+}
+
+#[cfg(test)]
+#[test]
+fn sticky_click_parse() {
+    let thresholds = |json| {
+        let parameters: Vector2Parameters = serde_json::from_str(json).unwrap();
+        parameters.sticky_thresholds().map(|t| {
+            (
+                *t.click_activate_threshold.unwrap(),
+                *t.click_deactivate_threshold.unwrap(),
+            )
+        })
+    };
+    assert_eq!(thresholds(r#"{}"#), None);
+    assert_eq!(thresholds(r#"{"sticky_click": "false"}"#), None);
+    assert_eq!(thresholds(r#"{"sticky_click": "true"}"#), Some((0.4, 0.3)));
+    assert_eq!(
+        thresholds(r#"{"sticky_click": true, "sticky_activate_threshold": "0.6"}"#),
+        Some((0.6, 0.3))
+    );
 }
 
 #[cfg(test)]
@@ -1073,6 +1113,44 @@ fn button_press_binding(
         Some(hold) => BoolBindingType::Latch(LatchData::new(press, hold)),
         None => press,
     })
+}
+
+/// Binds a stick's click that stays held while the stick is deflected (sticky_click).
+fn bind_sticky_click(
+    click: &ActionBindingOutput<paths::Click>,
+    path: DynInputPath,
+    sticky: &ClickThresholdParams,
+    validate_path: &dyn PathValidator,
+    action_set_name: &str,
+    action_set: &xr::ActionSet,
+    context: &mut BindingsProfileLoadContext,
+) {
+    // Like plain clicks of this mode, missing ones are skipped silently.
+    let Some(click_path) = validate_path(path.with_component(DynComponent::Click)) else {
+        return;
+    };
+    let Some(press) = threshold_binding(
+        &click.output,
+        click_path,
+        None,
+        action_set_name,
+        action_set,
+        context,
+    ) else {
+        return;
+    };
+    let hold = validate_path(path).and_then(|position| {
+        input_threshold(position, Some(sticky), action_set_name, action_set, context)
+    });
+    let ty = match hold {
+        Some(hold) => BoolBindingType::Latch(LatchData::new(press, hold)),
+        None => press,
+    };
+    trace!(
+        "suggesting {click_path} for {} (sticky click)",
+        click.output.path
+    );
+    context.add_custom_binding(&click.output, path.hand, click_path, ty);
 }
 
 /// The OpenVR path of the headset's proximity sensor.
@@ -1557,7 +1635,20 @@ pub fn handle_sources(
                 } = inputs;
 
                 if let Some(click) = click {
-                    let _ = click.try_bind_with_component(path, context, validate_path);
+                    match parameters.and_then(Vector2Parameters::sticky_thresholds) {
+                        Some(sticky) => bind_sticky_click(
+                            click,
+                            path,
+                            &sticky,
+                            validate_path,
+                            action_set_name,
+                            action_set,
+                            context,
+                        ),
+                        None => {
+                            let _ = click.try_bind_with_component(path, context, validate_path);
+                        }
+                    }
                 }
 
                 if let Some(touch) = touch {
