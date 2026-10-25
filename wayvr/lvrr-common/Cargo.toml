@@ -8,4 +8,12 @@ repository = "https://github.com/360900/LVRR"
 
 [dependencies]
 anyhow.workspace = true
+dbus = { workspace = true, optional = true }
+log.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+
+[features]
+default = []
+# Talk to the LVRR server; without it only the emulator is available
+dbus = ["dep:dbus"]

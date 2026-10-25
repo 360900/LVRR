@@ -70,6 +70,9 @@ pub struct DashInterfaceEmulated {
 	debug_frame_id: u64,
 	debug_counter: u64,
 	gfx: Arc<WGfx>,
+	// LVRR: LVRR_EMU=connected (default), absent or none
+	lvrr: Option<lvrr_common::emulator::LvrrEmulator>,
+	lvrr_perf_overlay: bool,
 }
 
 impl DashInterfaceEmulated {
@@ -134,11 +137,42 @@ impl DashInterfaceEmulated {
 			debug_counter: 0,
 			debug_frame_id: 0,
 			gfx,
+			lvrr: match std::env::var("LVRR_EMU").as_deref() {
+				Ok("none") => None,
+				Ok("absent") => Some(lvrr_common::emulator::LvrrEmulator::new(false)),
+				_ => Some(lvrr_common::emulator::LvrrEmulator::new(true)),
+			},
+			lvrr_perf_overlay: false,
 		}
 	}
 }
 
 impl DashInterface<()> for DashInterfaceEmulated {
+	fn lvrr_state<'a>(&'a mut self, _data: &'a mut ()) -> Option<&'a lvrr_common::state::LvrrState> {
+		use lvrr_common::state::LvrrBackend;
+		let lvrr = self.lvrr.as_mut()?;
+		for notice in lvrr.poll() {
+			log::info!("LVRR: {notice:?}");
+		}
+		Some(lvrr.state())
+	}
+
+	fn lvrr_request(&mut self, _data: &mut (), request: lvrr_common::state::LvrrRequest) -> anyhow::Result<()> {
+		use lvrr_common::state::LvrrBackend;
+		match self.lvrr.as_mut() {
+			Some(lvrr) => lvrr.request(request),
+			None => anyhow::bail!("Not connected to the LVRR server"),
+		}
+	}
+
+	fn lvrr_perf_overlay(&mut self, _data: &mut ()) -> bool {
+		self.lvrr_perf_overlay
+	}
+
+	fn lvrr_set_perf_overlay(&mut self, _data: &mut (), visible: bool) {
+		self.lvrr_perf_overlay = visible;
+	}
+
 	fn enumerate_vulkan_devices(&mut self, _: &mut ()) -> anyhow::Result<Vec<String>> {
 		self.gfx.enumerate_devices()
 	}

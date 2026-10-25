@@ -84,6 +84,9 @@ pub struct AppState {
     #[cfg(feature = "openxr")]
     pub monado_state: Option<backend::openxr::monado_state::MonadoState>,
 
+    // LVRR: the LVRR server, see crate::lvrr
+    pub lvrr: crate::lvrr::LvrrApp,
+
     #[cfg(feature = "pipewire")]
     pub screencast_manager: Option<ScreenCastManager>,
 
@@ -229,6 +232,8 @@ impl AppState {
             #[cfg(feature = "openxr")]
             monado_state: None,
 
+            lvrr: crate::lvrr::LvrrApp::default(),
+
             #[cfg(feature = "pipewire")]
             screencast_manager,
 
@@ -243,6 +248,7 @@ impl AppState {
     }
 
     pub fn late_init(&mut self) {
+        crate::lvrr::start(self);
         self.notifications.run_dbus(&mut self.dbus);
         self.notifications.run_udp();
 
@@ -270,6 +276,7 @@ impl AppState {
         while self.executor.try_tick() {}
         self.dbus.tick();
 
+        crate::lvrr::tick(self);
         toast_tick(self, self.delta_time);
 
         for toast in self.notifications.drain_pending(&self.session) {

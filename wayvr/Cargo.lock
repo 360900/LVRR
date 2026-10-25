@@ -2984,6 +2984,9 @@ name = "lvrr-common"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dbus",
+ "log",
+ "serde",
  "serde_json",
 ]
 
@@ -6871,6 +6874,7 @@ dependencies = [
  "idmap",
  "idmap-derive",
  "log",
+ "lvrr-common",
  "rodio",
  "serde",
  "serde_json",

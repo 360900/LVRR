@@ -392,6 +392,38 @@ impl DashInterfaceLive {
 }
 
 impl DashInterface<AppState> for DashInterfaceLive {
+    fn lvrr_state<'a>(
+        &'a mut self,
+        app: &'a mut AppState,
+    ) -> Option<&'a lvrr_common::state::LvrrState> {
+        use lvrr_common::state::LvrrBackend;
+        app.lvrr.link.as_ref().map(LvrrBackend::state)
+    }
+
+    fn lvrr_request(
+        &mut self,
+        app: &mut AppState,
+        request: lvrr_common::state::LvrrRequest,
+    ) -> anyhow::Result<()> {
+        use lvrr_common::state::LvrrBackend;
+        match app.lvrr.link.as_mut() {
+            Some(link) => link.request(request),
+            None => anyhow::bail!("Not connected to the LVRR server"),
+        }
+    }
+
+    fn lvrr_perf_overlay(&mut self, app: &mut AppState) -> bool {
+        app.lvrr.perf_overlay
+    }
+
+    fn lvrr_set_perf_overlay(&mut self, app: &mut AppState, visible: bool) {
+        app.lvrr.perf_overlay = visible;
+    }
+
+    fn clipboard_set_text(&mut self, _app: &mut AppState, text: &str) -> anyhow::Result<()> {
+        crate::lvrr::clipboard_set_text(text)
+    }
+
     fn enumerate_vulkan_devices(&mut self, data: &mut AppState) -> anyhow::Result<Vec<String>> {
         data.gfx.enumerate_devices()
     }

@@ -108,6 +108,21 @@ pub trait DashInterface<T> {
 	fn get_feats(&mut self, data: &mut T) -> InterfaceFeats;
 	fn hmd_stats(&mut self, data: &mut T) -> HmdStats;
 	fn enumerate_vulkan_devices(&mut self, data: &mut T) -> anyhow::Result<Vec<String>>;
+
+	// LVRR: the LVRR server; None without it
+	fn lvrr_state<'a>(&'a mut self, _data: &'a mut T) -> Option<&'a lvrr_common::state::LvrrState> {
+		None
+	}
+	fn lvrr_request(&mut self, _data: &mut T, _request: lvrr_common::state::LvrrRequest) -> anyhow::Result<()> {
+		anyhow::bail!("Not connected to the LVRR server")
+	}
+	fn lvrr_perf_overlay(&mut self, _data: &mut T) -> bool {
+		false
+	}
+	fn lvrr_set_perf_overlay(&mut self, _data: &mut T, _visible: bool) {}
+	fn clipboard_set_text(&mut self, _data: &mut T, _text: &str) -> anyhow::Result<()> {
+		anyhow::bail!("No clipboard")
+	}
 }
 
 #[derive(Default, Clone, Copy)]

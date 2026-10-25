@@ -24,6 +24,7 @@ mod config;
 mod graphics;
 mod gui;
 mod ipc;
+mod lvrr;
 mod overlays;
 mod shaders;
 mod state;
