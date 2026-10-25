@@ -2426,6 +2426,7 @@ mod tests {
             let (force_action, value_action) = match hand {
                 LeftHand => left_actions,
                 RightHand => right_actions,
+                Gamepad => unreachable!(),
             };
             fakexr::set_action_state(force_action, fakexr::ActionState::Float(force), hand);
             fakexr::set_action_state(value_action, fakexr::ActionState::Float(value), hand);
@@ -2437,6 +2438,7 @@ mod tests {
             let restrict = match hand {
                 LeftHand => left,
                 RightHand => right,
+                Gamepad => unreachable!(),
             };
             let s = f.get_bool_state_hand(boolact, restrict).unwrap();
             assert_eq!(s.bState, state, "State wrong (line {line})");
