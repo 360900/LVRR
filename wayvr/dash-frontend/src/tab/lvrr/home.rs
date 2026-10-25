@@ -2,7 +2,7 @@
 
 use std::marker::PhantomData;
 
-use lvrr_common::state::{Battery, BatteryDevice, Link, LvrrRequest, MessageKind};
+use lvrr_common::state::{Battery, BatteryDevice, Link, LvrrRequest, LvrrState, MessageKind};
 use wgui::{color::WguiColorName, i18n::Translation, layout::WidgetID, parser::ParserState, task::Tasks};
 use wlx_common::dash_interface::ConfigChangeKind;
 
@@ -30,6 +30,9 @@ enum Task {
 	Stop(i64),
 	TogglePassthrough,
 	TogglePerfOverlay,
+	/// Desktop window
+	Pair,
+	Quit,
 }
 
 /// Live values, updated in place with each statistics sample
@@ -95,6 +98,8 @@ impl<T: 'static> Tab<T> for TabLvrrHome<T> {
 					let visible = frontend.interface.lvrr_perf_overlay(data);
 					frontend.interface.lvrr_set_perf_overlay(data, !visible);
 				}
+				Task::Pair => frontend.lvrr_start_pairing(),
+				Task::Quit => frontend.lvrr_confirm("LVRR.QUIT_CONFIRM", LvrrRequest::Quit),
 			}
 		}
 
@@ -168,8 +173,20 @@ impl<T: 'static> TabLvrrHome<T> {
 		let mut widgets = wgui::parser::parse_from_assets(&ui::doc_params(&globals), &mut frontend.layout, self.parent)?;
 		let mut ui = Ui::new(&mut frontend.layout, &mut widgets, &globals);
 		let parent = self.parent;
+		let desktop = frontend.interface.lvrr_desktop();
 
-		if state.link != Link::Online {
+		if state.link != Link::Online && desktop {
+			let banner = ui.banner(parent, "LVRR.DESKTOP.NOT_RUNNING", "danger")?;
+			let tasks = self.tasks.clone();
+			ui.button(
+				banner,
+				Text::Key("LVRR.DESKTOP.START"),
+				"@/dashboard/play.svg",
+				move || {
+					tasks.push(Task::Frontend(FrontendTask::LvrrStartServer));
+				},
+			)?;
+		} else if state.link != Link::Online {
 			ui.banner(parent, "LVRR.OFFLINE", "danger")?;
 		}
 
@@ -255,6 +272,13 @@ impl<T: 'static> TabLvrrHome<T> {
 			)?;
 		}
 
+		if desktop {
+			self.desktop_actions(&mut ui, &state)?;
+			self.messages(&mut ui, &state)?;
+			self.widgets = Some(widgets);
+			return Ok(());
+		}
+
 		// Quick actions
 		let group = ui.group(parent, "LVRR.HOME.QUICK_ACTIONS", "@/dashboard/magic_wand.svg")?;
 		let row = ui.row(group)?;
@@ -315,9 +339,15 @@ impl<T: 'static> TabLvrrHome<T> {
 			tasks.push(Task::Frontend(FrontendTask::Lvrr(LvrrRequest::Disconnect)));
 		})?;
 
-		// What the server told the headset, newest first
+		self.messages(&mut ui, &state)?;
+		self.widgets = Some(widgets);
+		Ok(())
+	}
+
+	/// What the server told the headset, newest first
+	fn messages(&self, ui: &mut Ui, state: &LvrrState) -> anyhow::Result<()> {
 		if !state.messages.is_empty() {
-			let group = ui.group(parent, "LVRR.HOME.MESSAGES", "@/dashboard/info.svg")?;
+			let group = ui.group(self.parent, "LVRR.HOME.MESSAGES", "@/dashboard/info.svg")?;
 			for message in state.messages.iter().rev().take(5) {
 				let row = ui.row(group)?;
 				if message.kind == MessageKind::Error {
@@ -326,8 +356,41 @@ impl<T: 'static> TabLvrrHome<T> {
 				ui.text(row, Text::Raw(&message.text))?;
 			}
 		}
+		Ok(())
+	}
 
-		self.widgets = Some(widgets);
+	/// The desktop window's actions: no VR apps, overlays or playspace there
+	fn desktop_actions(&self, ui: &mut Ui, state: &LvrrState) -> anyhow::Result<()> {
+		if state.link != Link::Online {
+			return Ok(());
+		}
+		let group = ui.group(self.parent, "LVRR.HOME.QUICK_ACTIONS", "@/dashboard/magic_wand.svg")?;
+		let row = ui.row(group)?;
+		let mut actions = vec![
+			(
+				"LVRR.HEADSET.TITLE",
+				"@/dashboard/wivrn_head_symbolic.svg",
+				Task::Frontend(FrontendTask::SetTab(TabType::Lvrr(Page::Headset))),
+			),
+			(
+				"LVRR.PC.TITLE",
+				"@/dashboard/display.svg",
+				Task::Frontend(FrontendTask::SetTab(TabType::Lvrr(Page::Pc))),
+			),
+			("LVRR.PC.PAIR", "@/dashboard/add.svg", Task::Pair),
+		];
+		if state.headset_connected {
+			actions.push((
+				"LVRR.DISCONNECT",
+				"@/dashboard/close.svg",
+				Task::Frontend(FrontendTask::Lvrr(LvrrRequest::Disconnect)),
+			));
+		}
+		actions.push(("LVRR.QUIT", "@/dashboard/power.svg", Task::Quit));
+		for (translation, icon, task) in actions {
+			let tasks = self.tasks.clone();
+			ui.action(row, translation, icon, move || tasks.push(task.clone()))?;
+		}
 		Ok(())
 	}
 

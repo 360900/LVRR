@@ -6,7 +6,8 @@ use wgui::{
 	assets::AssetPathRef,
 	color::WguiColorName,
 	components::{
-		bar_graph::ComponentBarGraph, button::ComponentButton, checkbox::ComponentCheckbox, slider::ComponentSlider,
+		bar_graph::ComponentBarGraph, button::ComponentButton, checkbox::ComponentCheckbox, editbox::ComponentEditBox,
+		slider::ComponentSlider,
 	},
 	globals::WguiGlobals,
 	i18n::Translation,
@@ -235,6 +236,16 @@ impl<'a> Ui<'a> {
 			Ok(())
 		}));
 		Ok(button)
+	}
+
+	/// A text field; only the desktop window has a keyboard for it
+	pub fn editbox(&mut self, parent: WidgetID, text: &str) -> anyhow::Result<Rc<ComponentEditBox>> {
+		let id = self.id();
+		let mut params = TemplateParams::new();
+		params.insert("id", &id);
+		params.insert("text", text);
+		self.instantiate("EditBox", parent, params)?;
+		self.state.fetch_component_as::<ComponentEditBox>(&id)
 	}
 
 	/// A large tile button, for the home page

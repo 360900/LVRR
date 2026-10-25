@@ -136,6 +136,9 @@ pub enum FrontendTask {
 	MarkTutorialGraduated,
 	BackendTask(DashBackendTask),
 	Lvrr(lvrr_common::state::LvrrRequest),
+	/// Ends the session if needed and lets a new headset pair
+	LvrrPair,
+	LvrrStartServer,
 }
 
 impl<T: 'static> Frontend<T> {
@@ -451,6 +454,8 @@ impl<T: 'static> Frontend<T> {
 			FrontendTask::MarkTutorialGraduated => self.action_tutorial_graduated(params.data),
 			FrontendTask::BackendTask(task) => self.interface.backend_task(params.data, task)?,
 			FrontendTask::Lvrr(request) => self.lvrr_request(params.data, request),
+			FrontendTask::LvrrPair => self.lvrr_pair(params.data),
+			FrontendTask::LvrrStartServer => self.lvrr_start_server(params.data),
 		};
 		Ok(())
 	}

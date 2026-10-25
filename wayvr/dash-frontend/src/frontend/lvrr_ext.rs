@@ -3,7 +3,14 @@
 use std::time::Duration;
 
 use lvrr_common::state::LvrrRequest;
-use wgui::{components::button::ComponentButton, i18n::Translation, parser::Fetchable};
+use wgui::{
+	components::{ComponentTrait, button::ComponentButton},
+	event::StyleSetRequest,
+	i18n::Translation,
+	layout::LayoutTask,
+	parser::Fetchable,
+	taffy,
+};
 use wlx_common::config_io;
 
 use super::{Frontend, FrontendTask};
@@ -31,8 +38,42 @@ impl<T: 'static> Frontend<T> {
 				.handle_button(&button, FrontendTask::SetTab(TabType::Lvrr(page)));
 			self.side_buttons.push((TabType::Lvrr(page), button));
 		}
-		self.lvrr_reopen();
+		if self.interface.lvrr_desktop() {
+			self.lvrr_desktop_layout()?;
+		} else {
+			self.lvrr_reopen();
+		}
 		Ok(())
+	}
+
+	/// The desktop window has no VR pages, power menu or clock, and closes like any window
+	fn lvrr_desktop_layout(&mut self) -> anyhow::Result<()> {
+		let mut hidden = vec![
+			self.state.get_widget_id("side_separator")?,
+			self.state.get_widget_id("bottom_bar")?,
+		];
+		for id in [
+			"btn_side_library",
+			"btn_side_apps",
+			"btn_side_running",
+			"btn_side_settings",
+			"btn_close",
+		] {
+			hidden.push(self.state.fetch_component_as::<ComponentButton>(id)?.base().get_id());
+		}
+		for id in hidden {
+			self.layout.tasks.push(LayoutTask::SetWidgetStyle(
+				id,
+				StyleSetRequest::Display(taffy::Display::None),
+			));
+		}
+		Ok(())
+	}
+
+	/// Opens PC > Headsets and starts pairing, for the desktop window's tray
+	pub fn lvrr_start_pairing(&mut self) {
+		crate::tab::lvrr::pc::START_PAIRING.set(true);
+		self.lvrr_open("pc:headsets");
 	}
 
 	/// The open page, for [`Self::lvrr_open`]
@@ -103,10 +144,26 @@ impl<T: 'static> Frontend<T> {
 	}
 
 	pub(super) fn lvrr_request(&mut self, data: &mut T, request: LvrrRequest) {
-		if matches!(request, LvrrRequest::RestartSession) {
+		// the desktop window doesn't restart with the session
+		if matches!(request, LvrrRequest::RestartSession) && !self.interface.lvrr_desktop() {
 			self.lvrr_save_page();
 		}
-		if let Err(e) = self.interface.lvrr_request(data, request) {
+		let result = self.interface.lvrr_request(data, request);
+		self.lvrr_toast_error(result);
+	}
+
+	pub(super) fn lvrr_pair(&mut self, data: &mut T) {
+		let result = self.interface.lvrr_pair(data);
+		self.lvrr_toast_error(result);
+	}
+
+	pub(super) fn lvrr_start_server(&mut self, data: &mut T) {
+		let result = self.interface.lvrr_start_server(data);
+		self.lvrr_toast_error(result);
+	}
+
+	fn lvrr_toast_error(&self, result: anyhow::Result<()>) {
+		if let Err(e) = result {
 			self
 				.tasks
 				.push(FrontendTask::PushToast(Translation::from_raw_text_string(
@@ -117,6 +174,11 @@ impl<T: 'static> Frontend<T> {
 
 	/// Sends `request` once the user confirms `message`
 	pub(crate) fn lvrr_confirm(&self, message: &str, request: LvrrRequest) {
+		self.lvrr_confirm_task(message, FrontendTask::Lvrr(request));
+	}
+
+	/// Runs `task` once the user confirms `message`
+	pub(crate) fn lvrr_confirm_task(&self, message: &str, task: FrontendTask) {
 		let tasks = self.tasks.clone();
 		views::dialog_box::mount_popup(
 			self.popup_dialog_box.clone(),
@@ -127,7 +189,7 @@ impl<T: 'static> Frontend<T> {
 				entries: views::dialog_box::get_entries_yes_no(),
 				on_action_click: Box::new(move |action| {
 					if action == "yes" {
-						tasks.push(FrontendTask::Lvrr(request));
+						tasks.push(task.clone());
 					}
 				}),
 			},

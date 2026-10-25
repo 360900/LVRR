@@ -250,8 +250,10 @@ fn wivrn_compat_search_path() -> Result<String> {
 
 fn build_wayvr(b: &Build) -> Result {
     let mut cmd = cargo(&root().join("wayvr"));
-    cmd.args(["build", "--locked", "-p", "wayvr", "-p", "wayvrctl"])
-        .env("CARGO_TARGET_DIR", target().join("wayvr"));
+    cmd.args([
+        "build", "--locked", "-p", "wayvr", "-p", "wayvrctl", "-p", "lvrr-ui",
+    ])
+    .env("CARGO_TARGET_DIR", target().join("wayvr"));
     if b.release {
         cmd.arg("--release");
     }
@@ -314,7 +316,7 @@ fn install(args: &[String]) -> Result {
         )?;
     }
 
-    for bin in ["wayvr", "wayvrctl"] {
+    for bin in ["wayvr", "wayvrctl", "lvrr-ui"] {
         copy(
             &target().join("wayvr").join(profile).join(bin),
             &prefix.join("bin").join(bin),
@@ -337,7 +339,15 @@ fn install(args: &[String]) -> Result {
     let desktop = fs::read_to_string(&template)
         .map_err(|e| format!("{}: {e}", template.display()))?
         .replace("@PREFIX@", &b.prefix.display().to_string());
-    write(&prefix.join("share/applications/lvrr.desktop"), &desktop)?;
+    // named after the window's app id, so desktops match the two
+    let applications = prefix.join("share/applications");
+    write(&applications.join("io.github.lvrr.desktop"), &desktop)?;
+    match fs::remove_file(applications.join("lvrr.desktop")) {
+        Err(e) if e.kind() != ErrorKind::NotFound => {
+            return Err(format!("removing the old lvrr.desktop: {e}"));
+        }
+        _ => {}
+    }
 
     eprintln!("xtask: installed to {}", prefix.display());
     Ok(())

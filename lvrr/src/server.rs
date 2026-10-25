@@ -323,6 +323,7 @@ pub fn stop() -> Result<(), String> {
             ));
         }
         State::Stopped => {
+            bus::quit_ui(&conn);
             report("LVRR isn't running", "");
             return Ok(());
         }
@@ -347,6 +348,8 @@ pub fn stop() -> Result<(), String> {
             return Err("LVRR's server didn't stop".to_string());
         }
     }
+    // the window and tray go with it
+    bus::quit_ui(&conn);
     report("LVRR stopped", "");
     Ok(())
 }

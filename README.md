@@ -31,7 +31,7 @@ The headset APK is built by CI.
 
 # Usage
 
-Run `lvrr` (or LVRR from the app menu) to start the server in the background. Open LVRR on the headset and pick this PC; the first time, enter the PIN the PC shows. Once connected, the settings are in the dashboard in VR. OpenVR games use the bundled xrizer.
+Run `lvrr` (or LVRR from the app menu) to start the server in the background and open LVRR's window, with pairing and the headset and server settings; closing it leaves the server and a tray icon. Open LVRR on the headset and pick this PC; the first time, enter the PIN the PC shows. Once connected, the settings are in the dashboard in VR too. OpenVR games use the bundled xrizer.
 
 LVRR keeps its server settings in `~/.config/lvrr/wivrn-server.json`. Pairing is shared with WiVRn.
 

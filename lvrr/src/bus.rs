@@ -15,6 +15,10 @@ const PATH: &str = "/io/github/wivrn/Server";
 const INTERFACE: &str = "io.github.wivrn.Server";
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+/// LVRR's desktop window, see wayvr/lvrr-ui
+const UI_NAME: &str = "io.github.lvrr.Ui";
+const UI_PATH: &str = "/io/github/lvrr/Ui";
+
 const NOTIFICATIONS: &str = "org.freedesktop.Notifications";
 const NOTIFICATIONS_PATH: &str = "/org/freedesktop/Notifications";
 
@@ -30,6 +34,15 @@ pub fn has_owner(conn: &Connection, name: &str) -> bool {
     bus_proxy(conn)
         .method_call("org.freedesktop.DBus", "NameHasOwner", (name,))
         .is_ok_and(|(owned,): (bool,)| owned)
+}
+
+/// Closes LVRR's desktop window and its tray icon, if they are open
+pub fn quit_ui(conn: &Connection) {
+    if has_owner(conn, UI_NAME) {
+        let _: Result<(), _> =
+            conn.with_proxy(UI_NAME, UI_PATH, TIMEOUT)
+                .method_call(UI_NAME, "Quit", ());
+    }
 }
 
 /// The process that owns `name`, if any

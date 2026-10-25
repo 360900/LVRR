@@ -623,6 +623,7 @@ impl<T: 'static> TabLvrrHeadset<T> {
 	fn render(&mut self, frontend: &mut Frontend<T>, data: &mut T, generation: u64) -> anyhow::Result<()> {
 		self.rendered = Some(generation);
 		let headset = frontend.interface.lvrr_state(data).and_then(|s| s.headset.clone());
+		let desktop = frontend.interface.lvrr_desktop();
 
 		frontend.layout.remove_children(self.id_content);
 		let globals = frontend.layout.state.globals.clone();
@@ -632,12 +633,20 @@ impl<T: 'static> TabLvrrHeadset<T> {
 		let parent = self.id_content;
 
 		let Some(h) = headset else {
-			ui.banner(parent, "LVRR.HEADSET.NOT_CONNECTED", "secondary")?;
+			// the server remembers a headset's settings once it connected
+			let message = if desktop {
+				"LVRR.HEADSET.CONNECT_ONCE"
+			} else {
+				"LVRR.HEADSET.NOT_CONNECTED"
+			};
+			ui.banner(parent, message, "secondary")?;
 			self.widgets = Some(widgets);
 			return Ok(());
 		};
 
-		if h.restart_required {
+		if h.offline {
+			ui.banner(parent, "LVRR.HEADSET.OFFLINE", "primary")?;
+		} else if h.restart_required {
 			let banner = ui.banner(parent, "LVRR.RESTART_REQUIRED", "tertiary")?;
 			let tasks = self.tasks.clone();
 			ui.button(
@@ -649,7 +658,7 @@ impl<T: 'static> TabLvrrHeadset<T> {
 				},
 			)?;
 		}
-		if !h.permission_denied.is_empty() {
+		if !h.offline && !h.permission_denied.is_empty() {
 			ui.banner(parent, "LVRR.HEADSET.PERMISSION_DENIED", "danger")?;
 		}
 
@@ -740,7 +749,12 @@ fn mount(
 			}
 		}
 	}
-	if setting.restart {
+	// offline, everything applies when the headset connects
+	if h.offline {
+		if h.pending.get(key).is_some() {
+			ui.badge(row, "LVRR.HEADSET.PENDING", "primary")?;
+		}
+	} else if setting.restart {
 		ui.badge(row, "LVRR.APPLIES_AFTER_RESTART", "tertiary")?;
 	}
 	Ok(())

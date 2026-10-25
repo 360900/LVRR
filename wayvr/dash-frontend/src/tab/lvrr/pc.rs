@@ -19,6 +19,7 @@ use wgui::{
 	assets::AssetPathRef,
 	components::{
 		bar_graph::{ComponentBarGraph, ValueCell},
+		editbox::ComponentEditBox,
 		tabs::ComponentTabs,
 	},
 	drawing::Color,
@@ -60,6 +61,8 @@ const HEADSET_NAMES: &[&str] = &[
 thread_local! {
 	/// Section to open first, for uidev (`LVRR_PAGE=pc:server`)
 	pub(crate) static INITIAL_SECTION: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+	/// Start pairing once the page opens, for the desktop window's tray
+	pub(crate) static START_PAIRING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 const SECTIONS: [&str; 5] = ["performance", "headsets", "server", "diagnostics", "about"];
@@ -113,12 +116,19 @@ enum ServerChange {
 enum Task {
 	SetSection(Section),
 	Confirm(&'static str, LvrrRequest),
-	Server { change: ServerChange, now: bool },
+	Server {
+		change: ServerChange,
+		now: bool,
+	},
 	OpenMenu(context_menu::Position, Vec<context_menu::Cell>),
 	PerfOverlay(bool),
 	Copy(String),
 	RunChecks,
 	Frontend(FrontendTask),
+	/// Desktop window: pair a new headset, ending the session first if the user agrees
+	Pair,
+	/// Desktop window: a paired headset's public key and the field with its new name
+	Rename(String, Rc<ComponentEditBox>),
 }
 
 struct Graphs {
@@ -185,6 +195,25 @@ impl<T: 'static> Tab<T> for TabLvrrPc<T> {
 				}
 				Task::RunChecks => self.run_checks(),
 				Task::Frontend(task) => frontend.tasks.push(task),
+				Task::Pair => {
+					let busy = frontend
+						.interface
+						.lvrr_state(data)
+						.is_some_and(|s| s.session_running || s.headset_connected);
+					if busy {
+						frontend.lvrr_confirm_task("LVRR.PC.PAIR_CONFIRM", FrontendTask::LvrrPair);
+					} else {
+						frontend.tasks.push(FrontendTask::LvrrPair);
+					}
+				}
+				Task::Rename(key, field) => {
+					let name = field.get_text().trim().to_string();
+					if !name.is_empty() {
+						frontend
+							.tasks
+							.push(FrontendTask::Lvrr(LvrrRequest::RenameKey { key, name }));
+					}
+				}
 			}
 		}
 
@@ -304,6 +333,9 @@ impl<T: 'static> TabLvrrPc<T> {
 			.and_then(Section::from_name)
 			.unwrap_or(Section::Performance);
 		super::set_section(section.name());
+		if START_PAIRING.take() {
+			tasks.push(Task::Pair);
+		}
 
 		let tabs = state.fetch_component_as::<ComponentTabs>("tabs")?;
 		if section != Section::Performance {
@@ -379,7 +411,9 @@ impl<T: 'static> TabLvrrPc<T> {
 		self.rendered = Some(generation);
 		self.graphs = None;
 		let state = frontend.interface.lvrr_state(data).cloned().unwrap_or_default();
-		let perf_overlay = frontend.interface.lvrr_perf_overlay(data);
+		// the overlay is drawn in VR, the desktop window can't show it
+		let perf_overlay = (!frontend.interface.lvrr_desktop()).then(|| frontend.interface.lvrr_perf_overlay(data));
+		let desktop = frontend.interface.lvrr_desktop();
 
 		frontend.layout.remove_children(self.id_content);
 		let globals = frontend.layout.state.globals.clone();
@@ -389,6 +423,7 @@ impl<T: 'static> TabLvrrPc<T> {
 
 		match self.section {
 			Section::Performance => self.graphs = self.performance(&mut ui, &state, perf_overlay)?,
+			Section::Headsets if desktop => self.headsets_desktop(&mut ui, &state)?,
 			Section::Headsets => self.headsets(&mut ui, &state)?,
 			Section::Server => self.server(&mut ui, &state)?,
 			Section::Diagnostics => self.diagnostics(&mut ui)?,
@@ -399,12 +434,14 @@ impl<T: 'static> TabLvrrPc<T> {
 		Ok(())
 	}
 
-	fn performance(&self, ui: &mut Ui, state: &LvrrState, perf_overlay: bool) -> anyhow::Result<Option<Graphs>> {
+	fn performance(&self, ui: &mut Ui, state: &LvrrState, perf_overlay: Option<bool>) -> anyhow::Result<Option<Graphs>> {
 		let group = ui.group(self.id_content, "LVRR.PC.PERFORMANCE", "@/dashboard/barchart.svg")?;
-		let tasks = self.tasks.clone();
-		ui.toggle(group, Text::Key("LVRR.PC.PERF_OVERLAY"), perf_overlay, move |v| {
-			tasks.push(Task::PerfOverlay(v));
-		})?;
+		if let Some(perf_overlay) = perf_overlay {
+			let tasks = self.tasks.clone();
+			ui.toggle(group, Text::Key("LVRR.PC.PERF_OVERLAY"), perf_overlay, move |v| {
+				tasks.push(Task::PerfOverlay(v));
+			})?;
+		}
 		if state.stats.is_empty() {
 			ui.muted(group, Text::Key("LVRR.PC.NO_STATS"))?;
 			return Ok(None);
@@ -473,6 +510,59 @@ impl<T: 'static> TabLvrrPc<T> {
 			})?;
 		}
 		ui.muted(group, Text::Key("LVRR.PC.PAIR_HOWTO"))?;
+		Ok(())
+	}
+
+	/// Pairing with a keyboard and mouse: a PIN on demand and names typed in
+	fn headsets_desktop(&self, ui: &mut Ui, state: &LvrrState) -> anyhow::Result<()> {
+		if state.pairing_enabled && !state.pin.is_empty() {
+			let banner = ui.banner(self.id_content, "LVRR.PC.PAIR_PIN", "primary")?;
+			ui.bold(banner, Text::Raw(&state.pin), 32)?;
+			let tasks = self.tasks.clone();
+			ui.button(
+				banner,
+				Text::Key("LVRR.PC.PAIR_STOP"),
+				"@/dashboard/close.svg",
+				move || {
+					tasks.push(Task::Frontend(FrontendTask::Lvrr(LvrrRequest::DisablePairing)));
+				},
+			)?;
+		} else {
+			let row = ui.row(self.id_content)?;
+			let tasks = self.tasks.clone();
+			ui.button(row, Text::Key("LVRR.PC.PAIR"), "@/dashboard/add.svg", move || {
+				tasks.push(Task::Pair);
+			})?;
+			ui.muted(row, Text::Key("LVRR.PC.PAIR_HOWTO_DESKTOP"))?;
+		}
+		let group = ui.group(
+			self.id_content,
+			"LVRR.PC.PAIRED_HEADSETS",
+			"@/dashboard/wivrn_head_symbolic.svg",
+		)?;
+		if state.known_keys.is_empty() {
+			ui.muted(group, Text::Key("LVRR.PC.NO_HEADSETS"))?;
+		}
+		for key in &state.known_keys {
+			let row = ui.line(group)?;
+			let column = ui.column(row)?;
+			let field = ui.editbox(column, &key.name)?;
+			match key.last_connection {
+				Some(t) => ui.muted(column, Text::Raw(&format_time(t)))?,
+				None => ui.muted(column, Text::Key("LVRR.PC.NEVER_CONNECTED"))?,
+			}
+			let (tasks, public_key) = (self.tasks.clone(), key.public_key.clone());
+			ui.button(row, Text::Key("LVRR.PC.RENAME"), "@/dashboard/check.svg", move || {
+				tasks.push(Task::Rename(public_key.clone(), field.clone()));
+			})?;
+			let (tasks, public_key) = (self.tasks.clone(), key.public_key.clone());
+			ui.danger_button(row, Text::Key("LVRR.PC.REVOKE"), "@/dashboard/trash.svg", move || {
+				tasks.push(Task::Confirm(
+					"LVRR.PC.REVOKE_CONFIRM",
+					LvrrRequest::RevokeKey(public_key.clone()),
+				));
+			})?;
+		}
 		Ok(())
 	}
 

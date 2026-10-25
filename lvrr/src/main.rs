@@ -24,7 +24,9 @@ use std::process::{Command, ExitCode};
 
 const USAGE: &str = "usage: lvrr [COMMAND] [ARGS...]
 
-  start           start LVRR's server in the background, or show its status (default)
+  (none)          start the server and open LVRR's window, like the app menu does;
+                  without a display, like start
+  start           start LVRR's server in the background, or show its status
   stop            stop the server
   status          show the server, headset and pairing state
   logs [ARGS]     show the server log; ARGS such as -f go to journalctl, or tail without systemd
@@ -54,9 +56,10 @@ fn main() -> ExitCode {
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let (command, rest) = match args.split_first() {
         Some((command, rest)) => (command.to_string_lossy().into_owned(), rest),
-        None => ("start".to_string(), &[][..]),
+        None => ("open".to_string(), &[][..]),
     };
     let result = match command.as_str() {
+        "open" if args.is_empty() => open(&[]),
         "start" => no_args(&command, rest).and_then(|()| server::start()),
         "stop" => no_args(&command, rest).and_then(|()| server::stop()),
         "status" => {
@@ -132,6 +135,25 @@ pub fn report(summary: &str, body: &str) {
     if !interactive() {
         bus::notify(summary, body);
     }
+}
+
+/// The desktop window needs a display, and an install that has it
+pub fn window_available() -> bool {
+    let display = ["WAYLAND_DISPLAY", "DISPLAY"]
+        .iter()
+        .any(|var| env::var_os(var).is_some_and(|v| !v.is_empty()));
+    display && install_root().is_ok_and(|root| root.join("bin/lvrr-ui").is_file())
+}
+
+/// `lvrr` without arguments: the server, then the window on top of it
+pub fn open(ui_args: &[&str]) -> Result<(), String> {
+    if !window_available() {
+        return server::start();
+    }
+    server::ensure_running()?;
+    let mut cmd = Command::new(install_root()?.join("bin/lvrr-ui"));
+    cmd.args(ui_args);
+    Err(exec(cmd))
 }
 
 fn desktop(args: &[OsString]) -> String {

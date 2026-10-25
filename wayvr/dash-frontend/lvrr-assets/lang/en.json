@@ -110,7 +110,10 @@
       "EXTENDED_CONFIG": "Allow unsafe values",
       "HIGH_POWER": "High power mode",
       "BOUNDARY": "Show the boundary in passthrough",
-      "USB_NETWORK": "USB networking"
+      "USB_NETWORK": "USB networking",
+      "OFFLINE": "The headset isn't connected. Changes apply when it connects.",
+      "PENDING": "On connect",
+      "CONNECT_ONCE": "Connect the headset once to change its settings here."
     },
     "PC": {
       "TITLE": "PC",
@@ -156,7 +159,23 @@
       "SUPPORT_UPSTREAM": "Support WayVR",
       "CHECK_OK": "OK",
       "CHECK_WARN": "Warning",
-      "CHECK_FAIL": "Problem"
+      "CHECK_FAIL": "Problem",
+      "PAIR": "Pair headset",
+      "PAIR_PIN": "Open LVRR on the new headset, pick this PC and enter this PIN:",
+      "PAIR_STOP": "Stop pairing",
+      "PAIR_CONFIRM": "Pairing a new headset ends the current session and closes its apps. Continue?",
+      "PAIR_HOWTO_DESKTOP": "Shows a PIN to enter on the new headset."
+    },
+    "DESKTOP": {
+      "NOT_RUNNING": "LVRR isn't running.",
+      "START": "Start LVRR"
+    },
+    "TRAY": {
+      "OPEN": "Open LVRR",
+      "NOT_RUNNING": "LVRR isn't running",
+      "WAITING": "Waiting for the headset",
+      "CONNECTED": "{} is connected",
+      "PAIRING": "Pairing, PIN {}"
     }
   }
 }

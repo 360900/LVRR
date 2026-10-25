@@ -11,9 +11,9 @@ depends=(
   librsvg libstdc++ libx11 libxcb openssl systemd-libs vulkan-icd-loader x264
   # lvrr: icon, and pkexec for `lvrr doctor --fix`
   hicolor-icon-theme polkit
-  # wayvr
-  alsa-lib dav1d dbus libinput libxext libxkbcommon libxkbcommon-x11 libxrandr openvr openxr
-  xwayland-satellite
+  # wayvr, and the LVRR window
+  alsa-lib dav1d dbus libinput libxcursor libxext libxi libxkbcommon libxkbcommon-x11 libxrandr openvr
+  openxr wayland xwayland-satellite
   # 32-bit xrizer
   lib32-gcc-libs lib32-glibc
 )
@@ -21,7 +21,10 @@ makedepends=(
   boost clang cli11 cmake eigen git glib2-devel libdrm ninja nlohmann-json python rustup shaderc
   vulkan-headers
 )
-optdepends=('android-tools: lvrr usb and lvrr install')
+optdepends=(
+  'android-tools: lvrr usb and lvrr install'
+  'wl-clipboard: copying from the LVRR window on Wayland'
+)
 provides=(lvrr)
 conflicts=(lvrr)
 # LTO objects in the static OpenXR loader break the Rust link.
@@ -48,5 +51,5 @@ package() {
   cargo xtask install --destdir "$pkgdir"
   install -d "$pkgdir/usr/bin" "$pkgdir/usr/share/applications"
   ln -s /opt/lvrr/bin/lvrr "$pkgdir/usr/bin/lvrr"
-  ln -s /opt/lvrr/share/applications/lvrr.desktop "$pkgdir/usr/share/applications/lvrr.desktop"
+  ln -s /opt/lvrr/share/applications/io.github.lvrr.desktop "$pkgdir/usr/share/applications/io.github.lvrr.desktop"
 }

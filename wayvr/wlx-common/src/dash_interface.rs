@@ -126,6 +126,18 @@ pub trait DashInterface<T> {
 	fn clipboard_set_text(&mut self, _data: &mut T, _text: &str) -> anyhow::Result<()> {
 		anyhow::bail!("No clipboard")
 	}
+	// LVRR: the desktop window, which shows only the pages that work without a headset
+	fn lvrr_desktop(&self) -> bool {
+		false
+	}
+	/// Starts this install's LVRR server
+	fn lvrr_start_server(&mut self, _data: &mut T) -> anyhow::Result<()> {
+		anyhow::bail!("Can't start the LVRR server from here")
+	}
+	/// Ends the headset session if one runs, then lets a new headset pair
+	fn lvrr_pair(&mut self, _data: &mut T) -> anyhow::Result<()> {
+		anyhow::bail!("Can't pair a headset from here")
+	}
 }
 
 #[derive(Default, Clone, Copy)]

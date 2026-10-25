@@ -65,7 +65,7 @@
             <SideButton id="btn_side_games" src_builtin="@/dashboard/games.svg" tooltip="GAMES" tooltip_side="right" />
             <SideButton id="btn_side_monado" src_builtin="@/dashboard/monado.svg" tooltip="MONADO_RUNTIME" tooltip_side="right" />
           </div>
-          <rectangle height="2" color="outline" width="~side_sprite_size" />
+          <rectangle id="side_separator" height="2" color="outline" width="~side_sprite_size" />
           <SideButton id="btn_side_settings" src_builtin="@/dashboard/settings.svg" tooltip="SETTINGS" tooltip_side="right" />
         </rectangle>
       </div>
@@ -127,6 +127,7 @@
         </rectangle>
         <!-- BOTTOM PANEL -->
         <rectangle
+          id="bottom_bar"
           consume_mouse_events="1"
           width="100%"
           height="48"

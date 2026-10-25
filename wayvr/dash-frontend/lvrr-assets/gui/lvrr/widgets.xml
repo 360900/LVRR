@@ -65,6 +65,11 @@
     </div>
   </template>
 
+  <!-- id, text; only the desktop window has a keyboard for it -->
+  <template name="EditBox">
+    <EditBox id="${id}" text="${text}" width="260" height="32" />
+  </template>
+
   <!-- id, text, translation, icon, color -->
   <template name="Button">
     <Button id="${id}" height="32" padding="4" gap="8" color="${color}">

@@ -23,6 +23,10 @@ const CONFIRM_TIMEOUT: Duration = Duration::from_secs(60);
 const PACKAGES: [&str; 2] = ["io.github.lvrr", "io.github.lvrr.debug"];
 
 pub fn pair() -> Result<(), String> {
+    // from the app menu, the window asks and shows the PIN
+    if !crate::interactive() && crate::window_available() {
+        return crate::open(&["--pair"]);
+    }
     let conn = server::ensure_running()?;
     let server = Server::new(&conn);
     if server.get::<bool>("HeadsetConnected")? || server.get::<bool>("SessionRunning")? {
