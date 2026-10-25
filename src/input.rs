@@ -2745,7 +2745,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             }
         }
         self.sync_head_proximity(actions, &activated_sets);
-        self.sync_hand_speeds(&data, actions);
+        self.sync_hand_speeds(data, actions);
         *self.active_sets.write().unwrap() = activated_sets;
 
         // Each device's subaction path, interaction profile and origin.
@@ -4002,10 +4002,7 @@ impl ManifestLoadedActions {
                         .find(|origin| !custom.contains(origin))
                         .or_else(|| on_device().next())
                 };
-                found.insert(
-                    (*profile, key),
-                    InputDevice::ALL.map(origin),
-                );
+                found.insert((*profile, key), InputDevice::ALL.map(origin));
             }
         }
         found
