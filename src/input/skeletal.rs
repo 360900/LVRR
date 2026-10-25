@@ -1556,4 +1556,64 @@ mod tests {
         // A hand that let go of its controller
         check_tracked_bones::<OculusTouch>(&mut f, &skeletons, source, level);
     }
+
+    /// Joints derived from a controller that doesn't sense the fingers only follow its buttons
+    /// and capacitive sensors, so its skeleton is estimated from them like SteamVR does.
+    fn check_estimated_bones<P: InteractionProfile>(f: &mut Fixture, skeletons: &Skeletons) {
+        use vr::EVRSkeletalTrackingLevel::*;
+        use vr::{EVRSkeletalMotionRange as Range, EVRSkeletalTransformSpace as Space};
+        use xr::HandTrackingDataSourceEXT as Source;
+        let name = P::profile_path();
+        for hand in [Hand::Left, Hand::Right] {
+            let (open, fist) = match hand {
+                Hand::Left => (&generated::left_hand::OPENHAND, &generated::left_hand::FIST),
+                Hand::Right => (
+                    &generated::right_hand::OPENHAND,
+                    &generated::right_hand::FIST,
+                ),
+            };
+            let what = format!("{name} {hand:?}");
+            f.set_interaction_profile::<P>(user_path(hand));
+            // The joints make a fist, but nothing is touched.
+            fakexr::set_hand_tracked(f.raw_session(), user_path(hand), Some(Source::CONTROLLER));
+            place_joints::<P>(f, hand, fist);
+            skeletons.frame(f);
+            assert_eq!(skeletons.level(f, hand), Estimated, "{what}");
+            for range in [Range::WithoutController, Range::WithController] {
+                let bones = skeletons.bones(f, hand, Space::Parent, range);
+                assert_bones_eq(&bones, open, &format!("{what}, controller joints"));
+            }
+            assert_eq!(skeletons.curls(f, hand), [0.0; 5], "{what}");
+
+            // The hand let go of the controller and is tracked optically.
+            fakexr::set_hand_tracked(f.raw_session(), user_path(hand), Some(Source::UNOBSTRUCTED));
+            skeletons.frame(f);
+            assert_eq!(skeletons.level(f, hand), Full, "{what}");
+            let mut expected = *fist;
+            set_aux_bones(&mut expected, hand);
+            let bones = skeletons.bones(f, hand, Space::Parent, Range::WithoutController);
+            assert_bones_eq(&bones, &expected, &format!("{what}, optical joints"));
+
+            fakexr::set_hand_tracked(f.raw_session(), user_path(hand), None);
+            fakexr::set_hand_joints(f.raw_session(), user_path(hand), None);
+        }
+    }
+
+    #[test]
+    fn controller_joints_of_touch_like_controllers_are_estimated() {
+        use crate::input::profiles::{
+            meta_touch_plus::MetaTouchPlus,
+            oculus_touch::OculusTouch,
+            pico::{Pico4, PicoNeo3},
+            touch_pro::TouchPro,
+            vive_focus3::ViveFocus3,
+        };
+        let (mut f, skeletons) = Skeletons::new();
+        check_estimated_bones::<OculusTouch>(&mut f, &skeletons);
+        check_estimated_bones::<MetaTouchPlus>(&mut f, &skeletons);
+        check_estimated_bones::<TouchPro>(&mut f, &skeletons);
+        check_estimated_bones::<Pico4>(&mut f, &skeletons);
+        check_estimated_bones::<PicoNeo3>(&mut f, &skeletons);
+        check_estimated_bones::<ViveFocus3>(&mut f, &skeletons);
+    }
 }
