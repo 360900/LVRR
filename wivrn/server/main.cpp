@@ -103,6 +103,9 @@ int create_listen_socket()
 	auto sock_file = socket_path();
 
 	addr.sun_family = AF_UNIX;
+	// LVRR: a longer path would overflow sun_path
+	if (sock_file.native().size() >= sizeof(addr.sun_path))
+		throw std::runtime_error("Socket path " + sock_file.native() + " is longer than " + std::to_string(sizeof(addr.sun_path) - 1) + " bytes, use a shorter XDG_RUNTIME_DIR");
 	strcpy(addr.sun_path, sock_file.c_str());
 
 	int fd = socket(PF_UNIX, SOCK_STREAM, 0);
