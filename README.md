@@ -42,10 +42,10 @@ LVRR keeps its server settings in `~/.config/lvrr/wivrn-server.json`. Pairing is
 # Development
 
 ```sh
-cargo xtask build --i686 --prefix $PWD/target/stage
-cargo xtask install
-target/stage/bin/lvrr
+cargo xtask run
 ```
+
+This builds into `target/stage`, installs there and starts its `lvrr`. Build options such as `--i686` go first, arguments after `--` go to `lvrr`.
 
 `cargo xtask apk` builds the headset APK and needs the Android SDK and NDK. Upstream changes are merged as described in [CHANGES.md](CHANGES.md), followed by `cargo xtask rebrand`.
 

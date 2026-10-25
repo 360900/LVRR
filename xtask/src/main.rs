@@ -24,6 +24,9 @@ commands:
         release build with --i686, packed into target/dist/lvrr-<version>-x86_64.tar.gz
   apk [--debug] [-- GRADLE_ARGS...]
         build the headset APK into target/dist (needs the Android SDK and NDK)
+  run [BUILD_ARGS...] [-- LVRR_ARGS...]
+        build into target/stage, install there and start its lvrr, for testing
+        from the tree; BUILD_ARGS as for build, without --prefix
   client
         build WiVRn's desktop headset client into target/client-stage, for testing
         the server without a headset
@@ -58,6 +61,7 @@ fn main() -> ExitCode {
         Some("dist") => dist(rest),
         Some("apk") => apk(rest),
         Some("client") => client(rest),
+        Some("run") => run_staged(rest),
         Some("rebrand") => rebrand::run(rest),
         Some("version") => version().map(|v| println!("{v}")),
         _ => Err(USAGE.into()),
@@ -557,6 +561,27 @@ fn value<'a>(it: &mut impl Iterator<Item = &'a String>, flag: &str) -> Result<&'
     it.next()
         .map(String::as_str)
         .ok_or_else(|| format!("{flag} needs a value"))
+}
+
+/// Builds and installs into target/stage, then becomes its lvrr
+fn run_staged(args: &[String]) -> Result {
+    use std::os::unix::process::CommandExt;
+
+    let (build_args, lvrr_args) = match args.iter().position(|a| a == "--") {
+        Some(i) => (&args[..i], &args[i + 1..]),
+        None => (args, &[][..]),
+    };
+    if build_args.iter().any(|a| a == "--prefix") {
+        return Err("run: always uses target/stage as the prefix".into());
+    }
+    let stage = target().join("stage");
+    let mut b = strings(&["--prefix", &stage.to_string_lossy()]);
+    b.extend_from_slice(build_args);
+    build(&b)?;
+    install(&[])?;
+    let lvrr = stage.join("bin/lvrr");
+    let err = Command::new(&lvrr).args(lvrr_args).exec();
+    Err(format!("running {}: {err}", lvrr.display()))
 }
 
 fn strings(args: &[&str]) -> Vec<String> {
