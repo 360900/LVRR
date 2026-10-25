@@ -2540,11 +2540,16 @@ fn dpad_action_binding_info() {
     let action = f.get_action_handle(c"/actions/set1/in/boolact");
     let info = get_binding_info(&f, action);
 
-    assert_eq!(info.len(), 1);
-    assert_eq!(buf_str(&info[0].rchDevicePathName), "/user/hand/left");
-    assert_eq!(buf_str(&info[0].rchInputPathName), "/input/trackpad");
-    assert_eq!(buf_str(&info[0].rchModeName), "trackpad");
-    assert_eq!(buf_str(&info[0].rchSlotName), "position");
+    assert_eq!(
+        binding_info_rows(&info),
+        [[
+            "/user/hand/left",
+            "/input/trackpad",
+            "dpad",
+            "north",
+            "trackpad"
+        ]]
+    );
 
     let origins = get_action_origins(&f, set1, action);
     assert!(!origins.is_empty());
@@ -2553,6 +2558,375 @@ fn dpad_action_binding_info() {
     assert_eq!(
         buf_str(&origin_info.rchRenderModelComponentName),
         "trackpad"
+    );
+}
+
+/// Device, input, mode, slot and input type of each binding.
+fn binding_info_rows(info: &[vr::InputBindingInfo_t]) -> Vec<[String; 5]> {
+    info.iter()
+        .map(|info| {
+            [
+                buf_str(&info.rchDevicePathName),
+                buf_str(&info.rchInputPathName),
+                buf_str(&info.rchModeName),
+                buf_str(&info.rchSlotName),
+                buf_str(&info.rchInputSourceType),
+            ]
+        })
+        .collect()
+}
+
+/// Loads `actions`, makes both controllers `P` and syncs `set`.
+fn fixture_with<P: InteractionProfile>(actions: &CStr, set: &CStr) -> Fixture {
+    let mut f = Fixture::new();
+    let set = f.get_action_set_handle(set);
+    f.load_actions(actions);
+    f.set_interaction_profile::<P>(LeftHand);
+    f.set_interaction_profile::<P>(RightHand);
+    f.sync(vr::VRActiveActionSet_t {
+        ulActionSet: set,
+        ..Default::default()
+    });
+    f
+}
+
+#[track_caller]
+fn binding_info_of<P: InteractionProfile>(
+    actions: &CStr,
+    set: &CStr,
+    action: &CStr,
+) -> Vec<[String; 5]> {
+    let f = fixture_with::<P>(actions, set);
+    let action = f.get_action_handle(action);
+    binding_info_rows(&get_binding_info(&f, action))
+}
+
+#[test]
+fn binding_info_modes() {
+    let set1 = c"/actions/set1";
+    let main = c"/actions/main";
+    let touch = |action| binding_info_of::<OculusTouch>(c"actions.json", set1, action);
+
+    assert_eq!(
+        touch(c"/actions/set1/in/boolact"),
+        [
+            ["/user/hand/left", "/input/x", "button", "click", "button"],
+            ["/user/hand/left", "/input/y", "button", "click", "button"],
+            ["/user/hand/right", "/input/a", "button", "click", "button"],
+            ["/user/hand/right", "/input/b", "button", "click", "button"],
+            // The Touch's left menu button is its system button in SteamVR.
+            [
+                "/user/hand/left",
+                "/input/system",
+                "button",
+                "click",
+                "button"
+            ],
+            [
+                "/user/hand/left",
+                "/input/trigger",
+                "trigger",
+                "click",
+                "trigger"
+            ],
+            [
+                "/user/hand/left",
+                "/input/thumbrest",
+                "button",
+                "touch",
+                "button"
+            ],
+            [
+                "/user/hand/left",
+                "/input/grip",
+                "button",
+                "click",
+                "trigger"
+            ],
+            [
+                "/user/hand/right",
+                "/input/grip",
+                "button",
+                "click",
+                "trigger"
+            ],
+            [
+                "/user/hand/left",
+                "/input/trigger",
+                "button",
+                "click",
+                "trigger"
+            ],
+            [
+                "/user/hand/right",
+                "/input/trigger",
+                "button",
+                "click",
+                "trigger"
+            ],
+            [
+                "/user/hand/right",
+                "/input/joystick",
+                "joystick",
+                "click",
+                "joystick"
+            ],
+            [
+                "/user/hand/right",
+                "/input/joystick",
+                "joystick",
+                "touch",
+                "joystick"
+            ],
+        ]
+    );
+    assert_eq!(
+        touch(c"/actions/set1/in/vec1act"),
+        [
+            [
+                "/user/hand/left",
+                "/input/trigger",
+                "trigger",
+                "pull",
+                "trigger"
+            ],
+            [
+                "/user/hand/right",
+                "/input/trigger",
+                "trigger",
+                "pull",
+                "trigger"
+            ],
+        ]
+    );
+    assert_eq!(
+        touch(c"/actions/set1/in/vec2act"),
+        [
+            [
+                "/user/hand/right",
+                "/input/joystick",
+                "joystick",
+                "position",
+                "joystick"
+            ],
+            [
+                "/user/hand/left",
+                "/input/joystick",
+                "joystick",
+                "position",
+                "joystick"
+            ],
+        ]
+    );
+    assert_eq!(
+        touch(c"/actions/set1/in/vib"),
+        [
+            ["/user/hand/left", "/output/haptic", "", "", "vibration"],
+            ["/user/hand/right", "/output/haptic", "", "", "vibration"],
+        ]
+    );
+    // The Vive's grip is a button.
+    assert_eq!(
+        binding_info_of::<ViveWands>(c"actions.json", set1, c"/actions/set1/in/boolact"),
+        [
+            [
+                "/user/hand/left",
+                "/input/grip",
+                "button",
+                "click",
+                "button"
+            ],
+            [
+                "/user/hand/right",
+                "/input/grip",
+                "button",
+                "click",
+                "button"
+            ],
+            [
+                "/user/hand/left",
+                "/input/application_menu",
+                "button",
+                "click",
+                "button"
+            ],
+            [
+                "/user/hand/right",
+                "/input/application_menu",
+                "button",
+                "click",
+                "button"
+            ],
+            [
+                "/user/hand/left",
+                "/input/trigger",
+                "button",
+                "click",
+                "trigger"
+            ],
+            [
+                "/user/hand/right",
+                "/input/trigger",
+                "button",
+                "click",
+                "trigger"
+            ],
+            [
+                "/user/hand/left",
+                "/input/trackpad",
+                "trackpad",
+                "click",
+                "trackpad"
+            ],
+            [
+                "/user/hand/left",
+                "/input/trackpad",
+                "trackpad",
+                "touch",
+                "trackpad"
+            ],
+        ]
+    );
+
+    assert_eq!(
+        binding_info_of::<Knuckles>(c"actions_scroll.json", main, c"/actions/main/in/scroll_pad"),
+        [[
+            "/user/hand/left",
+            "/input/trackpad",
+            "scroll",
+            "scroll",
+            "trackpad"
+        ]]
+    );
+    assert_eq!(
+        binding_info_of::<Knuckles>(
+            c"actions_scroll.json",
+            main,
+            c"/actions/main/in/scroll_stick"
+        ),
+        [[
+            "/user/hand/right",
+            "/input/thumbstick",
+            "scroll",
+            "scroll",
+            "joystick"
+        ]]
+    );
+    assert_eq!(
+        binding_info_of::<Knuckles>(c"actions_scroll.json", main, c"/actions/main/in/move"),
+        [[
+            "/user/hand/left",
+            "/input/thumbstick",
+            "joystick",
+            "position",
+            "joystick"
+        ]]
+    );
+    assert_eq!(
+        binding_info_of::<OculusTouch>(c"actions_grab_mode.json", set1, c"/actions/set1/in/grab"),
+        [["/user/hand/left", "/input/grip", "grab", "grab", "trigger"]]
+    );
+    assert_eq!(
+        binding_info_of::<Knuckles>(c"actions_toggle.json", set1, c"/actions/set1/in/boolact"),
+        [
+            [
+                "/user/hand/left",
+                "/input/a",
+                "toggle_button",
+                "click",
+                "button"
+            ],
+            [
+                "/user/hand/right",
+                "/input/a",
+                "toggle_button",
+                "click",
+                "button"
+            ],
+        ]
+    );
+    let scalar =
+        |action| binding_info_of::<OculusTouch>(c"actions_scalar_constant.json", main, action);
+    assert_eq!(
+        scalar(c"/actions/main/in/alternateuse"),
+        [[
+            "/user/hand/right",
+            "/input/a",
+            "scalar_constant",
+            "value",
+            "button"
+        ]]
+    );
+    // Not bound, see scalar_constant_bindings.
+    assert!(scalar(c"/actions/main/in/reverse").is_empty());
+}
+
+#[test]
+fn binding_info_chords() {
+    let chord =
+        |action| binding_info_of::<Knuckles>(c"actions_chords.json", c"/actions/main", action);
+    assert_eq!(
+        chord(c"/actions/main/in/dodge"),
+        [
+            [
+                "/user/hand/left",
+                "/input/grip",
+                "button",
+                "click",
+                "trigger"
+            ],
+            ["/user/hand/right", "/input/a", "button", "click", "button"],
+        ]
+    );
+    assert_eq!(
+        chord(c"/actions/main/in/facepiece"),
+        [
+            [
+                "/user/hand/right",
+                "/input/grip",
+                "button",
+                "click",
+                "trigger"
+            ],
+            [
+                "/user/hand/right",
+                "/input/thumbstick",
+                "dpad",
+                "south",
+                "joystick"
+            ],
+        ]
+    );
+    // Ignored chords have no bindings.
+    assert!(chord(c"/actions/main/in/sit").is_empty());
+    assert!(chord(c"/actions/main/in/bad").is_empty());
+}
+
+#[test]
+fn binding_info_of_converted_bindings() {
+    // Vive wand bindings on the Touch report the Touch's inputs.
+    let vive_only = |action| {
+        binding_info_of::<OculusTouch>(c"actions_vive_only.json", c"/actions/main", action)
+    };
+    assert_eq!(
+        vive_only(c"/actions/main/in/vec2act"),
+        [[
+            "/user/hand/left",
+            "/input/joystick",
+            "trackpad",
+            "position",
+            "joystick"
+        ]]
+    );
+    assert_eq!(
+        vive_only(c"/actions/main/in/gripact"),
+        [[
+            "/user/hand/left",
+            "/input/grip",
+            "button",
+            "click",
+            "trigger"
+        ]]
     );
 }
 

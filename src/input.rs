@@ -2,6 +2,7 @@ mod action_manifest;
 mod custom_bindings;
 mod devices;
 mod legacy;
+mod origins;
 mod probe;
 mod profiles;
 mod skeletal;
@@ -1028,6 +1029,123 @@ macro_rules! get_subaction_path {
     };
 }
 
+/// A binding as GetActionBindingInfo reports it.
+struct ReportedBinding {
+    device: String,
+    input: String,
+    mode: String,
+    slot: String,
+    source_type: String,
+}
+
+/// The bindings recorded for `keys` in `profile`, or in every profile if there is none.
+fn recorded_bindings<'a>(
+    loaded: &'a ManifestLoadedActions,
+    profile: Option<xr::Path>,
+    keys: &[ActionKey],
+) -> Vec<&'a origins::BindingInfo> {
+    let maps: Vec<_> = match profile {
+        Some(profile) => loaded
+            .per_profile_binding_info
+            .get(&profile)
+            .into_iter()
+            .collect(),
+        None => loaded.per_profile_binding_info.values().collect(),
+    };
+    let mut out = Vec::new();
+    for map in maps {
+        for info in keys.iter().filter_map(|key| map.get(*key)).flatten() {
+            if !out.contains(&info) {
+                out.push(info);
+            }
+        }
+    }
+    out
+}
+
+impl<C: openxr_data::Compositor> Input<C> {
+    /// Bindings guessed from the OpenXR paths bound to `keys`, for actions with none recorded.
+    fn bindings_from_input_paths(
+        &self,
+        loaded: &ManifestLoadedActions,
+        profile: Option<xr::Path>,
+        keys: &[ActionKey],
+        action_is_bool: bool,
+    ) -> Vec<ReportedBinding> {
+        let mut seen = HashSet::new();
+        let maps: Vec<_> = match profile {
+            Some(profile) => loaded
+                .per_profile_input_paths
+                .get(&profile)
+                .into_iter()
+                .collect(),
+            None => loaded.per_profile_input_paths.values().collect(),
+        };
+        let paths: Vec<xr::Path> = maps
+            .into_iter()
+            .flat_map(|map| keys.iter().filter_map(|key| map.get(*key)).flatten())
+            .copied()
+            .filter(|path| seen.insert(*path))
+            .collect();
+
+        paths
+            .into_iter()
+            .map(|xr_path| {
+                let input_path_str = self
+                    .openxr
+                    .instance
+                    .path_to_string(xr_path)
+                    .unwrap_or_default();
+
+                let (device_path, input_kind, component, slot_raw) =
+                    parse_input_path(&input_path_str);
+
+                let slot = if slot_raw.is_empty() {
+                    match component {
+                        "thumbstick" | "joystick" | "trackpad" => "position",
+                        _ => "",
+                    }
+                } else {
+                    slot_raw
+                };
+
+                let slot = if action_is_bool
+                    && slot == "value"
+                    && matches!(component, "trigger" | "squeeze" | "grip")
+                {
+                    "click"
+                } else {
+                    slot
+                };
+
+                let display_component = normalize_component(component);
+
+                let input = if input_kind.is_empty() || display_component.is_empty() {
+                    String::new()
+                } else {
+                    format!("/{input_kind}/{display_component}")
+                };
+
+                // SteamVR's touch_profile.json lists grip as type "trigger"
+                let mode = match display_component {
+                    "trackpad" => "trackpad",
+                    "joystick" => "joystick",
+                    "trigger" | "grip" => "trigger",
+                    _ => "button",
+                };
+
+                ReportedBinding {
+                    device: device_path.to_owned(),
+                    input,
+                    mode: mode.to_owned(),
+                    slot: slot.to_owned(),
+                    source_type: mode.to_owned(),
+                }
+            })
+            .collect()
+    }
+}
+
 impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
     fn GetBindingVariant(
         &self,
@@ -1130,42 +1248,31 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
 
         let active_profile = self.resolve_active_profile(&session_data, loaded);
 
-        let paths_for_profile = |profile: xr::Path| -> Vec<xr::Path> {
-            let mut out = Vec::new();
-            let mut seen = HashSet::new();
-            if let Some(map) = loaded.per_profile_input_paths.get(&profile) {
-                for key in &related_action_keys {
-                    if let Some(paths) = map.get(*key) {
-                        for &p in paths {
-                            if seen.insert(p) {
-                                out.push(p);
-                            }
-                        }
-                    }
-                }
-            }
-            out
-        };
-
-        let paths: Vec<xr::Path> = if let Some(p) = active_profile {
-            paths_for_profile(p)
+        let action_is_bool = matches!(loaded.actions.get(action_key), Some(ActionData::Bool(_)));
+        let recorded = recorded_bindings(loaded, active_profile, &related_action_keys);
+        let bindings: Vec<ReportedBinding> = if recorded.is_empty() {
+            self.bindings_from_input_paths(
+                loaded,
+                active_profile,
+                &related_action_keys,
+                action_is_bool,
+            )
         } else {
-            let mut seen = HashSet::new();
-            loaded
-                .per_profile_input_paths
-                .values()
-                .flat_map(|m| {
-                    related_action_keys
-                        .iter()
-                        .flat_map(|key| m.get(*key).into_iter().flatten().copied::<xr::Path>())
+            recorded
+                .into_iter()
+                .map(|info| ReportedBinding {
+                    device: origins::hand_path(info.hand).to_owned(),
+                    input: info.input.clone(),
+                    mode: info.mode.to_owned(),
+                    slot: info.slot.to_owned(),
+                    source_type: info.source_type.to_owned(),
                 })
-                .filter(|p| seen.insert(*p))
                 .collect()
         };
 
         if binding_info.is_null() || binding_info_count == 0 {
             if !returned_binding_info_count.is_null() {
-                unsafe { *returned_binding_info_count = paths.len() as u32 };
+                unsafe { *returned_binding_info_count = bindings.len() as u32 };
             }
             return vr::EVRInputError::None;
         }
@@ -1182,12 +1289,11 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             return vr::EVRInputError::InvalidParam;
         }
 
-        let count = paths.len().min(binding_info_count as usize);
+        let count = bindings.len().min(binding_info_count as usize);
         if !returned_binding_info_count.is_null() {
             unsafe { *returned_binding_info_count = count as u32 };
         }
 
-        let action_is_bool = matches!(loaded.actions.get(action_key), Some(ActionData::Bool(_)));
         let action_name = self
             .action_map
             .read()
@@ -1196,58 +1302,13 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             .map(|a| a.path.clone())
             .unwrap_or_default();
 
-        for (i, &xr_path) in paths.iter().take(count).enumerate() {
+        for (i, binding) in bindings.iter().take(count).enumerate() {
             let mut info = vr::InputBindingInfo_t::default();
-
-            let input_path_str = self
-                .openxr
-                .instance
-                .path_to_string(xr_path)
-                .unwrap_or_default();
-
-            let (device_path, input_kind, component, slot_raw) = parse_input_path(&input_path_str);
-
-            let slot = if slot_raw.is_empty() {
-                match component {
-                    "thumbstick" | "joystick" | "trackpad" => "position",
-                    _ => "",
-                }
-            } else {
-                slot_raw
-            };
-
-            let slot = if action_is_bool
-                && slot == "value"
-                && matches!(component, "trigger" | "squeeze" | "grip")
-            {
-                "click"
-            } else {
-                slot
-            };
-
-            let display_component = normalize_component(component);
-
-            let input_component_path = if input_kind.is_empty() || display_component.is_empty() {
-                String::new()
-            } else {
-                format!("/{input_kind}/{display_component}")
-            };
-            copy_cstr(&mut info.rchInputPathName, &input_component_path);
-
-            // SteamVR's touch_profile.json lists grip as type "trigger"
-            let mode_name = match display_component {
-                "trackpad" => "trackpad",
-                "joystick" => "joystick",
-                "trigger" | "grip" => "trigger",
-                _ => "button",
-            };
-            copy_cstr(&mut info.rchModeName, mode_name);
-
-            copy_cstr(&mut info.rchSlotName, slot);
-
-            copy_cstr(&mut info.rchDevicePathName, device_path);
-
-            copy_cstr(&mut info.rchInputSourceType, mode_name);
+            copy_cstr(&mut info.rchDevicePathName, &binding.device);
+            copy_cstr(&mut info.rchInputPathName, &binding.input);
+            copy_cstr(&mut info.rchModeName, &binding.mode);
+            copy_cstr(&mut info.rchSlotName, &binding.slot);
+            copy_cstr(&mut info.rchInputSourceType, &binding.source_type);
 
             // Both layouts are only char arrays, the legacy one is a prefix of ours.
             unsafe {
@@ -1259,7 +1320,8 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             }
 
             debug!(
-                "GetActionBindingInfo: action={action_name:?} raw={input_path_str} device={device_path} input={input_component_path} mode={mode_name} slot={slot}"
+                "GetActionBindingInfo: action={action_name:?} device={} input={} mode={} slot={}",
+                binding.device, binding.input, binding.mode, binding.slot
             );
         }
 
@@ -3240,6 +3302,8 @@ struct ManifestLoadedActions {
     per_profile_pose_bindings: HashMap<xr::Path, SecondaryMap<ActionKey, BoundPose>>,
     per_profile_bindings: HashMap<xr::Path, SecondaryMap<ActionKey, Vec<BoolBindingData>>>,
     per_profile_input_paths: HashMap<xr::Path, SecondaryMap<ActionKey, Vec<xr::Path>>>,
+    /// What GetActionBindingInfo reports, per interaction profile.
+    per_profile_binding_info: HashMap<xr::Path, SecondaryMap<ActionKey, Vec<origins::BindingInfo>>>,
     info_set: xr::ActionSet,
     _info_action: xr::Action<bool>,
     haptic_set: xr::ActionSet,

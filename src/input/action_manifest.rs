@@ -172,6 +172,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             per_profile_bindings,
             per_profile_pose_bindings,
             per_profile_input_paths,
+            per_profile_binding_info,
             head_proximity,
             ..
         } = binding_context;
@@ -274,6 +275,11 @@ impl<C: openxr_data::Compositor> Input<C> {
             .map(|(k, v)| (k, action_map_to_secondary(&mut act_guard, v)))
             .collect();
 
+        let per_profile_binding_info = per_profile_binding_info
+            .into_iter()
+            .map(|(k, v)| (k, action_map_to_secondary(&mut act_guard, v)))
+            .collect();
+
         // An action belongs to the set its path starts with, e.g. /actions/main/in/hand_left.
         let skeleton_sets = actions
             .iter()
@@ -310,6 +316,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             per_profile_bindings,
             per_profile_pose_bindings,
             per_profile_input_paths,
+            per_profile_binding_info,
             _info_action: info_action,
             info_set,
             haptic_action,
@@ -716,6 +723,15 @@ impl<C: openxr_data::Compositor> Input<C> {
                 &bindings.chords,
             );
         }
+        bindings::record_binding_info(
+            &path_validator,
+            P::properties()
+                .openvr_controller_type
+                .to_str()
+                .unwrap_or_default(),
+            context,
+            bindings,
+        );
 
         let info_action_binding = *legacy_bindings
             .trigger_click

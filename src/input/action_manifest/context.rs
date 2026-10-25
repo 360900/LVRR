@@ -4,6 +4,7 @@ use crate::input::custom_bindings::{
     BoolBindingData, BoolBindingType, DpadActions, Vector2ActionData, Vector2BindingData,
     Vector2Transform,
 };
+use crate::input::origins::BindingInfo;
 use crate::input::profiles::{DynInputPath, paths};
 use crate::input::skeletal::SkeletalInputActionData;
 use crate::input::{ActionData, BoundPose, Input, InteractionProfile};
@@ -26,6 +27,8 @@ pub(super) struct BindingsLoadContext<'a> {
     /// Maps each interaction profile path → action name → bound input paths.
     /// Used to implement GetActionBindingInfo/GetActionOrigins.
     pub per_profile_input_paths: HashMap<xr::Path, HashMap<String, Vec<xr::Path>>>,
+    /// Maps each interaction profile path → action name → what GetActionBindingInfo reports.
+    pub per_profile_binding_info: HashMap<xr::Path, HashMap<String, Vec<BindingInfo>>>,
     /// Boolean actions bound to the headset's proximity sensor.
     pub head_proximity: HashSet<String>,
     pub grip_action: &'a xr::Action<xr::Posef>,
@@ -53,6 +56,7 @@ impl<'a> BindingsLoadContext<'a> {
             per_profile_bindings: Default::default(),
             per_profile_pose_bindings: Default::default(),
             per_profile_input_paths: Default::default(),
+            per_profile_binding_info: Default::default(),
             head_proximity: Default::default(),
             grip_action,
             info_action,
@@ -116,6 +120,10 @@ impl BindingsLoadContext<'_> {
             .per_profile_input_paths
             .entry(interaction_profile)
             .or_default();
+        let binding_info_out = self
+            .per_profile_binding_info
+            .entry(interaction_profile)
+            .or_default();
         Some(BindingsProfileLoadContext {
             interaction_profile,
             profile_name: P::profile_path(),
@@ -127,6 +135,7 @@ impl BindingsLoadContext<'_> {
             bindings_parsed,
             pose_bindings,
             input_paths_out,
+            binding_info_out,
             grip_action: self.grip_action,
             info_action: self.info_action,
             haptic_action: self.haptic_action,
@@ -153,6 +162,8 @@ pub(super) struct BindingsProfileLoadContext<'a> {
     pub pose_bindings: &'a mut HashMap<String, BoundPose>,
     /// Input paths bound to each action in the current profile, keyed by action name.
     pub input_paths_out: &'a mut HashMap<String, Vec<xr::Path>>,
+    /// What GetActionBindingInfo reports for each action in the current profile.
+    pub binding_info_out: &'a mut HashMap<String, Vec<BindingInfo>>,
     pub grip_action: &'a xr::Action<xr::Posef>,
     pub info_action: &'a xr::Action<bool>,
     pub haptic_action: &'a xr::Action<xr::Haptic>,

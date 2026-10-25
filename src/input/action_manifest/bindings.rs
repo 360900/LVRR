@@ -1620,3 +1620,211 @@ pub fn handle_pose_bindings(context: &mut BindingsProfileLoadContext, bindings: 
         );
     }
 }
+
+/// The output bound to each slot (input) of a mode.
+type SlotOutputs<'a> = Vec<(&'static str, &'a ActionPath)>;
+
+impl ActionBinding {
+    /// The mode's name, the input path and the bound output of each slot, as
+    /// GetActionBindingInfo reports them.
+    fn slots(&self) -> Option<(&'static str, DynInputPath, SlotOutputs<'_>)> {
+        fn slot<'a, C>(
+            name: &'static str,
+            output: &'a Option<ActionBindingOutput<C>>,
+        ) -> Option<(&'static str, &'a ActionPath)> {
+            output.as_ref().map(|output| (name, &output.output))
+        }
+        fn directions(inputs: &DpadInput) -> Vec<Option<(&'static str, &ActionPath)>> {
+            vec![
+                slot("north", &inputs.north),
+                slot("east", &inputs.east),
+                slot("south", &inputs.south),
+                slot("west", &inputs.west),
+                slot("center", &inputs.center),
+            ]
+        }
+        let (mode, path, slots) = match self {
+            Self::None(_) => return None,
+            Self::Button(data) => {
+                let inputs = &data.inputs;
+                let slots = vec![
+                    slot("click", &inputs.click),
+                    slot("touch", &inputs.touch),
+                    slot("double", &inputs.double),
+                    slot("grab", &inputs.grab),
+                    slot("long", &inputs.long),
+                    slot("held", &inputs.held),
+                    slot("single", &inputs.single),
+                ];
+                ("button", &data.path, slots)
+            }
+            Self::ToggleButton(data) => {
+                let slots = vec![
+                    slot("click", &data.inputs.click),
+                    slot("touch", &data.inputs.touch),
+                ];
+                ("toggle_button", &data.path, slots)
+            }
+            Self::Dpad(data) => ("dpad", &data.path, directions(&data.inputs)),
+            Self::DpadClick(data) => ("dpad_click", &data.path, directions(&data.inputs)),
+            Self::DpadTouch(data) => ("dpad_touch", &data.path, directions(&data.inputs)),
+            Self::Trigger(data) => {
+                let inputs = &data.inputs;
+                let slots = vec![
+                    slot("pull", &inputs.pull),
+                    slot("touch", &inputs.touch),
+                    slot("click", &inputs.click),
+                ];
+                ("trigger", &data.path, slots)
+            }
+            Self::ScalarConstant(data) => (
+                "scalar_constant",
+                &data.path,
+                vec![Some(("value", &data.inputs.value.output))],
+            ),
+            Self::ForceSensor(data) => (
+                "force_sensor",
+                &data.path,
+                vec![Some(("force", &data.inputs.force.output))],
+            ),
+            Self::Grab(data) => (
+                "grab",
+                &data.path,
+                vec![Some(("grab", &data.inputs.grab.output))],
+            ),
+            Self::Scroll(data) => (
+                "scroll",
+                &data.path,
+                vec![Some(("scroll", &data.inputs.scroll.output))],
+            ),
+            Self::Trackpad(data) | Self::Joystick(data) => {
+                let mode = match self {
+                    Self::Trackpad(_) => "trackpad",
+                    _ => "joystick",
+                };
+                let inputs = &data.inputs;
+                let slots = vec![
+                    slot("position", &inputs.position),
+                    slot("click", &inputs.click),
+                    slot("touch", &inputs.touch),
+                ];
+                (mode, &data.path, slots)
+            }
+        };
+        let MaybeInputPath::Valid(path) = path else {
+            return None;
+        };
+        Some((mode, *path, slots.into_iter().flatten().collect()))
+    }
+}
+
+/// Whether the profile `validate_path` checks for has what `slot` of a mode reads on `path`.
+fn has_slot(validate_path: &dyn PathValidator, path: DynInputPath, slot: &str) -> bool {
+    use DynComponent::*;
+    let components: &[Option<DynComponent>] = match slot {
+        // Touches fall back to the pull, see touch_input.
+        "touch" => &[Some(Touch), Some(Value)],
+        "pull" | "grab" => &[Some(Value)],
+        "force" => &[Some(Force)],
+        "position" | "scroll" | "north" | "east" | "south" | "west" | "center" => &[None],
+        _ => &[Some(Click), Some(Value), Some(Force)],
+    };
+    components
+        .iter()
+        .any(|&component| validate_path(DynInputPath { component, ..path }).is_some())
+}
+
+/// Records what GetActionBindingInfo reports for the actions this profile got bindings for:
+/// the OpenVR input, mode and slot of each of their sources, chord inputs and haptic outputs
+/// that the profile has.
+pub fn record_binding_info(
+    validate_path: &dyn PathValidator,
+    controller_type: &str,
+    context: &mut BindingsProfileLoadContext,
+    bindings: &HashMap<String, ActionSetBinding>,
+) {
+    use crate::input::origins::{self, BindingInfo};
+
+    let info = |path: DynInputPath, mode, slot| {
+        let analog = validate_path(path.with_component(DynComponent::Value))
+            .is_some_and(|path| path.component == Some(DynComponent::Value));
+        BindingInfo {
+            hand: path.hand,
+            input: origins::openvr_input(controller_type, path.subpath),
+            mode,
+            slot,
+            source_type: origins::source_type(path.subpath, analog),
+        }
+    };
+
+    let mut found: Vec<(&ActionPath, BindingInfo)> = Vec::new();
+    for (set_name, set) in bindings {
+        if context.get_action_set(set_name).is_none() {
+            continue;
+        }
+        for source in &set.sources {
+            let Some((mode, path, slots)) = source.slots() else {
+                continue;
+            };
+            for (slot, output) in slots {
+                if has_slot(validate_path, path, slot) {
+                    found.push((output, info(path, mode, slot)));
+                }
+            }
+        }
+        for chord in &set.chords {
+            for (path, slot) in &chord.inputs {
+                let MaybeInputPath::Valid(path) = path else {
+                    continue;
+                };
+                // Each input as the mode a chord reads it with.
+                let (mode, slot) = match slot.as_str() {
+                    "click" => ("button", "click"),
+                    "touch" => ("button", "touch"),
+                    "single" => ("button", "single"),
+                    "long" => ("button", "long"),
+                    "held" => ("button", "held"),
+                    "double" => ("button", "double"),
+                    "north" => ("dpad", "north"),
+                    "east" => ("dpad", "east"),
+                    "south" => ("dpad", "south"),
+                    "west" => ("dpad", "west"),
+                    "center" => ("dpad", "center"),
+                    _ => continue,
+                };
+                if has_slot(validate_path, *path, slot) {
+                    found.push((&chord.output, info(*path, mode, slot)));
+                }
+            }
+        }
+        for SimpleActionBinding { output, path } in &set.haptics {
+            let hand = match path.as_str() {
+                "/user/hand/left/output/haptic" => Hand::Left,
+                "/user/hand/right/output/haptic" => Hand::Right,
+                _ => continue,
+            };
+            let info = BindingInfo {
+                hand,
+                input: "/output/haptic".to_owned(),
+                mode: "",
+                slot: "",
+                source_type: "vibration",
+            };
+            found.push((output, info));
+        }
+    }
+
+    for (output, info) in found {
+        // Only actions that got a binding, so no handles are made for unknown names.
+        if !context.input_paths_out.contains_key(&output.path) {
+            continue;
+        }
+        let infos = context
+            .binding_info_out
+            .entry(output.path.clone())
+            .or_default();
+        if !infos.contains(&info) {
+            infos.push(info);
+        }
+    }
+}
