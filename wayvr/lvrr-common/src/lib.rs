@@ -1,5 +1,6 @@
 //! LVRR integration shared by the WayVR crates.
 
+pub mod doctor;
 pub mod emulator;
 pub mod headset;
 #[cfg(feature = "dbus")]

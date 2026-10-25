@@ -17,3 +17,7 @@ serde_json.workspace = true
 default = []
 # Talk to the LVRR server; without it only the emulator is available
 dbus = ["dep:dbus"]
+
+[[example]]
+name = "lvrr_probe"
+required-features = ["dbus"]

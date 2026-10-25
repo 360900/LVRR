@@ -10,11 +10,15 @@ use serde_json::Value;
 const UPSTREAM_NAME: &str = "WayVR";
 const NAME: &str = "LVRR";
 
+/// LVRR's own strings live under this key
+const LVRR_KEY: &str = "LVRR";
+
 /// Translation keys left as they are, because they credit the WayVR project.
 const KEEP_PREFIXES: &[&str] = &["DONATE."];
 
 /// Loads `path` from LVRR's assets if present, otherwise from upstream. Language files are
-/// always built from upstream, rebranded, with LVRR's strings merged over them.
+/// always built from upstream, rebranded, with LVRR's strings merged over them; LVRR's own
+/// strings fall back to English until translated.
 pub fn load(
 	path: &str,
 	lvrr: impl Fn(&str) -> Option<Cow<'static, [u8]>>,
@@ -24,7 +28,17 @@ pub fn load(
 		let Some(base) = upstream(path) else {
 			anyhow::bail!("embedded file {path} not found");
 		};
-		return lang_json(&base, lvrr(path).as_deref());
+		let mut overrides = Vec::new();
+		if path != "lang/en.json"
+			&& let Some(english) = lvrr("lang/en.json")
+		{
+			let english: Value = serde_json::from_slice(&english)?;
+			overrides.push(serde_json::json!({ LVRR_KEY: english[LVRR_KEY] }));
+		}
+		if let Some(own) = lvrr(path) {
+			overrides.push(serde_json::from_slice(&own)?);
+		}
+		return lang_json(&base, overrides);
 	}
 	match lvrr(path).or_else(|| upstream(path)) {
 		Some(data) => Ok(data.into_owned()),
@@ -32,12 +46,12 @@ pub fn load(
 	}
 }
 
-/// Rebrands an upstream language file and merges LVRR's strings (`overrides`) over it.
-pub fn lang_json(upstream: &[u8], overrides: Option<&[u8]>) -> anyhow::Result<Vec<u8>> {
+/// Rebrands an upstream language file and merges LVRR's strings (`overrides`, in order) over it.
+pub fn lang_json(upstream: &[u8], overrides: Vec<Value>) -> anyhow::Result<Vec<u8>> {
 	let mut root: Value = serde_json::from_slice(upstream)?;
 	rename(&mut root, "");
-	if let Some(overrides) = overrides {
-		merge(&mut root, serde_json::from_slice(overrides)?);
+	for o in overrides {
+		merge(&mut root, o);
 	}
 	Ok(serde_json::to_vec(&root)?)
 }
@@ -82,7 +96,11 @@ mod tests {
 	use super::*;
 
 	fn rebrand(upstream: &str, overrides: Option<&str>) -> Value {
-		let out = lang_json(upstream.as_bytes(), overrides.map(str::as_bytes)).unwrap();
+		let overrides = overrides
+			.map(|o| serde_json::from_str(o).unwrap())
+			.into_iter()
+			.collect();
+		let out = lang_json(upstream.as_bytes(), overrides).unwrap();
 		serde_json::from_slice(&out).unwrap()
 	}
 
@@ -105,6 +123,22 @@ mod tests {
 		assert_eq!(out["A"]["B"], "Restart LVRR desktop");
 		assert_eq!(out["A"]["C"], "kept");
 		assert_eq!(out["LVRR"]["NEW"], "New string");
+	}
+
+	#[test]
+	fn lvrr_strings_fall_back_to_english() {
+		let lvrr = |p: &str| match p {
+			"lang/en.json" => Some(Cow::Borrowed(
+				&br#"{"LVRR": {"A": "English", "B": "English"}, "X": "only English"}"#[..],
+			)),
+			"lang/de.json" => Some(Cow::Borrowed(&br#"{"LVRR": {"A": "Deutsch"}}"#[..])),
+			_ => None,
+		};
+		let upstream = |_: &str| Some(Cow::Borrowed(&br#"{"X": "upstream"}"#[..]));
+		let de: Value = serde_json::from_slice(&load("lang/de.json", lvrr, upstream).unwrap()).unwrap();
+		assert_eq!(de["LVRR"]["A"], "Deutsch");
+		assert_eq!(de["LVRR"]["B"], "English");
+		assert_eq!(de["X"], "upstream");
 	}
 
 	#[test]
