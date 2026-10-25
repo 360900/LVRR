@@ -2152,6 +2152,22 @@ extern "system" fn suggest_interaction_profile_bindings(
         return xr::Result::ERROR_PATH_UNSUPPORTED;
     }
 
+    // A suggestion replaces the previous one for the profile, like in Monado.
+    for set in instance.action_sets.lock().unwrap().iter().copied() {
+        let Some(set) = set.to_handle() else {
+            continue;
+        };
+        let pending = set.pending_actions.read().unwrap();
+        for action in set
+            .actions
+            .get()
+            .into_iter()
+            .flatten()
+            .chain(pending.iter())
+        {
+            action.suggested.lock().unwrap().remove(&profile_path);
+        }
+    }
     for xr::ActionSuggestedBinding { action, binding } in bindings.iter().copied() {
         let action = get_handle!(action);
         action
