@@ -37,6 +37,7 @@ LVRR keeps its server settings in `~/.config/lvrr/wivrn-server.json`. Pairing is
 
 - `lvrr server`: server without the dashboard
 - `lvrr desktop`: start wayvr by hand
+- `lvrr doctor`: check that the headset can reach this PC; `--fix` opens the firewall, which the first start offers too
 
 # Development
 

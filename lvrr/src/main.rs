@@ -5,6 +5,8 @@
 //! starts wayvr when a headset connects, and WiVRn finds this install's
 //! xrizer first on its OpenVR compat search path.
 
+mod doctor;
+
 use std::convert::Infallible;
 use std::env;
 use std::ffi::OsString;
@@ -17,11 +19,16 @@ use std::process::{Command, ExitCode};
 const USAGE: &str = "usage: lvrr [dashboard] [ARGS...]
        lvrr server [ARGS...]
        lvrr desktop [ARGS...]
+       lvrr doctor [--json] [--fix]
+       lvrr setup-firewall
        lvrr --version
 
-  dashboard  open the dashboard, which starts the server (default)
-  server     run the streaming server only
-  desktop    start the wayvr desktop overlay on the running server";
+  dashboard       open the dashboard, which starts the server (default)
+  server          run the streaming server only
+  desktop         start the wayvr desktop overlay on the running server
+  doctor          check that the headset can reach this PC; --fix repairs what it can
+  setup-firewall  open the server port and mDNS in ufw or firewalld; needs root,
+                  `doctor --fix` runs it with pkexec";
 
 /// Started by the server when a headset connects. A bare name, found on the
 /// PATH that `run` sets, so the config keeps working if LVRR moves.
@@ -34,6 +41,22 @@ fn main() -> ExitCode {
             let c = c.to_string();
             args.remove(0);
             c
+        }
+        Some("doctor") => {
+            let rest: Vec<String> = args[1..]
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            return doctor::main(&rest);
+        }
+        Some("setup-firewall") => {
+            return match doctor::setup_firewall() {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("lvrr: {e}");
+                    ExitCode::FAILURE
+                }
+            };
         }
         Some("--version") => {
             println!("lvrr {}", option_env!("LVRR_VERSION").unwrap_or("unknown"));
@@ -66,6 +89,9 @@ fn run(command: &str, args: Vec<OsString>) -> Result<Infallible, String> {
         }
         _ => {
             let config = server_config()?;
+            if let Some(dir) = config.parent() {
+                doctor::first_start(dir);
+            }
             warn_foreign(&root);
             let exe = if command == "server" {
                 "wivrn-server"
