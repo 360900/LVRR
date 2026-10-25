@@ -757,6 +757,11 @@ impl TrackedDevice {
         *self.last_seen.lock().unwrap() = Some(Instant::now());
     }
 
+    /// Whether the device was ever there: bound to a profile or tracked as a hand.
+    fn ever_connected(&self) -> bool {
+        self.connected || self.last_seen.lock().unwrap().is_some()
+    }
+
     pub(super) fn recently_seen(&self) -> bool {
         self.held.load(Ordering::Relaxed)
             || self
@@ -818,6 +823,10 @@ impl TrackedDevice {
     pub fn device_class(&self) -> vr::ETrackedDeviceClass {
         match self.device_type {
             TrackedDeviceType::Hmd => vr::ETrackedDeviceClass::HMD,
+            // Like SteamVR's device slots, a controller's is empty until one has been there.
+            TrackedDeviceType::Controller { .. } if !self.ever_connected() => {
+                vr::ETrackedDeviceClass::Invalid
+            }
             TrackedDeviceType::Controller { .. } => vr::ETrackedDeviceClass::Controller,
             #[cfg(feature = "monado")]
             TrackedDeviceType::GenericTracker { .. } => vr::ETrackedDeviceClass::GenericTracker,
@@ -868,11 +877,13 @@ impl TrackedDevice {
         }
     }
 
-    /// Whether this controller is a hand the runtime tracks optically and binds to
-    /// simple_controller (as Monado and WiVRn do), so it should be reported as a hand rather than
-    /// a generic controller. This is latched until the interaction profile changes, so the
-    /// identity doesn't flip whenever the hand briefly loses tracking. Without
-    /// XR_EXT_hand_tracking_data_source, joints derived from a controller look the same.
+    /// Whether this controller is a hand the runtime tracks optically, so it should be reported
+    /// as a hand rather than the controller: one bound to simple_controller (as Monado and WiVRn
+    /// do), or one whose controller lost its profile while the hand's joints are tracked (a
+    /// Quest whose controllers were put down, on WiVRn). This is latched until the interaction
+    /// profile changes, so the identity doesn't flip whenever the hand briefly loses tracking.
+    /// Without XR_EXT_hand_tracking_data_source, joints derived from a controller look the same,
+    /// so a bound simple_controller stays a controller then.
     pub(super) fn is_tracked_hand(
         &self,
         xr_data: &OpenXrData<impl openxr_data::Compositor>,
@@ -885,23 +896,43 @@ impl TrackedDevice {
                 ..
             }
         );
-        if !has_tracker
-            || !xr_data.enabled_extensions.ext_hand_tracking_data_source
-            || !self
-                .profile_data
-                .as_ref()
-                .is_some_and(|data| is_simple_controller(data.properties))
-        {
+        if !has_tracker {
+            return false;
+        }
+        if self.tracked_hand.load(Ordering::Relaxed) {
+            return true;
+        }
+
+        let has_data_source = xr_data.enabled_extensions.ext_hand_tracking_data_source;
+        let simple = self
+            .profile_data
+            .as_ref()
+            .is_some_and(|data| is_simple_controller(data.properties));
+        let took_over = self.profile_path == xr::Path::NULL && self.profile_data.is_some();
+        if !(simple && has_data_source) && !took_over {
             return false;
         }
 
-        if !self.tracked_hand.load(Ordering::Relaxed)
-            && self.get_hand_data_source(xr_data, session_data.tracking_space())
-                == Some(xr::HandTrackingDataSourceEXT::UNOBSTRUCTED)
-        {
+        let source = self.get_hand_data_source(xr_data, session_data.tracking_space());
+        let tracked = if has_data_source {
+            source == Some(xr::HandTrackingDataSourceEXT::UNOBSTRUCTED)
+        } else {
+            source.is_some()
+        };
+        if tracked {
             self.tracked_hand.store(true, Ordering::Relaxed);
+            if took_over {
+                // The app saw the controller, which goes, and the hand comes.
+                self.replace();
+            }
         }
-        self.tracked_hand.load(Ordering::Relaxed)
+        tracked
+    }
+
+    /// Whether a tracked hand took the place of the controller that lost its profile, see
+    /// [TrackedDevice::is_tracked_hand].
+    pub(super) fn hand_took_over(&self) -> bool {
+        self.profile_path == xr::Path::NULL && self.tracked_hand.load(Ordering::Relaxed)
     }
 
     pub(super) fn reset_tracked_hand(&self) {
@@ -2160,22 +2191,42 @@ mod tests {
     fn role_hint_and_device_class() {
         use vr::ETrackedDeviceProperty as Prop;
 
-        let f = Fixture::new();
-        let get = |index, prop| f.input.get_device_int_tracked_property(index, prop);
+        let mut f = Fixture::new();
+        f.load_actions(c"actions.json");
+        let get = |f: &Fixture, index, prop| f.input.get_device_int_tracked_property(index, prop);
 
         use vr::ETrackedControllerRole as Role;
         use vr::ETrackedDeviceClass as Class;
+        // Like SteamVR's, the controller slots are empty until a controller shows up.
         for (index, role, class) in [
             (vr::k_unTrackedDeviceIndex_Hmd, Role::Invalid, Class::HMD),
-            (1, Role::LeftHand, Class::Controller),
-            (2, Role::RightHand, Class::Controller),
+            (1, Role::LeftHand, Class::Invalid),
+            (2, Role::RightHand, Class::Invalid),
         ] {
             assert_eq!(
-                get(index, Prop::ControllerRoleHint_Int32),
+                get(&f, index, Prop::ControllerRoleHint_Int32),
                 Some(role.0 as i32)
             );
-            assert_eq!(get(index, Prop::DeviceClass_Int32), Some(class.0 as i32));
+            assert_eq!(
+                get(&f, index, Prop::DeviceClass_Int32),
+                Some(class.0 as i32)
+            );
         }
+
+        f.set_interaction_profile::<OculusTouch>(fakexr::UserPath::LeftHand);
+        let set = f.get_action_set_handle(c"/actions/set1");
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: set,
+            ..Default::default()
+        });
+        assert_eq!(
+            get(&f, 1, Prop::DeviceClass_Int32),
+            Some(Class::Controller.0 as i32)
+        );
+        assert_eq!(
+            get(&f, 2, Prop::DeviceClass_Int32),
+            Some(Class::Invalid.0 as i32)
+        );
     }
 
     #[test]

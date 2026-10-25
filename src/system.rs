@@ -1502,6 +1502,12 @@ impl vr::IVRSystem026_Interface for System {
         let Some(input) = self.input.get() else {
             return vr::ETrackedControllerRole::Invalid;
         };
+        // Trackers opt out of the hand roles, like their ControllerRoleHint says.
+        if input.device_index_to_tracked_device_class(index)
+            == Some(vr::ETrackedDeviceClass::GenericTracker)
+        {
+            return vr::ETrackedControllerRole::OptOut;
+        }
         input
             .device_index_to_hand(index)
             .map_or(vr::ETrackedControllerRole::Invalid, |hand| hand.into())
@@ -1515,11 +1521,12 @@ impl vr::IVRSystem026_Interface for System {
             return vr::k_unTrackedDeviceIndexInvalid;
         };
 
-        Hand::try_from(role).map_or(vr::k_unTrackedDeviceIndexInvalid, |hand| {
-            input
-                .get_controller_device_index(hand)
-                .unwrap_or(vr::k_unTrackedDeviceIndexInvalid)
-        })
+        // Like SteamVR, a role is only held by a connected controller.
+        Hand::try_from(role)
+            .ok()
+            .and_then(|hand| input.get_controller_device_index(hand))
+            .filter(|&index| input.is_device_connected(index))
+            .unwrap_or(vr::k_unTrackedDeviceIndexInvalid)
     }
     fn ApplyTransform(
         &self,
@@ -3487,6 +3494,88 @@ mod tests {
         assert!(!got_quit());
         wait_get_poses();
         assert!(got_quit());
+    }
+
+    #[test]
+    fn controller_roles_need_a_connected_controller() {
+        use fakexr::UserPath::LeftHand;
+        let (xr, system, input) = system_with_input();
+        let role = vr::ETrackedControllerRole::LeftHand;
+        assert_eq!(
+            system.GetTrackedDeviceIndexForControllerRole(role),
+            vr::k_unTrackedDeviceIndexInvalid
+        );
+        assert_eq!(
+            system.GetTrackedDeviceClass(1),
+            vr::ETrackedDeviceClass::Invalid
+        );
+
+        bind_profile(
+            &xr,
+            &input,
+            LeftHand,
+            "/interaction_profiles/oculus/touch_controller",
+        );
+        assert!(system.IsTrackedDeviceConnected(1));
+        assert_eq!(system.GetTrackedDeviceIndexForControllerRole(role), 1);
+        assert_eq!(system.GetControllerRoleForTrackedDeviceIndex(1), role);
+        assert_eq!(
+            system.GetTrackedDeviceClass(1),
+            vr::ETrackedDeviceClass::Controller
+        );
+
+        // Turned off: SteamVR keeps the device, but no longer answers for its role.
+        fakexr::set_interaction_profile(session(&xr), LeftHand, xr::Path::NULL);
+        sync_profiles(&xr, &input);
+        input.expire_connection_grace();
+        assert!(!system.IsTrackedDeviceConnected(1));
+        assert_eq!(
+            system.GetTrackedDeviceIndexForControllerRole(role),
+            vr::k_unTrackedDeviceIndexInvalid
+        );
+        assert_eq!(
+            system.GetTrackedDeviceClass(1),
+            vr::ETrackedDeviceClass::Controller
+        );
+    }
+
+    #[test]
+    #[cfg_attr(not(feature = "monado"), ignore)]
+    fn trackers_opt_out_of_hand_roles() {
+        let (xr, system, input) = system_with_input();
+        // Trackers are listed when a profile changes.
+        fakexr::add_trackers(session(&xr));
+        bind_profile(
+            &xr,
+            &input,
+            fakexr::UserPath::LeftHand,
+            "/interaction_profiles/valve/index_controller",
+        );
+        // we need to wait two frames for the tracker to be connected.
+        for _ in 0..2 {
+            xr.poll_events();
+            input.frame_start_update();
+        }
+        assert_eq!(
+            system.GetTrackedDeviceClass(3),
+            vr::ETrackedDeviceClass::GenericTracker
+        );
+        let role = vr::ETrackedControllerRole::OptOut;
+        assert_eq!(system.GetControllerRoleForTrackedDeviceIndex(3), role);
+        let mut err = vr::ETrackedPropertyError::UnknownProperty;
+        assert_eq!(
+            system.GetInt32TrackedDeviceProperty(
+                3,
+                vr::ETrackedDeviceProperty::ControllerRoleHint_Int32,
+                &mut err
+            ),
+            role.0 as i32
+        );
+        assert_eq!(err, vr::ETrackedPropertyError::Success);
+    }
+
+    fn translation(m: vr::HmdMatrix34_t) -> [f32; 3] {
+        [m.m[0][3], m.m[1][3], m.m[2][3]]
     }
 
     #[test]

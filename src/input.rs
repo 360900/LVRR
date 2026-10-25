@@ -3548,8 +3548,10 @@ impl<C: openxr_data::Compositor> Input<C> {
 
             if let Some(controller) = controller.as_mut() {
                 // Losing the profile keeps the device and its identity, see CONNECTION_GRACE.
-                // Getting the same one back changes nothing.
-                if profile_path != xr::Path::NULL && controller.last_profile_path != profile_path {
+                // Getting the same one back changes nothing, unless a hand took over meanwhile.
+                if profile_path != xr::Path::NULL
+                    && (controller.last_profile_path != profile_path || controller.hand_took_over())
+                {
                     // Another controller, or one in place of a hand tracked without a profile.
                     if controller.last_profile_path != xr::Path::NULL || controller.recently_seen()
                     {
@@ -3795,7 +3797,11 @@ impl<C: openxr_data::Compositor> Input<C> {
         // Before taking the event queue, since this may locate hand joints.
         let connected: Vec<_> = devices
             .iter()
-            .map(|device| device.is_connected(&self.openxr, &data))
+            .map(|device| {
+                // A hand may have taken a controller's place, which the app sees as a new device.
+                device.is_tracked_hand(&self.openxr, &data);
+                device.is_connected(&self.openxr, &data)
+            })
             .collect();
         let mut events = self.events.lock().unwrap();
 
