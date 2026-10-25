@@ -438,6 +438,15 @@ pub struct HmdProperties {
     pub controller_type: &'static CStr,
     /// Corresponds to Prop_SerialNumber_String
     pub serial_number: &'static CStr,
+    /// Corresponds to Prop_RenderModelName_String. SteamVR's drivers report `generic_hmd`.
+    pub render_model_name: &'static CStr,
+    /// Corresponds to Prop_RegisteredDeviceType_String, the driver's prefix followed by the
+    /// serial number, e.g. "valve/indexLHR-FFFFFFF0" (the `registered_device_type` of SteamVR's
+    /// HMD input profiles plus the serial). Empty if unknown, which reports no value.
+    pub registered_device_type: &'static CStr,
+    /// Corresponds to Prop_InputProfilePath_String, e.g. "{indexhmd}/input/indexhmd_profile.json".
+    /// Empty if unknown, which reports the tracking system name like SteamVR's default.
+    pub input_profile_path: &'static CStr,
 }
 
 pub enum MainAxisType {

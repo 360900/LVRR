@@ -1191,6 +1191,15 @@ impl GraphicsBackend for GlBridgeData {
         self.gl.array_layer(texture, index)
     }
 
+    fn new_on_same_device(&self, instance: &xr::Instance) -> Option<Self> {
+        Self::new(self.gl.new_on_same_device(instance)?, instance)
+    }
+
+    /// The texture is the app's context's, which the copies read like the app's own.
+    fn raw_texture(&mut self, pixels: &[u8], width: u32, height: u32) -> Option<GlTexture> {
+        self.gl.raw_texture(pixels, width, height)
+    }
+
     fn raw_swapchain_info_for_texture(
         &self,
         texture: GlTexture,

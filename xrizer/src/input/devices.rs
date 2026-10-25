@@ -1,4 +1,5 @@
 use std::any::TypeId;
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
 use std::ffi::{CStr, CString};
@@ -52,7 +53,80 @@ pub enum TrackedDeviceType {
     GenericTracker {
         space: xr::Space,
         serial: CString,
+        /// The body part the runtime names the tracker after, if any.
+        role: Option<TrackerRole>,
     },
+}
+
+/// SteamVR's tracker roles, which make a tracker's controller type `vive_tracker_<role>`. A
+/// runtime's device name may imply one: WiVRn's body tracking parts are xdevs named
+/// "WiVRn generic tracker (Left Foot)" and the like.
+#[cfg(feature = "monado")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrackerRole {
+    LeftFoot,
+    RightFoot,
+    LeftShoulder,
+    RightShoulder,
+    LeftElbow,
+    RightElbow,
+    LeftKnee,
+    RightKnee,
+    LeftWrist,
+    RightWrist,
+    LeftAnkle,
+    RightAnkle,
+    Waist,
+    Chest,
+}
+
+#[cfg(feature = "monado")]
+impl TrackerRole {
+    pub fn from_device_name(name: &str) -> Option<Self> {
+        let name = name.to_lowercase();
+        let has = |word: &str| name.contains(word);
+        if has("chest") {
+            return Some(Self::Chest);
+        }
+        if has("waist") || has("hip") {
+            return Some(Self::Waist);
+        }
+        let (left, right) = (has("left"), has("right"));
+        if left == right {
+            return None;
+        }
+        [
+            ("foot", Self::LeftFoot, Self::RightFoot),
+            ("ankle", Self::LeftAnkle, Self::RightAnkle),
+            ("knee", Self::LeftKnee, Self::RightKnee),
+            ("elbow", Self::LeftElbow, Self::RightElbow),
+            ("wrist", Self::LeftWrist, Self::RightWrist),
+            ("shoulder", Self::LeftShoulder, Self::RightShoulder),
+        ]
+        .into_iter()
+        .find(|(part, _, _)| has(part))
+        .map(|(_, l, r)| if left { l } else { r })
+    }
+
+    /// The role's name in SteamVR's `vive_tracker_<role>` controller types and profile files.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::LeftFoot => "left_foot",
+            Self::RightFoot => "right_foot",
+            Self::LeftShoulder => "left_shoulder",
+            Self::RightShoulder => "right_shoulder",
+            Self::LeftElbow => "left_elbow",
+            Self::RightElbow => "right_elbow",
+            Self::LeftKnee => "left_knee",
+            Self::RightKnee => "right_knee",
+            Self::LeftWrist => "left_wrist",
+            Self::RightWrist => "right_wrist",
+            Self::LeftAnkle => "left_ankle",
+            Self::RightAnkle => "right_ankle",
+            Self::Waist => "waist",
+            Self::Chest => "chest",
+        }
+    }
 }
 
 impl std::fmt::Debug for TrackedDeviceType {
@@ -683,6 +757,11 @@ impl TrackedDevice {
         *self.last_seen.lock().unwrap() = Some(Instant::now());
     }
 
+    /// Whether the device was ever there: bound to a profile or tracked as a hand.
+    fn ever_connected(&self) -> bool {
+        self.connected || self.last_seen.lock().unwrap().is_some()
+    }
+
     pub(super) fn recently_seen(&self) -> bool {
         self.held.load(Ordering::Relaxed)
             || self
@@ -744,6 +823,10 @@ impl TrackedDevice {
     pub fn device_class(&self) -> vr::ETrackedDeviceClass {
         match self.device_type {
             TrackedDeviceType::Hmd => vr::ETrackedDeviceClass::HMD,
+            // Like SteamVR's device slots, a controller's is empty until one has been there.
+            TrackedDeviceType::Controller { .. } if !self.ever_connected() => {
+                vr::ETrackedDeviceClass::Invalid
+            }
             TrackedDeviceType::Controller { .. } => vr::ETrackedDeviceClass::Controller,
             #[cfg(feature = "monado")]
             TrackedDeviceType::GenericTracker { .. } => vr::ETrackedDeviceClass::GenericTracker,
@@ -794,11 +877,13 @@ impl TrackedDevice {
         }
     }
 
-    /// Whether this controller is a hand the runtime tracks optically and binds to
-    /// simple_controller (as Monado and WiVRn do), so it should be reported as a hand rather than
-    /// a generic controller. This is latched until the interaction profile changes, so the
-    /// identity doesn't flip whenever the hand briefly loses tracking. Without
-    /// XR_EXT_hand_tracking_data_source, joints derived from a controller look the same.
+    /// Whether this controller is a hand the runtime tracks optically, so it should be reported
+    /// as a hand rather than the controller: one bound to simple_controller (as Monado and WiVRn
+    /// do), or one whose controller lost its profile while the hand's joints are tracked (a
+    /// Quest whose controllers were put down, on WiVRn). This is latched until the interaction
+    /// profile changes, so the identity doesn't flip whenever the hand briefly loses tracking.
+    /// Without XR_EXT_hand_tracking_data_source, joints derived from a controller look the same,
+    /// so a bound simple_controller stays a controller then.
     pub(super) fn is_tracked_hand(
         &self,
         xr_data: &OpenXrData<impl openxr_data::Compositor>,
@@ -811,23 +896,43 @@ impl TrackedDevice {
                 ..
             }
         );
-        if !has_tracker
-            || !xr_data.enabled_extensions.ext_hand_tracking_data_source
-            || !self
-                .profile_data
-                .as_ref()
-                .is_some_and(|data| is_simple_controller(data.properties))
-        {
+        if !has_tracker {
+            return false;
+        }
+        if self.tracked_hand.load(Ordering::Relaxed) {
+            return true;
+        }
+
+        let has_data_source = xr_data.enabled_extensions.ext_hand_tracking_data_source;
+        let simple = self
+            .profile_data
+            .as_ref()
+            .is_some_and(|data| is_simple_controller(data.properties));
+        let took_over = self.profile_path == xr::Path::NULL && self.profile_data.is_some();
+        if !(simple && has_data_source) && !took_over {
             return false;
         }
 
-        if !self.tracked_hand.load(Ordering::Relaxed)
-            && self.get_hand_data_source(xr_data, session_data.tracking_space())
-                == Some(xr::HandTrackingDataSourceEXT::UNOBSTRUCTED)
-        {
+        let source = self.get_hand_data_source(xr_data, session_data.tracking_space());
+        let tracked = if has_data_source {
+            source == Some(xr::HandTrackingDataSourceEXT::UNOBSTRUCTED)
+        } else {
+            source.is_some()
+        };
+        if tracked {
             self.tracked_hand.store(true, Ordering::Relaxed);
+            if took_over {
+                // The app saw the controller, which goes, and the hand comes.
+                self.replace();
+            }
         }
-        self.tracked_hand.load(Ordering::Relaxed)
+        tracked
+    }
+
+    /// Whether a tracked hand took the place of the controller that lost its profile, see
+    /// [TrackedDevice::is_tracked_hand].
+    pub(super) fn hand_took_over(&self) -> bool {
+        self.profile_path == xr::Path::NULL && self.tracked_hand.load(Ordering::Relaxed)
     }
 
     pub(super) fn reset_tracked_hand(&self) {
@@ -898,25 +1003,74 @@ impl TrackedDevice {
         devices: &TrackedDeviceList,
         last_profile: Option<&'static ProfileProperties>,
         property: vr::ETrackedDeviceProperty,
-    ) -> Option<&CStr> {
+    ) -> Option<Cow<'_, CStr>> {
         let hand = match self.device_type {
             TrackedDeviceType::Controller { hand, .. } => hand,
             _ => Hand::Left,
         };
 
         let data = self.get_profile_properties(xr_data, session_data, devices, last_profile)?;
+        let non_empty = |s: &'static CStr| (!s.is_empty()).then_some(s);
+        // Per the OpenVR docs the input profile path defaults to the tracking system name.
+        let input_profile_path =
+            |path: &'static CStr| non_empty(path).unwrap_or(data.tracking_system_name);
+        // The `{driver}` an input profile path starts with is the driver's resource root, e.g.
+        // "indexhmd" for the Index headset and "indexcontroller" for its controllers.
+        let resource_root = |path: &'static CStr| -> Cow<'static, CStr> {
+            path.to_str()
+                .ok()
+                .and_then(|path| path.strip_prefix('{')?.split_once('}'))
+                .and_then(|(root, _)| CString::new(root).ok())
+                .map_or(data.tracking_system_name.into(), Cow::Owned)
+        };
 
         if let TrackedDeviceType::Hmd = self.device_type {
+            let hmd = &data.hmd;
             return match property {
-                vr::ETrackedDeviceProperty::ControllerType_String => Some(data.hmd.controller_type),
-                vr::ETrackedDeviceProperty::ModelNumber_String => Some(data.hmd.model),
-                vr::ETrackedDeviceProperty::SerialNumber_String => Some(data.hmd.serial_number),
+                vr::ETrackedDeviceProperty::ControllerType_String => Some(hmd.controller_type),
+                vr::ETrackedDeviceProperty::ModelNumber_String => Some(hmd.model),
+                vr::ETrackedDeviceProperty::SerialNumber_String => Some(hmd.serial_number),
                 vr::ETrackedDeviceProperty::TrackingSystemName_String => {
                     Some(data.tracking_system_name)
                 }
                 vr::ETrackedDeviceProperty::ManufacturerName_String => Some(data.manufacturer_name),
+                vr::ETrackedDeviceProperty::RenderModelName_String => {
+                    non_empty(hmd.render_model_name)
+                }
+                vr::ETrackedDeviceProperty::RegisteredDeviceType_String => {
+                    non_empty(hmd.registered_device_type)
+                }
+                vr::ETrackedDeviceProperty::InputProfilePath_String => {
+                    Some(input_profile_path(hmd.input_profile_path))
+                }
+                vr::ETrackedDeviceProperty::ResourceRoot_String => {
+                    return Some(resource_root(hmd.input_profile_path));
+                }
+                _ => None,
+            }
+            .map(Cow::Borrowed);
+        }
+
+        // SteamVR's trackers with a role identify as that role's controller type, with its own
+        // input profile.
+        #[cfg(feature = "monado")]
+        if let TrackedDeviceType::GenericTracker {
+            role: Some(role), ..
+        } = &self.device_type
+        {
+            let role = role.name();
+            let owned = match property {
+                vr::ETrackedDeviceProperty::ControllerType_String => {
+                    Some(format!("vive_tracker_{role}"))
+                }
+                vr::ETrackedDeviceProperty::InputProfilePath_String => Some(format!(
+                    "{{htc}}/input/tracker/vive_tracker_{role}_profile.json"
+                )),
                 _ => None,
             };
+            if let Some(owned) = owned {
+                return CString::new(owned).ok().map(Cow::Owned);
+            }
         }
 
         match property {
@@ -940,20 +1094,21 @@ impl TrackedDevice {
             vr::ETrackedDeviceProperty::SerialNumber_String => match self.get_type() {
                 TrackedDeviceType::Controller { .. } => Some(*data.serial_number.get(hand)),
                 #[cfg(feature = "monado")]
-                TrackedDeviceType::GenericTracker { serial, .. } => Some(serial.as_c_str()),
+                TrackedDeviceType::GenericTracker { serial, .. } => {
+                    return Some(Cow::Borrowed(serial.as_c_str()));
+                }
                 TrackedDeviceType::Hmd => unreachable!(),
             },
             vr::ETrackedDeviceProperty::ManufacturerName_String => Some(data.manufacturer_name),
-            // Per the OpenVR docs this defaults to the tracking system name
             vr::ETrackedDeviceProperty::InputProfilePath_String => {
-                if data.input_profile_path.is_empty() {
-                    Some(data.tracking_system_name)
-                } else {
-                    Some(data.input_profile_path)
-                }
+                Some(input_profile_path(data.input_profile_path))
+            }
+            vr::ETrackedDeviceProperty::ResourceRoot_String => {
+                return Some(resource_root(data.input_profile_path));
             }
             _ => None,
         }
+        .map(Cow::Borrowed)
     }
 
     fn get_int_property(
@@ -1292,12 +1447,23 @@ impl TrackedDeviceList {
 
         let trackers = xdevs.into_iter().filter_map(|xdev| {
             let serial = CString::new(xdev.serial()).unwrap();
+            let role = TrackerRole::from_device_name(xdev.name());
+            if let Some(role) = role {
+                log::info!(
+                    "Tracker {serial:?} ({}) gets the {role:?} role",
+                    xdev.name()
+                );
+            }
             let space = xdev
                 .create_space(xr::Posef::IDENTITY)
                 .inspect_err(|e| log::warn!("Failed to create space for {serial:?}: {e}"))
                 .ok()?;
             let mut tracker = TrackedDevice::new(
-                TrackedDeviceType::GenericTracker { serial, space },
+                TrackedDeviceType::GenericTracker {
+                    serial,
+                    space,
+                    role,
+                },
                 None,
                 Some(ProfileData::new::<ViveTracker>()),
             );
@@ -1438,7 +1604,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                 last_profile,
                 property,
             )
-            .map(|s| s.to_owned())
+            .map(Cow::into_owned)
     }
 
     pub fn get_device_int_tracked_property(
@@ -1771,6 +1937,80 @@ mod tests {
         );
     }
 
+    #[test]
+    #[cfg_attr(not(feature = "monado"), ignore)]
+    fn tracker_roles_from_device_names() {
+        use super::TrackerRole;
+        use vr::ETrackedDeviceProperty as Prop;
+
+        assert_eq!(
+            TrackerRole::from_device_name("WiVRn generic tracker (Right Elbow)"),
+            Some(TrackerRole::RightElbow)
+        );
+        assert_eq!(
+            TrackerRole::from_device_name("WiVRn generic tracker (Hip)"),
+            Some(TrackerRole::Waist)
+        );
+        assert_eq!(TrackerRole::from_device_name("Vive Tracker"), None);
+        assert_eq!(TrackerRole::from_device_name("left and right foot"), None);
+
+        let mut f = Fixture::new();
+        f.load_actions(c"actions.json");
+        f.set_interaction_profile::<Knuckles>(fakexr::UserPath::LeftHand);
+        let session = f.input.openxr.session_data.get().session.as_raw();
+        fakexr::add_trackers(session);
+        fakexr::add_tracker(
+            session,
+            c"WiVRn generic tracker (Left Foot)",
+            c"WIVRN-LEFT-FOOT",
+        );
+        fakexr::add_tracker(session, c"WiVRn generic tracker (Chest)", c"WIVRN-CHEST");
+        // we need to wait two frames for the trackers to be connected.
+        for _ in 0..2 {
+            f.input.openxr.poll_events();
+            f.input.frame_start_update();
+        }
+
+        let get = |index, prop| {
+            f.input
+                .get_device_string_tracked_property(index, prop)
+                .map(|s| s.into_string().unwrap())
+        };
+        assert_eq!(
+            get(3, Prop::ControllerType_String).as_deref(),
+            Some("vive_tracker_handheld_object")
+        );
+        assert_eq!(
+            get(3, Prop::InputProfilePath_String).as_deref(),
+            Some("{htc}/input/vive_tracker_profile.json")
+        );
+        assert_eq!(
+            get(4, Prop::SerialNumber_String).as_deref(),
+            Some("WIVRN-LEFT-FOOT"),
+            "{:?}",
+            f.input.device_index_to_tracked_device_class(4)
+        );
+        assert_eq!(
+            get(4, Prop::ControllerType_String).as_deref(),
+            Some("vive_tracker_left_foot")
+        );
+        assert_eq!(
+            get(4, Prop::InputProfilePath_String).as_deref(),
+            Some("{htc}/input/tracker/vive_tracker_left_foot_profile.json")
+        );
+        assert_eq!(get(4, Prop::ResourceRoot_String).as_deref(), Some("htc"));
+        assert_eq!(
+            get(5, Prop::ControllerType_String).as_deref(),
+            Some("vive_tracker_chest")
+        );
+        // Roles don't take a hand's place.
+        assert_eq!(
+            f.input
+                .get_device_int_tracked_property(4, Prop::ControllerRoleHint_Int32),
+            Some(vr::ETrackedControllerRole::OptOut.0 as i32)
+        );
+    }
+
     fn hand_skeleton(f: &Fixture, hand: Hand) -> Option<super::HandSkeleton> {
         let session = f.input.openxr.session_data.get();
         let devices = session.input_data.devices.read().unwrap();
@@ -1951,22 +2191,42 @@ mod tests {
     fn role_hint_and_device_class() {
         use vr::ETrackedDeviceProperty as Prop;
 
-        let f = Fixture::new();
-        let get = |index, prop| f.input.get_device_int_tracked_property(index, prop);
+        let mut f = Fixture::new();
+        f.load_actions(c"actions.json");
+        let get = |f: &Fixture, index, prop| f.input.get_device_int_tracked_property(index, prop);
 
         use vr::ETrackedControllerRole as Role;
         use vr::ETrackedDeviceClass as Class;
+        // Like SteamVR's, the controller slots are empty until a controller shows up.
         for (index, role, class) in [
             (vr::k_unTrackedDeviceIndex_Hmd, Role::Invalid, Class::HMD),
-            (1, Role::LeftHand, Class::Controller),
-            (2, Role::RightHand, Class::Controller),
+            (1, Role::LeftHand, Class::Invalid),
+            (2, Role::RightHand, Class::Invalid),
         ] {
             assert_eq!(
-                get(index, Prop::ControllerRoleHint_Int32),
+                get(&f, index, Prop::ControllerRoleHint_Int32),
                 Some(role.0 as i32)
             );
-            assert_eq!(get(index, Prop::DeviceClass_Int32), Some(class.0 as i32));
+            assert_eq!(
+                get(&f, index, Prop::DeviceClass_Int32),
+                Some(class.0 as i32)
+            );
         }
+
+        f.set_interaction_profile::<OculusTouch>(fakexr::UserPath::LeftHand);
+        let set = f.get_action_set_handle(c"/actions/set1");
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: set,
+            ..Default::default()
+        });
+        assert_eq!(
+            get(&f, 1, Prop::DeviceClass_Int32),
+            Some(Class::Controller.0 as i32)
+        );
+        assert_eq!(
+            get(&f, 2, Prop::DeviceClass_Int32),
+            Some(Class::Invalid.0 as i32)
+        );
     }
 
     #[test]
@@ -2019,6 +2279,23 @@ mod tests {
             Some("WMHD315M3010GV")
         );
 
+        assert_eq!(
+            get(&f, Prop::RenderModelName_String).as_deref(),
+            Some("generic_hmd")
+        );
+        assert_eq!(
+            get(&f, Prop::RegisteredDeviceType_String).as_deref(),
+            Some("oculus/WMHD315M3010GV")
+        );
+        assert_eq!(
+            get(&f, Prop::InputProfilePath_String).as_deref(),
+            Some("{oculus}/input/rift_profile.json")
+        );
+        assert_eq!(
+            get(&f, Prop::ResourceRoot_String).as_deref(),
+            Some("oculus")
+        );
+
         f.set_interaction_profile::<Knuckles>(fakexr::UserPath::RightHand);
         sync(&mut f);
 
@@ -2030,6 +2307,27 @@ mod tests {
         assert_eq!(
             get(&f, Prop::ControllerType_String).as_deref(),
             Some("indexhmd")
+        );
+        assert_eq!(
+            get(&f, Prop::RegisteredDeviceType_String).as_deref(),
+            Some("valve/indexLHR-FFFFFFF0")
+        );
+        assert_eq!(
+            get(&f, Prop::InputProfilePath_String).as_deref(),
+            Some("{indexhmd}/input/indexhmd_profile.json")
+        );
+        assert_eq!(
+            get(&f, Prop::ResourceRoot_String).as_deref(),
+            Some("indexhmd")
+        );
+        // The controller's resource root is its own driver's.
+        assert_eq!(
+            f.input
+                .get_device_string_tracked_property(2, Prop::ResourceRoot_String)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "indexcontroller"
         );
     }
 }

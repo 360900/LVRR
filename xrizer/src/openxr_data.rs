@@ -1001,6 +1001,19 @@ impl<C: Compositor> OpenXrData<C> {
         }
     }
 
+    /// The refresh rates the display supports, if XR_FB_display_refresh_rate is enabled.
+    pub fn display_refresh_rates(&self) -> Option<Vec<f32>> {
+        if !self.enabled_extensions.fb_display_refresh_rate || self.is_lost() {
+            return None;
+        }
+        let rates = self
+            .session_data
+            .get()
+            .session
+            .enumerate_display_refresh_rates();
+        self.check("xrEnumerateDisplayRefreshRatesFB", rates)
+    }
+
     /// Time since the most recent vsync and a running vsync count, extrapolated from the last
     /// predicted display time and period. `None` if the current time can't be queried.
     pub fn vsync_timing(&self) -> Option<(Duration, u64)> {

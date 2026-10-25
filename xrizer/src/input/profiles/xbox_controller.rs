@@ -60,6 +60,9 @@ impl InteractionProfile for XboxController {
                 model: c"",
                 controller_type: c"",
                 serial_number: c"",
+                render_model_name: c"",
+                registered_device_type: c"",
+                input_profile_path: c"",
             },
         };
         &DEVICE_PROPERTIES

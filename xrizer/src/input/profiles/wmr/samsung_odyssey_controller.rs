@@ -49,6 +49,9 @@ impl InteractionProfile for SamsungOdysseyController {
                 model: c"Samsung Odyssey",
                 controller_type: c"holographic_controller",
                 serial_number: c"MRSOURCE0",
+                render_model_name: c"generic_hmd",
+                registered_device_type: c"",
+                input_profile_path: c"",
             },
         };
         &DEVICE_PROPERTIES

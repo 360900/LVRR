@@ -51,6 +51,15 @@ impl GraphicsBackend for HeadlessData {
         }
     }
 
+    /// Headless sessions have no device to draw overlays with.
+    fn new_on_same_device(&self, _: &xr::Instance) -> Option<Self> {
+        None
+    }
+
+    fn raw_texture(&mut self, _: &[u8], _: u32, _: u32) -> Option<Self::OpenVrTexture> {
+        None
+    }
+
     #[inline]
     fn store_swapchain_images(
         &mut self,

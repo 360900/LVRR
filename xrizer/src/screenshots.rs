@@ -60,7 +60,10 @@ impl vr::IVRScreenshots001_Interface for Screenshots {
         _: *const vr::EVRScreenshotType,
         _: std::os::raw::c_int,
     ) -> vr::EVRScreenshotError {
-        vr::EVRScreenshotError::None
+        // Nothing ever sends VREvent_RequestScreenshot (TODO.md, screenshots), so the hook
+        // wouldn't do anything.
+        crate::warn_unimplemented!("HookScreenshot");
+        vr::EVRScreenshotError::RequestFailed
     }
     fn RequestScreenshot(
         &self,
@@ -70,5 +73,21 @@ impl vr::IVRScreenshots001_Interface for Screenshots {
         _: *const std::os::raw::c_char,
     ) -> vr::EVRScreenshotError {
         vr::EVRScreenshotError::IncompatibleVersion
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vr::IVRScreenshots001_Interface;
+
+    #[test]
+    fn hooking_fails_since_nothing_requests_screenshots() {
+        let screenshots = Screenshots::default();
+        let types = [vr::EVRScreenshotType::Stereo];
+        assert_eq!(
+            screenshots.HookScreenshot(types.as_ptr(), types.len() as _),
+            vr::EVRScreenshotError::RequestFailed
+        );
     }
 }

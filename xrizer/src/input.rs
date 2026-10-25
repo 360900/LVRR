@@ -1538,15 +1538,38 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
     }
     fn GetComponentStateForBinding(
         &self,
-        _: *const c_char,
-        _: *const c_char,
-        _: *const vr::InputBindingInfo_t,
-        _: u32,
-        _: u32,
-        _: *mut vr::RenderModel_ComponentState_t,
+        render_model_name: *const c_char,
+        component_name: *const c_char,
+        binding_info: *const vr::InputBindingInfo_t,
+        binding_info_count: u32,
+        binding_info_size: u32,
+        state: *mut vr::RenderModel_ComponentState_t,
     ) -> vr::EVRInputError {
-        crate::warn_unimplemented!("GetComponentStateForBinding");
-        vr::EVRInputError::None
+        if render_model_name.is_null() || component_name.is_null() || state.is_null() {
+            return vr::EVRInputError::InvalidParam;
+        }
+        if binding_info_count > 0
+            && (binding_info.is_null()
+                || binding_info_size as usize != std::mem::size_of::<vr::InputBindingInfo_t>())
+        {
+            return vr::EVRInputError::InvalidParam;
+        }
+        let render_model_name = unsafe { CStr::from_ptr(render_model_name) };
+        let component_name = unsafe { CStr::from_ptr(component_name) };
+        // Our models are static, so the bindings don't change how the component shows.
+        match crate::rendermodels::component_state(render_model_name, component_name) {
+            Some(component_state) => {
+                unsafe { state.write(component_state) };
+                vr::EVRInputError::None
+            }
+            None => {
+                debug!(
+                    "GetComponentStateForBinding: no component {component_name:?} in {render_model_name:?}"
+                );
+                unsafe { state.write(Default::default()) };
+                vr::EVRInputError::InvalidRenderModel
+            }
+        }
     }
     fn ShowBindingsForActionSet(
         &self,
@@ -3525,8 +3548,10 @@ impl<C: openxr_data::Compositor> Input<C> {
 
             if let Some(controller) = controller.as_mut() {
                 // Losing the profile keeps the device and its identity, see CONNECTION_GRACE.
-                // Getting the same one back changes nothing.
-                if profile_path != xr::Path::NULL && controller.last_profile_path != profile_path {
+                // Getting the same one back changes nothing, unless a hand took over meanwhile.
+                if profile_path != xr::Path::NULL
+                    && (controller.last_profile_path != profile_path || controller.hand_took_over())
+                {
                     // Another controller, or one in place of a hand tracked without a profile.
                     if controller.last_profile_path != xr::Path::NULL || controller.recently_seen()
                     {
@@ -3772,7 +3797,11 @@ impl<C: openxr_data::Compositor> Input<C> {
         // Before taking the event queue, since this may locate hand joints.
         let connected: Vec<_> = devices
             .iter()
-            .map(|device| device.is_connected(&self.openxr, &data))
+            .map(|device| {
+                // A hand may have taken a controller's place, which the app sees as a new device.
+                device.is_tracked_hand(&self.openxr, &data);
+                device.is_connected(&self.openxr, &data)
+            })
             .collect();
         let mut events = self.events.lock().unwrap();
 

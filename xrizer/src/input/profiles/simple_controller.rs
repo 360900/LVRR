@@ -41,6 +41,9 @@ impl InteractionProfile for SimpleController {
                 model: c"generic",
                 controller_type: c"<unknown>",
                 serial_number: c"LHR-00000000",
+                render_model_name: c"generic_hmd",
+                registered_device_type: c"",
+                input_profile_path: c"",
             },
         };
         &DEVICE_PROPERTIES

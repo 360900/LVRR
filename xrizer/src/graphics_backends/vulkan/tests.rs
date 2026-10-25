@@ -40,6 +40,12 @@ struct Gpu {
     blits: Vec<(u64, u64, vk::ImageBlit)>,
     /// The format of each image the backend created.
     image_formats: HashMap<u64, vk::Format>,
+    /// The bytes behind each allocation.
+    allocations: HashMap<u64, Box<[u8]>>,
+    buffer_sizes: HashMap<u64, vk::DeviceSize>,
+    /// Source buffer, destination image and region of each recorded buffer to image copy.
+    buffer_copies: Vec<(u64, u64, vk::BufferImageCopy)>,
+    flushes: usize,
     /// Pending work never finishes, so waits for it time out.
     hung: bool,
     /// Fails the next submission of command buffers.
@@ -152,7 +158,132 @@ create_destroy! {
     vkCreatePipelineLayout, vkDestroyPipelineLayout: PipelineLayoutCreateInfo -> PipelineLayout;
     vkCreateImageView, vkDestroyImageView: ImageViewCreateInfo -> ImageView;
     vkCreateSampler, vkDestroySampler: SamplerCreateInfo -> Sampler;
-    vkAllocateMemory, vkFreeMemory: MemoryAllocateInfo -> DeviceMemory;
+}
+
+unsafe extern "system" fn vkAllocateMemory(
+    _: vk::Device,
+    info: *const vk::MemoryAllocateInfo<'_>,
+    _: *const vk::AllocationCallbacks<'_>,
+    out: *mut vk::DeviceMemory,
+) -> vk::Result {
+    let size = unsafe { (*info).allocation_size };
+    gpu(|gpu| {
+        let memory = gpu.create();
+        let bytes = vec![0; size as usize].into_boxed_slice();
+        gpu.allocations.insert(memory, bytes);
+        unsafe { *out = vk::DeviceMemory::from_raw(memory) };
+    });
+    vk::Result::SUCCESS
+}
+
+unsafe extern "system" fn vkFreeMemory(
+    _: vk::Device,
+    memory: vk::DeviceMemory,
+    _: *const vk::AllocationCallbacks<'_>,
+) {
+    gpu(|gpu| {
+        gpu.destroy(memory.as_raw());
+        gpu.allocations.remove(&memory.as_raw());
+    });
+}
+
+unsafe extern "system" fn vkMapMemory(
+    _: vk::Device,
+    memory: vk::DeviceMemory,
+    offset: vk::DeviceSize,
+    _: vk::DeviceSize,
+    _: vk::MemoryMapFlags,
+    out: *mut *mut c_void,
+) -> vk::Result {
+    gpu(|gpu| {
+        let in_use = gpu.in_flight().contains(&memory.as_raw());
+        check!(gpu, !in_use, "mapped memory the GPU may use");
+        let Some(bytes) = gpu.allocations.get_mut(&memory.as_raw()) else {
+            gpu.errors
+                .push(format!("mapped unknown memory {:#x}", memory.as_raw()));
+            return vk::Result::ERROR_MEMORY_MAP_FAILED;
+        };
+        unsafe { *out = bytes.as_mut_ptr().add(offset as usize).cast() };
+        vk::Result::SUCCESS
+    })
+}
+
+unsafe extern "system" fn vkUnmapMemory(_: vk::Device, _: vk::DeviceMemory) {}
+
+unsafe extern "system" fn vkFlushMappedMemoryRanges(
+    _: vk::Device,
+    _: u32,
+    _: *const vk::MappedMemoryRange<'_>,
+) -> vk::Result {
+    gpu(|gpu| gpu.flushes += 1);
+    vk::Result::SUCCESS
+}
+
+unsafe extern "system" fn vkCreateBuffer(
+    _: vk::Device,
+    info: *const vk::BufferCreateInfo<'_>,
+    _: *const vk::AllocationCallbacks<'_>,
+    out: *mut vk::Buffer,
+) -> vk::Result {
+    let size = unsafe { (*info).size };
+    gpu(|gpu| {
+        let buffer = gpu.create();
+        gpu.buffer_sizes.insert(buffer, size);
+        unsafe { *out = vk::Buffer::from_raw(buffer) };
+    });
+    vk::Result::SUCCESS
+}
+
+unsafe extern "system" fn vkDestroyBuffer(
+    _: vk::Device,
+    buffer: vk::Buffer,
+    _: *const vk::AllocationCallbacks<'_>,
+) {
+    gpu(|gpu| gpu.destroy(buffer.as_raw()));
+}
+
+unsafe extern "system" fn vkGetBufferMemoryRequirements(
+    _: vk::Device,
+    buffer: vk::Buffer,
+    out: *mut vk::MemoryRequirements,
+) {
+    let size = gpu(|gpu| gpu.buffer_sizes.get(&buffer.as_raw()).copied());
+    unsafe {
+        *out = vk::MemoryRequirements {
+            size: size.unwrap_or(0),
+            alignment: 1,
+            memory_type_bits: 0b11,
+        }
+    };
+}
+
+unsafe extern "system" fn vkBindBufferMemory(
+    _: vk::Device,
+    buffer: vk::Buffer,
+    memory: vk::DeviceMemory,
+    _: vk::DeviceSize,
+) -> vk::Result {
+    // The memory is in use as long as the buffer is.
+    gpu(|gpu| gpu.refs.insert(buffer.as_raw(), vec![memory.as_raw()]));
+    vk::Result::SUCCESS
+}
+
+unsafe extern "system" fn vkCmdCopyBufferToImage(
+    buf: vk::CommandBuffer,
+    src: vk::Buffer,
+    dst: vk::Image,
+    _: vk::ImageLayout,
+    count: u32,
+    regions: *const vk::BufferImageCopy,
+) {
+    let regions = unsafe { slice(regions, count) };
+    gpu(|gpu| {
+        gpu.record(buf, src);
+        gpu.record(buf, dst);
+        let (src, dst) = (src.as_raw(), dst.as_raw());
+        gpu.buffer_copies
+            .extend(regions.iter().map(|&r| (src, dst, r)));
+    });
 }
 
 unsafe extern "system" fn vkCreateImage(
@@ -683,6 +814,14 @@ fn proc_addr(name: &CStr) -> *const c_void {
         vkCmdResolveImage,
         vkCmdBlitImage,
         vkCmdClearColorImage,
+        vkMapMemory,
+        vkUnmapMemory,
+        vkFlushMappedMemoryRanges,
+        vkCreateBuffer,
+        vkDestroyBuffer,
+        vkGetBufferMemoryRequirements,
+        vkBindBufferMemory,
+        vkCmdCopyBufferToImage,
     ]
 }
 
@@ -724,6 +863,7 @@ fn fake_vulkan() -> VulkanData {
         host_import_alignment: None,
         memory_export: None,
         semaphore_export: false,
+        raw: None,
     }
 }
 
@@ -1740,4 +1880,156 @@ fn gpu_timer_skips_frames_while_the_gpu_hangs() {
         assert_eq!(gpu.errors, Vec::<String>::new());
         assert_eq!(gpu.live.len(), 4);
     });
+}
+
+/// Raw overlay pixels go through a staging buffer into an image of the backend's, which the
+/// overlay copy draws like an app's texture.
+#[test]
+fn raw_overlay_pixels_are_uploaded() {
+    let mut vk = fake_vulkan();
+    store_images(&mut vk, 2);
+    let pixels: Vec<u8> = (0..4 * 2 * 4).map(|i| i as u8).collect();
+    let texture = vk.raw_texture(&pixels, 4, 2).unwrap();
+    let data = unsafe { texture.read() };
+    assert_eq!(
+        (data.m_nWidth, data.m_nHeight, data.m_nSampleCount),
+        (4, 2, 1)
+    );
+    assert_eq!(data.m_nFormat, vk::Format::R8G8B8A8_UNORM.as_raw() as u32);
+    assert_eq!(data.m_pDevice as u64, APP_HANDLE);
+    assert!(vk.is_texture_on_device(texture));
+    let image = data.m_nImage;
+    gpu(|gpu| {
+        assert_eq!(gpu.image_formats[&image], vk::Format::R8G8B8A8_UNORM);
+        assert_eq!(gpu.buffer_copies.len(), 1);
+        let (buffer, copied, region) = gpu.buffer_copies[0];
+        assert_eq!(copied, image);
+        assert_eq!(
+            region.image_extent,
+            vk::Extent3D {
+                width: 4,
+                height: 2,
+                depth: 1
+            }
+        );
+        let packing = (
+            region.buffer_offset,
+            region.buffer_row_length,
+            region.buffer_image_height,
+        );
+        assert_eq!(packing, (0, 0, 0));
+        // The pixels are in the staging memory, which isn't coherent here, so it was flushed.
+        let memory = gpu.refs[&buffer][0];
+        assert_eq!(&gpu.allocations[&memory][..pixels.len()], &pixels[..]);
+        assert_eq!(gpu.flushes, 1);
+        // Handed over in the layout app textures come in.
+        let layouts: Vec<_> = gpu
+            .barriers
+            .iter()
+            .filter(|b| b.image.as_raw() == image)
+            .map(|b| (b.old_layout, b.new_layout))
+            .collect();
+        assert_eq!(
+            layouts,
+            [
+                (
+                    vk::ImageLayout::UNDEFINED,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL
+                ),
+                (
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL
+                ),
+            ]
+        );
+        assert_eq!(gpu.pending.values().flatten().count(), 1);
+    });
+
+    // Shown like a gamma encoded RGBA8 texture.
+    let info = vk.swapchain_info_for_texture(texture, FULL_BOUNDS, vr::EColorSpace::Auto);
+    assert_eq!((info.width, info.height), (4, 2));
+    assert_eq!(info.format, vk::Format::R8G8B8A8_SRGB.as_raw() as u32);
+    let extent = vk.copy_overlay_to_swapchain(texture, vr::EColorSpace::Auto, FULL_BOUNDS, 0);
+    assert_eq!((extent.width, extent.height), (4, 2));
+    gpu(|gpu| assert_eq!(gpu.draws, 1));
+    finish(vk);
+}
+
+/// The image is kept while the size stays the same, and only written to once the GPU is done with
+/// the last upload and the draws reading it. Another size gets a new image, freed the same way.
+#[test]
+fn raw_overlay_image_is_reused_for_the_same_size() {
+    let mut vk = fake_vulkan();
+    store_images(&mut vk, 1);
+    let first = unsafe { vk.raw_texture(&[0; 16], 2, 2).unwrap().read() };
+    vk.copy_overlay_to_swapchain(&first, vr::EColorSpace::Auto, FULL_BOUNDS, 0);
+    // Writing the staging memory or re-recording the upload would be flagged while they're
+    // pending.
+    let second = unsafe { vk.raw_texture(&[1; 16], 2, 2).unwrap().read() };
+    assert_eq!(second.m_nImage, first.m_nImage);
+    vk.copy_overlay_to_swapchain(&second, vr::EColorSpace::Auto, FULL_BOUNDS, 0);
+
+    let third = unsafe { vk.raw_texture(&[2; 32], 4, 2).unwrap().read() };
+    assert_ne!(third.m_nImage, first.m_nImage);
+    gpu(|gpu| {
+        assert!(!gpu.live.contains(&first.m_nImage));
+        let (buffer, image, _) = *gpu.buffer_copies.last().unwrap();
+        assert_eq!(image, third.m_nImage);
+        assert_eq!(&gpu.allocations[&gpu.refs[&buffer][0]][..], &[2; 32]);
+    });
+    finish(vk);
+}
+
+/// Uploads don't need a swapchain, and the pixels have to be the image's size.
+#[test]
+fn raw_overlay_upload_checks_the_size() {
+    let mut vk = fake_vulkan();
+    assert!(vk.raw_texture(&[0; 15], 2, 2).is_none());
+    assert!(vk.raw_texture(&[0; 16], 2, 2).is_some());
+    finish(vk);
+}
+
+/// A GPU that never finishes the draw isn't given another upload, and what it may still use is
+/// leaked rather than freed.
+#[test]
+fn raw_overlay_upload_waits_for_the_gpu() {
+    let mut vk = fake_vulkan();
+    store_images(&mut vk, 1);
+    let texture = vk.raw_texture(&[0; 16], 2, 2).unwrap();
+    vk.copy_overlay_to_swapchain(texture, vr::EColorSpace::Auto, FULL_BOUNDS, 0);
+    gpu(|gpu| gpu.hung = true);
+    assert!(vk.raw_texture(&[1; 16], 2, 2).is_none());
+    drop(vk);
+    gpu(|gpu| assert_eq!(gpu.errors, Vec::<String>::new()));
+}
+
+#[test]
+fn failed_raw_upload_does_not_block_the_next() {
+    let mut vk = fake_vulkan();
+    gpu(|gpu| gpu.fail_submit = true);
+    assert!(vk.raw_texture(&[0; 16], 2, 2).is_none());
+    assert!(vk.raw_texture(&[0; 16], 2, 2).is_some());
+    finish(vk);
+}
+
+/// Overlay backends for raw textures share the app's device without owning it.
+#[test]
+fn backend_on_same_device_shares_the_app_device() {
+    use crate::clientcore::Injector;
+    use crate::openxr_data::RealOpenXrData;
+
+    let xr = RealOpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap();
+    let mut vk = fake_vulkan();
+    store_images(&mut vk, 1);
+    let mut other = vk.new_on_same_device(&xr.instance).unwrap();
+    assert_eq!(other.device.handle(), vk.device.handle());
+    assert_eq!(
+        (other.queue, other.queue_family_index),
+        (vk.queue, vk.queue_family_index)
+    );
+    assert!(other.real_data.is_none());
+    let texture = other.raw_texture(&[0; 16], 2, 2).unwrap();
+    assert!(vk.is_texture_on_device(texture));
+    drop(other);
+    finish(vk);
 }

@@ -69,6 +69,9 @@ impl InteractionProfile for ReverbG2Controller {
                 model: c"HP Reverb G2",
                 controller_type: c"hpmotioncontroller",
                 serial_number: c"MRSOURCE0",
+                render_model_name: c"generic_hmd",
+                registered_device_type: c"",
+                input_profile_path: c"",
             },
         };
         &DEVICE_PROPERTIES

@@ -644,3 +644,86 @@ fn profile_changes_keep_generic_trackers() {
     );
     assert_eq!(b.f.input.device_index_to_tracked_device_class(4), None);
 }
+
+#[test]
+fn hand_takes_over_controller_without_profile() {
+    use xr::HandTrackingDataSourceEXT as Source;
+
+    fakexr::set_hand_tracking_supported(true);
+    let mut b = Blip::new();
+    b.f.input
+        .openxr
+        .set_tracking_space(vr::ETrackingUniverseOrigin::Seated);
+    b.bind::<OculusTouch>();
+    b.sync();
+    b.events();
+    b.assert_controllers("oculus_touch");
+    let hmd = |b: &Blip| {
+        b.f.input
+            .get_device_string_tracked_property(0, Prop::TrackingSystemName_String)
+            .map(|s| s.into_string().unwrap())
+    };
+    assert_eq!(hmd(&b).as_deref(), Some("oculus"));
+
+    // The controllers are put down: WiVRn unbinds their profiles and tracks the left hand. The
+    // app sees the left controller go and a hand come in its place, on the Quest's headset.
+    b.unbind();
+    fakexr::set_hand_tracked(b.f.raw_session(), LeftHand, Some(Source::UNOBSTRUCTED));
+    b.sync();
+    assert_eq!(
+        b.events(),
+        [
+            (Ev::TrackedDeviceDeactivated, 1),
+            (Ev::TrackedDeviceActivated, 1),
+        ]
+    );
+    assert!(b.connected(1));
+    assert_eq!(
+        b.controller_type(1).as_deref(),
+        Some("svl_hand_interaction_augmented")
+    );
+    assert_eq!(b.controller_type(2).as_deref(), Some("oculus_touch"));
+    assert_eq!(hmd(&b).as_deref(), Some("oculus"));
+    let pose =
+        b.f.input
+            .get_controller_pose(Hand::Left, None, xr::Time::from_nanos(1), None)
+            .unwrap();
+    assert!(pose.bPoseIsValid && pose.bDeviceIsConnected);
+
+    // The right controller is just gone once its grace is over.
+    b.f.input.expire_connection_grace();
+    assert!(b.connected(1) && !b.connected(2));
+    assert_eq!(b.events(), [(Ev::TrackedDeviceDeactivated, 2)]);
+
+    // Picking the controller back up replaces the hand.
+    b.f.set_interaction_profile::<OculusTouch>(LeftHand);
+    b.sync();
+    assert_eq!(
+        b.events(),
+        [
+            (Ev::TrackedDeviceDeactivated, 1),
+            (Ev::TrackedDeviceActivated, 1),
+        ]
+    );
+    assert_eq!(b.controller_type(1).as_deref(), Some("oculus_touch"));
+}
+
+#[test]
+fn controller_slots_are_empty_until_used() {
+    let mut b = Blip::new();
+    let class = |b: &Blip, index| b.f.input.device_index_to_tracked_device_class(index);
+    assert_eq!(class(&b, 1), Some(vr::ETrackedDeviceClass::Invalid));
+    assert_eq!(class(&b, 2), Some(vr::ETrackedDeviceClass::Invalid));
+
+    b.f.set_interaction_profile::<Knuckles>(LeftHand);
+    b.sync();
+    assert_eq!(class(&b, 1), Some(vr::ETrackedDeviceClass::Controller));
+    assert_eq!(class(&b, 2), Some(vr::ETrackedDeviceClass::Invalid));
+
+    // A controller that was there keeps its slot and class, like in SteamVR.
+    b.unbind();
+    b.sync();
+    b.f.input.expire_connection_grace();
+    assert!(!b.connected(1));
+    assert_eq!(class(&b, 1), Some(vr::ETrackedDeviceClass::Controller));
+}

@@ -43,6 +43,26 @@ pub trait GraphicsBackend: Into<SupportedBackend> {
         true
     }
 
+    /// A backend without a swapchain on this one's device and context, for an overlay that gets
+    /// raw pixels rather than a texture that says which API the app uses. None without the app's
+    /// graphics context, which GL calls need current on this thread. The device must outlive the
+    /// new backend, which the app's does.
+    fn new_on_same_device(&self, instance: &xr::Instance) -> Option<Self>
+    where
+        Self: Sized;
+
+    /// A texture of the backend's holding `pixels`, `width` by `height` RGBA8 with the rows top to
+    /// bottom, for SetOverlayRaw. The backend keeps one image and reuses it while the size stays
+    /// the same, replacing it once the copies reading it are done, so the texture is only valid
+    /// until the next call. None if it couldn't be created or uploaded, e.g. without the app's
+    /// graphics context.
+    fn raw_texture(
+        &mut self,
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Option<Self::OpenVrTexture>;
+
     /// Layer `index` of an array texture, for SubmitWithArrayIndex. None if there is no such
     /// layer. Textures without layers only have layer 0, which is shown like with Submit.
     fn array_layer(&self, texture: Self::OpenVrTexture, index: u32) -> Option<Self::OpenVrTexture> {

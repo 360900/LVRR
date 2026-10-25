@@ -103,6 +103,9 @@ impl InteractionProfile for FrameController {
                 model: c"Steam Frame",
                 controller_type: c"frame_controller",
                 serial_number: c"LHR-FFFFFFF0",
+                render_model_name: c"generic_hmd",
+                registered_device_type: c"",
+                input_profile_path: c"{frame_hmd}/input/input_profile.json",
             },
             input_profile_path: c"{frame_controller}/input/frame_controller_profile.json",
         };

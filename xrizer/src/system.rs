@@ -604,6 +604,52 @@ impl System {
     }
 }
 
+/// The type of a tracked device property, from the suffix of its name in the headers.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PropertyType {
+    Bool,
+    Float,
+    Int32,
+    Uint64,
+    String,
+    Matrix34,
+    Vector3,
+    Array,
+    Binary,
+}
+
+/// None for values the headers don't name: vendor properties, other SDK versions, garbage.
+fn property_type(prop: vr::ETrackedDeviceProperty) -> Option<PropertyType> {
+    let name = format!("{prop:?}");
+    let name = name.strip_suffix("_deprecated").unwrap_or(&name);
+    let (_, suffix) = name.rsplit_once('_')?;
+    Some(match suffix {
+        "Bool" => PropertyType::Bool,
+        "Float" => PropertyType::Float,
+        "Int32" => PropertyType::Int32,
+        "Uint64" => PropertyType::Uint64,
+        "String" => PropertyType::String,
+        "Matrix34" => PropertyType::Matrix34,
+        "Vector3" => PropertyType::Vector3,
+        "Array" => PropertyType::Array,
+        "Binary" => PropertyType::Binary,
+        _ => return None,
+    })
+}
+
+/// The error for a property a getter of `expected` values has no value for: like SteamVR,
+/// WrongDataType if the property is of another type, UnknownProperty if the device doesn't
+/// provide it.
+fn missing_property_error(
+    prop: vr::ETrackedDeviceProperty,
+    expected: PropertyType,
+) -> vr::ETrackedPropertyError {
+    match property_type(prop) {
+        Some(ty) if ty != expected => vr::ETrackedPropertyError::WrongDataType,
+        _ => vr::ETrackedPropertyError::UnknownProperty,
+    }
+}
+
 impl vr::IVRSystem026_Interface for System {
     fn GetRecommendedRenderTargetSize(&self, width: *mut u32, height: *mut u32) {
         let (eye_width, eye_height) = self.openxr.recommended_eye_size();
@@ -1091,12 +1137,23 @@ impl vr::IVRSystem026_Interface for System {
                     vr::k_unTrackedDeviceIndex_Hmd,
                     vr::ETrackedDeviceProperty::ManufacturerName_String,
                 ) => Some(self.hmd_identity().manufacturer.clone()),
+                // SteamVR's drivers all report this model, and default the rest to the tracking
+                // system name.
+                (
+                    vr::k_unTrackedDeviceIndex_Hmd,
+                    vr::ETrackedDeviceProperty::RenderModelName_String,
+                ) => Some(c"generic_hmd".to_owned()),
+                (
+                    vr::k_unTrackedDeviceIndex_Hmd,
+                    vr::ETrackedDeviceProperty::InputProfilePath_String
+                    | vr::ETrackedDeviceProperty::ResourceRoot_String,
+                ) => Some(self.hmd_identity().tracking_system.clone()),
                 _ => None,
             });
 
         let Some(data) = data else {
             if let Some(error) = unsafe { error.as_mut() } {
-                *error = vr::ETrackedPropertyError::UnknownProperty;
+                *error = missing_property_error(prop, PropertyType::String);
             }
             return 0;
         };
@@ -1115,18 +1172,57 @@ impl vr::IVRSystem026_Interface for System {
     }
     fn GetArrayTrackedDeviceProperty(
         &self,
-        _: vr::TrackedDeviceIndex_t,
-        _: vr::ETrackedDeviceProperty,
-        _: vr::PropertyTypeTag_t,
-        _: *mut std::os::raw::c_void,
-        _: u32,
+        device_index: vr::TrackedDeviceIndex_t,
+        prop: vr::ETrackedDeviceProperty,
+        tag: vr::PropertyTypeTag_t,
+        buffer: *mut std::os::raw::c_void,
+        size: u32,
         error: *mut vr::ETrackedPropertyError,
     ) -> u32 {
-        crate::warn_unimplemented!("GetArrayTrackedDeviceProperty");
-        if let Some(error) = unsafe { error.as_mut() } {
-            *error = vr::ETrackedPropertyError::UnknownProperty;
+        debug!(target: log_tags::TRACKED_PROP, "requesting array property: {prop:?} ({device_index})");
+        let set_error = |e| {
+            if let Some(error) = unsafe { error.as_mut() } {
+                *error = e;
+            }
+        };
+        if !self.IsTrackedDeviceConnected(device_index) {
+            set_error(vr::ETrackedPropertyError::InvalidDevice);
+            return 0;
         }
-        0
+        if property_type(prop) != Some(PropertyType::Array) {
+            set_error(missing_property_error(prop, PropertyType::Array));
+            return 0;
+        }
+
+        // The elements as bytes, and the tag of their type.
+        let value: Option<(Vec<u8>, vr::PropertyTypeTag_t)> = match (device_index, prop) {
+            (
+                vr::k_unTrackedDeviceIndex_Hmd,
+                vr::ETrackedDeviceProperty::DisplayAvailableFrameRates_Float_Array,
+            ) => self.openxr.display_refresh_rates().map(|rates| {
+                let bytes = rates.iter().flat_map(|rate| rate.to_ne_bytes()).collect();
+                (bytes, vr::k_unFloatPropertyTag)
+            }),
+            _ => None,
+        };
+        let Some((bytes, expected_tag)) = value else {
+            set_error(vr::ETrackedPropertyError::UnknownProperty);
+            return 0;
+        };
+        if tag != expected_tag {
+            set_error(vr::ETrackedPropertyError::WrongDataType);
+            return 0;
+        }
+        let needed = bytes.len() as u32;
+        if needed > 0 && (buffer.is_null() || size < needed) {
+            set_error(vr::ETrackedPropertyError::BufferTooSmall);
+            return needed;
+        }
+        if needed > 0 {
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer.cast(), bytes.len()) };
+        }
+        set_error(vr::ETrackedPropertyError::Success);
+        needed
     }
     fn GetMatrix34TrackedDeviceProperty(
         &self,
@@ -1142,8 +1238,24 @@ impl vr::IVRSystem026_Interface for System {
             return Default::default();
         }
 
+        if device_index == vr::k_unTrackedDeviceIndex_Hmd {
+            match prop {
+                // The runtime's head pose is the headset's; it has no camera or status display of
+                // its own to offset.
+                vr::ETrackedDeviceProperty::CameraToHeadTransform_Matrix34
+                | vr::ETrackedDeviceProperty::StatusDisplayTransform_Matrix34
+                | vr::ETrackedDeviceProperty::ImuToHeadTransform_Matrix34 => {
+                    if let Some(err) = unsafe { err.as_mut() } {
+                        *err = vr::ETrackedPropertyError::Success;
+                    }
+                    return xr::Posef::IDENTITY.into();
+                }
+                _ => {}
+            }
+        }
+
         if let Some(err) = unsafe { err.as_mut() } {
-            *err = vr::ETrackedPropertyError::UnknownProperty;
+            *err = missing_property_error(prop, PropertyType::Matrix34);
         }
         Default::default()
     }
@@ -1165,12 +1277,19 @@ impl vr::IVRSystem026_Interface for System {
             *err = vr::ETrackedPropertyError::Success;
         }
 
+        // The runtime's tracking space is the one universe there is; 0 would mean none.
+        if device_index == vr::k_unTrackedDeviceIndex_Hmd
+            && prop == vr::ETrackedDeviceProperty::CurrentUniverseId_Uint64
+        {
+            return 1;
+        }
+
         self.input
             .get()
             .and_then(|input| input.get_device_uint_tracked_property(device_index, prop))
             .unwrap_or_else(|| {
                 if let Some(err) = unsafe { err.as_mut() } {
-                    *err = vr::ETrackedPropertyError::UnknownProperty;
+                    *err = missing_property_error(prop, PropertyType::Uint64);
                 }
                 0
             })
@@ -1197,7 +1316,7 @@ impl vr::IVRSystem026_Interface for System {
             .and_then(|input| input.get_device_int_tracked_property(device_index, prop))
             .unwrap_or_else(|| {
                 if let Some(err) = unsafe { err.as_mut() } {
-                    *err = vr::ETrackedPropertyError::UnknownProperty;
+                    *err = missing_property_error(prop, PropertyType::Int32);
                 }
                 0
             })
@@ -1251,12 +1370,18 @@ impl vr::IVRSystem026_Interface for System {
                 vr::ETrackedDeviceProperty::DisplayFrequency_Float => {
                     return self.openxr.get_refresh_rate();
                 }
+                // GetTimeSinceLastVsync counts from the last predicted display time, i.e. when
+                // the photons of a frame reach the eyes, so apps predicting a frame duration
+                // past the last vsync plus this land on the next display time.
+                vr::ETrackedDeviceProperty::SecondsFromVsyncToPhotons_Float => return 0.0,
+                // SteamVR's default dashboard scale.
+                vr::ETrackedDeviceProperty::DashboardScale_Float => return 1.0,
                 _ => {}
             }
         }
 
         if let Some(error) = unsafe { error.as_mut() } {
-            *error = vr::ETrackedPropertyError::UnknownProperty;
+            *error = missing_property_error(prop, PropertyType::Float);
         }
         0.0
     }
@@ -1314,11 +1439,37 @@ impl vr::IVRSystem026_Interface for System {
             {
                 return self.openxr.supports_user_presence;
             }
+            vr::ETrackedDeviceProperty::DisplaySupportsRuntimeFramerateChange_Bool
+                if device_index == vr::k_unTrackedDeviceIndex_Hmd =>
+            {
+                return self.openxr.enabled_extensions.fb_display_refresh_rate;
+            }
+            vr::ETrackedDeviceProperty::DisplaySupportsMultipleFramerates_Bool
+                if device_index == vr::k_unTrackedDeviceIndex_Hmd =>
+            {
+                return self
+                    .openxr
+                    .display_refresh_rates()
+                    .is_some_and(|rates| rates.len() > 1);
+            }
+            // The driver components SteamVR would ask for: the headset is a display, controllers
+            // and trackers have inputs, and nothing has a camera, direct mode display, virtual
+            // display or spatial anchors.
+            vr::ETrackedDeviceProperty::HasDisplayComponent_Bool => {
+                return device_index == vr::k_unTrackedDeviceIndex_Hmd;
+            }
+            vr::ETrackedDeviceProperty::HasControllerComponent_Bool => {
+                return device_index != vr::k_unTrackedDeviceIndex_Hmd;
+            }
+            vr::ETrackedDeviceProperty::HasCameraComponent_Bool
+            | vr::ETrackedDeviceProperty::HasDriverDirectModeComponent_Bool
+            | vr::ETrackedDeviceProperty::HasVirtualDisplayComponent_Bool
+            | vr::ETrackedDeviceProperty::HasSpatialAnchorsSupport_Bool => return false,
             _ => {}
         }
 
         if let Some(err) = unsafe { err.as_mut() } {
-            *err = vr::ETrackedPropertyError::UnknownProperty;
+            *err = missing_property_error(prop, PropertyType::Bool);
         }
         false
     }
@@ -1351,6 +1502,12 @@ impl vr::IVRSystem026_Interface for System {
         let Some(input) = self.input.get() else {
             return vr::ETrackedControllerRole::Invalid;
         };
+        // Trackers opt out of the hand roles, like their ControllerRoleHint says.
+        if input.device_index_to_tracked_device_class(index)
+            == Some(vr::ETrackedDeviceClass::GenericTracker)
+        {
+            return vr::ETrackedControllerRole::OptOut;
+        }
         input
             .device_index_to_hand(index)
             .map_or(vr::ETrackedControllerRole::Invalid, |hand| hand.into())
@@ -1364,11 +1521,12 @@ impl vr::IVRSystem026_Interface for System {
             return vr::k_unTrackedDeviceIndexInvalid;
         };
 
-        Hand::try_from(role).map_or(vr::k_unTrackedDeviceIndexInvalid, |hand| {
-            input
-                .get_controller_device_index(hand)
-                .unwrap_or(vr::k_unTrackedDeviceIndexInvalid)
-        })
+        // Like SteamVR, a role is only held by a connected controller.
+        Hand::try_from(role)
+            .ok()
+            .and_then(|hand| input.get_controller_device_index(hand))
+            .filter(|&index| input.is_device_connected(index))
+            .unwrap_or(vr::k_unTrackedDeviceIndexInvalid)
     }
     fn ApplyTransform(
         &self,
@@ -2483,8 +2641,282 @@ mod tests {
         xr.session_data.get().session.as_raw()
     }
 
-    fn translation(m: vr::HmdMatrix34_t) -> [f32; 3] {
-        [m.m[0][3], m.m[1][3], m.m[2][3]]
+    type TestInput = Input<crate::compositor::Compositor>;
+
+    /// A System with its Input, like an app gets, before any controller showed up. The input's
+    /// test manifest is loaded, so controllers connect once their profile is bound and synced.
+    fn system_with_input() -> (Arc<RealOpenXrData>, Arc<System>, Arc<TestInput>) {
+        use vr::IVRInput010_Interface;
+        fakexr::advertise_extension(xr::sys::FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+        let xr =
+            Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap());
+        let system = Arc::new(System::new(xr.clone(), &Injector::default()));
+        let input = Arc::new(Input::new(xr.clone()));
+        system.input.set(Arc::downgrade(&input));
+        xr.input.set(Arc::downgrade(&input));
+        xr.system.set(Arc::downgrade(&system));
+        let manifest = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/input_data/actions.json\0"
+        );
+        assert_eq!(
+            input.SetActionManifestPath(manifest.as_ptr() as _),
+            vr::EVRInputError::None
+        );
+        (xr, system, input)
+    }
+
+    /// Syncs the test manifest's first action set and applies pending profile changes.
+    fn sync_profiles(xr: &RealOpenXrData, input: &TestInput) {
+        use vr::IVRInput010_Interface;
+        let mut set = 0;
+        assert_eq!(
+            input.GetActionSetHandle(c"/actions/set1".as_ptr(), &mut set),
+            vr::EVRInputError::None
+        );
+        let mut active = vr::VRActiveActionSet_t {
+            ulActionSet: set,
+            ..Default::default()
+        };
+        assert_eq!(
+            input.UpdateActionState(
+                &mut active,
+                std::mem::size_of::<vr::VRActiveActionSet_t>() as u32,
+                1
+            ),
+            vr::EVRInputError::None
+        );
+        xr.poll_events();
+    }
+
+    fn bind_profile(xr: &RealOpenXrData, input: &TestInput, hand: fakexr::UserPath, profile: &str) {
+        let path = xr.instance.string_to_path(profile).unwrap();
+        fakexr::set_interaction_profile(session(xr), hand, path);
+        sync_profiles(xr, input);
+    }
+
+    #[test]
+    fn property_errors_tell_wrong_type_from_unknown() {
+        use vr::ETrackedDeviceProperty as Prop;
+        use vr::ETrackedPropertyError as Err;
+        let (_xr, system, _input) = system_with_input();
+        const HMD: u32 = vr::k_unTrackedDeviceIndex_Hmd;
+        let mut err = Err::Success;
+
+        // A property of another type.
+        assert_eq!(
+            system.GetFloatTrackedDeviceProperty(HMD, Prop::ModelNumber_String, &mut err),
+            0.0
+        );
+        assert_eq!(err, Err::WrongDataType);
+        assert!(!system.GetBoolTrackedDeviceProperty(HMD, Prop::DisplayFrequency_Float, &mut err));
+        assert_eq!(err, Err::WrongDataType);
+        assert_eq!(
+            system.GetInt32TrackedDeviceProperty(HMD, Prop::ContainsProximitySensor_Bool, &mut err),
+            0
+        );
+        assert_eq!(err, Err::WrongDataType);
+        assert_eq!(
+            system.GetUint64TrackedDeviceProperty(HMD, Prop::DashboardScale_Float, &mut err),
+            0
+        );
+        assert_eq!(err, Err::WrongDataType);
+        system.GetMatrix34TrackedDeviceProperty(HMD, Prop::ModelNumber_String, &mut err);
+        assert_eq!(err, Err::WrongDataType);
+        assert_eq!(
+            system.GetStringTrackedDeviceProperty(
+                HMD,
+                Prop::DisplayFrequency_Float,
+                std::ptr::null_mut(),
+                0,
+                &mut err
+            ),
+            0
+        );
+        assert_eq!(err, Err::WrongDataType);
+        assert_eq!(
+            system.GetArrayTrackedDeviceProperty(
+                HMD,
+                Prop::ModelNumber_String,
+                vr::k_unStringPropertyTag,
+                std::ptr::null_mut(),
+                0,
+                &mut err
+            ),
+            0
+        );
+        assert_eq!(err, Err::WrongDataType);
+
+        // A property of the right type the device doesn't provide.
+        assert_eq!(
+            system.GetFloatTrackedDeviceProperty(
+                HMD,
+                Prop::UserHeadToEyeDepthMeters_Float,
+                &mut err
+            ),
+            0.0
+        );
+        assert_eq!(err, Err::UnknownProperty);
+        assert_eq!(
+            system.GetStringTrackedDeviceProperty(
+                HMD,
+                Prop::DriverVersion_String,
+                std::ptr::null_mut(),
+                0,
+                &mut err
+            ),
+            0
+        );
+        assert_eq!(err, Err::UnknownProperty);
+        assert_eq!(
+            system.GetArrayTrackedDeviceProperty(
+                HMD,
+                Prop::CameraToHeadTransforms_Matrix34_Array,
+                vr::k_unHmdMatrix34PropertyTag,
+                std::ptr::null_mut(),
+                0,
+                &mut err
+            ),
+            0
+        );
+        assert_eq!(err, Err::UnknownProperty);
+    }
+
+    #[test]
+    fn hmd_display_and_component_properties() {
+        use vr::ETrackedDeviceProperty as Prop;
+        use vr::ETrackedPropertyError as Err;
+        let (_xr, system, _input) = system_with_input();
+        const HMD: u32 = vr::k_unTrackedDeviceIndex_Hmd;
+
+        let get_bool = |prop| {
+            let mut err = Err::UnknownProperty;
+            let value = system.GetBoolTrackedDeviceProperty(HMD, prop, &mut err);
+            assert_eq!(err, Err::Success, "{prop:?}");
+            value
+        };
+        assert!(get_bool(Prop::HasDisplayComponent_Bool));
+        assert!(!get_bool(Prop::HasControllerComponent_Bool));
+        assert!(!get_bool(Prop::HasCameraComponent_Bool));
+        assert!(!get_bool(Prop::HasDriverDirectModeComponent_Bool));
+        assert!(!get_bool(Prop::HasSpatialAnchorsSupport_Bool));
+        // fakexr has XR_FB_display_refresh_rate with several rates.
+        assert!(get_bool(Prop::DisplaySupportsRuntimeFramerateChange_Bool));
+        assert!(get_bool(Prop::DisplaySupportsMultipleFramerates_Bool));
+
+        let get_float = |prop| {
+            let mut err = Err::UnknownProperty;
+            let value = system.GetFloatTrackedDeviceProperty(HMD, prop, &mut err);
+            assert_eq!(err, Err::Success, "{prop:?}");
+            value
+        };
+        assert_eq!(get_float(Prop::SecondsFromVsyncToPhotons_Float), 0.0);
+        assert_eq!(get_float(Prop::DashboardScale_Float), 1.0);
+
+        let mut err = Err::UnknownProperty;
+        assert_eq!(
+            system.GetUint64TrackedDeviceProperty(HMD, Prop::CurrentUniverseId_Uint64, &mut err),
+            1
+        );
+        assert_eq!(err, Err::Success);
+
+        let identity = vr::HmdMatrix34_t::from(xr::Posef::IDENTITY).m;
+        for prop in [
+            Prop::CameraToHeadTransform_Matrix34,
+            Prop::StatusDisplayTransform_Matrix34,
+            Prop::ImuToHeadTransform_Matrix34,
+        ] {
+            let mut err = Err::UnknownProperty;
+            let matrix = system.GetMatrix34TrackedDeviceProperty(HMD, prop, &mut err);
+            assert_eq!(err, Err::Success, "{prop:?}");
+            assert_eq!(matrix.m, identity, "{prop:?}");
+        }
+
+        let get_string = |prop| {
+            let mut err = Err::UnknownProperty;
+            let mut buf = vec![0; 64];
+            let len = system.GetStringTrackedDeviceProperty(
+                HMD,
+                prop,
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                &mut err,
+            );
+            assert_eq!(err, Err::Success, "{prop:?}");
+            let slice = unsafe { std::slice::from_raw_parts(buf.as_ptr() as _, len as usize) };
+            CStr::from_bytes_with_nul(slice).unwrap().to_owned()
+        };
+        assert_eq!(
+            get_string(Prop::RenderModelName_String).as_c_str(),
+            c"generic_hmd"
+        );
+        // Without a controller profile to go by, SteamVR's defaults: the tracking system name.
+        let tracking_system = get_string(Prop::TrackingSystemName_String);
+        assert_eq!(get_string(Prop::InputProfilePath_String), tracking_system);
+        assert_eq!(get_string(Prop::ResourceRoot_String), tracking_system);
+    }
+
+    #[test]
+    fn display_available_frame_rates() {
+        use vr::ETrackedDeviceProperty as Prop;
+        use vr::ETrackedPropertyError as Err;
+        let (_xr, system, _input) = system_with_input();
+        const HMD: u32 = vr::k_unTrackedDeviceIndex_Hmd;
+        let prop = Prop::DisplayAvailableFrameRates_Float_Array;
+        let mut err = Err::Success;
+
+        let needed = system.GetArrayTrackedDeviceProperty(
+            HMD,
+            prop,
+            vr::k_unFloatPropertyTag,
+            std::ptr::null_mut(),
+            0,
+            &mut err,
+        );
+        assert_eq!(err, Err::BufferTooSmall);
+        let expected = fakexr::DISPLAY_REFRESH_RATES;
+        assert_eq!(needed as usize, std::mem::size_of_val(&expected));
+
+        let mut rates = [0.0f32; 4];
+        assert_eq!(
+            system.GetArrayTrackedDeviceProperty(
+                HMD,
+                prop,
+                vr::k_unFloatPropertyTag,
+                rates.as_mut_ptr().cast(),
+                needed,
+                &mut err
+            ),
+            needed
+        );
+        assert_eq!(err, Err::Success);
+        assert_eq!(rates, expected);
+
+        assert_eq!(
+            system.GetArrayTrackedDeviceProperty(
+                HMD,
+                prop,
+                vr::k_unInt32PropertyTag,
+                rates.as_mut_ptr().cast(),
+                needed,
+                &mut err
+            ),
+            0
+        );
+        assert_eq!(err, Err::WrongDataType);
+
+        assert_eq!(
+            system.GetArrayTrackedDeviceProperty(
+                1,
+                prop,
+                vr::k_unFloatPropertyTag,
+                std::ptr::null_mut(),
+                0,
+                &mut err
+            ),
+            0
+        );
+        assert_eq!(err, Err::InvalidDevice);
     }
 
     #[test]
@@ -3062,6 +3494,88 @@ mod tests {
         assert!(!got_quit());
         wait_get_poses();
         assert!(got_quit());
+    }
+
+    #[test]
+    fn controller_roles_need_a_connected_controller() {
+        use fakexr::UserPath::LeftHand;
+        let (xr, system, input) = system_with_input();
+        let role = vr::ETrackedControllerRole::LeftHand;
+        assert_eq!(
+            system.GetTrackedDeviceIndexForControllerRole(role),
+            vr::k_unTrackedDeviceIndexInvalid
+        );
+        assert_eq!(
+            system.GetTrackedDeviceClass(1),
+            vr::ETrackedDeviceClass::Invalid
+        );
+
+        bind_profile(
+            &xr,
+            &input,
+            LeftHand,
+            "/interaction_profiles/oculus/touch_controller",
+        );
+        assert!(system.IsTrackedDeviceConnected(1));
+        assert_eq!(system.GetTrackedDeviceIndexForControllerRole(role), 1);
+        assert_eq!(system.GetControllerRoleForTrackedDeviceIndex(1), role);
+        assert_eq!(
+            system.GetTrackedDeviceClass(1),
+            vr::ETrackedDeviceClass::Controller
+        );
+
+        // Turned off: SteamVR keeps the device, but no longer answers for its role.
+        fakexr::set_interaction_profile(session(&xr), LeftHand, xr::Path::NULL);
+        sync_profiles(&xr, &input);
+        input.expire_connection_grace();
+        assert!(!system.IsTrackedDeviceConnected(1));
+        assert_eq!(
+            system.GetTrackedDeviceIndexForControllerRole(role),
+            vr::k_unTrackedDeviceIndexInvalid
+        );
+        assert_eq!(
+            system.GetTrackedDeviceClass(1),
+            vr::ETrackedDeviceClass::Controller
+        );
+    }
+
+    #[test]
+    #[cfg_attr(not(feature = "monado"), ignore)]
+    fn trackers_opt_out_of_hand_roles() {
+        let (xr, system, input) = system_with_input();
+        // Trackers are listed when a profile changes.
+        fakexr::add_trackers(session(&xr));
+        bind_profile(
+            &xr,
+            &input,
+            fakexr::UserPath::LeftHand,
+            "/interaction_profiles/valve/index_controller",
+        );
+        // we need to wait two frames for the tracker to be connected.
+        for _ in 0..2 {
+            xr.poll_events();
+            input.frame_start_update();
+        }
+        assert_eq!(
+            system.GetTrackedDeviceClass(3),
+            vr::ETrackedDeviceClass::GenericTracker
+        );
+        let role = vr::ETrackedControllerRole::OptOut;
+        assert_eq!(system.GetControllerRoleForTrackedDeviceIndex(3), role);
+        let mut err = vr::ETrackedPropertyError::UnknownProperty;
+        assert_eq!(
+            system.GetInt32TrackedDeviceProperty(
+                3,
+                vr::ETrackedDeviceProperty::ControllerRoleHint_Int32,
+                &mut err
+            ),
+            role.0 as i32
+        );
+        assert_eq!(err, vr::ETrackedPropertyError::Success);
+    }
+
+    fn translation(m: vr::HmdMatrix34_t) -> [f32; 3] {
+        [m.m[0][3], m.m[1][3], m.m[2][3]]
     }
 
     #[test]

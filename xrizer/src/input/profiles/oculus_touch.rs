@@ -62,6 +62,9 @@ impl InteractionProfile for OculusTouch {
                 model: c"Oculus Quest2",
                 controller_type: c"rift",
                 serial_number: c"WMHD315M3010GV",
+                render_model_name: c"generic_hmd",
+                registered_device_type: c"oculus/WMHD315M3010GV",
+                input_profile_path: c"{oculus}/input/rift_profile.json",
             },
         };
         &DEVICE_PROPERTIES

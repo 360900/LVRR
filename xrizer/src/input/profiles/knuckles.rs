@@ -86,6 +86,9 @@ impl InteractionProfile for Knuckles {
                 model: c"Index",
                 controller_type: c"indexhmd",
                 serial_number: c"LHR-FFFFFFF0",
+                render_model_name: c"generic_hmd",
+                registered_device_type: c"valve/indexLHR-FFFFFFF0",
+                input_profile_path: c"{indexhmd}/input/indexhmd_profile.json",
             },
         };
         &DEVICE_PROPERTIES

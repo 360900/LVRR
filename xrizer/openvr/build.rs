@@ -55,6 +55,44 @@ static RUST_ENUM_FIELDS: &[(&str, &str)] = &[("RenderModel_TextureMap_t", "forma
 
 static BITFIELD_ENUMS: &[&str] = &["EVRSubmitFlags", "EVRComponentProperty", "EKeyboardFlags"];
 
+// Interfaces to generate bindings for.
+static INTERFACES: &[&str] = &[
+    "IVRSystem",
+    "IVRCompositor",
+    "IVROverlay",
+    "IVROverlayView",
+    "IVRInput",
+    "IVRRenderModels",
+    "IVRScreenshots",
+    "IVRClientCore",
+    "IVRChaperone",
+    "IVRChaperoneSetup",
+    "IVRApplications",
+    "IVRSettings",
+    "IVRDebug",
+    "IVRExtendedDisplay",
+    "IVRHeadsetView",
+    "IVRTrackedCamera",
+    "IVRResources",
+    "IVRNotifications",
+    "IVRDriverManager",
+    "IVRSpatialAnchors",
+    "IVRIOBuffer",
+    "IVRIPCResourceManagerClient",
+    "IVRControlPanel",
+];
+
+// Fields that were renamed between headers without changing the struct's layout.
+static KNOWN_FIELD_RENAMES: &[(&str, &str)] = &[
+    // NotificationBitmap_t up to 0.9.20
+    ("m_pImageData", "bytes"),
+    ("m_nWidth", "width"),
+    ("m_nHeight", "height"),
+    ("m_nBytesPerPixel", "depth"),
+    // CameraVideoStreamFrameHeader_t up to 1.4.18
+    ("trackedDevicePose", "standingTrackedDevicePose"),
+];
+
 // On Linux the headers declare these aligned(8), so structs using them have the same layout in 32
 // and 64 bit processes. Bindgen drops the alignment of typedefs, which leaves them 4 byte aligned
 // on i686, so they're blocklisted and replaced by the newtypes in process_and_versionify_types.
@@ -191,25 +229,6 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     builder = builder.header_contents("openvr-1.0.4-compositor017.h", &compositor017);
 
-    // Interfaces to generate bindings for.
-    const INTERFACES: &[&str] = &[
-        "IVRSystem",
-        "IVRCompositor",
-        "IVROverlay",
-        "IVROverlayView",
-        "IVRInput",
-        "IVRRenderModels",
-        "IVRScreenshots",
-        "IVRClientCore",
-        "IVRChaperone",
-        "IVRChaperoneSetup",
-        "IVRApplications",
-        "IVRSettings",
-        "IVRDebug",
-        "IVRExtendedDisplay",
-        "IVRHeadsetView",
-    ];
-
     for interface in INTERFACES {
         builder = builder
             .allowlist_type(format!("vr.*::{interface}"))
@@ -323,9 +342,12 @@ fn verify_fields_are_identical<'a, T>(
                 existing_field.ident.as_ref().unwrap().to_string(),
                 new_field.ident.as_ref().unwrap().to_string(),
             ];
+            let renamed = (idents[0].as_str(), idents[1].as_str());
             assert!(
                 idents.contains(&"repeatCount".into()) && idents.contains(&"unused".into())
-                    || idents[1] == (idents[0].clone() + "_deprecated"),
+                    || idents[1] == (idents[0].clone() + "_deprecated")
+                    || KNOWN_FIELD_RENAMES.contains(&renamed)
+                    || KNOWN_FIELD_RENAMES.contains(&(renamed.1, renamed.0)),
                 "Non-allowed differently named fields in {ident} (left = {:?} from {existing_mod}, right = {:?} from {new_mod})",
                 existing_field.ident,
                 new_field.ident
@@ -739,6 +761,19 @@ fn versionify_interface(
                     .insert(0, syn::PathSegment::from(item_mod.clone()));
             }
         }
+
+        // IVRControlPanel_001 hands out other interfaces, whose types only exist versioned
+        // here, so those pointers are opaque.
+        if let syn::ReturnType::Type(_, ty) = &mut f.output
+            && let syn::Type::Ptr(ptr) = &mut **ty
+            && let syn::Type::Path(path) = &*ptr.elem
+            && path
+                .path
+                .get_ident()
+                .is_some_and(|i| INTERFACES.contains(&i.to_string().as_str()))
+        {
+            *ptr.elem = parse_quote!(::std::os::raw::c_void);
+        }
     }
 
     let ret = VersionedInterface {
@@ -777,8 +812,10 @@ fn process_vr_namespace_content(
             match extract_array_or_ptr_type(ty) {
                 syn::Type::Path(type_path) => {
                     let type_name = type_path.path.segments.last().unwrap().ident.to_string();
+                    // Absolute paths (::std::os::raw::c_void) don't live in the vr module.
                     if !incompatible_items.contains_key(&type_name)
                         && !PRIMITIVES.contains(&type_name.as_str())
+                        && type_path.path.leading_colon.is_none()
                     {
                         type_path
                             .path
@@ -864,7 +901,14 @@ fn process_vr_namespace_content(
                 static INCOMPAT_STRUCTS: &[(&str, &[&str])] = &[
                     (
                         "vr_0_9_12",
-                        &["VREvent_t", "VREvent_Reserved_t", "Compositor_FrameTiming"],
+                        &[
+                            "VREvent_t",
+                            "VREvent_Reserved_t",
+                            "Compositor_FrameTiming",
+                            // 0.9.14 reordered its fields and added some without bumping
+                            // IVRTrackedCamera_001.
+                            "CameraVideoStreamFrame_t",
+                        ],
                     ),
                     (
                         "vr_0_9_14",

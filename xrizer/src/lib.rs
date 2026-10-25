@@ -19,6 +19,7 @@ mod quit_watchdog;
 mod rendermodels;
 mod screenshots;
 mod settings;
+mod stubs;
 mod system;
 
 #[cfg(not(test))]

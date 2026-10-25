@@ -49,6 +49,27 @@ impl CompositorSessionData {
             .as_ref()
             .is_none_or(|ctrl| ctrl.with_any_graphics::<is_current>(()))
     }
+
+    /// A backend without a swapchain on the frame controller's device and context, for an overlay
+    /// that gets raw pixels rather than a texture that says which API the app uses. None without
+    /// a frame controller, i.e. before the real session is set up, or without the app's graphics
+    /// context on this thread. Like [Self::is_context_current], don't call it while holding the
+    /// overlay locks.
+    pub fn overlay_backend(&self, instance: &xr::Instance) -> Option<SupportedBackend> {
+        #[macros::any_graphics(DynFrameController)]
+        fn new_backend<G: GraphicsBackend>(
+            ctrl: &FrameController<G>,
+            instance: &xr::Instance,
+        ) -> Option<SupportedBackend> {
+            ctrl.backend.new_on_same_device(instance).map(Into::into)
+        }
+
+        self.ctrl
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .and_then(|ctrl| ctrl.with_any_graphics::<new_backend>(instance))
+    }
 }
 
 #[derive(macros::InterfaceImpl)]
@@ -2227,6 +2248,14 @@ mod tests {
         vk: Arc<VulkanData>,
         swapchain_format: Option<u32>,
         swapchain: Option<xr::sys::Swapchain>,
+        /// The last raw overlay texture, which the texture handle points to.
+        raw: Option<Box<FakeRawTexture>>,
+    }
+
+    /// What [GraphicsBackend::raw_texture] was given, standing in for the backend's image.
+    struct FakeRawTexture {
+        width: u32,
+        height: u32,
     }
     thread_local! {
         static SWAPCHAIN_WIDTH: Cell<u32> = const { Cell::new(10) };
@@ -2241,6 +2270,8 @@ mod tests {
         static ARRAY_LAYER: Cell<Option<u32>> = const { Cell::new(Option::None) };
         /// How long after a frame's last Submit the fake GPU reports it finished, if at all.
         static GPU_LATENCY: Cell<Option<std::time::Duration>> = const { Cell::new(Option::None) };
+        /// The size and pixels of each raw overlay texture uploaded on this thread.
+        static RAW_UPLOADS: RefCell<Vec<(u32, u32, Vec<u8>)>> = const { RefCell::new(Vec::new()) };
     }
 
     pub enum FakeApi {}
@@ -2330,19 +2361,44 @@ mod tests {
             (index < 2).then_some(texture)
         }
 
+        fn new_on_same_device(&self, _: &xr::Instance) -> Option<Self> {
+            Some(Self {
+                vk: self.vk.clone(),
+                swapchain_format: Option::None,
+                swapchain: Option::None,
+                raw: Option::None,
+            })
+        }
+
+        /// Like GL's, needs the context.
+        fn raw_texture(
+            &mut self,
+            pixels: &[u8],
+            width: u32,
+            height: u32,
+        ) -> Option<Self::OpenVrTexture> {
+            if !CONTEXT_CURRENT.get() {
+                return Option::None;
+            }
+            RAW_UPLOADS.with_borrow_mut(|uploads| uploads.push((width, height, pixels.to_vec())));
+            let raw = self.raw.insert(Box::new(FakeRawTexture { width, height }));
+            Some(std::ptr::from_ref::<FakeRawTexture>(raw).cast())
+        }
+
         fn raw_swapchain_info_for_texture(
             &self,
-            _: Self::OpenVrTexture,
+            texture: Self::OpenVrTexture,
             _: openvr::VRTextureBounds_t,
             _: openvr::EColorSpace,
         ) -> openxr::SwapchainCreateInfo<Self::Api> {
+            let (width, height) = self.texture_size(texture);
             xr::SwapchainCreateInfo {
                 create_flags: xr::SwapchainCreateFlags::EMPTY,
                 usage_flags: xr::SwapchainUsageFlags::EMPTY,
                 format: SWAPCHAIN_FORMAT.get(),
                 sample_count: SWAPCHAIN_SAMPLE_COUNT.get(),
-                width: SWAPCHAIN_WIDTH.get(),
-                height: SWAPCHAIN_HEIGHT.get(),
+                width,
+                height,
                 face_count: 1,
                 array_size: 2,
                 mip_count: 1,
@@ -2374,15 +2430,16 @@ mod tests {
 
         fn copy_overlay_to_swapchain(
             &mut self,
-            _texture: Self::OpenVrTexture,
+            texture: Self::OpenVrTexture,
             color_space: vr::EColorSpace,
             _bounds: openvr::VRTextureBounds_t,
             _image_index: usize,
         ) -> openxr::Extent2Di {
             OVERLAY_COLOR_SPACE.set(color_space);
+            let (width, height) = self.texture_size(texture);
             xr::Extent2Di {
-                width: SWAPCHAIN_WIDTH.get() as i32,
-                height: SWAPCHAIN_HEIGHT.get() as i32,
+                width: width as i32,
+                height: height as i32,
             }
         }
 
@@ -2414,9 +2471,29 @@ mod tests {
             SWAPCHAIN_HEIGHT.set(height);
         }
 
+        /// App textures have the thread's size, raw ones their own.
+        fn texture_size(&self, texture: <Self as GraphicsBackend>::OpenVrTexture) -> (u32, u32) {
+            let raw = texture.cast::<FakeRawTexture>();
+            match self.raw.as_deref().filter(|r| std::ptr::eq(raw, *r)) {
+                Some(raw) => (raw.width, raw.height),
+                Option::None => (SWAPCHAIN_WIDTH.get(), SWAPCHAIN_HEIGHT.get()),
+            }
+        }
+
         /// The colour space of the last overlay texture copied on this thread.
         pub fn overlay_color_space() -> vr::EColorSpace {
             OVERLAY_COLOR_SPACE.get()
+        }
+
+        /// The size and pixels of the raw overlay textures uploaded on this thread since the last
+        /// call.
+        pub fn raw_uploads() -> Vec<(u32, u32, Vec<u8>)> {
+            RAW_UPLOADS.with_borrow_mut(std::mem::take)
+        }
+
+        /// Sets whether backends on this thread report their graphics context as current.
+        pub fn set_context_current(current: bool) {
+            CONTEXT_CURRENT.set(current);
         }
 
         /// Sets the sample count of the textures on this thread.
@@ -2449,6 +2526,7 @@ mod tests {
                 vk,
                 swapchain_format: Option::None,
                 swapchain: Option::None,
+                raw: Option::None,
             }
         }
     }

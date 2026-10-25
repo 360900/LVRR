@@ -56,6 +56,9 @@ impl InteractionProfile for VRLinkHand {
                 model: c"VRLink",
                 controller_type: c"vrlink",
                 serial_number: c"VRLINKQ_HMD",
+                render_model_name: c"generic_hmd",
+                registered_device_type: c"",
+                input_profile_path: c"",
             },
         };
         &DEVICE_PROPERTIES

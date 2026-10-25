@@ -55,6 +55,26 @@ fn has_component(render_model_name: &CStr, component_name: &CStr) -> bool {
     }
 }
 
+/// The state of a render model's component, None if the model or component is unknown. Our
+/// meshes are static and have their offsets baked in, so only the pose components aren't at the
+/// device's raw pose.
+pub(crate) fn component_state(
+    render_model_name: &CStr,
+    component_name: &CStr,
+) -> Option<vr::RenderModel_ComponentState_t> {
+    if !has_component(render_model_name, component_name) {
+        return None;
+    }
+    let transform = pose_component(component_name)
+        .and_then(|ty| pose_component_transform(render_model_name, ty))
+        .map_or(xr::Posef::IDENTITY.into(), hmd_matrix);
+    Some(vr::RenderModel_ComponentState_t {
+        mTrackingToComponentRenderModel: transform,
+        mTrackingToComponentLocal: transform,
+        uProperties: (vr::EVRComponentProperty::IsVisible | vr::EVRComponentProperty::IsStatic).0,
+    })
+}
+
 /// The transform from the raw pose to a pose component: the profile's transform for that pose
 /// type, as for pose actions bound to it.
 fn pose_component_transform(render_model_name: &CStr, ty: BoundPoseType) -> Option<Mat4> {
@@ -334,22 +354,13 @@ impl vr::IVRRenderModels006_Interface for RenderModels {
         let render_model_name = unsafe { CStr::from_ptr(render_model_name) };
         let component_name = unsafe { CStr::from_ptr(component_name) };
 
-        if !has_component(render_model_name, component_name) {
-            return false;
+        match component_state(render_model_name, component_name) {
+            Some(component_state) => {
+                *state = component_state;
+                true
+            }
+            None => false,
         }
-
-        // Our meshes are static and have their offsets baked in, so only the pose components
-        // aren't at the device's raw pose.
-        if let Some(transform) = pose_component(component_name)
-            .and_then(|ty| pose_component_transform(render_model_name, ty))
-        {
-            state.mTrackingToComponentRenderModel = hmd_matrix(transform);
-            state.mTrackingToComponentLocal = hmd_matrix(transform);
-        }
-        state.uProperties =
-            (vr::EVRComponentProperty::IsVisible | vr::EVRComponentProperty::IsStatic).0;
-
-        true
     }
     fn GetComponentStateForDevicePath(
         &self,

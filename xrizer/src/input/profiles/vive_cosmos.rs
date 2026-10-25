@@ -70,6 +70,9 @@ impl InteractionProfile for ViveCosmos {
                 model: c"vive_cosmos",
                 controller_type: c"vive_cosmos",
                 serial_number: c"HMD",
+                render_model_name: c"generic_hmd",
+                registered_device_type: c"",
+                input_profile_path: c"",
             },
         };
         &DEVICE_PROPERTIES
