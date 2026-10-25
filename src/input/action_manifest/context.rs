@@ -445,10 +445,11 @@ impl BindingsProfileLoadContext<'_> {
             self.push_input_path(&output.path, input);
         }
         let device_path = self.device_path(device);
+        let origin = self.origin(input);
         self.bindings_parsed
             .entry(output.path.clone())
             .or_default()
-            .push(BoolBindingData::new(ty, device_path));
+            .push(BoolBindingData::new(ty, device_path).with_origin(origin));
     }
 
     /// Plays `haptic` when `press` changes on `device`, for `output`'s binding in a set.
@@ -495,6 +496,7 @@ impl BindingsProfileLoadContext<'_> {
             self.push_input_path(&output.path, input);
         }
         let hand = self.device_path(path.device);
+        let origin = self.origin(path);
         let ActionData::Vector2 { data, .. } = self.actions.get_mut(&output.path).unwrap() else {
             unreachable!();
         };
@@ -502,6 +504,7 @@ impl BindingsProfileLoadContext<'_> {
             action,
             profile: self.interaction_profile,
             hand,
+            origin,
             transform,
         });
     }
@@ -552,6 +555,7 @@ impl BindingsProfileLoadContext<'_> {
             self.push_input_path(&output.path, path);
         }
         let hand = self.device_path(input.device);
+        let origin = self.origin(input);
         self.scalar_constants
             .entry(output.path.clone())
             .or_default()
@@ -559,6 +563,7 @@ impl BindingsProfileLoadContext<'_> {
                 press,
                 profile: self.interaction_profile,
                 hand,
+                origin,
                 on,
                 off,
             });

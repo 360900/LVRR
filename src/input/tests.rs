@@ -2122,12 +2122,15 @@ fn pose_action_inactive_without_its_device() {
     assert_eq!(active(&f, skeleton, 0), (true, left));
     fakexr::set_hand_tracked(f.raw_session(), LeftHand, None);
 
-    // Only the left controller, whose bindings are used for the right hand too.
+    // Only the left controller, whose bindings are used for the right hand too. The origin is
+    // the bound pose source.
+    let left_raw = f.get_input_source_handle(c"/user/hand/left/pose/raw");
+    let right_raw = f.get_input_source_handle(c"/user/hand/right/pose/raw");
     f.set_interaction_profile::<OculusTouch>(LeftHand);
     sync(&mut f);
-    assert_eq!(active(&f, pose, left), (true, left));
+    assert_eq!(active(&f, pose, left), (true, left_raw));
     assert_eq!(active(&f, pose, right), inactive);
-    assert_eq!(active(&f, pose, 0), (true, left));
+    assert_eq!(active(&f, pose, 0), (true, left_raw));
 
     // Only the right one: unrestricted reads use it.
     fakexr::set_interaction_profile(f.raw_session(), LeftHand, xr::Path::NULL);
@@ -2135,8 +2138,8 @@ fn pose_action_inactive_without_its_device() {
     sync(&mut f);
     f.input.expire_connection_grace();
     assert_eq!(active(&f, pose, left), inactive);
-    assert_eq!(active(&f, pose, right), (true, right));
-    assert_eq!(active(&f, pose, 0), (true, right));
+    assert_eq!(active(&f, pose, right), (true, right_raw));
+    assert_eq!(active(&f, pose, 0), (true, right_raw));
     assert_eq!(active(&f, skeleton, 0), inactive);
 }
 
@@ -3934,8 +3937,6 @@ fn unrestricted_digital_action_origin() {
     f.load_actions(c"actions.json");
     f.set_interaction_profile::<Knuckles>(LeftHand);
     f.set_interaction_profile::<Knuckles>(RightHand);
-    let left = f.get_input_source_handle(c"/user/hand/left");
-    let right = f.get_input_source_handle(c"/user/hand/right");
     let action = f.get_action::<bool>(boolact);
     let sync = |f: &mut Fixture| {
         f.sync(vr::VRActiveActionSet_t {
@@ -3943,41 +3944,202 @@ fn unrestricted_digital_action_origin() {
             ..Default::default()
         })
     };
+    // OpenXR combines the inputs bound directly, so it's the first one on the hand.
+    let origin = |f: &Fixture| origin_path(f, f.get_bool_state(boolact).unwrap().activeOrigin);
+    let set = |hand, pressed: bool, secs: i64| {
+        let time = xr::Time::from_nanos(secs * 1_000_000_000);
+        fakexr::set_action_state_with_time(action, pressed.into(), hand, time);
+    };
 
     sync(&mut f);
     let state = f.get_bool_state(boolact).unwrap();
     assert!(!state.bActive);
     assert_eq!(state.activeOrigin, 0);
 
-    fakexr::set_action_state(action, true.into(), RightHand);
+    set(RightHand, true, 1);
     sync(&mut f);
     let state = f.get_bool_state(boolact).unwrap();
     assert!(state.bState);
-    assert_eq!(state.activeOrigin, right);
+    assert_eq!(origin(&f), "/user/hand/right/input/a");
+    let info = get_origin_info(&f, state.activeOrigin);
+    assert_eq!(info.trackedDeviceIndex, Hand::Right as u32);
     assert_eq!(
-        get_origin_info(&f, state.activeOrigin).trackedDeviceIndex,
-        Hand::Right as u32
+        info.devicePath,
+        f.get_input_source_handle(c"/user/hand/right")
     );
 
-    // Active but not pressed still has an origin.
-    fakexr::set_action_state(action, false.into(), RightHand);
+    // Active but not pressed still has an origin: the input released last.
+    set(RightHand, false, 2);
     sync(&mut f);
     sync(&mut f);
     let state = f.get_bool_state(boolact).unwrap();
     assert!(state.bActive && !state.bState);
-    assert_ne!(state.activeOrigin, 0);
+    assert_eq!(origin(&f), "/user/hand/right/input/a");
 
-    fakexr::set_action_state(action, true.into(), LeftHand);
+    set(LeftHand, true, 3);
     sync(&mut f);
-    assert_eq!(f.get_bool_state(boolact).unwrap().activeOrigin, left);
+    assert_eq!(origin(&f), "/user/hand/left/input/a");
 
     // Left wins ties.
-    fakexr::set_action_state(action, false.into(), LeftHand);
+    set(LeftHand, false, 4);
     sync(&mut f);
-    fakexr::set_action_state(action, true.into(), LeftHand);
-    fakexr::set_action_state(action, true.into(), RightHand);
+    set(LeftHand, true, 5);
+    set(RightHand, true, 5);
     sync(&mut f);
-    assert_eq!(f.get_bool_state(boolact).unwrap().activeOrigin, left);
+    assert_eq!(origin(&f), "/user/hand/left/input/a");
+
+    // A read restricted to a hand reports that hand's input.
+    let right = f.get_input_source_handle(c"/user/hand/right");
+    let state = f.get_bool_state_hand(boolact, right).unwrap();
+    assert_eq!(
+        origin_path(&f, state.activeOrigin),
+        "/user/hand/right/input/a"
+    );
+}
+
+#[test]
+fn action_data_origin_is_the_driving_input() {
+    let mut f = fixture_with::<OculusTouch>(c"actions_origins.json", c"/actions/main");
+    let main = f.get_action_set_handle(c"/actions/main");
+    let sync = |f: &mut Fixture| {
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: main,
+            ..Default::default()
+        })
+    };
+    let fire = f.get_action_handle(c"/actions/main/in/fire");
+    let throttle = f.get_action_handle(c"/actions/main/in/throttle");
+    let move_ = f.get_action_handle(c"/actions/main/in/move");
+    let pose = f.get_action_handle(c"/actions/main/in/pose");
+    let [left, right] =
+        [c"/user/hand/left", c"/user/hand/right"].map(|hand| f.get_input_source_handle(hand));
+    // Button mode on the analog trigger is a threshold xrizer evaluates.
+    let trigger_click = f.custom_binding_action(fire, OculusTouch::profile_path(), |ty| {
+        matches!(ty, BoolBindingType::ThresholdFloat(_))
+    });
+    let fire_xr = f.get_action::<bool>(fire);
+    let throttle_xr = f.get_action::<f32>(throttle);
+    let move_xr = f.get_action::<xr::Vector2f>(move_);
+    let fire_origin = |f: &Fixture| {
+        let state = f.get_bool_state(fire).unwrap();
+        (state.bState, origin_path(f, state.activeOrigin))
+    };
+    let named = |f: &Fixture, origin| origin_name(f, origin, -1).1;
+    let at = |secs: i64| xr::Time::from_nanos(secs * 1_000_000_000);
+    let trigger = |value, secs| {
+        let value = fakexr::ActionState::Float(value);
+        fakexr::set_action_state_with_time(trigger_click, value, RightHand, at(secs));
+    };
+
+    // Nothing changed yet: the first hand's first input.
+    for hand in [LeftHand, RightHand] {
+        fakexr::set_action_state(fire_xr, false.into(), hand);
+    }
+    trigger(0.0, 0);
+    sync(&mut f);
+    sync(&mut f);
+    assert_eq!(fire_origin(&f), (false, "/user/hand/left/input/x".into()));
+
+    // The trigger's threshold drives it, and Unity names the origin after it.
+    trigger(1.0, 1);
+    sync(&mut f);
+    assert_eq!(
+        fire_origin(&f),
+        (true, "/user/hand/right/input/trigger".into())
+    );
+    let state = f.get_bool_state(fire).unwrap();
+    assert_eq!(
+        named(&f, state.activeOrigin),
+        "Right Hand Oculus Touch Trigger"
+    );
+    let info = get_origin_info(&f, state.activeOrigin);
+    assert_eq!(buf_str(&info.rchRenderModelComponentName), "trigger");
+    assert_eq!(info.devicePath, right);
+    // An origin action data reports is one GetActionOrigins lists.
+    assert!(get_action_origins(&f, main, fire).contains(&state.activeOrigin));
+
+    // Released, it stays the origin until another input changes.
+    trigger(0.0, 2);
+    sync(&mut f);
+    sync(&mut f);
+    assert_eq!(
+        fire_origin(&f),
+        (false, "/user/hand/right/input/trigger".into())
+    );
+
+    // A pressed button wins over a released threshold.
+    fakexr::set_action_state_with_time(fire_xr, true.into(), RightHand, at(3));
+    sync(&mut f);
+    assert_eq!(fire_origin(&f), (true, "/user/hand/right/input/a".into()));
+    let state = f.get_bool_state_hand(fire, left).unwrap();
+    assert_eq!(
+        origin_path(&f, state.activeOrigin),
+        "/user/hand/left/input/x"
+    );
+
+    // Analog actions.
+    fakexr::set_action_state(throttle_xr, fakexr::ActionState::Float(0.5), RightHand);
+    fakexr::set_action_state(move_xr, fakexr::ActionState::Vector2(0.0, 1.0), RightHand);
+    sync(&mut f);
+    let state = get_analog_state(&f, throttle, 0);
+    assert_eq!(
+        origin_path(&f, state.activeOrigin),
+        "/user/hand/right/input/trigger"
+    );
+    let state = get_analog_state(&f, move_, right);
+    assert_eq!(
+        origin_path(&f, state.activeOrigin),
+        "/user/hand/right/input/joystick"
+    );
+    assert_eq!(
+        named(&f, state.activeOrigin),
+        "Right Hand Oculus Touch Joystick"
+    );
+
+    // Poses report their pose source.
+    f.input
+        .openxr
+        .set_tracking_space(vr::ETrackingUniverseOrigin::Seated);
+    f.input.frame_start_update();
+    for (restrict, expected, name, hand) in [
+        (
+            left,
+            "/user/hand/left/pose/raw",
+            "Left Hand Oculus Touch Raw",
+            left,
+        ),
+        (
+            right,
+            "/user/hand/right/pose/tip",
+            "Right Hand Oculus Touch Tip",
+            right,
+        ),
+        (
+            0,
+            "/user/hand/left/pose/raw",
+            "Left Hand Oculus Touch Raw",
+            left,
+        ),
+    ] {
+        let data = f.get_pose(pose, restrict).unwrap();
+        assert!(data.bActive);
+        assert_eq!(origin_path(&f, data.activeOrigin), expected);
+        assert_eq!(named(&f, data.activeOrigin), name);
+        assert_eq!(get_origin_info(&f, data.activeOrigin).devicePath, hand);
+    }
+    let tip = f.get_pose(pose, right).unwrap().activeOrigin;
+    assert_eq!(
+        buf_str(&get_origin_info(&f, tip).rchRenderModelComponentName),
+        "tip"
+    );
+    let origins = get_action_origins(&f, main, pose);
+    assert_eq!(
+        origins
+            .iter()
+            .map(|origin| origin_path(&f, *origin))
+            .collect::<Vec<_>>(),
+        ["/user/hand/left/pose/raw", "/user/hand/right/pose/tip"]
+    );
 }
 
 #[test]
@@ -4293,7 +4455,11 @@ fn vector3_actions() {
     let s = get_analog_state(&f, look, right);
     assert_eq!(xyz(s), (0.5, -0.5, 1.0));
     assert_eq!((s.deltaX, s.deltaY, s.deltaZ), (0.5, -0.5, 2.0));
-    assert_eq!(s.activeOrigin, right);
+    // The grip's, which drives the scalar constants.
+    assert_eq!(
+        s.activeOrigin,
+        f.get_input_source_handle(c"/user/hand/right/input/grip")
+    );
     assert_eq!(xyz(get_analog_state(&f, look, 0)), (0.5, -0.5, 1.0));
     assert!(!get_analog_state(&f, look, left).bActive);
 
@@ -4529,6 +4695,8 @@ fn action_set_priorities() {
     f.custom_binding_action(select, Knuckles::profile_path(), |_| true);
     let left = f.get_input_source_handle(c"/user/hand/left");
     let right = f.get_input_source_handle(c"/user/hand/right");
+    // Fire and throttle are bound to the trigger.
+    let trigger = f.get_input_source_handle(c"/user/hand/left/input/trigger");
     f.set_interaction_profile::<Knuckles>(LeftHand);
     f.set_interaction_profile::<Knuckles>(RightHand);
 
@@ -4566,7 +4734,7 @@ fn action_set_priorities() {
     };
 
     sync(&mut f, 0, 0);
-    assert_eq!(digital(&f, 0), (true, true, true, left));
+    assert_eq!(digital(&f, 0), (true, true, true, trigger));
 
     // The menu binds the trigger and thumbstick: actions bound to them are masked, and a held
     // button is released.
@@ -4583,17 +4751,17 @@ fn action_set_priorities() {
 
     // Unmasking a held button doesn't press it.
     sync(&mut f, 0, 0);
-    assert_eq!(digital(&f, 0), (true, true, false, left));
+    assert_eq!(digital(&f, 0), (true, true, false, trigger));
     assert!(get_analog_state(&f, throttle, 0).bActive);
 
     // A set restricted to one hand only masks that hand.
     sync(&mut f, 1, right);
-    assert_eq!(digital(&f, left), (true, true, false, left));
+    assert_eq!(digital(&f, left), (true, true, false, trigger));
     assert_eq!(digital(&f, right), (false, false, true, 0));
-    assert_eq!(digital(&f, 0), (true, true, false, left));
+    assert_eq!(digital(&f, 0), (true, true, false, trigger));
     let throttle_state = get_analog_state(&f, throttle, 0);
     assert!(throttle_state.bActive);
-    assert_eq!(throttle_state.activeOrigin, left);
+    assert_eq!(throttle_state.activeOrigin, trigger);
     assert!(!get_analog_state(&f, move_, right).bActive);
 }
 
@@ -4765,7 +4933,6 @@ fn head_proximity() {
     f.set_interaction_profile::<Knuckles>(RightHand);
     let head = f.get_input_source_handle(c"/user/head");
     let left = f.get_input_source_handle(c"/user/hand/left");
-    let right = f.get_input_source_handle(c"/user/hand/right");
 
     let sync = |f: &mut Fixture, set| {
         f.sync(vr::VRActiveActionSet_t {
@@ -4790,7 +4957,8 @@ fn head_proximity() {
     sync(&mut f, main);
     let s = state(&f, on_head, 0);
     assert_eq!(flags(s), (true, true, true));
-    assert_eq!(s.activeOrigin, head);
+    let proximity_origin = f.get_input_source_handle(c"/user/head/proximity");
+    assert_eq!(s.activeOrigin, proximity_origin);
     sync(&mut f, main);
     assert_eq!(flags(state(&f, on_head, 0)), (true, true, false));
 
@@ -4815,7 +4983,10 @@ fn head_proximity() {
     sync(&mut f, main);
     let s = state(&f, on_head_or_a, 0);
     assert_eq!(flags(s), (true, true, true));
-    assert_eq!(s.activeOrigin, right);
+    assert_eq!(
+        s.activeOrigin,
+        f.get_input_source_handle(c"/user/hand/right/input/a")
+    );
     assert_eq!(flags(state(&f, on_head_or_a, head)), (true, false, false));
     set_present(&f, true);
     sync(&mut f, main);
@@ -4824,7 +4995,7 @@ fn head_proximity() {
     sync(&mut f, main);
     let s = state(&f, on_head_or_a, 0);
     assert_eq!(flags(s), (true, true, false));
-    assert_eq!(s.activeOrigin, head);
+    assert_eq!(s.activeOrigin, proximity_origin);
 
     // Inactive with its set, or with the set restricted to a hand.
     sync(&mut f, other);
@@ -5057,22 +5228,24 @@ fn gamepad_actions() {
     fakexr::set_action_state(stick, Vector2(0.0, 1.0), Gamepad);
     sync_set(&mut f, main);
 
-    // Pressed on the gamepad, which is the origin.
-    let s = f.get_bool_state(jump).unwrap();
-    assert_eq!((s.bActive, s.bState, s.activeOrigin), (true, true, gamepad));
-    let s = f.get_bool_state_hand(jump, gamepad).unwrap();
-    assert_eq!((s.bActive, s.bState, s.activeOrigin), (true, true, gamepad));
-    assert!(!f.get_bool_state_hand(jump, left).unwrap().bState);
+    // Pressed on the gamepad's A, which is the origin.
     let a = f.get_input_source_handle(c"/user/gamepad/input/a");
+    let s = f.get_bool_state(jump).unwrap();
+    assert_eq!((s.bActive, s.bState, s.activeOrigin), (true, true, a));
+    let s = f.get_bool_state_hand(jump, gamepad).unwrap();
+    assert_eq!((s.bActive, s.bState, s.activeOrigin), (true, true, a));
+    assert!(!f.get_bool_state_hand(jump, left).unwrap().bState);
     assert!(f.get_bool_state_hand(jump, a).unwrap().bState);
 
     // Each device's own value, and the largest one unrestricted.
     assert_eq!(get_analog_state(&f, throttle, gamepad).x, 0.25);
     assert_eq!(get_analog_state(&f, throttle, left).x, 0.5);
     let s = get_analog_state(&f, throttle, 0);
-    assert_eq!((s.x, s.activeOrigin), (0.5, left));
+    let left_trigger = f.get_input_source_handle(c"/user/hand/left/input/trigger");
+    assert_eq!((s.x, s.activeOrigin), (0.5, left_trigger));
     let s = get_analog_state(&f, move_, 0);
-    assert_eq!((s.y, s.activeOrigin), (1.0, gamepad));
+    let left_stick = f.get_input_source_handle(c"/user/gamepad/input/joystick_left");
+    assert_eq!((s.y, s.activeOrigin), (1.0, left_stick));
     assert_eq!(get_analog_state(&f, move_, gamepad).y, 1.0);
     assert_eq!(get_analog_state(&f, move_, left).y, 0.0);
 
@@ -5083,9 +5256,10 @@ fn gamepad_actions() {
     fakexr::set_action_state(right_stick, Vector2(1.0, 0.0), Gamepad);
     sync_set(&mut f, main);
     let s = f.get_bool_state(turn).unwrap();
+    let right_stick_origin = f.get_input_source_handle(c"/user/gamepad/input/joystick_right");
     assert_eq!(
         (s.bState, s.bChanged, s.activeOrigin),
-        (true, true, gamepad)
+        (true, true, right_stick_origin)
     );
     assert!(f.get_bool_state_hand(turn, gamepad).unwrap().bState);
     assert!(!f.get_bool_state_hand(turn, left).unwrap().bState);
@@ -5136,7 +5310,11 @@ fn gamepad_sets_restricted_and_prioritized() {
     };
     sync(&mut f, 0);
     let s = f.get_bool_state(fire).unwrap();
-    assert_eq!((s.bActive, s.bState, s.activeOrigin), (true, true, gamepad));
+    let trigger_origin = f.get_input_source_handle(c"/user/gamepad/input/trigger_right");
+    assert_eq!(
+        (s.bActive, s.bState, s.activeOrigin),
+        (true, true, trigger_origin)
+    );
     sync(&mut f, 1);
     let s = f.get_bool_state_hand(fire, gamepad).unwrap();
     assert_eq!((s.bActive, s.bState, s.bChanged), (false, false, true));

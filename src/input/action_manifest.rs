@@ -371,7 +371,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             })
             .collect();
 
-        Ok(super::ManifestLoadedActions {
+        let mut loaded = super::ManifestLoadedActions {
             sets,
             hand_restrictable_sets,
             actions,
@@ -380,6 +380,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             per_profile_pose_bindings,
             per_profile_input_paths,
             per_profile_binding_info,
+            direct_origins: Default::default(),
             scalar_constants,
             _info_action: info_action,
             info_set,
@@ -395,7 +396,9 @@ impl<C: openxr_data::Compositor> Input<C> {
             legacy: None,
             simulated_properties,
             hand_speeds: uses_hand_speeds.then_some(hand_speeds),
-        })
+        };
+        loaded.direct_origins = loaded.find_direct_origins();
+        Ok(loaded)
     }
 }
 

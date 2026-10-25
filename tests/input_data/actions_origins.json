@@ -1,0 +1,37 @@
+{
+	"action_sets": [
+		{
+			"name": "/actions/main",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/main/in/fire",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/main/in/throttle",
+			"type": "vector1"
+		},
+		{
+			"name": "/actions/main/in/move",
+			"type": "vector2"
+		},
+		{
+			"name": "/actions/main/in/pose",
+			"type": "pose"
+		},
+		{
+			"name": "/actions/main/out/haptic",
+			"type": "vibration"
+		}
+	],
+	"default_bindings": [
+		{
+			"controller_type": "oculus_touch",
+			"binding_url": "oculus_origins.json"
+		}
+	],
+	"localization": []
+}

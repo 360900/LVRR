@@ -1,0 +1,69 @@
+{
+	"bindings": {
+		"/actions/main": {
+			"haptics": [
+				{
+					"output": "/actions/main/out/haptic",
+					"path": "/user/hand/right/output/haptic"
+				}
+			],
+			"poses": [
+				{
+					"output": "/actions/main/in/pose",
+					"path": "/user/hand/left/pose/raw"
+				},
+				{
+					"output": "/actions/main/in/pose",
+					"path": "/user/hand/right/pose/tip"
+				}
+			],
+			"sources": [
+				{
+					"mode": "button",
+					"path": "/user/hand/right/input/trigger",
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/fire"
+						}
+					}
+				},
+				{
+					"mode": "button",
+					"path": "/user/hand/right/input/a",
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/fire"
+						}
+					}
+				},
+				{
+					"mode": "button",
+					"path": "/user/hand/left/input/x",
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/fire"
+						}
+					}
+				},
+				{
+					"mode": "trigger",
+					"path": "/user/hand/right/input/trigger",
+					"inputs": {
+						"pull": {
+							"output": "/actions/main/in/throttle"
+						}
+					}
+				},
+				{
+					"mode": "joystick",
+					"path": "/user/hand/right/input/joystick",
+					"inputs": {
+						"position": {
+							"output": "/actions/main/in/move"
+						}
+					}
+				}
+			]
+		}
+	}
+}

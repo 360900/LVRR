@@ -1,5 +1,5 @@
 use super::action_manifest::{ClickThresholdParams, GrabParameters, StringOrTyped};
-use crate::input::inactive_state;
+use crate::input::{inactive_state, origins};
 use crate::openxr_data::{Hand, SessionData};
 use log::{error, warn};
 use openvr as vr;
@@ -58,6 +58,8 @@ pub(super) struct Vector2BindingData {
     pub action: xr::Action<xr::Vector2f>,
     pub profile: xr::Path,
     pub hand: xr::Path,
+    /// The handle of the input's source path, see [BoolBindingData::origin].
+    pub origin: vr::VRInputValueHandle_t,
     pub transform: Vector2Transform,
 }
 
@@ -317,8 +319,8 @@ impl Vector2ActionData {
         }
     }
 
-    /// `devices` are each device's subaction path, interaction profile and origin, in the order
-    /// of [AnalogStates].
+    /// `devices` are each device's subaction path, interaction profile and the origin of the
+    /// inputs the action is bound to directly, in the order of [AnalogStates].
     pub fn sync(
         &self,
         direct: &xr::Action<xr::Vector2f>,
@@ -349,7 +351,7 @@ impl Vector2ActionData {
             if masked[index] {
                 continue;
             }
-            let mut consider = |state: xr::ActionState<xr::Vector2f>| {
+            let mut consider = |state: xr::ActionState<xr::Vector2f>, origin| {
                 let candidate = vr::InputAnalogActionData_t {
                     bActive: state.is_active,
                     activeOrigin: origin,
@@ -362,7 +364,10 @@ impl Vector2ActionData {
                     next[index] = candidate;
                 }
             };
-            consider(direct.state(session, hand).unwrap_or_else(inactive_state));
+            consider(
+                direct.state(session, hand).unwrap_or_else(inactive_state),
+                origin,
+            );
             for binding in &self.bindings {
                 if binding.hand != hand || binding.profile != profile {
                     continue;
@@ -372,7 +377,7 @@ impl Vector2ActionData {
                     .state(session, hand)
                     .unwrap_or_else(inactive_state);
                 state.current_state = binding.transform.apply(state.current_state, session, hand);
-                consider(state);
+                consider(state, origins::origin_or(binding.origin, origin));
             }
             if let Some(constant) =
                 scalar_constants_state(constants, session, hand, profile, origin, &update_time)
@@ -398,18 +403,21 @@ pub(super) struct ScalarConstantBinding {
     pub press: BoolBindingType,
     pub profile: xr::Path,
     pub hand: xr::Path,
+    /// The handle of the press's source path, see [BoolBindingData::origin].
+    pub origin: vr::VRInputValueHandle_t,
     pub on: [f32; 3],
     pub off: [f32; 3],
 }
 
 impl ScalarConstantBinding {
     /// The value on `hand` with `profile`, if the binding is for them and its input is active.
+    /// Its origin is the press's, or `hand_origin` without one.
     fn state(
         &self,
         session: &xr::Session<xr::AnyGraphics>,
         hand: xr::Path,
         profile: xr::Path,
-        origin: vr::VRInputValueHandle_t,
+        hand_origin: vr::VRInputValueHandle_t,
         update_time: &impl Fn(bool, xr::Time) -> f32,
     ) -> Option<vr::InputAnalogActionData_t> {
         if self.hand != hand || self.profile != profile {
@@ -429,7 +437,7 @@ impl ScalarConstantBinding {
         let changed = press.changed_since_last_sync && self.on != self.off;
         Some(vr::InputAnalogActionData_t {
             bActive: true,
-            activeOrigin: origin,
+            activeOrigin: origins::origin_or(self.origin, hand_origin),
             x,
             y,
             z,
@@ -446,13 +454,13 @@ pub(super) fn scalar_constants_state(
     session: &xr::Session<xr::AnyGraphics>,
     hand: xr::Path,
     profile: xr::Path,
-    origin: vr::VRInputValueHandle_t,
+    hand_origin: vr::VRInputValueHandle_t,
     update_time: &impl Fn(bool, xr::Time) -> f32,
 ) -> Option<vr::InputAnalogActionData_t> {
     // Every binding is read, as their inputs keep their own state between syncs.
     constants
         .iter()
-        .filter_map(|constant| constant.state(session, hand, profile, origin, update_time))
+        .filter_map(|constant| constant.state(session, hand, profile, hand_origin, update_time))
         .reduce(|best, state| {
             if analog_magnitude(&state) > analog_magnitude(&best) {
                 state
@@ -1435,6 +1443,10 @@ enum BindingState {
 pub struct BoolBindingData {
     pub ty: BoolBindingType,
     pub hand: xr::Path,
+    /// The handle of the input's source path in SteamVR's profile of the controller (e.g.
+    /// `/user/hand/left/input/trigger`), the origin action data reports when this binding drives
+    /// the action. 0 for none.
+    pub origin: vr::VRInputValueHandle_t,
     last_state: Mutex<BindingState>,
 }
 
@@ -1443,8 +1455,13 @@ impl BoolBindingData {
         Self {
             ty,
             hand,
+            origin: vr::k_ulInvalidInputValueHandle,
             last_state: Mutex::new(BindingState::Unsynced),
         }
+    }
+
+    pub fn with_origin(self, origin: vr::VRInputValueHandle_t) -> Self {
+        Self { origin, ..self }
     }
 
     pub fn unsync(&self) {

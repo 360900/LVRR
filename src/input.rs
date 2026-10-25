@@ -364,6 +364,24 @@ impl<C: openxr_data::Compositor> Input<C> {
         .as_ffi()
     }
 
+    /// The origin of `key`'s direct bindings on the device at `index` of [Self::action_devices]
+    /// in its current interaction profile (see [ManifestLoadedActions::direct_origin]), or the
+    /// device if it has none.
+    fn direct_origin(
+        &self,
+        session: &xr::Session<xr::AnyGraphics>,
+        loaded: &ManifestLoadedActions,
+        key: ActionKey,
+        index: usize,
+    ) -> vr::VRInputValueHandle_t {
+        let (path, device) = self.action_devices()[index];
+        session
+            .current_interaction_profile(path)
+            .ok()
+            .and_then(|profile| loaded.direct_origin(key, index, profile))
+            .unwrap_or_else(|| device.data().as_ffi())
+    }
+
     /// Determine which hand an input source key belongs to, including
     /// specific input paths like `/user/hand/right/input/trigger`.
     fn hand_from_key(&self, key: InputSourceKey) -> Option<Hand> {
@@ -534,6 +552,8 @@ impl<C: openxr_data::Compositor> Input<C> {
             })
     }
 
+    /// The state of `action`'s custom bindings on a device (both hands for none), with the origin
+    /// of the binding that drives it: the first pressed one, otherwise the one that changed last.
     fn state_from_bindings(
         &self,
         action: vr::VRActionHandle_t,
@@ -557,7 +577,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             .try_get_bindings(action, interaction_profile)
             .ok()?;
 
-        let mut best_state: Option<xr::ActionState<bool>> = None;
+        let mut best: Option<(xr::ActionState<bool>, &BoolBindingData)> = None;
 
         for x in bindings.iter() {
             let Ok(Some(state)) = x.state(&session, subaction) else {
@@ -567,8 +587,8 @@ impl<C: openxr_data::Compositor> Input<C> {
                 continue;
             }
 
-            if best_state.is_none_or(|best| binding_rank(&state) > binding_rank(&best)) {
-                best_state = Some(state);
+            if best.is_none_or(|(best, _)| binding_rank(&state) > binding_rank(&best)) {
+                best = Some((state, x));
             }
 
             if state.current_state {
@@ -576,7 +596,10 @@ impl<C: openxr_data::Compositor> Input<C> {
             }
         }
 
-        best_state.map(|x| (x, restrict_to_device))
+        best.map(|(state, binding)| {
+            let origin = origins::origin_or(binding.origin, restrict_to_device);
+            (state, origin)
+        })
     }
 }
 
@@ -609,20 +632,22 @@ impl<C: openxr_data::Compositor> Input<C> {
         let has_custom_bindings = loaded.actions_with_custom_bindings.contains(&key);
         let mut next = AnalogStates::default();
         let devices = self.action_devices();
-        for ((slot, (path, hand_key)), masked) in next.iter_mut().zip(devices).zip(masked) {
+        for (index, ((slot, (path, device_key)), masked)) in
+            next.iter_mut().zip(devices).zip(masked).enumerate()
+        {
             if masked {
                 continue;
             }
             let mut current = action
                 .state(&session_data.session, path)
                 .unwrap_or_else(inactive_state);
-            let mut origin = hand_key.data().as_ffi();
+            let mut origin = self.direct_origin(&session_data.session, loaded, key, index);
 
             // It's generally not clear how SteamVR handles float actions with multiple bindings,
             // so emulate OpenXR, which takes the maximum among active bindings.
             if has_custom_bindings
                 && let Some((binding, source)) =
-                    self.state_from_bindings(key.data().as_ffi(), origin)
+                    self.state_from_bindings(key.data().as_ffi(), device_key.data().as_ffi())
                 && binding.is_active
                 && (binding.current_state && current.current_state != 1.0 || !current.is_active)
             {
@@ -646,7 +671,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                 };
             }
             if let Some(constant) =
-                self.scalar_constant_state(session_data, loaded, key, path, hand_key)
+                self.scalar_constant_state(session_data, loaded, key, path, device_key)
                 && (!slot.bActive || constant.x.abs() > slot.x.abs())
             {
                 *slot = constant;
@@ -709,20 +734,20 @@ impl<C: openxr_data::Compositor> Input<C> {
         session_data: &SessionData,
         loaded: &ManifestLoadedActions,
         key: ActionKey,
-        hand: xr::Path,
-        hand_key: InputSourceKey,
+        path: xr::Path,
+        device: InputSourceKey,
     ) -> Option<vr::InputAnalogActionData_t> {
         let constants = loaded.scalar_constants.get(key)?;
         let profile = session_data
             .session
-            .current_interaction_profile(hand)
+            .current_interaction_profile(path)
             .ok()?;
         custom_bindings::scalar_constants_state(
             constants,
             &session_data.session,
-            hand,
+            path,
             profile,
-            hand_key.data().as_ffi(),
+            device.data().as_ffi(),
             &|changed, time| self.update_time(changed, time),
         )
     }
@@ -873,6 +898,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         handle: vr::VRActionHandle_t,
         action: &xr::Action<bool>,
         session_data: &SessionData,
+        loaded: &ManifestLoadedActions,
         subaction_path: xr::Path,
         mask: HandMask,
     ) -> (xr::ActionState<bool>, vr::VRInputValueHandle_t) {
@@ -885,38 +911,42 @@ impl<C: openxr_data::Compositor> Input<C> {
         let mut origin = vr::k_ulInvalidInputValueHandle;
         let mut best_rank = None;
         let mut previous = false;
-        for (hand, (path, hand_key)) in self.action_devices().into_iter().enumerate() {
+        let key = ActionKey::from(KeyData::from_ffi(handle));
+        for (index, (path, device_key)) in self.action_devices().into_iter().enumerate() {
             if subaction_path != xr::Path::NULL && subaction_path != path {
                 continue;
             }
             // Don't evaluate custom bindings of a hand that stays masked: like SteamVR's disabled
             // bindings, they mustn't see inputs meant for the higher priority set (e.g. toggles).
-            if mask.previous[hand] && mask.current[hand] {
+            if mask.previous[index] && mask.current[index] {
                 continue;
             }
 
-            let hand_origin = hand_key.data().as_ffi();
             let native = action
                 .state(&session_data.session, path)
                 .unwrap_or_else(inactive_state);
-            let (hand_state, hand_origin) = match self.state_from_bindings(handle, hand_origin) {
-                Some((binding, source))
-                    if binding.is_active
-                        && (!native.is_active
-                            || binding_rank(&binding) > binding_rank(&native)) =>
-                {
-                    (binding, source)
-                }
-                _ => (native, hand_origin),
-            };
+            let (hand_state, hand_origin) =
+                match self.state_from_bindings(handle, device_key.data().as_ffi()) {
+                    Some((binding, source))
+                        if binding.is_active
+                            && (!native.is_active
+                                || binding_rank(&binding) > binding_rank(&native)) =>
+                    {
+                        (binding, source)
+                    }
+                    _ => (
+                        native,
+                        self.direct_origin(&session_data.session, loaded, key, index),
+                    ),
+                };
 
             // A hand that was masked counts as unchanged, so unmasking a held input isn't a press.
-            previous |= if mask.previous[hand] {
+            previous |= if mask.previous[index] {
                 hand_state.current_state
             } else {
                 hand_state.current_state != hand_state.changed_since_last_sync
             };
-            if mask.current[hand] || !hand_state.is_active {
+            if mask.current[index] || !hand_state.is_active {
                 continue;
             }
 
@@ -935,23 +965,28 @@ impl<C: openxr_data::Compositor> Input<C> {
         (state, origin)
     }
 
-    /// The device whose natively bound inputs drive an unrestricted read of a boolean action, if
-    /// any is active.
+    /// The origin of the natively bound inputs that drive a read of a boolean action on
+    /// `subaction_path` (NULL for every device), if any is active.
     fn native_bool_origin(
         &self,
+        key: ActionKey,
         action: &xr::Action<bool>,
         session: &xr::Session<xr::AnyGraphics>,
+        loaded: &ManifestLoadedActions,
+        subaction_path: xr::Path,
     ) -> vr::VRInputValueHandle_t {
         self.action_devices()
             .into_iter()
-            .filter_map(|(path, key)| {
+            .enumerate()
+            .filter(|(_, (path, _))| subaction_path == xr::Path::NULL || subaction_path == *path)
+            .filter_map(|(index, (path, _))| {
                 let state = action.state(session, path).unwrap_or_else(inactive_state);
-                state.is_active.then(|| (binding_rank(&state), key))
+                state.is_active.then(|| (binding_rank(&state), index))
             })
             // Left wins ties.
-            .reduce(|best, hand| if hand.0 > best.0 { hand } else { best })
-            .map_or(vr::k_ulInvalidInputValueHandle, |(_, key)| {
-                key.data().as_ffi()
+            .reduce(|best, device| if device.0 > best.0 { device } else { best })
+            .map_or(vr::k_ulInvalidInputValueHandle, |(_, index)| {
+                self.direct_origin(session, loaded, key, index)
             })
     }
 }
@@ -2372,8 +2407,11 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         get_action_from_handle!(self, handle, session_data, action, loaded);
         let key = ActionKey::from(KeyData::from_ffi(handle));
         let head = loaded.head_proximity.get(key).map(HeadProximity::state);
-        let head_origin = self.head_key.data().as_ffi();
-        let (state, active_hand) = match head {
+        let head_origin = match head {
+            Some(_) => self.get_or_create_input_source_handle(c"/user/head/proximity"),
+            None => vr::k_ulInvalidInputValueHandle,
+        };
+        let (state, active_origin) = match head {
             // The proximity sensor is the only input on the headset.
             Some(head) if self.is_head_source(restrict_to_device) => (head, head_origin),
             _ => {
@@ -2383,16 +2421,25 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
                 };
 
                 let hands = if let Some(mask) = session_data.input_data.hand_mask(key) {
-                    self.masked_bool_state(handle, action, &session_data, subaction_path, mask)
+                    self.masked_bool_state(
+                        handle,
+                        action,
+                        &session_data,
+                        loaded,
+                        subaction_path,
+                        mask,
+                    )
                 } else {
                     let mut state = action
                         .state(&session_data.session, subaction_path)
                         .unwrap_or_else(inactive_state);
-                    let mut active_hand = if subaction_path == xr::Path::NULL {
-                        self.native_bool_origin(action, &session_data.session)
-                    } else {
-                        restrict_to_device
-                    };
+                    let mut active_origin = self.native_bool_origin(
+                        key,
+                        action,
+                        &session_data.session,
+                        loaded,
+                        subaction_path,
+                    );
 
                     // An action can be driven both by a natively bound input and by a custom
                     // binding.
@@ -2402,9 +2449,9 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
                         && (!state.is_active || binding_rank(&binding_state) > binding_rank(&state))
                     {
                         state = binding_state;
-                        active_hand = binding_source;
+                        active_origin = binding_source;
                     }
-                    (state, active_hand)
+                    (state, active_origin)
                 };
                 match head {
                     Some(head) if subaction_path == xr::Path::NULL => {
@@ -2429,7 +2476,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         *out.value = vr::InputDigitalActionData_t {
             bActive: state.is_active,
             bState: state.current_state,
-            activeOrigin: active_hand,
+            activeOrigin: active_origin,
             bChanged: state.changed_since_last_sync,
             fUpdateTime: self.update_time(state.changed_since_last_sync, state.last_change_time),
         };
@@ -2742,10 +2789,16 @@ impl<C: openxr_data::Compositor> Input<C> {
                 data: vector2,
             } = action
             {
+                let mut devices = per_device;
+                for (index, (_, profile, origin)) in devices.iter_mut().enumerate() {
+                    *origin = actions
+                        .direct_origin(key, index, *profile)
+                        .unwrap_or(*origin);
+                }
                 vector2.sync(
                     action,
                     &data.session,
-                    per_device,
+                    devices,
                     masked_devices(key),
                     actions.scalar_constants.get(key).map_or(&[], Vec::as_slice),
                     |changed, time| self.update_time(changed, time),
@@ -3043,7 +3096,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                     no_data!()
                 };
 
-                let origin = hand.is_some().then_some(restrict_to_device);
+                let restricted = hand.is_some();
                 let pose_type = match hand {
                     Some(Hand::Left) => bound.left,
                     Some(Hand::Right) => bound.right,
@@ -3067,10 +3120,17 @@ impl<C: openxr_data::Compositor> Input<C> {
                     trace!("the {hand:?} hand isn't there");
                     no_data!()
                 }
-                let origin = origin.unwrap_or_else(|| match hand {
-                    Hand::Left => self.left_hand_key.data().as_ffi(),
-                    Hand::Right => self.right_hand_key.data().as_ffi(),
-                });
+                // The bound pose source, like `/user/hand/left/pose/raw`.
+                let bound_origin = match hand {
+                    Hand::Left => bound.origins[0],
+                    Hand::Right => bound.origins[1],
+                };
+                let device = if restricted {
+                    restrict_to_device
+                } else {
+                    self.hand_handle(hand)
+                };
+                let origin = origins::origin_or(bound_origin, device);
 
                 (origin, hand, Some(ty))
             }
@@ -3787,6 +3847,9 @@ impl<C: openxr_data::Compositor> Input<C> {
     }
 }
 
+/// Per interaction profile and action, an origin for each hand, left first.
+type DirectOrigins = HashMap<(xr::Path, ActionKey), [Option<vr::VRInputValueHandle_t>; 3]>;
+
 enum LoadedActions {
     /// With the legacy bindings files that could have replaced the fixed mapping.
     Legacy(LegacyActionData, BindingChoices),
@@ -3814,6 +3877,8 @@ struct ManifestLoadedActions {
     per_profile_input_paths: HashMap<xr::Path, SecondaryMap<ActionKey, Vec<xr::Path>>>,
     /// What GetActionBindingInfo reports, per interaction profile.
     per_profile_binding_info: HashMap<xr::Path, SecondaryMap<ActionKey, Vec<origins::BindingInfo>>>,
+    /// See [ManifestLoadedActions::find_direct_origins].
+    direct_origins: DirectOrigins,
     /// The scalar_constant bindings of analog actions that aren't bound to their input directly.
     scalar_constants: SecondaryMap<ActionKey, Vec<ScalarConstantBinding>>,
     info_set: xr::ActionSet,
@@ -3883,6 +3948,69 @@ impl HeadProximity {
 }
 
 impl ManifestLoadedActions {
+    /// The origin of the inputs `key` is bound to directly with `profile` on the device at
+    /// `index` of [Input::action_devices], see [Self::find_direct_origins].
+    fn direct_origin(
+        &self,
+        key: ActionKey,
+        index: usize,
+        profile: xr::Path,
+    ) -> Option<vr::VRInputValueHandle_t> {
+        self.direct_origins.get(&(profile, key))?[index]
+    }
+
+    /// For each profile and action, the origin of the inputs it's bound to directly on each
+    /// hand: the first such input, as OpenXR combines their states. Bindings xrizer evaluates
+    /// itself report their own input, so it's one none of them reads, unless that's all there is.
+    fn find_direct_origins(&self) -> DirectOrigins {
+        let mut found = DirectOrigins::new();
+        for (profile, actions) in &self.per_profile_binding_info {
+            for (key, infos) in actions {
+                let bools = self
+                    .per_profile_bindings
+                    .get(profile)
+                    .and_then(|bindings| bindings.get(key))
+                    .into_iter()
+                    .flatten()
+                    .map(|binding| binding.origin);
+                let vector2s = match self.actions.get(key) {
+                    Some(ActionData::Vector2 { data, .. }) => data.bindings.as_slice(),
+                    _ => &[],
+                }
+                .iter()
+                .filter(|binding| binding.profile == *profile)
+                .map(|binding| binding.origin);
+                let constants = self
+                    .scalar_constants
+                    .get(key)
+                    .into_iter()
+                    .flatten()
+                    .filter(|constant| constant.profile == *profile)
+                    .map(|constant| constant.origin);
+                // Each origin names its device, so one list serves every device.
+                let custom: Vec<_> = bools.chain(vector2s).chain(constants).collect();
+
+                let origin = |device| {
+                    let on_device = || {
+                        infos
+                            .iter()
+                            .filter(move |info| info.device == device)
+                            .map(|info| info.origin)
+                            .filter(|origin| *origin != vr::k_ulInvalidInputValueHandle)
+                    };
+                    on_device()
+                        .find(|origin| !custom.contains(origin))
+                        .or_else(|| on_device().next())
+                };
+                found.insert(
+                    (*profile, key),
+                    InputDevice::ALL.map(origin),
+                );
+            }
+        }
+        found
+    }
+
     fn try_get_bindings(
         &self,
         handle: vr::VRActionHandle_t,
