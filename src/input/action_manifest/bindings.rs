@@ -33,6 +33,18 @@ use std::time::Duration;
 pub struct Bindings {
     #[serde(deserialize_with = "lenient_sets")]
     pub bindings: HashMap<String, ActionSetBinding>,
+    /// `options.variant`, e.g. "singlecontroller" in Half-Life: Alyx's single controller
+    /// bindings, which games read with GetBindingVariant.
+    #[serde(default, rename = "options", deserialize_with = "variant_option")]
+    pub variant: Option<String>,
+}
+
+fn variant_option<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    let options = serde_json::Value::deserialize(d)?;
+    Ok(options["variant"]
+        .as_str()
+        .filter(|variant| !variant.is_empty())
+        .map(str::to_owned))
 }
 
 // SteamVR skips what it doesn't understand, so one odd entry (an unknown mode, a missing

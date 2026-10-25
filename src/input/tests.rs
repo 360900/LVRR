@@ -1111,6 +1111,84 @@ fn steamvr_choice_disabled() {
     );
 }
 
+/// The binding variant `device` reports, and the result with a buffer that's too small for it.
+fn binding_variant(f: &Fixture, device: vr::VRInputValueHandle_t) -> (String, vr::EVRInputError) {
+    use vr::IVRInput011_Interface as Input;
+    let mut buffer = [1 as std::ffi::c_char; 64];
+    assert_eq!(
+        Input::GetBindingVariant(&*f.input, device, buffer.as_mut_ptr(), buffer.len() as u32),
+        vr::EVRInputError::None
+    );
+    let variant = unsafe { CStr::from_ptr(buffer.as_ptr()) }
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let mut small = [1 as std::ffi::c_char; 1];
+    let small_result = Input::GetBindingVariant(&*f.input, device, small.as_mut_ptr(), 1);
+    assert_eq!(small[0], 0);
+    (variant, small_result)
+}
+
+fn sync_main_set(f: &mut Fixture) {
+    let set = f.get_action_set_handle(c"/actions/main");
+    f.sync(vr::VRActiveActionSet_t {
+        ulActionSet: set,
+        ..Default::default()
+    });
+}
+
+#[test]
+fn binding_variant_of_the_first_bindings() {
+    let mut f = Fixture::new();
+    f.load_actions(c"actions_variants.json");
+    f.set_interaction_profile::<ViveWands>(LeftHand);
+    sync_main_set(&mut f);
+
+    // Like SteamVR, the first file listed is the default, and it has no variant.
+    f.verify_bindings::<bool>(
+        ViveWands::profile_path(),
+        c"/actions/main/in/boolact",
+        [
+            "/user/hand/left/input/menu/click".into(),
+            "/user/hand/right/input/menu/click".into(),
+            "/user/hand/right/input/trigger/click".into(),
+        ],
+    );
+    let left = f.get_input_source_handle(c"/user/hand/left");
+    assert_eq!(
+        binding_variant(&f, left),
+        (String::new(), vr::EVRInputError::None)
+    );
+}
+
+#[test]
+fn binding_variant_chosen_in_steamvr() {
+    let steam = FakeSteam::new("variant");
+    let url = format!("file://{}", input_data("vive_only_single.json"));
+    steam.choose(&[("vive_controller_250820_CurrentURL_steamvrinput", &url)]);
+    let mut f = Fixture::new();
+    f.load_actions(c"actions_variants.json");
+    f.set_interaction_profile::<ViveWands>(LeftHand);
+    f.set_interaction_profile::<Knuckles>(RightHand);
+    sync_main_set(&mut f);
+
+    f.verify_bindings::<bool>(
+        ViveWands::profile_path(),
+        c"/actions/main/in/boolact",
+        ["/user/hand/left/input/trigger/click".into()],
+    );
+    let left = f.get_input_source_handle(c"/user/hand/left");
+    let single = (
+        "singlecontroller".to_string(),
+        vr::EVRInputError::BufferTooSmall,
+    );
+    assert_eq!(binding_variant(&f, left), single);
+    // Bindings converted from them are the same variant.
+    let right = f.get_input_source_handle(c"/user/hand/right/input/trigger");
+    assert_eq!(binding_variant(&f, right), single);
+    assert_eq!(binding_variant(&f, vr::k_ulInvalidInputValueHandle), single);
+}
+
 #[track_caller]
 pub fn compare_pose(expected: xr::Posef, actual: xr::Posef) {
     fn float_eq(a: f32, b: f32) -> bool {

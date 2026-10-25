@@ -15,7 +15,7 @@ use crate::openxr_data::{self, Hand, SessionData};
 use log::{debug, error, info, warn};
 use openvr as vr;
 use openxr as xr;
-use slotmap::{SecondaryMap, SlotMap};
+use slotmap::{KeyData, SecondaryMap, SlotMap};
 use std::collections::{HashMap, HashSet};
 use std::env::current_dir;
 use std::ffi::OsString;
@@ -160,7 +160,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             skeletal_input,
         );
 
-        self.load_bindings(
+        let binding_variants = self.load_bindings(
             manifest_path.parent().unwrap(),
             manifest.default_bindings,
             &mut binding_context,
@@ -316,6 +316,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             haptic_set,
             skeleton_sets,
             head_proximity,
+            binding_variants,
         };
 
         session_data
@@ -418,18 +419,58 @@ fn steamvr_saved_bindings() -> Option<SavedBindings> {
     SavedBindings::load(&isolated_env_var, &keys)
 }
 
+impl<C: openxr_data::Compositor> Input<C> {
+    /// The variant (`options.variant`) of the bindings of `device`'s controller, empty if they
+    /// have none. Other handles get the first hand's that has one.
+    pub(super) fn binding_variant(&self, device: vr::VRInputValueHandle_t) -> String {
+        if self.openxr.is_lost() {
+            return String::new();
+        }
+        let data = self.openxr.session_data.get();
+        let Some(loaded) = data.input_data.get_loaded_actions() else {
+            return String::new();
+        };
+        let hand = (device != vr::k_ulInvalidInputValueHandle)
+            .then(|| self.hand_from_key(super::InputSourceKey::from(KeyData::from_ffi(device))))
+            .flatten();
+        let hands = match hand {
+            Some(hand) => vec![hand],
+            None => vec![Hand::Left, Hand::Right],
+        };
+        let devices = data.input_data.devices.read().unwrap();
+        hands
+            .into_iter()
+            .find_map(|hand| {
+                let profile = devices
+                    .get_controller(hand)
+                    .map(|device| device.profile_path)
+                    .filter(|profile| *profile != xr::Path::NULL)
+                    .or_else(|| {
+                        data.session
+                            .current_interaction_profile(self.get_subaction_path(hand))
+                            .ok()
+                            .filter(|profile| *profile != xr::Path::NULL)
+                    })?;
+                loaded.binding_variants.get(&profile).cloned()
+            })
+            .unwrap_or_default()
+    }
+}
+
 /// Whether two paths name the same file, even if spelled differently.
 pub(super) fn same_file(a: &Path, b: &Path) -> bool {
     a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
 }
 
 impl<C: openxr_data::Compositor> Input<C> {
+    /// Suggests the bindings for every profile. Returns the variant of the bindings each profile
+    /// got, for GetBindingVariant.
     fn load_bindings(
         &self,
         parent_path: &Path,
         bindings: Vec<actions::DefaultBindings>,
         context: &mut context::BindingsLoadContext,
-    ) {
+    ) -> HashMap<xr::Path, String> {
         let custom_bindings_dir = env_var("XRIZER_CUSTOM_BINDINGS_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| current_dir().unwrap_or_default().join("xrizer"));
@@ -440,6 +481,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                 .as_ref()?
                 .file_for(&controller_type.to_string(), Category::SteamVrInput)
         };
+        let mut variants = HashMap::new();
 
         let mut bindings = bindings;
         if let Some(additional_bindings) =
@@ -497,7 +539,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                     );
                 }
             } else {
-                let mut runner = Runner(self, context, &bindings);
+                let mut runner = Runner(self, context, &bindings, &mut variants);
                 controller_type.run_for_profile(&mut runner);
             }
             loaded.push((controller_type, bindings));
@@ -507,6 +549,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                 &'a Input<C>,
                 &'b mut BindingsLoadContext<'c>,
                 &'d bindings::Bindings,
+                &'d mut HashMap<xr::Path, String>,
             );
             impl<C: openxr_data::Compositor> RunWithProfile for Runner<'_, '_, '_, '_, C> {
                 fn run<P: super::InteractionProfile>(&mut self) {
@@ -519,6 +562,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                             >();
                         self.0
                             .load_bindings_for_profile::<P>(&self.2.bindings, &mut context);
+                        record_variant::<C, P>(self.0, self.2, self.3);
                     } else {
                         warn!(
                             "Couldn't create context for profile {}?",
@@ -537,6 +581,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             loaded: &loaded,
             custom_bindings_dir: &custom_bindings_dir,
             saved_file: &saved_file,
+            variants: &mut variants,
         };
         super::profiles::run_for_all_profiles(&mut runner);
 
@@ -546,6 +591,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             loaded: &'a [(actions::ControllerType, bindings::Bindings)],
             custom_bindings_dir: &'a Path,
             saved_file: &'a dyn Fn(&actions::ControllerType) -> Option<PathBuf>,
+            variants: &'a mut HashMap<xr::Path, String>,
         }
         impl<C: openxr_data::Compositor> RunWithProfile for FallbackRunner<'_, '_, '_, C> {
             fn run<P: super::InteractionProfile>(&mut self) {
@@ -601,9 +647,26 @@ impl<C: openxr_data::Compositor> Input<C> {
                     context.adapted = true;
                     self.input
                         .load_bindings_for_profile::<P>(&bindings.bindings, &mut context);
+                    record_variant::<C, P>(self.input, &bindings, self.variants);
                 }
             }
         }
+
+        /// Remembers the variant of the bindings `P` got.
+        fn record_variant<C: openxr_data::Compositor, P: super::InteractionProfile>(
+            input: &Input<C>,
+            bindings: &bindings::Bindings,
+            variants: &mut HashMap<xr::Path, String>,
+        ) {
+            if let (Some(variant), Ok(profile)) = (
+                &bindings.variant,
+                input.openxr.instance.string_to_path(P::profile_path()),
+            ) {
+                variants.insert(profile, variant.clone());
+            }
+        }
+
+        variants
     }
 
     fn load_bindings_for_profile<P: InteractionProfile>(

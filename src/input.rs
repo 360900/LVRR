@@ -1031,11 +1031,20 @@ macro_rules! get_subaction_path {
 impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
     fn GetBindingVariant(
         &self,
-        _: vr::VRInputValueHandle_t,
-        _: *mut c_char,
-        _: u32,
+        device: vr::VRInputValueHandle_t,
+        variant: *mut c_char,
+        size: u32,
     ) -> vr::EVRInputError {
-        crate::warn_unimplemented!("GetBindingVariant");
+        // e.g. Half-Life: Alyx switches to its single controller mode on "singlecontroller".
+        let value = self.binding_variant(device);
+        if variant.is_null() || (size as usize) <= value.len() {
+            if !variant.is_null() && size > 0 {
+                unsafe { *variant = 0 };
+            }
+            return vr::EVRInputError::BufferTooSmall;
+        }
+        let buffer = unsafe { std::slice::from_raw_parts_mut(variant, size as usize) };
+        copy_cstr(buffer, &value);
         vr::EVRInputError::None
     }
     fn OpenBindingUI(
@@ -3238,6 +3247,8 @@ struct ManifestLoadedActions {
     /// The set each skeleton action belongs to.
     skeleton_sets: SecondaryMap<ActionKey, ActionSetKey>,
     head_proximity: SecondaryMap<ActionKey, HeadProximity>,
+    /// The variant of each profile's bindings, see [Input::binding_variant].
+    binding_variants: HashMap<xr::Path, String>,
 }
 
 /// A boolean action bound to the headset's proximity sensor, which has no OpenXR input. It reads
