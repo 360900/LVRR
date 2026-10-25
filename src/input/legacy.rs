@@ -1055,6 +1055,31 @@ mod tests {
     }
 
     #[test]
+    fn cosmos_bindings() {
+        use crate::input::profiles::vive_cosmos::ViveCosmos;
+        let (f, _) = legacy_fixture(|actions| actions.a.as_raw());
+        // Like the Focus 3, with clicks only.
+        assert_legacy_bindings::<ViveCosmos>(
+            &f,
+            |a| a.app_menu.as_raw(),
+            &[
+                "/user/hand/left/input/y/click",
+                "/user/hand/left/input/menu/click",
+                "/user/hand/right/input/b/click",
+            ],
+        );
+        assert_legacy_bindings::<ViveCosmos>(
+            &f,
+            |a| a.squeeze.as_raw(),
+            &[
+                "/user/hand/left/input/squeeze/click",
+                "/user/hand/right/input/squeeze/click",
+            ],
+        );
+        assert_legacy_bindings::<ViveCosmos>(&f, |a| a.a_touch.as_raw(), &[]);
+    }
+
+    #[test]
     fn legacy_input_on_pico() {
         use crate::input::profiles::pico::Pico4;
         use fakexr::UserPath::*;

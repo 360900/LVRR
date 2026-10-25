@@ -917,6 +917,94 @@ fn bindings_converted_for_pico() {
 }
 
 #[test]
+fn bindings_converted_for_cosmos() {
+    use super::profiles::vive_cosmos::ViveCosmos;
+    let f = Fixture::new();
+    f.load_actions(c"actions_vive_only.json");
+
+    let cosmos = ViveCosmos::profile_path();
+    f.verify_bindings::<bool>(
+        cosmos,
+        c"/actions/main/in/boolact",
+        [
+            "/user/hand/left/input/menu/click".into(),
+            "/user/hand/right/input/b/click".into(),
+            "/user/hand/right/input/trigger/click".into(),
+        ],
+    );
+    f.verify_bindings::<xr::Vector2f>(
+        cosmos,
+        c"/actions/main/in/vec2act",
+        ["/user/hand/left/input/thumbstick".into()],
+    );
+    f.verify_bindings::<bool>(
+        cosmos,
+        c"/actions/main/in/gripact",
+        ["/user/hand/left/input/squeeze/click".into()],
+    );
+}
+
+#[test]
+fn bindings_converted_from_cosmos() {
+    use super::profiles::vive_cosmos::ViveCosmos;
+    let f = Fixture::new();
+    f.load_actions(c"actions_cosmos_only.json");
+
+    // Its own, with the bumper.
+    f.verify_bindings::<bool>(
+        ViveCosmos::profile_path(),
+        c"/actions/main/in/boolact",
+        [
+            "/user/hand/left/input/x/click".into(),
+            "/user/hand/right/input/b/click".into(),
+            "/user/hand/left/input/shoulder/click".into(),
+            "/user/hand/left/input/menu/click".into(),
+        ],
+    );
+    // Others without a bumper drop it.
+    f.verify_bindings::<bool>(
+        OculusTouch::profile_path(),
+        c"/actions/main/in/boolact",
+        [
+            "/user/hand/left/input/x/click".into(),
+            "/user/hand/right/input/b/click".into(),
+            "/user/hand/left/input/menu/click".into(),
+        ],
+    );
+    f.verify_bindings::<xr::Vector2f>(
+        OculusTouch::profile_path(),
+        c"/actions/main/in/vec2act",
+        ["/user/hand/left/input/thumbstick".into()],
+    );
+    f.verify_threshold_bindings(
+        OculusTouch::profile_path(),
+        c"/actions/main/in/gripact",
+        ["/user/hand/right/input/squeeze/value".into()],
+    );
+    // Index has no X or menu button: they go to its face buttons.
+    f.verify_bindings::<bool>(
+        Knuckles::profile_path(),
+        c"/actions/main/in/boolact",
+        [
+            "/user/hand/left/input/a/click".into(),
+            "/user/hand/left/input/b/click".into(),
+            "/user/hand/right/input/b/click".into(),
+        ],
+    );
+    // The Frame has bumpers.
+    f.verify_bindings::<bool>(
+        FrameController::profile_path(),
+        c"/actions/main/in/boolact",
+        [
+            "/user/hand/left/input/dpad_down/click".into(),
+            "/user/hand/right/input/b/click".into(),
+            "/user/hand/left/input/bumper/click".into(),
+            "/user/hand/left/input/view/click".into(),
+        ],
+    );
+}
+
+#[test]
 fn controllers_tracked_without_bindings() {
     let f = Fixture::new();
     f.load_actions(c"actions_no_bindings.json");

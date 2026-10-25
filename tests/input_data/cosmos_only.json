@@ -1,0 +1,62 @@
+{
+	"bindings": {
+		"/actions/main": {
+			"sources": [
+				{
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/boolact"
+						}
+					},
+					"mode": "button",
+					"path": "/user/hand/left/input/x"
+				},
+				{
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/boolact"
+						}
+					},
+					"mode": "button",
+					"path": "/user/hand/right/input/b"
+				},
+				{
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/boolact"
+						}
+					},
+					"mode": "button",
+					"path": "/user/hand/left/input/bumper"
+				},
+				{
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/boolact"
+						}
+					},
+					"mode": "button",
+					"path": "/user/hand/left/input/application_menu"
+				},
+				{
+					"inputs": {
+						"position": {
+							"output": "/actions/main/in/vec2act"
+						}
+					},
+					"mode": "joystick",
+					"path": "/user/hand/left/input/joystick"
+				},
+				{
+					"inputs": {
+						"click": {
+							"output": "/actions/main/in/gripact"
+						}
+					},
+					"mode": "button",
+					"path": "/user/hand/right/input/grip"
+				}
+			]
+		}
+	}
+}

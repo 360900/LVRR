@@ -117,6 +117,10 @@
 		{
 			"binding_url": "pico.json",
 			"controller_type": "pico_controller"
+		},
+		{
+			"binding_url": "cosmos.json",
+			"controller_type": "vive_cosmos_controller"
 		}
 	],
 	"localization": []

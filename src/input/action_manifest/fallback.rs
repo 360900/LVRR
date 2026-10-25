@@ -22,7 +22,7 @@ impl ControllerType {
     }
 
     /// Every controller type a game can list bindings for.
-    pub fn known() -> [Self; 8] {
+    pub fn known() -> [Self; 9] {
         [
             Self::ViveController,
             Self::ViveFocus3,
@@ -31,6 +31,7 @@ impl ControllerType {
             Self::OculusTouch,
             Self::HolographicController,
             Self::HPMotionController,
+            Self::ViveCosmosController,
             Self::PicoController,
         ]
     }
@@ -38,7 +39,7 @@ impl ControllerType {
     /// Controller types whose bindings convert best to this one, closest first.
     ///
     /// Pico bindings come right after the Touch ones, or first for the Touch, as in SteamVR's
-    /// remapping files.
+    /// remapping files. SteamVR never converts the Cosmos ones, which go after the Focus 3's.
     pub fn conversion_sources(&self) -> Vec<Self> {
         use ControllerType::*;
         let order = match self {
@@ -49,6 +50,7 @@ impl ControllerType {
                 PicoController,
                 OculusTouch,
                 ViveFocus3,
+                ViveCosmosController,
                 HPMotionController,
                 FrameController,
                 ViveController,
@@ -57,6 +59,7 @@ impl ControllerType {
                 OculusTouch,
                 PicoController,
                 ViveFocus3,
+                ViveCosmosController,
                 HPMotionController,
                 FrameController,
                 HolographicController,
@@ -70,6 +73,7 @@ impl ControllerType {
                 PicoController,
                 Knuckles,
                 ViveFocus3,
+                ViveCosmosController,
                 FrameController,
                 ViveController,
             ],
@@ -78,6 +82,7 @@ impl ControllerType {
                 PicoController,
                 Knuckles,
                 ViveFocus3,
+                ViveCosmosController,
                 HPMotionController,
                 HolographicController,
                 FrameController,
@@ -290,6 +295,10 @@ mod tests {
         assert_eq!(
             PicoController.conversion_sources()[..2],
             [OculusTouch, Knuckles]
+        );
+        assert_eq!(
+            ViveCosmosController.conversion_sources()[..3],
+            [OculusTouch, PicoController, Knuckles]
         );
         assert_eq!(
             Knuckles.conversion_sources()[..2],

@@ -6,6 +6,7 @@ pub mod pico;
 pub mod simple_controller;
 pub mod touch_pro;
 pub mod vive_controller;
+pub mod vive_cosmos;
 pub mod vive_focus3;
 #[cfg(feature = "monado")]
 pub mod vive_tracker;
@@ -29,6 +30,7 @@ use std::ffi::CStr;
 use std::marker::PhantomData;
 use touch_pro::TouchPro;
 use vive_controller::ViveWands;
+use vive_cosmos::ViveCosmos;
 use vive_focus3::ViveFocus3;
 use wmr::{
     hp_motion_controller::ReverbG2Controller, ms_motion_controller::HolographicController,
@@ -112,6 +114,7 @@ impl ControllerType {
                 runner.run::<HolographicController>();
             }
             Self::HPMotionController => runner.run::<ReverbG2Controller>(),
+            Self::ViveCosmosController => runner.run::<ViveCosmos>(),
             Self::PicoController => {
                 runner.run::<Pico4>();
                 runner.run::<PicoNeo3>();
@@ -155,6 +158,7 @@ pub fn run_for_all_profiles(runner: &mut impl RunWithProfile) {
     profile!(TouchPro);
     profile!(OculusTouch);
     profile!(ViveFocus3);
+    profile!(ViveCosmos);
     profile!(Pico4);
     profile!(PicoNeo3);
     profile!(SimpleController);
@@ -654,6 +658,8 @@ pub mod paths {
         View::<Click, Touch>,
         System::<Click, Touch>,
         Bumper::<Click, Touch>,
+        // The Cosmos bumpers, which SteamVR calls bumper.
+        Shoulder::<Click>,
         DpadUp::<Click, Touch>,
         DpadLeft::<Click, Touch>,
         DpadDown::<Click, Touch>,
