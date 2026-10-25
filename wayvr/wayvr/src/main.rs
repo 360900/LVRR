@@ -194,7 +194,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => {}
         }
 
-        let _ = Command::new(exe).args(args).spawn();
+        // LVRR: in place, so the systemd unit the server started this in keeps running
+        let err = std::os::unix::process::CommandExt::exec(Command::new(exe).args(args));
+        log::error!("Could not restart: {err}");
     }
 
     Ok(())
@@ -386,6 +388,28 @@ fn logging_init(args: &mut Args) {
     log_panics::init();
 }
 
+/// LVRR: a frozen instance ignores SIGTERM, so it gets SIGKILL after a while
+fn lvrr_wait_or_kill(system: &mut sysinfo::System, pid: Pid) {
+    let alive = |system: &mut sysinfo::System| {
+        system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+        system
+            .process(pid)
+            .is_some_and(|p| p.status() != sysinfo::ProcessStatus::Zombie)
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while alive(system) {
+        if Instant::now() > deadline {
+            println!("The previous instance didn't quit, killing it.");
+            if let Some(proc) = system.process(pid) {
+                proc.kill();
+                proc.wait();
+            }
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn ensure_single_instance(replace: bool) -> bool {
     let mut path =
         std::env::var("XDG_RUNTIME_DIR").map_or_else(|_| PathBuf::from("/tmp"), PathBuf::from);
@@ -401,10 +425,13 @@ fn ensure_single_instance(replace: bool) -> bool {
                 sysinfo::ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
                 false,
             );
-            if let Some(proc) = system.process(sysinfo::Pid::from_u32(pid)) {
+            // LVRR: a restart in place keeps the pid
+            if let Some(proc) = system.process(sysinfo::Pid::from_u32(pid))
+                && pid != std::process::id()
+            {
                 if replace {
                     proc.kill_with(sysinfo::Signal::Term);
-                    proc.wait();
+                    lvrr_wait_or_kill(&mut system, Pid::from_u32(pid));
                 } else {
                     return false;
                 }

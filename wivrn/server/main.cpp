@@ -534,6 +534,16 @@ void start_app_by_id(const std::string & app_id)
 	children->start_application(it->second.exec, it->second.path);
 }
 
+// LVRR: the headset's "Restart desktop". wayvr runs once, and --replace ends the running one
+// even when it hangs.
+void restart_application()
+{
+	auto application = configuration().application;
+	if (not application.empty() and std::filesystem::path(application.front()).filename() == "wayvr")
+		application.push_back("--replace");
+	children->start_application(application);
+}
+
 gboolean control_received(gint fd, GIOCondition condition, gpointer user_data)
 {
 	auto packet = wivrn_ipc_socket_main_loop->receive();
@@ -552,7 +562,10 @@ gboolean control_received(gint fd, GIOCondition condition, gpointer user_data)
 		                   [&](const wivrn::from_headset::start_app & request) {
 			                   try
 			                   {
-				                   start_app_by_id(request.app_id);
+				                   if (request.app_id.empty())
+					                   restart_application();
+				                   else
+					                   start_app_by_id(request.app_id);
 			                   }
 			                   catch (std::exception & e)
 			                   {
