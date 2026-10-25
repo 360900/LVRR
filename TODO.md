@@ -7,40 +7,29 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
 ## 1. Breaks games now
 
 1. Binding modes and options (S-M each)
-   - radial mode (entries are dropped)
-   - `touchy_click` (#449)
-   - Index force sensor curve (#208)
-   - dpad `deadzone_pct`, `overlap_pct`, `sticky` (parsed, ignored; fixed 90° zones)
-   - `sticky_click`, force sensor `haptic_amplitude`
-   - `scalar_constant` values other than 1.0
-   - vector3 actions
+   - radial mode: format unknown (vrclient has `radial_menu`, `num_buttons`, `button_`), entries are skipped
+   - grab `downgrade_speed`, `drop_speed` (need controller velocity), `capsense_enable_threshold`
+   - Index trackpad force (#208): Alyx's weapon wheel opening on a light touch is unexplained, needs a log
 2. Controller profiles (M)
-   - Pico 4 / 4 Ultra, `XR_BD_controller_interaction` (#97, #120, #403)
-   - Touch Pro, `XR_FB_touch_controller_pro`
-   - Vive Cosmos, `XR_HTC_vive_cosmos_controller_interaction`
-   - Xbox gamepad (core profile), PSVR2 Sense
-   - `vive_cosmos_controller`, `gamepad`, `vive_tracker_*` default bindings are ignored and can't be conversion sources
-   - WiVRn: Pico works through its Touch fallback; a pico4 profile fixes controller type and names
-3. Binding sources (M)
-   - read SteamVR's saved per-app binding choice and Workshop bindings (app 250820)
-   - binding variants: only the first file per controller type loads (Alyx `_left`, `_single`)
-   - remappable legacy input (Skyrim VR, Fallout 4 VR use a fixed mapping)
-4. Frame timing (M)
-   - `GetFrameTiming`/`GetFrameTimings` report constant GPU/CPU times, zero phase timestamps, reprojection flags and mispresents
-   - `ShouldAppRenderWithLowResources` always false
-   - games that scale resolution from these never adapt
-   - options: time `xrWaitFrame`/`xrEndFrame`, Vulkan timestamps on our copies, `XR_META_performance_metrics`
-   - WiVRn: no timing extension
+   - Xbox gamepad (core profile): every action needs a `/user/gamepad` subaction path; WiVRn 26.9+ exposes one
+   - PSVR2 Sense: no Khronos profile, Monado's `XR_MNDX_psvr2_interaction` is a preview; works as Touch today
+   - Pico 4 tilt (#97): 4 and 4 Ultra need different offsets, WiVRn reports both as `pico4_controller`
+   - Cosmos identity strings are guesses; `gamepad` and `vive_tracker_*` default bindings still ignored (trackers: 21)
+3. Binding sources (M-L)
+   - remappable legacy input (Skyrim VR, Fallout 4 VR use a fixed mapping): load `legacy_actions.json` with per-controller legacy bindings
+   - Vivecraft's SteamVR binding choice isn't found: it loads its manifest before `IdentifyApplication`
+4. Frame timing (S)
+   - `XR_META_performance_metrics` unused (no Linux runtime has it)
+   - `VSyncsReadyForUse`, `VSyncsToFirstView`, `TransferLatencyMs`, `WaitForPresentCpuMs` stay 0
 5. Haptics (S)
-   - legacy `TriggerHapticPulse` always plays amplitude 1.0; games encode strength as duration
-   - `start_seconds_from_now` ignored
-   - weak or missing vibration in VRChat (#371, #420)
+   - SteamVR's legacy pulse conversion unverified (amplitude scales with length here)
+   - trigger mode click haptic off by default, unverified; dpad haptic may be faint on Quest
 6. Origin names (S)
-   - `GetOriginLocalizedName` returns OpenXR paths instead of names like "Trigger" (#162, #331)
-   - `GetActionBindingInfo` guesses the mode from the component; never reports dpad, scroll, grab
-7. Color space (S-M)
-   - Linear color space unimplemented in Vulkan backend
-   - UNORM textures relabelled as sRGB (#441)
+   - `activeOrigin` of action data is the hand, so Unity's `localizedOriginName` lacks the input part
+   - HP, Focus 3 and Cosmos controller names are guesses
+7. Color space (S)
+   - Outer Wilds with NomaiVR reportedly too dark (#441); `XRIZER_LINEAR_UNORM=1` is the workaround
+   - `A2R10G10B10_UINT` unhandled
 
 ## 2. Fake success and crash insurance
 
