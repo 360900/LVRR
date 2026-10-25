@@ -60,7 +60,7 @@ const PICO4_PROPERTIES: ProfileProperties = ProfileProperties {
 
 /// The Pico 4. The Pico 4 Ultra reports this profile on WiVRn too, since Monado has none for
 /// its own (`pico4s_controller`, which isn't in the OpenXR registry either), so it gets these
-/// poses rather than those of SteamVR's `pico_4_ultra_controller` models.
+/// poses. SteamVR's `pico_4_ultra_controller` models have no `openxr_grip` to take its own from.
 pub struct Pico4;
 
 impl InteractionProfile for Pico4 {
