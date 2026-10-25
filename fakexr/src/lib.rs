@@ -48,26 +48,97 @@ pub fn set_action_state_with_time(
     hand: UserPath,
     time: xr::Time,
 ) {
-    let action = action.to_handle().unwrap();
-    assert_eq!(
-        std::mem::discriminant(&state),
-        std::mem::discriminant(&action.state.left.load().state)
-    );
-    let mut d = action.pending_state.take();
-    match hand {
-        UserPath::RightHand => {
-            d.right = Some((state, time));
-        }
-        UserPath::LeftHand => {
-            d.left = Some((state, time));
-        }
-    }
-    action.pending_state.store(d);
-    action.active.store(true, Ordering::Relaxed);
+    action.to_handle().unwrap().set_state(state, hand, time);
 }
 
 pub fn set_action_state(action: xr::Action, state: ActionState, hand: UserPath) {
     set_action_state_with_time(action, state, hand, xr::Time::from_nanos(0));
+}
+
+/// The value of a controller input, see [set_input].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum InputValue {
+    Bool(bool),
+    Float(f32),
+    Vector2(f32, f32),
+}
+
+/// Sets an input of a hand's controller, like `/user/hand/right/input/thumbstick`, for every
+/// action bound to it in the hand's current interaction profile. Values are converted like
+/// Monado does: the axes of a 2D input go to float actions bound to its `/x` and `/y`, a
+/// boolean input reads 0 or 1 in a float action, a float input presses a boolean action past
+/// 0.7 (past 0.2 for an axis), and actions bound to the parent of a `/click` (boolean actions)
+/// or `/value` (float actions) follow it.
+pub fn set_input(session: xr::Session, input: &str, value: InputValue) {
+    let session = session.to_handle().unwrap();
+    let instance = session.instance.upgrade().unwrap();
+    let hand = [UserPath::LeftHand, UserPath::RightHand]
+        .into_iter()
+        .find(|hand| input.starts_with(&format!("{}/", hand.as_path())))
+        .unwrap_or_else(|| panic!("{input} isn't a hand input"));
+    let hand_data = get_hand_data(hand, &session);
+    let profile = hand_data
+        .pending_profile
+        .load()
+        .unwrap_or_else(|| hand_data.profile.load());
+
+    let converted = |binding: &str, ty: &ActionState| -> Option<ActionState> {
+        use ActionState as S;
+        use InputValue as V;
+        if binding == input {
+            return match (value, ty) {
+                (V::Bool(b), S::Bool(_)) => Some(S::Bool(b)),
+                (V::Bool(b), S::Float(_)) => Some(S::Float(b.into())),
+                (V::Float(f), S::Float(_)) => Some(S::Float(f)),
+                (V::Float(f), S::Bool(_)) => Some(S::Bool(f > 0.7)),
+                (V::Vector2(x, y), S::Vector2(..)) => Some(S::Vector2(x, y)),
+                _ => None,
+            };
+        }
+        if let V::Vector2(x, y) = value {
+            let axis = match binding.strip_prefix(input)? {
+                "/x" => x,
+                "/y" => y,
+                _ => return None,
+            };
+            return match ty {
+                S::Float(_) => Some(S::Float(axis)),
+                S::Bool(_) => Some(S::Bool(axis > 0.2)),
+                _ => None,
+            };
+        }
+        match (input.rsplit_once('/'), value, ty) {
+            (Some((parent, "click")), V::Bool(b), S::Bool(_)) if binding == parent => {
+                Some(S::Bool(b))
+            }
+            (Some((parent, "value")), V::Float(f), S::Float(_)) if binding == parent => {
+                Some(S::Float(f))
+            }
+            _ => None,
+        }
+    };
+
+    let sets = session
+        .attached_sets
+        .get()
+        .expect("action sets not attached");
+    for set in sets.iter() {
+        let set = set.to_handle().unwrap();
+        for action in set.actions.get().into_iter().flatten() {
+            let ty = action.state.left.load().state;
+            let suggested = action.suggested.lock().unwrap();
+            let state = suggested
+                .get(&profile)
+                .into_iter()
+                .flatten()
+                .filter_map(|path| instance.get_path_value(*path).ok().flatten())
+                .find_map(|binding| converted(&binding, &ty));
+            drop(suggested);
+            if let Some(state) = state {
+                action.set_state(state, hand, xr::Time::from_nanos(0));
+            }
+        }
+    }
 }
 
 pub fn deactivate_action(action: xr::Action) {
@@ -150,6 +221,15 @@ thread_local! {
     static LOCATE_VIEWS_ERROR: Cell<Option<xr::Result>> = const { Cell::new(None) };
     static VISIBILITY_MASK: RefCell<Option<(Vec<xr::Vector2f>, Vec<u32>)>> = const { RefCell::new(None) };
     static HEADLESS_SUPPORTED: Cell<bool> = const { Cell::new(false) };
+    static BINDING_ACTIVITY: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Makes instances created on this thread report input actions active on a hand only like
+/// Monado does: when they have a suggested binding on that hand in its current interaction
+/// profile, and their action set was synced for that hand. Without it, an action is active on
+/// both hands once a test set its state.
+pub fn set_binding_activity(enabled: bool) {
+    BINDING_ACTIVITY.set(enabled);
 }
 
 /// Sets the vertices and indices xrGetVisibilityMaskKHR returns on this thread. Without one, it
@@ -856,6 +936,8 @@ struct Instance {
     lost: AtomicBool,
     enabled_extensions: Vec<CString>,
     rejected_profiles: Vec<String>,
+    /// See [set_binding_activity].
+    binding_activity: bool,
 }
 
 impl Instance {
@@ -1058,6 +1140,47 @@ impl Session {
             None
         })
     }
+
+    fn user_path(&self, path: xr::Path) -> Option<UserPath> {
+        self.instance.upgrade()?.get_user_path(path).ok().flatten()
+    }
+
+    /// The state of an input action for `subaction_path`, and whether it's active (see
+    /// [set_binding_activity]).
+    fn input_state(
+        &self,
+        set: &ActionSet,
+        action: &Action,
+        subaction_path: xr::Path,
+    ) -> (ActionStateData, bool) {
+        let instance = self.instance.upgrade().unwrap();
+        if !instance.binding_activity {
+            return (
+                action.get_hand_state(subaction_path),
+                action.active.load(Ordering::Relaxed),
+            );
+        }
+        let synced = set.synced_hands.load();
+        let suggested = action.suggested.lock().unwrap();
+        let active = |hand: UserPath| {
+            let prefix = format!("{}/", hand.as_path());
+            synced[hand as usize]
+                && suggested
+                    .get(&get_hand_data(hand, self).profile.load())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|path| instance.get_path_value(*path).ok().flatten())
+                    .any(|path| path.starts_with(&prefix))
+        };
+        match instance.get_user_path(subaction_path).unwrap() {
+            Some(hand) => (action.get_hand_state(subaction_path), active(hand)),
+            None => match (active(UserPath::LeftHand), active(UserPath::RightHand)) {
+                (true, false) => (action.state.left.load(), true),
+                (false, true) => (action.state.right.load(), true),
+                (both, _) => (action.combined_state(), both),
+            },
+        }
+    }
 }
 
 impl Drop for Session {
@@ -1222,6 +1345,8 @@ struct ActionSet {
     pending_actions: RwLock<Vec<Arc<Action>>>,
     actions: OnceLock<Vec<Arc<Action>>>,
     active: AtomicBool,
+    /// The hands (left, right) the set was synced for by the last xrSyncActions.
+    synced_hands: AtomicCell<[bool; 2]>,
 }
 impl ActionSet {
     fn make_immutable(&self) {
@@ -1245,6 +1370,25 @@ struct Action {
 }
 
 impl Action {
+    /// Sets the state the next xrSyncActions reports for `hand`.
+    fn set_state(&self, state: ActionState, hand: UserPath, time: xr::Time) {
+        assert_eq!(
+            std::mem::discriminant(&state),
+            std::mem::discriminant(&self.state.left.load().state)
+        );
+        let mut d = self.pending_state.take();
+        match hand {
+            UserPath::RightHand => {
+                d.right = Some((state, time));
+            }
+            UserPath::LeftHand => {
+                d.left = Some((state, time));
+            }
+        }
+        self.pending_state.store(d);
+        self.active.store(true, Ordering::Relaxed);
+    }
+
     fn get_hand_state(&self, path: xr::Path) -> ActionStateData {
         let instance = self.instance.upgrade().expect("Failed to get instance");
         match instance.get_user_path(path).unwrap() {
@@ -1349,6 +1493,7 @@ extern "system" fn create_instance(
         lost: false.into(),
         enabled_extensions,
         rejected_profiles: REJECTED_PROFILES.with_borrow(Clone::clone),
+        binding_activity: BINDING_ACTIVITY.get(),
     });
     unsafe {
         *instance = inst.to_xr();
@@ -1524,6 +1669,7 @@ extern "system" fn create_action_set(
         actions: OnceLock::new(),
         pending_actions: RwLock::default(),
         active: false.into(),
+        synced_hands: Default::default(),
     });
 
     unsafe {
@@ -2065,6 +2211,7 @@ extern "system" fn sync_actions(
     for set in attached {
         let set = get_handle!(*set);
         set.active.store(false, Ordering::Relaxed);
+        set.synced_hands.store([false; 2]);
     }
     let sets = unsafe {
         std::slice::from_raw_parts(
@@ -2089,6 +2236,13 @@ extern "system" fn sync_actions(
             return xr::Result::ERROR_PATH_UNSUPPORTED;
         }
         set.active.store(true, Ordering::Relaxed);
+        let mut hands = set.synced_hands.load();
+        match session.user_path(subaction_path) {
+            Some(UserPath::LeftHand) => hands[0] = true,
+            Some(UserPath::RightHand) => hands[1] = true,
+            None => hands = [true; 2],
+        }
+        set.synced_hands.store(hands);
 
         for action in actions {
             // activate pose actions
@@ -2168,13 +2322,12 @@ extern "system" fn get_action_state_boolean(
     };
 
     let info = unsafe { info.as_ref().unwrap() };
-    let hand_state = action.get_hand_state(info.subaction_path);
+    let (hand_state, active) = session.input_state(&set, &action, info.subaction_path);
     let ActionState::Bool(b) = hand_state.state else {
         return xr::Result::ERROR_ACTION_TYPE_MISMATCH;
     };
     let state = unsafe { state.as_mut().unwrap() };
     if set.active.load(Ordering::Relaxed) {
-        let active = action.active.load(Ordering::Relaxed);
         if active {
             state.current_state = b.into();
             state.changed_since_last_sync = hand_state.changed.into();
@@ -2204,13 +2357,13 @@ extern "system" fn get_action_state_float(
     let Some((set, action)) = session.get_action_if_attached(info) else {
         return xr::Result::ERROR_ACTIONSET_NOT_ATTACHED;
     };
-    let hand_state = action.get_hand_state(unsafe { (*info).subaction_path });
+    let (hand_state, active) =
+        session.input_state(&set, &action, unsafe { (*info).subaction_path });
     let ActionState::Float(f) = hand_state.state else {
         return xr::Result::ERROR_ACTION_TYPE_MISMATCH;
     };
     let state = unsafe { state.as_mut().unwrap() };
     if set.active.load(Ordering::Relaxed) {
-        let active = action.active.load(Ordering::Relaxed);
         if active {
             state.current_state = f;
             state.changed_since_last_sync = hand_state.changed.into();
@@ -2241,13 +2394,13 @@ extern "system" fn get_action_state_vector2f(
         return xr::Result::ERROR_ACTIONSET_NOT_ATTACHED;
     };
 
-    let hand_state = action.get_hand_state(unsafe { (*info).subaction_path });
+    let (hand_state, active) =
+        session.input_state(&set, &action, unsafe { (*info).subaction_path });
     let ActionState::Vector2(x, y) = hand_state.state else {
         return xr::Result::ERROR_ACTION_TYPE_MISMATCH;
     };
     let state = unsafe { state.as_mut().unwrap() };
     if set.active.load(Ordering::Relaxed) {
-        let active = action.active.load(Ordering::Relaxed);
         if active {
             state.current_state = xr::Vector2f { x, y };
             state.changed_since_last_sync = hand_state.changed.into();
