@@ -178,6 +178,30 @@ impl DashInterface<()> for DashInterfaceEmulated {
 		}
 	}
 
+	fn lvrr_batteries(&mut self, _data: &mut ()) -> Vec<lvrr_common::state::Battery> {
+		use lvrr_common::state::{Battery, BatteryDevice};
+		if self.lvrr.is_none() {
+			return Vec::new();
+		}
+		vec![
+			Battery {
+				device: BatteryDevice::Headset,
+				level: 0.8,
+				charging: false,
+			},
+			Battery {
+				device: BatteryDevice::LeftController,
+				level: 0.55,
+				charging: true,
+			},
+			Battery {
+				device: BatteryDevice::RightController,
+				level: 0.2,
+				charging: false,
+			},
+		]
+	}
+
 	fn lvrr_perf_overlay(&mut self, _data: &mut ()) -> bool {
 		self.lvrr_perf_overlay
 	}

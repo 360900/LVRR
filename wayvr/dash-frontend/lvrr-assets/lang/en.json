@@ -11,6 +11,12 @@
     "QUIT": "Stop LVRR",
     "QUIT_CONFIRM": "Stop LVRR? The headset disconnects and all VR apps close.",
     "OFFLINE": "The LVRR server is not running.",
+    "BATTERY": {
+      "HEADSET": "Headset battery",
+      "LEFT": "Left controller",
+      "RIGHT": "Right controller",
+      "TRACKER": "Tracker"
+    },
     "HOME": {
       "CONNECTED": "Connected",
       "NOT_CONNECTED": "No headset connected",
@@ -24,6 +30,10 @@
       "MESSAGES": "Messages",
       "PAIRING": "Pairing is on. Enter this PIN on the headset:",
       "RECENTER": "Recenter",
+      "NOW_PLAYING": "Now playing",
+      "SWITCH": "Switch",
+      "PERF_OVERLAY": "Performance overlay",
+      "PASSTHROUGH": "Passthrough",
       "ERROR": "Error"
     },
     "LIBRARY": {
@@ -42,7 +52,8 @@
       "FOCUS": "Show",
       "STOP": "Stop",
       "FOCUSED": "In front",
-      "DETAILS": "Runtime details"
+      "DETAILS": "Runtime details",
+      "STOP_CONFIRM": "Stop this app? Unsaved progress is lost."
     },
     "HEADSET": {
       "TITLE": "Headset",
@@ -120,6 +131,7 @@
       "NEVER_CONNECTED": "Never connected",
       "LAST_CONNECTED": "Last connected",
       "REVOKE": "Forget",
+      "RENAME": "Rename",
       "REVOKE_CONFIRM": "Forget this headset? It needs a new PIN to connect again.",
       "PAIR_HOWTO": "To pair another headset, run \"lvrr pair\" on the PC; this ends the current session.",
       "ENCODER": "Video encoder",

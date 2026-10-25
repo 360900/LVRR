@@ -120,6 +120,9 @@ pub trait DashInterface<T> {
 		false
 	}
 	fn lvrr_set_perf_overlay(&mut self, _data: &mut T, _visible: bool) {}
+	fn lvrr_batteries(&mut self, _data: &mut T) -> Vec<lvrr_common::state::Battery> {
+		Vec::new()
+	}
 	fn clipboard_set_text(&mut self, _data: &mut T, _text: &str) -> anyhow::Result<()> {
 		anyhow::bail!("No clipboard")
 	}

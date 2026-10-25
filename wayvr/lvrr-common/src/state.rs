@@ -87,6 +87,43 @@ pub struct Message {
 	pub text: String,
 }
 
+/// A tracked device with a battery
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatteryDevice {
+	Headset,
+	LeftController,
+	RightController,
+	Tracker,
+}
+
+impl BatteryDevice {
+	pub const ALL: [Self; 4] = [
+		Self::Headset,
+		Self::LeftController,
+		Self::RightController,
+		Self::Tracker,
+	];
+
+	/// Translation key of the device's name
+	pub fn key(self) -> &'static str {
+		match self {
+			Self::Headset => "LVRR.BATTERY.HEADSET",
+			Self::LeftController => "LVRR.BATTERY.LEFT",
+			Self::RightController => "LVRR.BATTERY.RIGHT",
+			Self::Tracker => "LVRR.BATTERY.TRACKER",
+		}
+	}
+}
+
+/// A battery reported by the OpenXR runtime
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Battery {
+	pub device: BatteryDevice,
+	/// From 0 to 1
+	pub level: f32,
+	pub charging: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct LvrrState {
 	/// Changes whenever anything but the statistics changes

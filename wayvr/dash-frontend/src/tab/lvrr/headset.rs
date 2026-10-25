@@ -50,6 +50,18 @@ enum Section {
 }
 
 impl Section {
+	const fn name(self) -> &'static str {
+		match self {
+			Section::Video => "video",
+			Section::Streaming => "streaming",
+			Section::PostProcessing => "post_processing",
+			Section::Audio => "audio",
+			Section::Devices => "devices",
+			Section::Tracking => "tracking",
+			Section::System => "system",
+		}
+	}
+
 	fn from_name(name: &str) -> Option<Self> {
 		Some(match name {
 			"video" => Section::Video,
@@ -488,6 +500,7 @@ impl<T: 'static> Tab<T> for TabLvrrHeadset<T> {
 			match task {
 				Task::SetSection(section) => {
 					self.section = section;
+					super::set_section(section.name());
 					self.rendered = None;
 				}
 				Task::Edit { key, value, now } => {
@@ -549,6 +562,7 @@ impl<T: 'static> TabLvrrHeadset<T> {
 			.take()
 			.and_then(Section::from_name)
 			.unwrap_or(Section::Video);
+		super::set_section(section.name());
 
 		let tabs = state.fetch_component_as::<ComponentTabs>("tabs")?;
 		if section != Section::Video {

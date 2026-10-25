@@ -57,9 +57,7 @@ impl<T: 'static> Tab<T> for TabLvrrRunning<T> {
 				}
 				Task::Stop(id) => {
 					if let Ok(id) = u32::try_from(id) {
-						frontend
-							.tasks
-							.push(FrontendTask::Lvrr(LvrrRequest::StopApplication(id)));
+						frontend.lvrr_confirm("LVRR.RUNNING.STOP_CONFIRM", LvrrRequest::StopApplication(id));
 					}
 				}
 				Task::Frontend(task) => frontend.tasks.push(task),

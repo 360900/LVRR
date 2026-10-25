@@ -43,6 +43,20 @@ use crate::{
 const DEBOUNCE: Duration = Duration::from_millis(400);
 const ACTION_PREFIX: &str = "lvrr_pc;";
 
+/// Headset names to pick from in VR, where there is no keyboard
+const HEADSET_NAMES: &[&str] = &[
+	"Quest 3",
+	"Quest 3S",
+	"Quest Pro",
+	"Quest 2",
+	"Pico 4",
+	"Pico 4 Ultra",
+	"Vive Focus 3",
+	"Vive XR Elite",
+	"Lynx R-1",
+	"Galaxy XR",
+];
+
 thread_local! {
 	/// Section to open first, for uidev (`LVRR_PAGE=pc:server`)
 	pub(crate) static INITIAL_SECTION: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
@@ -64,6 +78,16 @@ enum Section {
 }
 
 impl Section {
+	const fn name(self) -> &'static str {
+		match self {
+			Section::Performance => "performance",
+			Section::Headsets => "headsets",
+			Section::Server => "server",
+			Section::Diagnostics => "diagnostics",
+			Section::About => "about",
+		}
+	}
+
 	fn from_name(name: &str) -> Option<Self> {
 		Some(match name {
 			"performance" => Section::Performance,
@@ -135,6 +159,7 @@ impl<T: 'static> Tab<T> for TabLvrrPc<T> {
 			match task {
 				Task::SetSection(section) => {
 					self.section = section;
+					super::set_section(section.name());
 					self.rendered = None;
 				}
 				Task::Confirm(message, request) => frontend.lvrr_confirm(message, request),
@@ -167,10 +192,12 @@ impl<T: 'static> Tab<T> for TabLvrrPc<T> {
 			self.send_server(frontend, data);
 		}
 
-		if let TickResult::Action(name) = self.context_menu.tick(&mut frontend.layout, &mut self.state)?
-			&& let Some(change) = parse_action(&name)
-		{
-			self.tasks.push(Task::Server { change, now: true });
+		if let TickResult::Action(name) = self.context_menu.tick(&mut frontend.layout, &mut self.state)? {
+			match parse_action(&name) {
+				Some(MenuAction::Server(change)) => self.tasks.push(Task::Server { change, now: true }),
+				Some(MenuAction::Request(request)) => frontend.tasks.push(FrontendTask::Lvrr(request)),
+				None => {}
+			}
 		}
 
 		let finished = self.checks_running.as_ref().and_then(|r| r.lock().unwrap().take());
@@ -201,15 +228,28 @@ impl<T: 'static> Tab<T> for TabLvrrPc<T> {
 	}
 }
 
-fn parse_action(name: &str) -> Option<ServerChange> {
+enum MenuAction {
+	Server(ServerChange),
+	Request(LvrrRequest),
+}
+
+fn parse_action(name: &str) -> Option<MenuAction> {
 	let (kind, value) = name.strip_prefix(ACTION_PREFIX)?.split_once(';')?;
 	Some(match kind {
-		"encoder" if value == "auto" => ServerChange::Encoder(Encoder::Automatic),
-		"encoder" => ServerChange::Encoder(Encoder::Named(value.to_string())),
-		"openvr" => ServerChange::OpenVr(match value {
+		"encoder" if value == "auto" => MenuAction::Server(ServerChange::Encoder(Encoder::Automatic)),
+		"encoder" => MenuAction::Server(ServerChange::Encoder(Encoder::Named(value.to_string()))),
+		"openvr" => MenuAction::Server(ServerChange::OpenVr(match value {
 			"unmanaged" => OpenVrCompat::Unmanaged,
 			_ => OpenVrCompat::Automatic,
-		}),
+		})),
+		// names have no ';', keys might
+		"rename" => {
+			let (name, key) = value.split_once(';')?;
+			MenuAction::Request(LvrrRequest::RenameKey {
+				key: key.to_string(),
+				name: name.to_string(),
+			})
+		}
 		_ => return None,
 	})
 }
@@ -263,6 +303,7 @@ impl<T: 'static> TabLvrrPc<T> {
 			.take()
 			.and_then(Section::from_name)
 			.unwrap_or(Section::Performance);
+		super::set_section(section.name());
 
 		let tabs = state.fetch_component_as::<ComponentTabs>("tabs")?;
 		if section != Section::Performance {
@@ -404,6 +445,25 @@ impl<T: 'static> TabLvrrPc<T> {
 				Some(t) => ui.muted(column, Text::Raw(&format_time(t)))?,
 				None => ui.muted(column, Text::Key("LVRR.PC.NEVER_CONNECTED"))?,
 			}
+			let cells = HEADSET_NAMES
+				.iter()
+				.map(|name| {
+					ui::menu_cell(
+						format!("{ACTION_PREFIX}rename;{name};{}", key.public_key),
+						Translation::from_raw_text(name),
+					)
+				})
+				.collect();
+			let tasks = self.tasks.clone();
+			ui.dropdown(
+				row,
+				"LVRR.PC.RENAME",
+				Translation::from_raw_text(&key.name),
+				cells,
+				move |position, cells| {
+					tasks.push(Task::OpenMenu(position, cells));
+				},
+			)?;
 			let (tasks, public_key) = (self.tasks.clone(), key.public_key.clone());
 			ui.danger_button(row, Text::Key("LVRR.PC.REVOKE"), "@/dashboard/trash.svg", move || {
 				tasks.push(Task::Confirm(

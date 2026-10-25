@@ -4,6 +4,7 @@ use std::rc::Rc;
 
 use wgui::{
 	assets::AssetPathRef,
+	color::WguiColorName,
 	components::{
 		bar_graph::ComponentBarGraph, button::ComponentButton, checkbox::ComponentCheckbox, slider::ComponentSlider,
 	},
@@ -124,6 +125,13 @@ impl<'a> Ui<'a> {
 
 	pub fn bold(&mut self, parent: WidgetID, text: Text, size: u32) -> anyhow::Result<()> {
 		self.label("Bold", parent, text, size, "on_background")
+	}
+
+	/// An icon from a file, such as an application's icon
+	pub fn file_icon(&mut self, parent: WidgetID, path: &str) -> anyhow::Result<()> {
+		let mut params = TemplateParams::new();
+		params.insert("src", path);
+		self.instantiate("FileIcon", parent, params)
 	}
 
 	/// A small colored tag, color is a theme color such as `primary` or `danger`
@@ -319,5 +327,12 @@ pub fn set_label(layout: &mut Layout, id: WidgetID, text: Translation) {
 	let mut common = layout.common();
 	if let Ok(mut label) = common.state.widgets.cast_as::<WidgetLabel>(id) {
 		label.set_text(&mut common, text);
+	}
+}
+
+pub fn set_label_color(layout: &mut Layout, id: WidgetID, color: WguiColorName) {
+	let mut common = layout.common();
+	if let Ok(mut label) = common.state.widgets.cast_as::<WidgetLabel>(id) {
+		label.set_color(&mut common, color.into(), true);
 	}
 }

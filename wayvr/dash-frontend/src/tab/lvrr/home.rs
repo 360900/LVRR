@@ -1,9 +1,10 @@
-//! The LVRR home page: headset status and quick actions.
+//! The LVRR home page: headset status, what is playing and quick actions.
 
 use std::marker::PhantomData;
 
-use lvrr_common::state::{Link, LvrrRequest, MessageKind};
-use wgui::{i18n::Translation, layout::WidgetID, parser::ParserState, task::Tasks};
+use lvrr_common::state::{Battery, BatteryDevice, Link, LvrrRequest, MessageKind};
+use wgui::{color::WguiColorName, i18n::Translation, layout::WidgetID, parser::ParserState, task::Tasks};
+use wlx_common::dash_interface::ConfigChangeKind;
 
 use crate::{
 	frontend::{Frontend, FrontendTask},
@@ -16,10 +17,19 @@ use crate::{
 	},
 };
 
+/// Ticks between reads of the batteries and running applications
+const REFRESH_TICKS: u32 = 120;
+
+/// Below this, a battery shows in the danger color
+const BATTERY_LOW: f32 = 0.3;
+
 #[derive(Clone)]
 enum Task {
 	Frontend(FrontendTask),
 	RestartSession,
+	Stop(i64),
+	TogglePassthrough,
+	TogglePerfOverlay,
 }
 
 /// Live values, updated in place with each statistics sample
@@ -30,15 +40,29 @@ struct Stats {
 	network: WidgetID,
 }
 
+/// What the page shows; it is built again when this changes
+#[derive(Clone, PartialEq)]
+struct Shown {
+	generation: u64,
+	batteries: Vec<BatteryDevice>,
+	playing: Option<(i64, String)>,
+	passthrough: Option<bool>,
+	perf_overlay: bool,
+}
+
 pub struct TabLvrrHome<T> {
 	#[allow(dead_code)]
 	state: ParserState,
 	widgets: Option<ParserState>,
 	tasks: Tasks<Task>,
 	parent: WidgetID,
-	rendered: Option<u64>,
+	ticks: u32,
+	batteries: Vec<Battery>,
+	playing: Option<(i64, String)>,
+	shown: Option<Shown>,
 	stats_rendered: Option<u64>,
 	stats: Option<Stats>,
+	battery_labels: Vec<WidgetID>,
 	marker: PhantomData<T>,
 }
 
@@ -48,20 +72,65 @@ impl<T: 'static> Tab<T> for TabLvrrHome<T> {
 	}
 
 	fn update(&mut self, frontend: &mut Frontend<T>, _time_ms: u32, data: &mut T) -> anyhow::Result<()> {
+		let mut refresh = self.ticks.is_multiple_of(REFRESH_TICKS);
+		self.ticks += 1;
 		for task in self.tasks.drain() {
 			match task {
 				Task::Frontend(task) => frontend.tasks.push(task),
 				Task::RestartSession => frontend.lvrr_confirm("LVRR.RESTART_SESSION_CONFIRM", LvrrRequest::RestartSession),
+				Task::Stop(id) => {
+					if let Ok(id) = u32::try_from(id) {
+						frontend.lvrr_confirm("LVRR.RUNNING.STOP_CONFIRM", LvrrRequest::StopApplication(id));
+					}
+					refresh = true;
+				}
+				Task::TogglePassthrough => {
+					let config = frontend.interface.general_config(data);
+					config.use_passthrough = !config.use_passthrough;
+					frontend
+						.interface
+						.config_changed(data, ConfigChangeKind::EnvironmentBlend);
+				}
+				Task::TogglePerfOverlay => {
+					let visible = frontend.interface.lvrr_perf_overlay(data);
+					frontend.interface.lvrr_set_perf_overlay(data, !visible);
+				}
 			}
+		}
+
+		if refresh {
+			self.batteries = frontend.interface.lvrr_batteries(data);
+			let clients = frontend.interface.monado_client_list(data, true).unwrap_or_default();
+			self.playing = clients
+				.iter()
+				.find(|c| c.is_primary)
+				.or_else(|| clients.first())
+				.map(|c| (c.id, c.name.clone()));
 		}
 
 		let (generation, stats_generation) = frontend
 			.interface
 			.lvrr_state(data)
 			.map_or((0, 0), |s| (s.generation, s.stats_generation));
-		if self.rendered != Some(generation) {
-			self.render(frontend, data, generation)?;
+		let shown = Shown {
+			generation,
+			batteries: self.batteries.iter().map(|b| b.device).collect(),
+			playing: self.playing.clone(),
+			passthrough: frontend
+				.interface
+				.get_feats(data)
+				.passthru
+				.then(|| frontend.interface.general_config(data).use_passthrough),
+			perf_overlay: frontend.interface.lvrr_perf_overlay(data),
+		};
+		if self.shown.as_ref() != Some(&shown) {
+			self.render(frontend, data, &shown)?;
+			self.shown = Some(shown);
 			self.stats_rendered = None;
+			refresh = true;
+		}
+		if refresh {
+			self.update_batteries(frontend);
 		}
 		if self.stats_rendered != Some(stats_generation) {
 			self.stats_rendered = Some(stats_generation);
@@ -80,15 +149,18 @@ impl<T: 'static> TabLvrrHome<T> {
 			widgets: None,
 			tasks: Tasks::new(),
 			parent,
-			rendered: None,
+			ticks: 0,
+			batteries: Vec::new(),
+			playing: None,
+			shown: None,
 			stats_rendered: None,
 			stats: None,
+			battery_labels: Vec::new(),
 			marker: PhantomData,
 		})
 	}
 
-	fn render(&mut self, frontend: &mut Frontend<T>, data: &mut T, generation: u64) -> anyhow::Result<()> {
-		self.rendered = Some(generation);
+	fn render(&mut self, frontend: &mut Frontend<T>, data: &mut T, shown: &Shown) -> anyhow::Result<()> {
 		let state = frontend.interface.lvrr_state(data).cloned().unwrap_or_default();
 
 		frontend.layout.remove_children(self.parent);
@@ -138,6 +210,13 @@ impl<T: 'static> TabLvrrHome<T> {
 		} else {
 			None
 		};
+		self.battery_labels.clear();
+		if !shown.batteries.is_empty() {
+			let row = ui.row(card)?;
+			for device in &shown.batteries {
+				self.battery_labels.push(ui.stat(row, device.key())?);
+			}
+		}
 
 		if state.pairing_enabled && !state.pin.is_empty() {
 			let banner = ui.banner(parent, "LVRR.HOME.PAIRING", "primary")?;
@@ -156,6 +235,26 @@ impl<T: 'static> TabLvrrHome<T> {
 			)?;
 		}
 
+		// The application in front
+		if let Some((id, name)) = &shown.playing {
+			let group = ui.group(parent, "LVRR.HOME.NOW_PLAYING", "@/dashboard/play.svg")?;
+			let row = ui.row(group)?;
+			ui.bold(row, Text::Raw(name), 18)?;
+			let tasks = self.tasks.clone();
+			ui.button(row, Text::Key("LVRR.HOME.SWITCH"), "@/dashboard/apps.svg", move || {
+				tasks.push(Task::Frontend(FrontendTask::SetTab(TabType::Lvrr(Page::Running))));
+			})?;
+			let (tasks, id) = (self.tasks.clone(), *id);
+			ui.danger_button(
+				row,
+				Text::Key("LVRR.RUNNING.STOP"),
+				"@/dashboard/close.svg",
+				move || {
+					tasks.push(Task::Stop(id));
+				},
+			)?;
+		}
+
 		// Quick actions
 		let group = ui.group(parent, "LVRR.HOME.QUICK_ACTIONS", "@/dashboard/magic_wand.svg")?;
 		let row = ui.row(group)?;
@@ -163,38 +262,58 @@ impl<T: 'static> TabLvrrHome<T> {
 			(
 				"LVRR.LIBRARY.TITLE",
 				"@/dashboard/games.svg",
-				FrontendTask::SetTab(TabType::Lvrr(Page::Library)),
+				Task::Frontend(FrontendTask::SetTab(TabType::Lvrr(Page::Library))),
 			),
 			(
 				"APPLICATIONS",
 				"@/dashboard/apps.svg",
-				FrontendTask::SetTab(TabType::Apps),
+				Task::Frontend(FrontendTask::SetTab(TabType::Apps)),
 			),
 			(
 				"LVRR.HEADSET.TITLE",
 				"@/dashboard/wivrn_head_symbolic.svg",
-				FrontendTask::SetTab(TabType::Lvrr(Page::Headset)),
+				Task::Frontend(FrontendTask::SetTab(TabType::Lvrr(Page::Headset))),
 			),
 			(
 				"LVRR.PC.TITLE",
 				"@/dashboard/display.svg",
-				FrontendTask::SetTab(TabType::Lvrr(Page::Pc)),
+				Task::Frontend(FrontendTask::SetTab(TabType::Lvrr(Page::Pc))),
 			),
 			(
 				"LVRR.HOME.RECENTER",
 				"@/dashboard/recenter.svg",
-				FrontendTask::RecenterPlayspace,
-			),
-			(
-				"LVRR.DISCONNECT",
-				"@/dashboard/close.svg",
-				FrontendTask::Lvrr(LvrrRequest::Disconnect),
+				Task::Frontend(FrontendTask::RecenterPlayspace),
 			),
 		];
 		for (translation, icon, task) in actions {
 			let tasks = self.tasks.clone();
-			ui.action(row, translation, icon, move || tasks.push(Task::Frontend(task.clone())))?;
+			ui.action(row, translation, icon, move || tasks.push(task.clone()))?;
 		}
+		// toggles are highlighted while on
+		let mut toggles = vec![(
+			"LVRR.HOME.PERF_OVERLAY",
+			"@/dashboard/barchart.svg",
+			Task::TogglePerfOverlay,
+			shown.perf_overlay,
+		)];
+		if let Some(on) = shown.passthrough {
+			toggles.push((
+				"LVRR.HOME.PASSTHROUGH",
+				"@/dashboard/eye.svg",
+				Task::TogglePassthrough,
+				on,
+			));
+		}
+		for (translation, icon, task, on) in toggles {
+			let tasks = self.tasks.clone();
+			let button = ui.action(row, translation, icon, move || tasks.push(task.clone()))?;
+			let mut common = ui.layout.common();
+			button.set_sticky_state(&mut common, on);
+		}
+		let tasks = self.tasks.clone();
+		ui.action(row, "LVRR.DISCONNECT", "@/dashboard/close.svg", move || {
+			tasks.push(Task::Frontend(FrontendTask::Lvrr(LvrrRequest::Disconnect)));
+		})?;
 
 		// What the server told the headset, newest first
 		if !state.messages.is_empty() {
@@ -210,6 +329,22 @@ impl<T: 'static> TabLvrrHome<T> {
 
 		self.widgets = Some(widgets);
 		Ok(())
+	}
+
+	fn update_batteries(&self, frontend: &mut Frontend<T>) {
+		for (battery, &label) in self.batteries.iter().zip(&self.battery_labels) {
+			let layout = &mut frontend.layout;
+			let text = format!("{:.0}%", battery.level * 100.0);
+			ui::set_label(layout, label, Translation::from_raw_text_string(text));
+			let color = if battery.charging {
+				WguiColorName::Primary
+			} else if battery.level < BATTERY_LOW {
+				WguiColorName::Danger
+			} else {
+				WguiColorName::OnBackground
+			};
+			ui::set_label_color(layout, label, color);
+		}
 	}
 
 	fn update_stats(&mut self, frontend: &mut Frontend<T>, data: &mut T) {

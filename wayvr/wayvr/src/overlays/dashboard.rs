@@ -412,6 +412,10 @@ impl DashInterface<AppState> for DashInterfaceLive {
         }
     }
 
+    fn lvrr_batteries(&mut self, app: &mut AppState) -> Vec<lvrr_common::state::Battery> {
+        crate::lvrr::batteries(app)
+    }
+
     fn lvrr_perf_overlay(&mut self, app: &mut AppState) -> bool {
         app.lvrr.perf_overlay
     }

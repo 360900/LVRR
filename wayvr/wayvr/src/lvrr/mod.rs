@@ -6,13 +6,13 @@ use std::io::Write;
 
 use lvrr_common::{
     link::LvrrLink,
-    state::{LvrrBackend, MessageKind, Notice},
+    state::{Battery, BatteryDevice, LvrrBackend, MessageKind, Notice},
 };
 use serde::{Deserialize, Serialize};
 use wgui::i18n::Translation;
 use wlx_common::{config_io, overlays::ToastTopic};
 
-use crate::{overlays::toast::Toast, state::AppState};
+use crate::{backend::input::TrackedDeviceRole, overlays::toast::Toast, state::AppState};
 
 const CONFIG_FILE: &str = "lvrr.json5";
 
@@ -60,6 +60,28 @@ pub fn start(app: &mut AppState) {
     if app.lvrr.perf_overlay {
         perf_overlay::set_visible(app, true);
     }
+}
+
+/// Batteries of the headset, controllers and trackers
+pub fn batteries(app: &AppState) -> Vec<Battery> {
+    app.input_state
+        .devices
+        .iter()
+        .filter_map(|d| {
+            let device = match d.role {
+                TrackedDeviceRole::Hmd => BatteryDevice::Headset,
+                TrackedDeviceRole::LeftHand => BatteryDevice::LeftController,
+                TrackedDeviceRole::RightHand => BatteryDevice::RightController,
+                TrackedDeviceRole::Tracker => BatteryDevice::Tracker,
+                TrackedDeviceRole::None => return None,
+            };
+            Some(Battery {
+                device,
+                level: d.soc?,
+                charging: d.charging,
+            })
+        })
+        .collect()
 }
 
 /// Shows or hides the performance overlay, and remembers the choice

@@ -1,7 +1,22 @@
 //! LVRR pages: the streaming, headset and PC features that used to be WiVRn's own UI.
 
+use std::cell::Cell;
+
 use crate::{frontend::Frontend, tab::Tab};
 use wgui::layout::WidgetID;
+
+thread_local! {
+	/// Section of the open Headset or PC page
+	static SECTION: Cell<&'static str> = const { Cell::new("") };
+}
+
+pub(crate) fn set_section(name: &'static str) {
+	SECTION.set(name);
+}
+
+pub(crate) fn section() -> &'static str {
+	SECTION.get()
+}
 
 pub mod headset;
 pub mod home;
@@ -148,6 +163,9 @@ mod tests {
 			}
 		}
 		assert!(keys > 100, "found only {keys} keys");
+		for device in lvrr_common::state::BatteryDevice::ALL {
+			assert!(exists(&en, device.key()), "{} is missing from en.json", device.key());
+		}
 		for part in lvrr_common::headset::BODY_PARTS {
 			let key = format!("LVRR.HEADSET.BODY.{}", part.to_uppercase());
 			assert!(exists(&en, &key), "{key} is missing from en.json");
