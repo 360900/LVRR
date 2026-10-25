@@ -50,6 +50,8 @@ pub enum ControllerType {
     HPMotionController,
     ViveCosmosController,
     PicoController,
+    /// The gamepad, `/user/gamepad`.
+    Gamepad,
     /// The headset, see [super::bindings::handle_hmd_bindings].
     GenericHmd,
     #[serde(untagged)]
@@ -70,6 +72,7 @@ impl std::str::FromStr for ControllerType {
             "hpmotioncontroller" => Self::HPMotionController,
             "vive_cosmos_controller" => Self::ViveCosmosController,
             "pico_controller" => Self::PicoController,
+            "gamepad" => Self::Gamepad,
             "generic_hmd" => Self::GenericHmd,
             other => Self::Unknown(other.to_owned()),
         })
@@ -88,6 +91,7 @@ impl std::fmt::Display for ControllerType {
             Self::HPMotionController => "hpmotioncontroller",
             Self::ViveCosmosController => "vive_cosmos_controller",
             Self::PicoController => "pico_controller",
+            Self::Gamepad => "gamepad",
             Self::GenericHmd => "generic_hmd",
             Self::Unknown(value) => value,
         };
@@ -343,12 +347,10 @@ pub fn load_actions(
     english: &HashMap<String, String>,
     sets: &mut HashMap<String, xr::ActionSet>,
     actions: Vec<ActionType>,
-    left_hand: xr::Path,
-    right_hand: xr::Path,
+    paths: &[xr::Path],
 ) -> LoadedActionDataMap {
     let mut ret = HashMap::with_capacity(actions.len());
     for action in actions {
-        let paths = &[left_hand, right_hand];
         macro_rules! create_action {
             ($ty:ty, $data:expr) => {{
                 let Some(action) =

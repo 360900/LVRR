@@ -3,6 +3,7 @@ use super::{
     profiles::{
         frame_controller::FrameController, knuckles::Knuckles, oculus_touch::OculusTouch,
         simple_controller::SimpleController, vive_controller::ViveWands,
+        xbox_controller::XboxController,
     },
 };
 use crate::{
@@ -3592,8 +3593,22 @@ fn origin_name_sections() {
         origin_name(&f, 0xdead_beef, -1),
         (InvalidHandle, String::new())
     );
+    let treadmill = f.get_input_source_handle(c"/user/treadmill/input/a");
+    assert_eq!(
+        origin_name(&f, treadmill, -1),
+        (InvalidDevice, String::new())
+    );
+    // The gamepad has no tracked device, but SteamVR's driver names it and its inputs.
     let gamepad = f.get_input_source_handle(c"/user/gamepad/input/a");
-    assert_eq!(origin_name(&f, gamepad, -1), (InvalidDevice, String::new()));
+    assert_eq!(
+        origin_name(&f, gamepad, -1),
+        (None, "Gamepad A Button".into())
+    );
+    let stick = f.get_input_source_handle(c"/user/gamepad/input/joystick_left");
+    assert_eq!(
+        origin_name(&f, stick, -1),
+        (None, "Gamepad Left Thumbstick".into())
+    );
 }
 
 #[test]
@@ -4931,4 +4946,220 @@ fn axis2d_bindings_touch() {
 #[test]
 fn axis2d_bindings_touch_plus() {
     axis2d_bindings::<super::profiles::meta_touch_plus::MetaTouchPlus>();
+}
+
+/// Loads actions_gamepad.json with Touch controllers and a gamepad, and syncs the main set.
+fn gamepad_fixture() -> (Fixture, vr::VRActionSetHandle_t) {
+    let mut f = Fixture::new();
+    let main = f.get_action_set_handle(c"/actions/main");
+    f.load_actions(c"actions_gamepad.json");
+    f.set_interaction_profile::<OculusTouch>(LeftHand);
+    f.set_interaction_profile::<OculusTouch>(RightHand);
+    f.set_interaction_profile::<XboxController>(Gamepad);
+    sync_set(&mut f, main);
+    (f, main)
+}
+
+fn sync_set(f: &mut Fixture, set: vr::VRActionSetHandle_t) {
+    f.sync(vr::VRActiveActionSet_t {
+        ulActionSet: set,
+        ..Default::default()
+    });
+}
+
+#[test]
+fn gamepad_actions() {
+    use fakexr::ActionState::*;
+    let (mut f, main) = gamepad_fixture();
+    let jump = f.get_action_handle(c"/actions/main/in/jump");
+    let throttle = f.get_action_handle(c"/actions/main/in/throttle");
+    let move_ = f.get_action_handle(c"/actions/main/in/move");
+    let turn = f.get_action_handle(c"/actions/main/in/turn");
+    let left = f.get_input_source_handle(c"/user/hand/left");
+    let gamepad = f.get_input_source_handle(c"/user/gamepad");
+
+    fakexr::set_action_state(f.get_action::<bool>(jump), true.into(), Gamepad);
+    fakexr::set_action_state(f.get_action::<f32>(throttle), Float(0.25), Gamepad);
+    fakexr::set_action_state(f.get_action::<f32>(throttle), Float(0.5), LeftHand);
+    let stick = f.get_action::<xr::Vector2f>(move_);
+    fakexr::set_action_state(stick, Vector2(0.0, 1.0), Gamepad);
+    sync_set(&mut f, main);
+
+    // Pressed on the gamepad, which is the origin.
+    let s = f.get_bool_state(jump).unwrap();
+    assert_eq!((s.bActive, s.bState, s.activeOrigin), (true, true, gamepad));
+    let s = f.get_bool_state_hand(jump, gamepad).unwrap();
+    assert_eq!((s.bActive, s.bState, s.activeOrigin), (true, true, gamepad));
+    assert!(!f.get_bool_state_hand(jump, left).unwrap().bState);
+    let a = f.get_input_source_handle(c"/user/gamepad/input/a");
+    assert!(f.get_bool_state_hand(jump, a).unwrap().bState);
+
+    // Each device's own value, and the largest one unrestricted.
+    assert_eq!(get_analog_state(&f, throttle, gamepad).x, 0.25);
+    assert_eq!(get_analog_state(&f, throttle, left).x, 0.5);
+    let s = get_analog_state(&f, throttle, 0);
+    assert_eq!((s.x, s.activeOrigin), (0.5, left));
+    let s = get_analog_state(&f, move_, 0);
+    assert_eq!((s.y, s.activeOrigin), (1.0, gamepad));
+    assert_eq!(get_analog_state(&f, move_, gamepad).y, 1.0);
+    assert_eq!(get_analog_state(&f, move_, left).y, 0.0);
+
+    // A dpad on the right stick, which xrizer computes.
+    let right_stick = f.custom_binding_action(turn, XboxController::profile_path(), |ty| {
+        matches!(ty, BoolBindingType::Dpad(_))
+    });
+    fakexr::set_action_state(right_stick, Vector2(1.0, 0.0), Gamepad);
+    sync_set(&mut f, main);
+    let s = f.get_bool_state(turn).unwrap();
+    assert_eq!(
+        (s.bState, s.bChanged, s.activeOrigin),
+        (true, true, gamepad)
+    );
+    assert!(f.get_bool_state_hand(turn, gamepad).unwrap().bState);
+    assert!(!f.get_bool_state_hand(turn, left).unwrap().bState);
+    fakexr::set_action_state(right_stick, Vector2(0.0, 0.0), Gamepad);
+    sync_set(&mut f, main);
+    let s = f.get_bool_state(turn).unwrap();
+    assert_eq!((s.bState, s.bChanged), (false, true));
+
+    // The gamepad has no pose.
+    let pose = f.get_action_handle(c"/actions/main/in/pose");
+    assert!(!f.get_pose(pose, gamepad).unwrap().bActive);
+}
+
+#[test]
+fn gamepad_sets_restricted_and_prioritized() {
+    let (mut f, main) = gamepad_fixture();
+    let menu = f.get_action_set_handle(c"/actions/menu");
+    let jump = f.get_action_handle(c"/actions/main/in/jump");
+    let fire = f.get_action_handle(c"/actions/main/in/fire");
+    let gamepad = f.get_input_source_handle(c"/user/gamepad");
+    fakexr::set_action_state(f.get_action::<bool>(jump), true.into(), Gamepad);
+
+    // A set can be restricted to the gamepad, as its actions have its subaction path.
+    f.sync(vr::VRActiveActionSet_t {
+        ulActionSet: main,
+        ulRestrictedToDevice: gamepad,
+        ..Default::default()
+    });
+    assert!(f.get_bool_state_hand(jump, gamepad).unwrap().bState);
+
+    // A higher priority set's binding on the gamepad's trigger masks the game's there.
+    let trigger = f.custom_binding_action(fire, XboxController::profile_path(), |ty| {
+        matches!(ty, BoolBindingType::ThresholdFloat(_))
+    });
+    fakexr::set_action_state(trigger, fakexr::ActionState::Float(1.0), Gamepad);
+    let sync = |f: &mut Fixture, menu_priority| {
+        f.sync_sets(&mut [
+            vr::VRActiveActionSet_t {
+                ulActionSet: main,
+                ..Default::default()
+            },
+            vr::VRActiveActionSet_t {
+                ulActionSet: menu,
+                nPriority: menu_priority,
+                ..Default::default()
+            },
+        ])
+    };
+    sync(&mut f, 0);
+    let s = f.get_bool_state(fire).unwrap();
+    assert_eq!((s.bActive, s.bState, s.activeOrigin), (true, true, gamepad));
+    sync(&mut f, 1);
+    let s = f.get_bool_state_hand(fire, gamepad).unwrap();
+    assert_eq!((s.bActive, s.bState, s.bChanged), (false, false, true));
+    // Jump is on A, which the menu doesn't use.
+    assert!(f.get_bool_state_hand(jump, gamepad).unwrap().bState);
+}
+
+#[test]
+fn gamepad_haptics() {
+    let (mut f, main) = gamepad_fixture();
+    let vib = f.get_action_handle(c"/actions/main/in/vib");
+    let gamepad = f.get_input_source_handle(c"/user/gamepad");
+    assert_eq!(
+        f.input
+            .TriggerHapticVibrationAction(vib, 0.0, 0.1, 160.0, 0.5, gamepad),
+        vr::EVRInputError::None
+    );
+    let feedback = fakexr::take_haptic_feedback(f.get_action::<xr::Haptic>(vib));
+    assert_eq!(feedback.len(), 1);
+    assert_eq!(feedback[0].hand, Some(Gamepad));
+
+    // SteamVR's binding haptic for a click from the gamepad's trigger.
+    let fire = f.get_action_handle(c"/actions/main/in/fire");
+    let trigger = f.custom_binding_action(fire, XboxController::profile_path(), |ty| {
+        matches!(ty, BoolBindingType::ThresholdFloat(_))
+    });
+    let haptic = f
+        .input
+        .openxr
+        .session_data
+        .get()
+        .input_data
+        .get_loaded_actions()
+        .unwrap()
+        .haptic_action
+        .as_raw();
+    sync_set(&mut f, main);
+    fakexr::set_action_state(trigger, fakexr::ActionState::Float(1.0), Gamepad);
+    sync_set(&mut f, main);
+    let feedback = fakexr::take_haptic_feedback(haptic);
+    assert_eq!(feedback.len(), 1);
+    assert_eq!(feedback[0].hand, Some(Gamepad));
+}
+
+#[test]
+fn gamepad_origins() {
+    let (mut f, main) = gamepad_fixture();
+    let jump = f.get_action_handle(c"/actions/main/in/jump");
+    let a = f.get_input_source_handle(c"/user/gamepad/input/a");
+    let gamepad_row = [
+        "/user/gamepad".to_owned(),
+        "/input/a".to_owned(),
+        "button".to_owned(),
+        "click".to_owned(),
+        "button".to_owned(),
+    ];
+
+    // WiVRn binds the gamepad's profile while none is connected, which its inputs show.
+    assert!(!get_action_origins(&f, main, jump).contains(&a));
+    assert!(!binding_info_rows(&get_binding_info(&f, jump)).contains(&gamepad_row));
+    // Only bound on the gamepad.
+    let turn = f.get_action_handle(c"/actions/main/in/turn");
+    assert!(get_action_origins(&f, main, turn).is_empty());
+
+    let presence = f
+        .input
+        .openxr
+        .session_data
+        .get()
+        .input_data
+        .get_loaded_actions()
+        .unwrap()
+        .gamepad_presence
+        .as_raw();
+    fakexr::set_action_state(presence, false.into(), Gamepad);
+    sync_set(&mut f, main);
+    let origins = get_action_origins(&f, main, jump);
+    assert!(origins.contains(&a), "{origins:?}");
+    let rows = binding_info_rows(&get_binding_info(&f, jump));
+    assert!(rows.contains(&gamepad_row), "{rows:?}");
+    // The hands' come first.
+    assert_eq!(rows[0][0], "/user/hand/right");
+    let right_stick = f.get_input_source_handle(c"/user/gamepad/input/joystick_right");
+    assert_eq!(get_action_origins(&f, main, turn), [right_stick]);
+
+    let info = get_origin_info(&f, a);
+    assert_eq!(info.trackedDeviceIndex, vr::k_unTrackedDeviceIndexInvalid);
+    assert_eq!(info.devicePath, a);
+}
+
+#[test]
+fn gamepad_controller_type() {
+    use super::action_manifest::ControllerType;
+    let ty: ControllerType = serde_json::from_str(r#""gamepad""#).unwrap();
+    assert_eq!(ty, ControllerType::Gamepad);
+    assert_eq!("gamepad".parse::<ControllerType>(), Ok(ty.clone()));
+    assert_eq!(ty.to_string(), "gamepad");
 }

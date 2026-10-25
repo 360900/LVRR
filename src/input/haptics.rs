@@ -233,20 +233,21 @@ impl BindingHapticData {
 
 /// Plays the haptics of the bindings whose click changed, in the sets the last UpdateActionState
 /// activated. Bindings a higher priority set masks don't play, like SteamVR doesn't run them.
-/// `hands` are each hand's subaction path and interaction profile, left first.
+/// `devices` are each device's subaction path and interaction profile: the hands, left first,
+/// then the gamepad.
 pub(super) fn sync_binding_haptics(
     session_data: &SessionData,
     loaded: &ManifestLoadedActions,
     active_sets: &[(ActionSetKey, xr::Path)],
-    hands: [(xr::Path, xr::Path); 2],
+    devices: [(xr::Path, xr::Path); 3],
     masked: &HashSet<(ActionKey, usize)>,
     check: impl Fn(xr::Result<()>),
 ) {
     for (set, action, haptic) in &loaded.binding_haptics {
-        let Some(index) = hands.iter().position(|(hand, _)| *hand == haptic.hand) else {
+        let Some(index) = devices.iter().position(|(hand, _)| *hand == haptic.hand) else {
             continue;
         };
-        let (hand, profile) = hands[index];
+        let (hand, profile) = devices[index];
         let active = profile == haptic.profile
             && !masked.contains(&(*action, index))
             && active_sets.iter().any(|(key, restricted)| {

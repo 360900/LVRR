@@ -138,14 +138,14 @@ impl<C: openxr_data::Compositor> Input<C> {
         let left_hand_subaction_path = self.get_subaction_path(Hand::Left);
         let right_hand_subaction_path = self.get_subaction_path(Hand::Right);
 
+        // Any action may get gamepad bindings.
         let actions = actions::load_actions(
             &self.openxr.instance,
             &mut names,
             &english,
             &mut sets,
             manifest.actions,
-            left_hand_subaction_path,
-            right_hand_subaction_path,
+            &self.subaction_paths.all(),
         );
         debug!("Loaded {} actions.", actions.len());
 
@@ -180,7 +180,17 @@ impl<C: openxr_data::Compositor> Input<C> {
             .create_action::<xr::Haptic>(
                 "xrizer-haptic-action",
                 "XRizer haptic action",
-                &[self.subaction_paths.left, self.subaction_paths.right],
+                &self.subaction_paths.all(),
+            )
+            .unwrap();
+        // Bound to an input of the gamepad, which runtimes like WiVRn only make active while a
+        // gamepad is connected. It's in the haptic set, as that is synced on every
+        // UpdateActionState.
+        let gamepad_presence = haptic_set
+            .create_action::<bool>(
+                "xrizer-gamepad-presence",
+                "XRizer gamepad presence",
+                &[self.subaction_paths.gamepad],
             )
             .unwrap();
 
@@ -191,6 +201,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             &session_data.input_data.pose_data.grip,
             &info_action,
             &haptic_action,
+            &gamepad_presence,
             skeletal_input,
         );
 
@@ -237,8 +248,8 @@ impl<C: openxr_data::Compositor> Input<C> {
             .sync_actions(&[xr::ActiveActionSet::new(&info_set)]);
         self.openxr.check("xrSyncActions", synced);
 
-        // Every manifest OpenXR action is created with both hand subaction paths, so a set can
-        // only be synced restricted to a hand if it has at least one.
+        // Every manifest OpenXR action is created with the hands' and the gamepad's subaction
+        // paths, so a set can only be synced restricted to one if it has at least one.
         let sets_with_xr_actions: HashSet<String> = actions
             .iter()
             .filter(|(_, data)| {
@@ -374,6 +385,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             info_set,
             haptic_action,
             haptic_set,
+            gamepad_presence,
             binding_haptics,
             pending_vibrations: Default::default(),
             skeleton_sets,
@@ -812,6 +824,14 @@ impl<C: openxr_data::Compositor> Input<C> {
                     .map(|path| xr::Binding::new(context.haptic_action, path)),
             )
             .chain(skeletal_bindings.binding_iter(&context.skeletal_input.actions))
+            .chain(P::GAMEPAD.then(|| {
+                let input = self
+                    .openxr
+                    .instance
+                    .string_to_path(super::profiles::xbox_controller::PRESENCE_INPUT)
+                    .unwrap();
+                xr::Binding::new(context.gamepad_presence, input)
+            }))
             .collect();
 
         match self

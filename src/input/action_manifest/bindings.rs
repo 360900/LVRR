@@ -5,7 +5,7 @@ use crate::input::action_manifest::context;
 use crate::input::custom_bindings::BoolBindingData;
 use crate::input::haptics::{BindingHaptic, BindingPress, Vibration};
 use crate::input::profiles::paths::DynComponent;
-use crate::input::profiles::{Component, DynInputPath, InputDevice, paths};
+use crate::input::profiles::{Component, DynInputPath, GAMEPAD_HAPTICS, InputDevice, paths};
 use crate::input::{ActionData, BoundPoseType};
 use crate::{
     input::custom_bindings::{
@@ -2162,19 +2162,31 @@ pub fn handle_skeleton_bindings(
     }
 }
 
+/// The device of a haptic output's OpenVR path, e.g. `/user/hand/left/output/haptic`.
+fn haptic_device(path: &str) -> Option<InputDevice> {
+    let device = path.strip_suffix("/output/haptic")?;
+    InputDevice::ALL
+        .into_iter()
+        .find(|candidate| candidate.path() == device)
+}
+
 pub fn handle_haptic_bindings(
     instance: &xr::Instance,
     context: &mut BindingsProfileLoadContext,
     bindings: &[SimpleActionBinding],
 ) {
     for SimpleActionBinding { output, path } in bindings {
-        if !matches!(
-            path.as_str(),
-            "/user/hand/left/output/haptic" | "/user/hand/right/output/haptic",
-        ) {
+        let Some(device) = haptic_device(path) else {
             warn!("invalid haptic path {path} for {}", output.path);
             continue;
         };
+        if !context.has_device(device) {
+            context.unusable_binding(format_args!(
+                "ignoring haptic {path} for {}, it isn't on this controller",
+                output.path
+            ));
+            continue;
+        }
         if !context.find_action(&output.path) {
             continue;
         };
@@ -2186,8 +2198,14 @@ pub fn handle_haptic_bindings(
             );
             continue;
         }
-        let xr_path = instance.string_to_path(path).unwrap();
-        context.push_binding(output.path.clone(), xr_path);
+        let outputs = match device {
+            InputDevice::Gamepad => &GAMEPAD_HAPTICS[..],
+            InputDevice::Hand(_) => &[path.as_str()],
+        };
+        for output_path in outputs {
+            let xr_path = instance.string_to_path(output_path).unwrap();
+            context.push_binding(output.path.clone(), xr_path);
+        }
     }
 }
 
@@ -2601,13 +2619,12 @@ pub fn record_binding_info(
             }
         }
         for SimpleActionBinding { output, path } in &set.haptics {
-            let hand = match path.as_str() {
-                "/user/hand/left/output/haptic" => Hand::Left,
-                "/user/hand/right/output/haptic" => Hand::Right,
-                _ => continue,
+            let Some(device) = haptic_device(path).filter(|device| context.has_device(*device))
+            else {
+                continue;
             };
             let info = BindingInfo {
-                device: InputDevice::Hand(hand),
+                device,
                 input: "/output/haptic".to_owned(),
                 mode: "",
                 slot: "",

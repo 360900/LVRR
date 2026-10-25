@@ -12,6 +12,7 @@ pub mod vive_focus3;
 pub mod vive_tracker;
 pub mod vrlink_hand;
 pub mod wmr;
+pub mod xbox_controller;
 use super::{
     BoundPoseType, action_manifest::ControllerType, legacy::LegacyBindings,
     skeletal::SkeletalInputBindings,
@@ -36,6 +37,7 @@ use wmr::{
     hp_motion_controller::ReverbG2Controller, ms_motion_controller::HolographicController,
     samsung_odyssey_controller::SamsungOdysseyController,
 };
+use xbox_controller::XboxController;
 
 #[allow(private_interfaces)]
 pub trait InteractionProfile: SupportedProfile + Sized + 'static {
@@ -56,6 +58,8 @@ pub trait InteractionProfile: SupportedProfile + Sized + 'static {
     /// `simulate_controller_type`, `simulate_render_model` and `simulate_HMD`. Only for profiles
     /// games rarely know, so far: the others keep reporting themselves.
     const SIMULATE_CONVERTED: bool = false;
+    /// Whether this is the gamepad's profile (`/user/gamepad`) rather than a hand controller's.
+    const GAMEPAD: bool = false;
     type LegalPaths: LegalPathsT;
     fn profile_path() -> &'static str;
     fn has_required_extensions(enabled_extensions: &xr::ExtensionSet) -> bool;
@@ -124,6 +128,7 @@ impl ControllerType {
                 runner.run::<Pico4>();
                 runner.run::<PicoNeo3>();
             }
+            Self::Gamepad => runner.run::<XboxController>(),
             Self::GenericHmd | Self::Unknown(_) => {}
         }
     }
@@ -141,7 +146,8 @@ impl ControllerType {
             Self::HPMotionController => ReverbG2Controller::properties(),
             Self::ViveCosmosController => ViveCosmos::properties(),
             Self::PicoController => Pico4::properties(),
-            Self::GenericHmd | Self::Unknown(_) => return None,
+            // Nothing converts to or from the gamepad's bindings.
+            Self::Gamepad | Self::GenericHmd | Self::Unknown(_) => return None,
         })
     }
 }
@@ -158,6 +164,11 @@ pub trait SupportedProfile {}
 // tracker profile.
 #[cfg(feature = "monado")]
 impl SupportedProfile for vive_tracker::ViveTracker {}
+
+// The gamepad isn't a hand controller: the profiles below are probed for the hands, get legacy
+// bindings and stand in for each other's bindings, none of which applies to it. Its bindings are
+// only loaded from the game's gamepad bindings, see ControllerType::run_for_profile.
+impl SupportedProfile for XboxController {}
 
 pub fn run_for_all_profiles(runner: &mut impl RunWithProfile) {
     macro_rules! profile {
@@ -238,6 +249,14 @@ impl<'a, P: InteractionProfile> InputToXrPath<'a, P> {
         ]
     }
 
+    /// Both rumble motors of the gamepad.
+    pub fn gamepad_haptics(&self) -> Vec<xr::Path> {
+        GAMEPAD_HAPTICS
+            .iter()
+            .map(|path| self.instance.string_to_path(path).unwrap())
+            .collect()
+    }
+
     pub fn pose(&self) -> Vec<xr::Path> {
         vec![
             self.instance
@@ -249,6 +268,12 @@ impl<'a, P: InteractionProfile> InputToXrPath<'a, P> {
         ]
     }
 }
+
+/// The gamepad's rumble motors, which its one SteamVR haptic output (`/output/haptic`) drives.
+pub const GAMEPAD_HAPTICS: [&str; 2] = [
+    "/user/gamepad/output/haptic_left",
+    "/user/gamepad/output/haptic_right",
+];
 
 pub trait LegalPathsT {
     fn is_legal(path: DynInputPath) -> bool;
@@ -277,6 +302,14 @@ where
 }
 
 macro_rules! legal_paths {
+    (Gamepad::<($first_s:ty, $first_c:ty) $(, ($rest_s:ty, $rest_c:ty) )*$(,)?>) => {
+        $crate::input::profiles::__recursify_tuple![
+            $crate::input::profiles::Gamepad<$first_s, $first_c>,
+            $(
+                $crate::input::profiles::Gamepad<$rest_s, $rest_c>,
+            )*
+        ]
+    };
     (
         $(Both::<($both_first_s:ty, $both_first_c:ty) $(, ($both_rest_s:ty, $both_rest_c:ty) )*$(,)?>)?
         $(,Left::<($left_first_s:ty, $left_first_c:ty) $(, ($left_rest_s:ty, $left_rest_c:ty) )*$(,)?>)?
@@ -419,6 +452,7 @@ pub struct PoseTransformations {
 
 pub struct Left<Sub = (), Comp = ()>(PhantomData<(Sub, Comp)>);
 pub struct Right<Sub = (), Comp = ()>(PhantomData<(Sub, Comp)>);
+pub struct Gamepad<Sub = (), Comp = ()>(PhantomData<(Sub, Comp)>);
 
 /// Represents the input subpath of a path, i.e. the `trigger` part of
 /// /user/hand/left/input/trigger/click
@@ -472,6 +506,18 @@ where
     };
 }
 
+impl<S, C> InputPath for Gamepad<S, C>
+where
+    S: Subpath,
+    C: LegalComponentFor<S>,
+{
+    const DYN: DynInputPath = DynInputPath {
+        device: InputDevice::Gamepad,
+        subpath: S::DYN,
+        component: C::DYN,
+    };
+}
+
 /// The device an input is on, named by its top level path.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum InputDevice {
@@ -481,6 +527,16 @@ pub enum InputDevice {
 }
 
 impl InputDevice {
+    /// The hands, left first, then the gamepad: the order of [devices::SubactionPaths::all],
+    /// which priority masks and analog action states index devices by.
+    ///
+    /// [devices::SubactionPaths::all]: super::devices::SubactionPaths::all
+    pub const ALL: [Self; 3] = [
+        Self::Hand(Hand::Left),
+        Self::Hand(Hand::Right),
+        Self::Gamepad,
+    ];
+
     pub fn path(self) -> &'static str {
         match self {
             Self::Hand(Hand::Left) => "/user/hand/left",

@@ -21,7 +21,7 @@ impl ControllerType {
         finder.1
     }
 
-    /// Every controller type a game can list bindings for.
+    /// Every hand controller type a game can list bindings for.
     pub fn known() -> [Self; 9] {
         [
             Self::ViveController,

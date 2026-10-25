@@ -19,15 +19,16 @@ pub struct BindingInfo {
     pub source_type: &'static str,
 }
 
-pub fn hand_path(hand: Hand) -> &'static str {
-    InputDevice::Hand(hand).path()
-}
-
 /// The OpenVR path of `subpath` on controllers of `controller_type`, as SteamVR's profiles of
 /// them name it (`drivers/*/resources/input/*_profile.json`). Bindings converted from another
 /// controller and OpenXR use other names.
 pub fn openvr_input(controller_type: &str, subpath: DynSubpath) -> String {
     let name = match subpath {
+        DynSubpath::View if controller_type == "gamepad" => "back",
+        DynSubpath::Menu if controller_type == "gamepad" => "start",
+        DynSubpath::System if controller_type == "gamepad" => "guide",
+        DynSubpath::ThumbstickLeft => "joystick_left",
+        DynSubpath::ThumbstickRight => "joystick_right",
         DynSubpath::Squeeze => "grip",
         // Only Valve's controllers call it a thumbstick.
         DynSubpath::Thumbstick if matches!(controller_type, "knuckles" | "frame_controller") => {
@@ -52,9 +53,15 @@ pub fn openvr_input(controller_type: &str, subpath: DynSubpath) -> String {
 /// The `type` SteamVR's controller profiles give an input.
 pub fn source_type(subpath: DynSubpath, analog: bool) -> &'static str {
     match subpath {
-        DynSubpath::Thumbstick => "joystick",
+        DynSubpath::Thumbstick | DynSubpath::ThumbstickLeft | DynSubpath::ThumbstickRight => {
+            "joystick"
+        }
         DynSubpath::Trackpad => "trackpad",
-        DynSubpath::Trigger | DynSubpath::PinchExt | DynSubpath::GraspExt => "trigger",
+        DynSubpath::Trigger
+        | DynSubpath::TriggerLeft
+        | DynSubpath::TriggerRight
+        | DynSubpath::PinchExt
+        | DynSubpath::GraspExt => "trigger",
         // An analog grip is a trigger (Index, Touch), a clicky one a button (Vive).
         DynSubpath::Squeeze if analog => "trigger",
         _ => "button",
@@ -108,6 +115,25 @@ const DRIVERS: &[Driver] = &[
         controller_type: "vive",
         name: "Vive",
         inputs: &[],
+    },
+    Driver {
+        controller_type: "gamepad",
+        name: "Gamepad",
+        inputs: &[
+            ("/input/trigger_left", "Left Trigger"),
+            ("/input/trigger_right", "Right Trigger"),
+            ("/input/joystick_left", "Left Thumbstick"),
+            ("/input/joystick_right", "Right Thumbstick"),
+            ("/input/back", "Back Button"),
+            ("/input/start", "Start Button"),
+            ("/input/guide", "Guide Button"),
+            ("/input/dpad_down", "Dpad Down"),
+            ("/input/dpad_up", "Dpad Up"),
+            ("/input/dpad_left", "Dpad Left"),
+            ("/input/dpad_right", "Dpad Right"),
+            ("/input/shoulder_left", "Left Shoulder"),
+            ("/input/shoulder_right", "Right Shoulder"),
+        ],
     },
     Driver {
         controller_type: "frame_controller",

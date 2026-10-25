@@ -48,10 +48,12 @@ pub(super) struct BindingsLoadContext<'a> {
     pub grip_action: &'a xr::Action<xr::Posef>,
     pub info_action: &'a xr::Action<bool>,
     pub haptic_action: &'a xr::Action<xr::Haptic>,
+    pub gamepad_presence: &'a xr::Action<bool>,
     pub skeletal_input: &'a SkeletalInputActionData,
 }
 
 impl<'a> BindingsLoadContext<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         action_sets: &'a HashMap<String, xr::ActionSet>,
         actions: LoadedActionDataMap,
@@ -59,6 +61,7 @@ impl<'a> BindingsLoadContext<'a> {
         grip_action: &'a xr::Action<xr::Posef>,
         info_action: &'a xr::Action<bool>,
         haptic_action: &'a xr::Action<xr::Haptic>,
+        gamepad_presence: &'a xr::Action<bool>,
         skeletal_input: &'a SkeletalInputActionData,
     ) -> Self {
         BindingsLoadContext {
@@ -80,6 +83,7 @@ impl<'a> BindingsLoadContext<'a> {
             grip_action,
             info_action,
             haptic_action,
+            gamepad_presence,
             skeletal_input,
         }
     }
@@ -157,9 +161,11 @@ impl BindingsLoadContext<'_> {
             grip_action: self.grip_action,
             info_action: self.info_action,
             haptic_action: self.haptic_action,
+            gamepad_presence: self.gamepad_presence,
             skeletal_input: self.skeletal_input,
             instance,
             subaction_paths: input.subaction_paths,
+            gamepad: P::GAMEPAD,
             bindings: Vec::new(),
             use_force_for_dpad: P::USE_FORCE_DPAD,
         })
@@ -189,9 +195,12 @@ pub(super) struct BindingsProfileLoadContext<'a> {
     pub grip_action: &'a xr::Action<xr::Posef>,
     pub info_action: &'a xr::Action<bool>,
     pub haptic_action: &'a xr::Action<xr::Haptic>,
+    pub gamepad_presence: &'a xr::Action<bool>,
     pub skeletal_input: &'a SkeletalInputActionData,
     pub instance: &'a xr::Instance,
     subaction_paths: SubactionPaths,
+    /// The profile is the gamepad's, see [InteractionProfile::GAMEPAD].
+    gamepad: bool,
     pub bindings: Vec<(String, xr::Path)>,
     use_force_for_dpad: bool,
 }
@@ -294,9 +303,9 @@ impl BindingsProfileLoadContext<'_> {
         self.subaction_paths.get(device)
     }
 
-    /// The subaction paths of xrizer's own actions.
-    fn input_action_paths(&self) -> [xr::Path; 2] {
-        [self.subaction_paths.left, self.subaction_paths.right]
+    /// Whether the profile's inputs are on `device`.
+    pub fn has_device(&self, device: InputDevice) -> bool {
+        self.gamepad == (device == InputDevice::Gamepad)
     }
 
     pub fn get_action_set(&self, p0: &String) -> Option<&xr::ActionSet> {
@@ -371,7 +380,7 @@ impl BindingsProfileLoadContext<'_> {
     ) -> Option<xr::Action<T>> {
         let key = format!("{input}-{action_set_name}{}", T::KEY_SUFFIX);
         let binding = self.instance.string_to_path(&input.to_string()).ok()?;
-        let paths = self.input_action_paths();
+        let paths = self.subaction_paths.all();
         let action = match self.actions.entry(key.clone()) {
             Entry::Occupied(entry) => T::from_data(entry.get())?.clone(),
             Entry::Vacant(entry) => {
@@ -584,7 +593,7 @@ impl BindingsProfileLoadContext<'_> {
         let haptic_path = format!("{}/output/haptic", parent_path.device.path());
         let binding = self.instance.string_to_path(&haptic_path).ok()?;
         let key = format!("{parent_path}-{action_set_name}-haptic");
-        let paths = self.input_action_paths();
+        let paths = self.subaction_paths.all();
         let action = match self.actions.entry(key.clone()) {
             Entry::Occupied(entry) => {
                 let ActionData::Haptic(action) = entry.get() else {

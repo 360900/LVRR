@@ -1044,15 +1044,15 @@ pub struct SubactionPaths {
 
 impl SubactionPaths {
     pub fn new(instance: &xr::Instance) -> Self {
-        let path = |device: InputDevice| {
+        let [left, right, gamepad] = InputDevice::ALL.map(|device| {
             instance
                 .string_to_path(device.path())
                 .expect("Failed to convert string to path")
-        };
+        });
         Self {
-            left: path(InputDevice::Hand(Hand::Left)),
-            right: path(InputDevice::Hand(Hand::Right)),
-            gamepad: path(InputDevice::Gamepad),
+            left,
+            right,
+            gamepad,
         }
     }
 
@@ -1062,6 +1062,11 @@ impl SubactionPaths {
             InputDevice::Hand(Hand::Right) => self.right,
             InputDevice::Gamepad => self.gamepad,
         }
+    }
+
+    /// In the order of [InputDevice::ALL].
+    pub fn all(&self) -> [xr::Path; 3] {
+        InputDevice::ALL.map(|device| self.get(device))
     }
 }
 

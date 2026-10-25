@@ -284,10 +284,27 @@ impl ScrollData {
 #[derive(Default)]
 pub(super) struct Vector2ActionData {
     pub bindings: Vec<Vector2BindingData>,
-    // Left, right, unrestricted. OpenVR deltas are relative to UpdateActionState,
+    // See [AnalogStates]. OpenVR deltas are relative to UpdateActionState,
     // so reads must neither consume deltas nor share history between subactions.
-    pub state: Mutex<[vr::InputAnalogActionData_t; 3]>,
+    pub state: Mutex<AnalogStates>,
     input_only: bool,
+}
+
+/// An analog action's state on the left hand, the right hand, the gamepad (the order of
+/// `SubactionPaths::all`) and unrestricted.
+pub(super) type AnalogStates = [vr::InputAnalogActionData_t; 4];
+
+/// The state of an analog action read without a device: the one `prefer` picks among the
+/// devices'. The first one wins ties.
+pub(super) fn unrestricted_analog(
+    devices: &[vr::InputAnalogActionData_t],
+    prefer: impl Fn(&vr::InputAnalogActionData_t, &vr::InputAnalogActionData_t) -> bool,
+) -> vr::InputAnalogActionData_t {
+    devices
+        .iter()
+        .copied()
+        .reduce(|best, state| if prefer(&state, &best) { state } else { best })
+        .unwrap_or_default()
 }
 
 impl Vector2ActionData {
@@ -300,12 +317,14 @@ impl Vector2ActionData {
         }
     }
 
+    /// `devices` are each device's subaction path, interaction profile and origin, in the order
+    /// of [AnalogStates].
     pub fn sync(
         &self,
         direct: &xr::Action<xr::Vector2f>,
         session: &xr::Session<xr::AnyGraphics>,
-        hands: [(xr::Path, xr::Path, vr::VRInputValueHandle_t); 2],
-        masked: [bool; 2],
+        devices: [(xr::Path, xr::Path, vr::VRInputValueHandle_t); 3],
+        masked: [bool; 3],
         constants: &[ScalarConstantBinding],
         update_time: impl Fn(bool, xr::Time) -> f32,
     ) {
@@ -324,8 +343,8 @@ impl Vector2ActionData {
                         > best.x * best.x + best.y * best.y)
         }
 
-        let mut next = [vr::InputAnalogActionData_t::default(); 3];
-        for (index, (hand, profile, origin)) in hands.into_iter().enumerate() {
+        let mut next = AnalogStates::default();
+        for (index, (hand, profile, origin)) in devices.into_iter().enumerate() {
             // By a higher priority action set.
             if masked[index] {
                 continue;
@@ -362,11 +381,7 @@ impl Vector2ActionData {
                 next[index] = constant;
             }
         }
-        next[2] = if prefer(&next[1], &next[0]) {
-            next[1]
-        } else {
-            next[0]
-        };
+        next[3] = unrestricted_analog(&next[..3], prefer);
 
         let mut previous = self.state.lock().unwrap();
         for (next, previous) in next.iter_mut().zip(previous.iter()) {
