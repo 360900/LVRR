@@ -1188,6 +1188,12 @@ impl TrackedDeviceList {
     }
 }
 
+/// The pose that legacy bindings chosen for the app give `device`, if another than its own.
+fn legacy_pose_type(session_data: &SessionData, device: &TrackedDevice) -> Option<BoundPoseType> {
+    let loaded = session_data.input_data.get_loaded_actions()?;
+    loaded.legacy.as_ref()?.pose_type(loaded, device)
+}
+
 impl<C: openxr_data::Compositor> Input<C> {
     pub fn get_poses(
         &self,
@@ -1208,7 +1214,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                         xr_time,
                         &session_data,
                         origin.unwrap_or(session_data.current_origin),
-                        None,
+                        legacy_pose_type(&session_data, device),
                     )
                 })
                 .unwrap_or_default();
@@ -1244,12 +1250,13 @@ impl<C: openxr_data::Compositor> Input<C> {
 
         let session_data = self.openxr.session_data.get();
         let devices = session_data.input_data.devices.read().unwrap();
+        let device = devices.get_device(index)?;
 
-        Some(devices.get_device(index)?.get_pose(
+        Some(device.get_pose(
             xr_time,
             &session_data,
             origin.unwrap_or(session_data.current_origin),
-            pose_type,
+            pose_type.or_else(|| legacy_pose_type(&session_data, device)),
         ))
     }
 

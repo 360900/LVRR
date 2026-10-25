@@ -1,6 +1,6 @@
 use super::{
-    ActionData, ActionKey, ActionSetKey, Input, PoseData, TrackedDevice, TrackedDeviceList,
-    WriteOnDrop,
+    ActionData, ActionKey, ActionSetKey, BoundPoseType, Input, PoseData, TrackedDevice,
+    TrackedDeviceList, WriteOnDrop,
 };
 use crate::{
     input::{
@@ -734,6 +734,32 @@ impl RemappedLegacy {
         devices
             .get_controller(hand)
             .is_some_and(|controller| self.profiles.contains(&controller.profile_path))
+    }
+
+    /// The pose the chosen bindings give `controller`, if they give it another than its own.
+    pub fn pose_type(
+        &self,
+        loaded: &ManifestLoadedActions,
+        controller: &TrackedDevice,
+    ) -> Option<BoundPoseType> {
+        let super::TrackedDeviceType::Controller { hand, .. } = controller.get_type() else {
+            return None;
+        };
+        if !self.profiles.contains(&controller.profile_path) {
+            return None;
+        }
+        let poses = loaded
+            .per_profile_pose_bindings
+            .get(&controller.profile_path)?;
+        self.keys(*hand, |output| matches!(output, LegacyOutput::Pose))
+            .find_map(|key| {
+                let pose = poses.get(key)?;
+                match hand {
+                    Hand::Left => pose.left,
+                    Hand::Right => pose.right,
+                }
+            })
+            .filter(|pose| !matches!(pose, BoundPoseType::Raw))
     }
 
     /// The controller state of `hand` from the legacy actions, after they were synced.
@@ -2107,6 +2133,42 @@ mod tests {
         f.input.legacy_haptic(2, 0, 3000);
         assert!(fakexr::take_haptic_feedback(left).is_empty());
         assert!(fakexr::take_haptic_feedback(fixed).is_empty());
+    }
+
+    #[test]
+    fn remapped_pose() {
+        use crate::input::BoundPoseType;
+        let f = remapped_fixture::<OculusTouch, OculusTouch>("legacy_custom");
+        let grip = xr::Posef {
+            position: xr::Vector3f {
+                x: 0.1,
+                y: 0.2,
+                z: 0.3,
+            },
+            ..xr::Posef::IDENTITY
+        };
+        for hand in [fakexr::UserPath::LeftHand, fakexr::UserPath::RightHand] {
+            fakexr::set_grip(f.raw_session(), hand, grip);
+        }
+        f.input.frame_start_update();
+        let time = xr::Time::from_nanos(1);
+        let pose = |index, ty| {
+            f.input
+                .get_device_pose(index, None, time, ty)
+                .unwrap()
+                .mDeviceToAbsoluteTracking
+                .m
+        };
+        // Left_Pose is bound to the tip, Right_Pose to the raw pose.
+        assert_eq!(pose(1, None), pose(1, Some(BoundPoseType::Tip)));
+        assert_ne!(pose(1, None), pose(1, Some(BoundPoseType::Raw)));
+        assert_eq!(pose(2, None), pose(2, Some(BoundPoseType::Raw)));
+        let mut poses = [vr::TrackedDevicePose_t::default(); 3];
+        f.input.get_poses(&mut poses, None, time);
+        assert_eq!(
+            poses[1].mDeviceToAbsoluteTracking.m,
+            pose(1, Some(BoundPoseType::Tip))
+        );
     }
 
     /// With mirror_actions, both hands drive /actions/legacy_mirrored and /actions/legacy is
