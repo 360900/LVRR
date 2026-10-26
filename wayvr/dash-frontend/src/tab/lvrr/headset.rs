@@ -149,6 +149,83 @@ fn toggle(get: fn(&Config) -> bool) -> Control {
 	Control::Toggle { get, set: |v| json!(v) }
 }
 
+const PRESET_ACTION_PREFIX: &str = "lvrr-preset;";
+
+/// Sets resolution, foveation, bitrate and codec at once
+struct Preset {
+	label: &'static str,
+	resolution_scale: f32,
+	foveation: f32,
+	bitrate_mbit: u32,
+}
+
+const PRESETS: [Preset; 5] = [
+	Preset {
+		label: "LVRR.HEADSET.PRESET_POTATO",
+		resolution_scale: 0.8,
+		foveation: 0.7,
+		bitrate_mbit: 30,
+	},
+	Preset {
+		label: "LVRR.HEADSET.PRESET_LOW",
+		resolution_scale: 1.0,
+		foveation: 0.6,
+		bitrate_mbit: 40,
+	},
+	Preset {
+		label: "LVRR.HEADSET.PRESET_MEDIUM",
+		resolution_scale: 1.2,
+		foveation: 0.5,
+		bitrate_mbit: 50,
+	},
+	Preset {
+		label: "LVRR.HEADSET.PRESET_HIGH",
+		resolution_scale: 1.4,
+		foveation: 0.4,
+		bitrate_mbit: 80,
+	},
+	Preset {
+		label: "LVRR.HEADSET.PRESET_ULTRA",
+		resolution_scale: 1.5,
+		foveation: 0.3,
+		bitrate_mbit: 120,
+	},
+];
+
+impl Preset {
+	/// As the headset stores it
+	fn values(&self, h: &HeadsetSettings) -> (f32, f32, u32) {
+		// eye tracking foveates more for the same look, as the headset's default does
+		let eye_gaze = h.capabilities.eye_gaze && h.config.eye_gaze;
+		let foveation = if eye_gaze {
+			(self.foveation + 0.2).min(0.8)
+		} else {
+			self.foveation
+		};
+		let bitrate = (self.bitrate_mbit * 1_000_000).min(h.config.max_bitrate_bps(&h.capabilities));
+		(self.resolution_scale, foveation, bitrate)
+	}
+
+	fn patch(&self, h: &HeadsetSettings) -> [(&'static str, Value); 4] {
+		let (resolution_scale, foveation, bitrate) = self.values(h);
+		[
+			("resolution_scale", json!(resolution_scale)),
+			("foveation", json!(foveation)),
+			("bitrate_bps", json!(bitrate)),
+			("codec", json!(Codec::Automatic.key())),
+		]
+	}
+
+	fn matches(&self, h: &HeadsetSettings) -> bool {
+		let (resolution_scale, foveation, bitrate) = self.values(h);
+		let close = |a: f32, b: f32| (a - b).abs() < 0.005;
+		close(h.config.resolution_scale, resolution_scale)
+			&& close(h.config.foveation, foveation)
+			&& h.config.bitrate_bps == bitrate
+			&& h.config.codec == Codec::Automatic
+	}
+}
+
 fn settings() -> Vec<Setting> {
 	use Section::*;
 	vec![
@@ -466,6 +543,8 @@ enum Task {
 		now: bool,
 	},
 	OpenMenu(context_menu::Position, Vec<context_menu::Cell>),
+	/// Index in PRESETS
+	Preset(usize),
 	RestartSession,
 }
 
@@ -529,6 +608,12 @@ impl<T: 'static> Tab<T> for TabLvrrHeadset<T> {
 					position,
 					blueprint: Blueprint::Cells(cells),
 				}),
+				Task::Preset(index) => {
+					if let Some(h) = frontend.interface.lvrr_state(data).and_then(|s| s.headset.clone()) {
+						self.pending.extend(PRESETS[index].patch(&h));
+						self.send(frontend);
+					}
+				}
 				Task::RestartSession => frontend.lvrr_confirm("LVRR.RESTART_SESSION_CONFIRM", LvrrRequest::RestartSession),
 			}
 		}
@@ -539,10 +624,16 @@ impl<T: 'static> Tab<T> for TabLvrrHeadset<T> {
 			self.send(frontend);
 		}
 
-		if let TickResult::Action(name) = self.context_menu.tick(&mut frontend.layout, &mut self.state)?
-			&& let Some((key, value)) = parse_action(&name)
-		{
-			self.tasks.push(Task::Edit { key, value, now: true });
+		if let TickResult::Action(name) = self.context_menu.tick(&mut frontend.layout, &mut self.state)? {
+			if let Some(index) = name
+				.strip_prefix(PRESET_ACTION_PREFIX)
+				.and_then(|i| i.parse::<usize>().ok())
+				.filter(|i| *i < PRESETS.len())
+			{
+				self.tasks.push(Task::Preset(index));
+			} else if let Some((key, value)) = parse_action(&name) {
+				self.tasks.push(Task::Edit { key, value, now: true });
+			}
 		}
 
 		// Show the headset's answer, unless the user is still moving a slider
@@ -682,6 +773,9 @@ impl<T: 'static> TabLvrrHeadset<T> {
 
 		let (title, icon) = self.section.title_icon();
 		let group = ui.group(parent, title, icon)?;
+		if self.section == Section::Video {
+			mount_presets(&mut ui, group, &h, &self.tasks)?;
+		}
 		for setting in settings().iter().filter(|s| s.section == self.section && (s.show)(&h)) {
 			mount(&mut ui, group, setting, &h, &self.tasks, &mut self.sliders)?;
 		}
@@ -692,6 +786,33 @@ impl<T: 'static> TabLvrrHeadset<T> {
 		self.widgets = Some(widgets);
 		Ok(())
 	}
+}
+
+fn mount_presets(ui: &mut Ui, parent: WidgetID, h: &HeadsetSettings, tasks: &Tasks<Task>) -> anyhow::Result<()> {
+	let row = ui.row(parent)?;
+	let current = PRESETS
+		.iter()
+		.find(|p| p.matches(h))
+		.map_or("LVRR.HEADSET.PRESET_CUSTOM", |p| p.label);
+	let cells = PRESETS
+		.iter()
+		.enumerate()
+		.map(|(i, p)| ui::menu_cell(format!("{PRESET_ACTION_PREFIX}{i}"), key(p.label)))
+		.collect();
+	let tasks = tasks.clone();
+	ui.dropdown(
+		row,
+		"LVRR.HEADSET.PRESET",
+		key(current),
+		cells,
+		move |position, cells| {
+			tasks.push(Task::OpenMenu(position, cells));
+		},
+	)?;
+	if !h.offline {
+		ui.badge(row, "LVRR.APPLIES_AFTER_RESTART", "tertiary")?;
+	}
+	Ok(())
 }
 
 fn mount(
