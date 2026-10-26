@@ -86,6 +86,7 @@ protected:
 	vk::Extent3D aligned_extent;
 	vk::VideoEncodeRateControlLayerInfoKHR rate_control_layer;
 	std::optional<vk::VideoEncodeRateControlInfoKHR> rate_control;
+	vk::VideoEncodeQualityLevelInfoKHR quality_level;
 
 	video_encoder_vulkan(wivrn::vk_bundle & vk,
 	                     const vk::VideoCapabilitiesKHR & video_caps,

@@ -225,6 +225,10 @@ wivrn::video_encoder_vulkan::video_encoder_vulkan(
 		rate_control.reset();
 	}
 
+	// LVRR: RADV's level 0 is the speed preset, 1 is balanced
+	if (vk.physical_device.getProperties().vendorID == 0x1002 and encode_caps.maxQualityLevels > 1)
+		quality_level.qualityLevel = 1;
+
 	constexpr uint32_t cb_min_size = 8;
 	uint32_t granWidth =
 	        std::max(video_caps.pictureAccessGranularity.width, encode_caps.encodeInputPictureGranularity.width);
@@ -526,8 +530,9 @@ void wivrn::video_encoder_vulkan::init(const vk::VideoCapabilitiesKHR & video_ca
 
 	// video session parameters
 	{
+		quality_level.pNext = session_params_next;
 		video_session_parameters = vk.device.createVideoSessionParametersKHR({
-		        .pNext = session_params_next,
+		        .pNext = quality_level.qualityLevel ? &quality_level : session_params_next,
 		        .videoSession = *video_session,
 		});
 	}
@@ -841,6 +846,12 @@ void wivrn::video_encoder_vulkan::present_image(vk::Image y_cbcr, vk::SemaphoreS
 		{
 			control_info.flags |= vk::VideoCodingControlFlagBitsKHR::eEncodeRateControl;
 			control_info.pNext = &rate_control.value();
+		}
+		if (quality_level.qualityLevel)
+		{
+			control_info.flags |= vk::VideoCodingControlFlagBitsKHR::eEncodeQualityLevel;
+			quality_level.pNext = control_info.pNext;
+			control_info.pNext = &quality_level;
 		}
 		video_cmd_buf.controlVideoCodingKHR(control_info);
 
