@@ -25,6 +25,11 @@
     <div id="${id}" flex_direction="column" gap="4" flex_grow="1" flex_shrink="1" />
   </template>
 
+  <!-- id -->
+  <template name="Stack">
+    <div id="${id}" flex_direction="column" align_items="center" gap="4" />
+  </template>
+
   <!-- text, translation, size, color -->
   <template name="Text">
     <label text="${text}" translation="${translation}" size="${size}" color="${color}" wrap="1" />

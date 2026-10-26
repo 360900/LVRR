@@ -44,6 +44,10 @@
       "LOADING": "Loading...",
       "ALL_GAMES": "All Steam games",
       "STARTING": "Starting",
+      "CONTROLLERS": "Controllers",
+      "CONTROLLERS_AUTO": "Auto",
+      "CONTROLLERS_TOUCH": "Touch",
+      "CONTROLLERS_INDEX": "Index",
       "REFRESH": "Refresh"
     },
     "RUNNING": {

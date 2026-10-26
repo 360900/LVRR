@@ -8,3 +8,4 @@ pub mod link;
 pub mod rebrand;
 pub mod server_config;
 pub mod state;
+pub mod xrizer_apps;

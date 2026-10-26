@@ -108,6 +108,11 @@ impl<'a> Ui<'a> {
 		self.container("Column", parent, |_| {})
 	}
 
+	/// A column as wide as its content, such as a game cover with its settings below
+	pub fn stack(&mut self, parent: WidgetID) -> anyhow::Result<WidgetID> {
+		self.container("Stack", parent, |_| {})
+	}
+
 	fn label(&mut self, template: &str, parent: WidgetID, text: Text, size: u32, color: &str) -> anyhow::Result<()> {
 		let mut params = TemplateParams::new();
 		text.insert(&mut params);
@@ -315,10 +320,23 @@ impl<'a> Ui<'a> {
 		cells: Vec<context_menu::Cell>,
 		on_open: impl Fn(context_menu::Position, Vec<context_menu::Cell>) + 'static,
 	) -> anyhow::Result<()> {
+		self.dropdown_sized(parent, translation, current, cells, 120, on_open)
+	}
+
+	/// A dropdown whose value takes at least `min_width`
+	pub fn dropdown_sized(
+		&mut self,
+		parent: WidgetID,
+		translation: &str,
+		current: Translation,
+		cells: Vec<context_menu::Cell>,
+		min_width: u32,
+		on_open: impl Fn(context_menu::Position, Vec<context_menu::Cell>) + 'static,
+	) -> anyhow::Result<()> {
 		let id = self.id();
 		let mut params = TemplateParams::new();
 		params.insert("translation", translation);
-		params.insert("min_width", "120");
+		params.insert_rc("min_width", min_width.to_string().into());
 		wgui_simple::mount_dropdown(wgui_simple::MountDropdownParams {
 			layout: self.layout,
 			parser_state: self.state,

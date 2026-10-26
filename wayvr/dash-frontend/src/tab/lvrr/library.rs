@@ -4,8 +4,18 @@
 
 use std::{collections::HashMap, marker::PhantomData, path::Path, rc::Rc};
 
-use lvrr_common::state::{LvrrRequest, VrApplication};
-use wgui::{layout::WidgetID, parser::ParserState, task::Tasks, widget::ConstructEssentials};
+use lvrr_common::{
+	state::{LvrrRequest, VrApplication},
+	xrizer_apps::{self, ControllerType},
+};
+use wgui::{
+	i18n::Translation,
+	layout::WidgetID,
+	parser::ParserState,
+	task::Tasks,
+	widget::ConstructEssentials,
+	windowing::context_menu::{self, Blueprint, ContextMenu, TickResult},
+};
 
 use crate::{
 	frontend::{Frontend, FrontendTask},
@@ -28,12 +38,17 @@ const POLL_MS: u32 = 500;
 /// Steam can take a while to update or start a game, after this the notice goes away
 const STARTING_TIMEOUT_MS: u32 = 180_000;
 
+/// Followed by the Steam app id and the index in `ControllerType::ALL`
+const CONTROLLER_ACTION_PREFIX: &str = "lvrr-controllers;";
+
 #[derive(Clone)]
 enum Task {
 	Request(LvrrRequest),
 	Frontend(FrontendTask),
 	SetCover(String, Rc<CoverArt>),
 	Start { id: String, name: String },
+	OpenMenu(context_menu::Position, Vec<context_menu::Cell>),
+	SetControllers(u64, ControllerType),
 }
 
 /// An app that was started and has no session yet
@@ -46,7 +61,6 @@ struct Starting {
 }
 
 pub struct TabLvrrLibrary<T> {
-	#[allow(dead_code)]
 	state: ParserState,
 	widgets: Option<ParserState>,
 	tasks: Tasks<Task>,
@@ -56,6 +70,7 @@ pub struct TabLvrrLibrary<T> {
 	cover_common: game_cover::ViewCommon,
 	covers: HashMap<String, game_cover::View>,
 	starting: Option<Starting>,
+	context_menu: ContextMenu,
 	marker: PhantomData<T>,
 }
 
@@ -88,7 +103,23 @@ impl<T: 'static> Tab<T> for TabLvrrLibrary<T> {
 						.push(FrontendTask::Lvrr(LvrrRequest::StartApplication(id)));
 					redraw = true;
 				}
+				Task::OpenMenu(position, cells) => self.context_menu.open(context_menu::OpenParams {
+					on_custom_attribs: None,
+					position,
+					blueprint: Blueprint::Cells(cells),
+				}),
+				Task::SetControllers(app_id, ty) => {
+					if let Err(e) = xrizer_apps::set_controller_type(app_id, ty) {
+						log::warn!("Could not save the controllers of {app_id}: {e:?}");
+					}
+					redraw = true;
+				}
 			}
+		}
+		if let TickResult::Action(name) = self.context_menu.tick(&mut frontend.layout, &mut self.state)?
+			&& let Some(task) = parse_controllers_action(&name)
+		{
+			self.tasks.push(task);
 		}
 		if let Some(starting) = &mut self.starting
 			&& time_ms.wrapping_sub(starting.polled_ms) >= POLL_MS
@@ -136,6 +167,7 @@ impl<T: 'static> TabLvrrLibrary<T> {
 			cover_common: game_cover::ViewCommon::new(globals),
 			covers: HashMap::new(),
 			starting: None,
+			context_menu: ContextMenu::default(),
 			marker: PhantomData,
 		})
 	}
@@ -199,10 +231,11 @@ impl<T: 'static> TabLvrrLibrary<T> {
 					let (tasks, id) = (self.tasks.clone(), app.id.clone());
 					Box::new(move |cover: CoverArt| tasks.push(Task::SetCover(id, Rc::new(cover))))
 				};
+				let stack = ui.stack(covers)?;
 				let view = game_cover::View::new(game_cover::Params {
 					ess: &mut ConstructEssentials {
 						layout: ui.layout,
-						parent: covers,
+						parent: stack,
 					},
 					executor: &frontend.executor,
 					manifest: &manifest,
@@ -218,6 +251,9 @@ impl<T: 'static> TabLvrrLibrary<T> {
 					Ok(())
 				}));
 				self.covers.insert(app.id.clone(), view);
+				if let Some(app_id) = app.steam_app_id() {
+					self.mount_controllers(&mut ui, stack, app_id)?;
+				}
 			}
 		}
 
@@ -247,6 +283,43 @@ impl<T: 'static> TabLvrrLibrary<T> {
 		self.widgets = Some(widgets);
 		Ok(())
 	}
+
+	/// The controllers the game sees, through xrizer
+	fn mount_controllers(&self, ui: &mut Ui, parent: WidgetID, app_id: u64) -> anyhow::Result<()> {
+		let cells = ControllerType::ALL
+			.iter()
+			.enumerate()
+			.map(|(i, ty)| {
+				ui::menu_cell(
+					format!("{CONTROLLER_ACTION_PREFIX}{app_id};{i}"),
+					controllers_label(*ty),
+				)
+			})
+			.collect();
+		let tasks = self.tasks.clone();
+		ui.dropdown_sized(
+			parent,
+			"LVRR.LIBRARY.CONTROLLERS",
+			controllers_label(xrizer_apps::controller_type(app_id)),
+			cells,
+			60,
+			move |position, cells| tasks.push(Task::OpenMenu(position, cells)),
+		)
+	}
+}
+
+fn controllers_label(ty: ControllerType) -> Translation {
+	Translation::from_translation_key(match ty {
+		ControllerType::Auto => "LVRR.LIBRARY.CONTROLLERS_AUTO",
+		ControllerType::Touch => "LVRR.LIBRARY.CONTROLLERS_TOUCH",
+		ControllerType::Index => "LVRR.LIBRARY.CONTROLLERS_INDEX",
+	})
+}
+
+fn parse_controllers_action(name: &str) -> Option<Task> {
+	let (app_id, index) = name.strip_prefix(CONTROLLER_ACTION_PREFIX)?.split_once(';')?;
+	let ty = *ControllerType::ALL.get(index.parse::<usize>().ok()?)?;
+	Some(Task::SetControllers(app_id.parse().ok()?, ty))
 }
 
 /// VR sessions other than overlays such as the dashboard
