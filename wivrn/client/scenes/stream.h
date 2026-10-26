@@ -207,6 +207,8 @@ private:
 	thread_safe<std::vector<lvrr::set_headset_settings>> lvrr_requests;
 	std::atomic<bool> lvrr_report_needed = false;
 	std::atomic<bool> reconnect_expected_ = false;
+	std::atomic<bool> lvrr_end_reported = false; // why the connection ends is in stream_error_queue
+	void lvrr_connection_lost(const std::exception &);
 	std::atomic<uint8_t> lvrr_permission_pending = 0;
 	std::atomic<uint8_t> lvrr_permission_denied = 0;
 	lvrr::headset_config lvrr_session_config; // connection-time settings of this stream
@@ -267,6 +269,7 @@ public:
 	// LVRR, see stream_lvrr.cpp
 	void operator()(lvrr::set_headset_settings &&);
 	void operator()(lvrr::expect_reconnect &&);
+	void operator()(lvrr::server_stopping &&);
 
 	// Applies settings sent by the LVRR dashboard, on the render thread
 	void lvrr_update();

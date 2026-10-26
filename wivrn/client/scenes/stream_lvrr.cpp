@@ -20,6 +20,7 @@
 #include "application.h"
 #include "configuration.h"
 #include "decoder/decoder.h"
+#include "utils/i18n.h"
 #include <algorithm>
 #include <cmath>
 #include <ranges>
@@ -506,4 +507,29 @@ void scenes::stream::operator()(lvrr::set_headset_settings && request)
 void scenes::stream::operator()(lvrr::expect_reconnect &&)
 {
 	reconnect_expected_ = true;
+}
+
+void scenes::stream::operator()(lvrr::server_stopping && packet)
+{
+	if (lvrr_end_reported.exchange(true))
+		return;
+
+	switch (packet.reason)
+	{
+		case lvrr::server_stopping::reason_t::stopped:
+			stream_error_queue.lock()->emplace(_("LVRR was stopped on the PC."));
+			break;
+		case lvrr::server_stopping::reason_t::disconnected:
+			stream_error_queue.lock()->emplace(_("The PC disconnected the headset."));
+			break;
+	}
+}
+
+// Called by the network and tracking threads, the server sent no reason
+void scenes::stream::lvrr_connection_lost(const std::exception & e)
+{
+	spdlog::info("Connection to the server lost: {}", e.what());
+	if (state_ != state::shutdown and not reconnect_expected_ and not lvrr_end_reported.exchange(true))
+		stream_error_queue.lock()->emplace(_("The connection to the PC ended unexpectedly. If LVRR crashed, run \"lvrr logs\" on the PC for details."));
+	exit();
 }

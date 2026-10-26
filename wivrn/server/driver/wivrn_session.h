@@ -195,6 +195,7 @@ public:
 	// LVRR, see wivrn_session_lvrr.cpp
 	void operator()(lvrr::headset_settings &&);
 	void operator()(lvrr::headset_stats &&);
+	void send_stopping(lvrr::server_stopping::reason_t);
 
 	void operator()(to_monado::stop &&);
 	void operator()(to_monado::disconnect &&);

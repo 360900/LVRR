@@ -998,11 +998,13 @@ void wivrn_session::operator()(audio_data && data)
 
 void wivrn_session::operator()(to_monado::stop &&)
 {
+	send_stopping(lvrr::server_stopping::reason_t::stopped);
 	request_stop();
 }
 
 void wivrn_session::operator()(to_monado::disconnect &&)
 {
+	send_stopping(lvrr::server_stopping::reason_t::disconnected);
 	connection->shutdown();
 	throw std::runtime_error("Disconnecting as requested by main loop");
 }
@@ -1175,12 +1177,13 @@ void wivrn_session::quit_if_no_client()
 	if (count == 0)
 	{
 		U_LOG_I("No OpenXR client connected, exiting");
+		send_stopping(lvrr::server_stopping::reason_t::stopped);
 		request_stop();
 	}
 	// LVRR: the dashboard is always a client, so a lost headset gets a bounded wait
 	else if (reconnect_deadline and os_monotonic_get_ns() > reconnect_deadline)
 	{
-		U_LOG_I("No headset came back in %ld minutes, exiting", long(reconnect_wait_ns / (60 * 1'000'000'000)));
+		U_LOG_I("No headset came back in %ld minutes, exiting", long(reconnect_wait_ns / (60 * 1'000'000'000LL)));
 		request_stop();
 	}
 }

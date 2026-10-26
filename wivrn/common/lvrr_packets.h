@@ -149,6 +149,18 @@ struct expect_reconnect
 	uint32_t timeout_ms;
 };
 
+// The server closes the connection on purpose and does not expect the headset back.
+struct server_stopping
+{
+	enum class reason_t : uint8_t
+	{
+		stopped,      // the server quits
+		disconnected, // the PC disconnected the headset
+	};
+
+	reason_t reason;
+};
+
 // Sent by the headset about once per second while streaming.
 struct headset_stats
 {

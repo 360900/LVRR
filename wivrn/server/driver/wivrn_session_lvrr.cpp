@@ -34,6 +34,20 @@ void wivrn_session::operator()(lvrr::headset_stats && stats)
 	send_to_main(std::move(stats));
 }
 
+// Lets the headset tell a deliberate stop from a crash.
+void wivrn_session::send_stopping(lvrr::server_stopping::reason_t reason)
+{
+	try
+	{
+		if (connection)
+			connection->send_control(lvrr::server_stopping{.reason = reason});
+	}
+	catch (std::exception & e)
+	{
+		U_LOG_D("Could not tell the headset the server stops: %s", e.what());
+	}
+}
+
 void wivrn_session::operator()(lvrr::set_headset_settings && request)
 {
 	send_control(std::move(request));

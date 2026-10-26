@@ -641,8 +641,7 @@ void scenes::stream::tracking()
 		}
 		catch (std::exception & e)
 		{
-			spdlog::info("Exception in tracking thread, exiting: {}", e.what());
-			exit();
+			lvrr_connection_lost(e);
 		}
 	}
 }
