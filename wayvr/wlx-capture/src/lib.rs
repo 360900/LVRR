@@ -18,6 +18,9 @@ pub mod wlr_screencopy;
 #[cfg(feature = "pipewire")]
 pub mod pipewire;
 
+#[cfg(feature = "pipewire")]
+pub mod kde_screencast;
+
 #[cfg(feature = "xshm")]
 pub mod xshm;
 

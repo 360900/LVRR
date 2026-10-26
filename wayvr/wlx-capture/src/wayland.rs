@@ -1,6 +1,8 @@
 use std::{
     collections::VecDeque,
+    os::fd::{AsFd, AsRawFd},
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use idmap::IdMap;
@@ -30,6 +32,10 @@ use wayland_client::{
 };
 use wayland_protocols::wp::linux_dmabuf::zv1::client::{
     zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1, zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
+};
+use wayland_protocols_plasma::screencast::v1::client::{
+    zkde_screencast_stream_unstable_v1::{self, ZkdeScreencastStreamUnstableV1},
+    zkde_screencast_unstable_v1::ZkdeScreencastUnstableV1,
 };
 
 use crate::frame;
@@ -63,6 +69,8 @@ pub struct WlxClient {
     pub xdg_output_mgr: ZxdgOutputManagerV1,
     pub maybe_wlr_dmabuf_mgr: Option<ZwlrExportDmabufManagerV1>,
     pub maybe_wlr_screencopy_mgr: Option<ZwlrScreencopyManagerV1>,
+    /// LVRR: KWin streams an output over PipeWire on request, without the portal's picker
+    pub maybe_kde_screencast_mgr: Option<ZkdeScreencastUnstableV1>,
     pub maybe_zwp_linux_dmabuf: Option<ZwpLinuxDmabufV1>,
     pub wl_seat: WlSeat,
     pub wl_shm: WlShm,
@@ -95,6 +103,7 @@ impl WlxClient {
             wl_shm: globals.bind(&qh, 1..=1, ()).expect(WlShm::interface().name),
             maybe_wlr_dmabuf_mgr: globals.bind(&qh, 1..=1, ()).ok(),
             maybe_wlr_screencopy_mgr: globals.bind(&qh, 3..=3, ()).ok(),
+            maybe_kde_screencast_mgr: globals.bind(&qh, 1..=4, ()).ok(),
             maybe_zwp_linux_dmabuf: globals.bind(&qh, 4..=4, ()).ok(),
             outputs: IdMap::new(),
             queue: Arc::new(Mutex::new(queue)),
@@ -166,6 +175,24 @@ impl WlxClient {
     pub fn dispatch(&mut self) {
         if let Ok(mut queue_mut) = self.queue.clone().lock() {
             let _ = queue_mut.blocking_dispatch(self);
+        }
+    }
+
+    /// LVRR: wait until the compositor sent something, or the deadline passed.
+    pub fn wait_readable(&self, deadline: Instant) {
+        let timeout = deadline.saturating_duration_since(Instant::now());
+        let mut fds = [libc::pollfd {
+            fd: self.connection.as_fd().as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        // SAFETY: fds is a valid array of one pollfd for the duration of the call
+        unsafe {
+            libc::poll(
+                fds.as_mut_ptr(),
+                1,
+                timeout.as_millis().min(i32::MAX as u128) as i32,
+            );
         }
     }
 
@@ -407,6 +434,48 @@ impl Dispatch<ZwlrExportDmabufManagerV1, ()> for WlxClient {
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
+    }
+}
+
+/// LVRR: the answer to a KDE screencast request: the PipeWire node, or why there is none
+pub type KdeStreamResult = Arc<Mutex<Option<Result<u32, String>>>>;
+
+impl Dispatch<ZkdeScreencastUnstableV1, ()> for WlxClient {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ZkdeScreencastUnstableV1,
+        _event: <ZkdeScreencastUnstableV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<ZkdeScreencastStreamUnstableV1, KdeStreamResult> for WlxClient {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ZkdeScreencastStreamUnstableV1,
+        event: <ZkdeScreencastStreamUnstableV1 as Proxy>::Event,
+        data: &KdeStreamResult,
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        let Ok(mut result) = data.lock() else {
+            return;
+        };
+        match event {
+            zkde_screencast_stream_unstable_v1::Event::Created { node } => {
+                *result = Some(Ok(node));
+            }
+            zkde_screencast_stream_unstable_v1::Event::Failed { error } => {
+                *result = Some(Err(error));
+            }
+            zkde_screencast_stream_unstable_v1::Event::Closed if result.is_none() => {
+                *result = Some(Err("closed by the compositor".into()));
+            }
+            _ => {}
+        }
     }
 }
 

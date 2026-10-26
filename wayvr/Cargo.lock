@@ -7033,6 +7033,7 @@ dependencies = [
  "smithay-client-toolkit 0.20.0",
  "wayland-client",
  "wayland-protocols",
+ "wayland-protocols-plasma",
 ]
 
 [[package]]

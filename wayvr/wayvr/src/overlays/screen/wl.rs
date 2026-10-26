@@ -2,6 +2,7 @@ use glam::{DVec2, vec2};
 use wgui::log::LogErr;
 use wlx_capture::{
     frame::Transform,
+    kde_screencast::KdeScreencastCapture,
     wayland::{WlxClient, WlxOutput},
     wlr_screencopy::WlrScreencopyCapture,
 };
@@ -26,11 +27,25 @@ impl ScreenBackend {
             capture,
         ))
     }
+
+    /// LVRR: KWin's own screencast, a PipeWire stream of the output without the portal's picker
+    pub fn new_kde_screencast(output: &WlxOutput, app: &AppState) -> Option<Self> {
+        let client = Box::new(WlxClient::new()?);
+        // the macro names the capture in each of its branches, the frame type differs
+        let capture = new_wlx_capture!(app, KdeScreencastCapture::new(client, output.id, true)?);
+        Some(Self::new_raw(
+            output.name.clone(),
+            app.feats.xr_backend,
+            CaptureType::PipeWire,
+            capture,
+        ))
+    }
 }
 
 pub fn create_screen_renderer_wl(
     output: &WlxOutput,
     has_wlr_screencopy: bool,
+    has_kde_screencast: bool,
     app: &mut AppState,
 ) -> anyhow::Result<Box<dyn OverlayBackend>> {
     if matches!(
@@ -40,6 +55,19 @@ pub fn create_screen_renderer_wl(
         && let Some(mut backend) = ScreenBackend::new_wlr_screencopy(output, app)
     {
         log::info!("{}: Using ScreenCopy capture", output.name);
+        backend.logical_pos = vec2(output.logical_pos.0 as f32, output.logical_pos.1 as f32);
+        backend.logical_size = vec2(output.logical_size.0 as f32, output.logical_size.1 as f32);
+        backend.apply_mouse_transform_with_override(Transform::Undefined);
+        return Ok(Box::new(backend));
+    }
+
+    if matches!(
+        app.session.config.capture_method,
+        CaptureMethod::PipeWire | CaptureMethod::Auto
+    ) && has_kde_screencast
+        && let Some(mut backend) = ScreenBackend::new_kde_screencast(output, app)
+    {
+        log::info!("{}: Using KDE screencast capture", output.name);
         backend.logical_pos = vec2(output.logical_pos.0 as f32, output.logical_pos.1 as f32);
         backend.logical_size = vec2(output.logical_size.0 as f32, output.logical_size.1 as f32);
         backend.apply_mouse_transform_with_override(Transform::Undefined);
@@ -72,6 +100,7 @@ pub fn create_screens_wayland(
 ) -> anyhow::Result<ScreenCreateData> {
     let mut screens = vec![];
     let has_wlr_screencopy = wl.maybe_wlr_screencopy_mgr.is_some();
+    let has_kde_screencast = wl.maybe_kde_screencast_mgr.is_some();
 
     for (id, output) in &wl.outputs {
         if app.screens.iter().any(|s| s.name == output.name) {
@@ -86,7 +115,8 @@ pub fn create_screens_wayland(
             output.logical_pos,
         );
 
-        let backend = create_screen_renderer_wl(output, has_wlr_screencopy, app)?;
+        let backend =
+            create_screen_renderer_wl(output, has_wlr_screencopy, has_kde_screencast, app)?;
         let window_config = create_screen_from_backend(
             output.name.clone(),
             output.transform,

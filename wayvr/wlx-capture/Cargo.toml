@@ -42,6 +42,7 @@ rxscreen = {
   optional = true
 }
 smithay-client-toolkit = { version = "0.20.0", optional = true }
+wayland-protocols-plasma = { version = "0.3.12", features = ["client"], optional = true }
 
 [features]
 default = ["pipewire", "wayland"]
@@ -51,6 +52,7 @@ wayland = [
   "dep:smithay-client-toolkit",
   "dep:wayland-client",
   "dep:wayland-protocols",
+  "dep:wayland-protocols-plasma",
 ]
 wlr = ["wayland"]
 xshm = ["dep:rxscreen"]
