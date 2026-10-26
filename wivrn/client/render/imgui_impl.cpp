@@ -1061,8 +1061,9 @@ bool imgui_context::draw_data_changed(const ImDrawData * draw_data)
 		for (const ImDrawCmd & cmd: list->CmdBuffer)
 		{
 			mix(&cmd.ClipRect, sizeof(cmd.ClipRect));
-			ImTextureID tex = cmd.GetTexID();
-			mix(&tex, sizeof(tex));
+			// not GetTexID(): it asserts on textures the backend has not uploaded yet
+			mix(&cmd.TexRef._TexData, sizeof(cmd.TexRef._TexData));
+			mix(&cmd.TexRef._TexID, sizeof(cmd.TexRef._TexID));
 			mix(&cmd.VtxOffset, sizeof(cmd.VtxOffset));
 			mix(&cmd.IdxOffset, sizeof(cmd.IdxOffset));
 			mix(&cmd.ElemCount, sizeof(cmd.ElemCount));
