@@ -4,7 +4,7 @@ Upstreams merged into LVRR, and LVRR's own changes to them.
 
 ## Upstreams
 
-Merged as git subtrees without `--squash`, which keeps upstream history and authors. `.github/scripts/upstream-watch.py` reports unmerged upstream commits every Monday.
+Merged as git subtrees without `--squash`, which keeps upstream history and authors. `.github/scripts/upstream-watch.py` reports unmerged upstream commits every day.
 
 | Name | Repo | Branch | Prefix | Local edits |
 |------|------|--------|--------|-------------|
