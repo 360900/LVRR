@@ -452,8 +452,12 @@ impl OverlayMan {
                 }
             };
             let mut layer = OverlayLayer::from(layer);
-            if let Some(alpha) = overlay.alpha {
-                layer.set_alpha(alpha, premultiplied);
+            if overlay.alpha.is_some() || overlay.color.is_some() {
+                layer.set_color_scale(
+                    overlay.color.unwrap_or([1.0; 3]),
+                    overlay.alpha.unwrap_or(1.0),
+                    premultiplied,
+                );
             }
             layers.push((overlay.z_order, layer));
         }
@@ -573,27 +577,22 @@ impl<G: xr::Graphics> Drop for OverlayLayer<'_, G> {
 }
 
 impl<G: xr::Graphics> OverlayLayer<'_, G> {
-    fn set_alpha(&mut self, alpha: f32, premultiplied: bool) {
+    fn set_color_scale(&mut self, color: [f32; 3], alpha: f32, premultiplied: bool) {
         // only one instance is stored, so this would cause segfault due to UAF
         debug_assert!(
             self.color_bias_khr.is_none(),
-            "attempted to set_alpha on the same CompositorLayer twice!"
+            "attempted to set_color_scale on the same CompositorLayer twice!"
         );
 
         // Monado scales the color as submitted, without unpremultiplying it first, so
         // premultiplied colors have to be scaled along with the alpha.
-        let rgb = if premultiplied { alpha } else { 1.0 };
+        let [r, g, b] = color.map(|c| if premultiplied { c * alpha } else { c });
         self.color_bias_khr = {
             let payload = Box::new(xr::sys::CompositionLayerColorScaleBiasKHR {
                 ty: xr::StructureType::COMPOSITION_LAYER_COLOR_SCALE_BIAS_KHR,
                 next: std::ptr::null(),
                 color_bias: Default::default(),
-                color_scale: xr::Color4f {
-                    r: rgb,
-                    g: rgb,
-                    b: rgb,
-                    a: alpha,
-                },
+                color_scale: xr::Color4f { r, g, b, a: alpha },
             });
 
             let payload = NonNull::from(Box::leak(payload));
@@ -847,6 +846,8 @@ struct Overlay {
     name: CString,
     /// Only allowed to be Some if KHR_composition_layer_color_scale_bias is active
     alpha: Option<f32>,
+    /// From SetOverlayColor, with the same rule as `alpha`
+    color: Option<[f32; 3]>,
     width: f32,
     /// Scale factors of the transform matrix.
     /// Applied to the quad size like OpenComposite does, so games that encode
@@ -871,6 +872,7 @@ impl Overlay {
             key,
             name,
             alpha: None,
+            color: None,
             width: 1.0,
             scale: (1.0, 1.0),
             visible: false,
@@ -2227,22 +2229,46 @@ impl vr::IVROverlay028_Interface for OverlayMan {
 
     fn GetOverlayColor(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: *mut f32,
-        _: *mut f32,
-        _: *mut f32,
+        handle: vr::VROverlayHandle_t,
+        red: *mut f32,
+        green: *mut f32,
+        blue: *mut f32,
     ) -> vr::EVROverlayError {
-        crate::warn_unimplemented!("GetOverlayColor");
-        vr::EVROverlayError::RequestFailed
+        get_overlay!(self, handle, overlay);
+        if red.is_null() || green.is_null() || blue.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        let [r, g, b] = overlay.color.unwrap_or([1.0; 3]);
+        unsafe {
+            *red = r;
+            *green = g;
+            *blue = b;
+        }
+        vr::EVROverlayError::None
     }
     fn SetOverlayColor(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: f32,
-        _: f32,
-        _: f32,
+        handle: vr::VROverlayHandle_t,
+        red: f32,
+        green: f32,
+        blue: f32,
     ) -> vr::EVROverlayError {
-        crate::warn_unimplemented!("SetOverlayColor");
+        get_overlay!(self, handle, mut overlay);
+        if !self
+            .openxr
+            .enabled_extensions
+            .khr_composition_layer_color_scale_bias
+        {
+            crate::warn_once!(
+                "Cannot SetOverlayColor on {:?}: Runtime does not support KHR_composition_layer_color_scale_bias",
+                overlay.name
+            );
+            return vr::EVROverlayError::None;
+        }
+
+        let color = [red, green, blue];
+        debug!("setting overlay {:?} color to {color:?}", overlay.name);
+        overlay.color = (color != [1.0; 3]).then_some(color);
         vr::EVROverlayError::None
     }
     fn GetOverlayFlags(
@@ -3319,6 +3345,41 @@ mod tests {
         set_flag(OverlayFlags::IsPremultiplied, false);
         set_flag(OverlayFlags::IgnoreTextureAlpha, true);
         assert_eq!(layer().flags(), Flags::UNPREMULTIPLIED_ALPHA);
+    }
+
+    #[test]
+    fn overlay_color_tints_layer() {
+        let f = RealSessionFixture::with_extensions(|e| {
+            e.khr_composition_layer_color_scale_bias = true
+        });
+        let handle = f.textured_overlay(c"key");
+        let layer = || f.layers(false).pop().unwrap();
+        assert_eq!(layer().color_scale(), None);
+
+        assert_eq!(
+            f.man.SetOverlayColor(handle, 1.0, 0.5, 0.25),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(layer().color_scale(), Some([1.0, 0.5, 0.25, 1.0]));
+        let mut color = [0.0; 3];
+        let [r, g, b] = color.each_mut();
+        assert_eq!(
+            f.man.GetOverlayColor(handle, r, g, b),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(color, [1.0, 0.5, 0.25]);
+
+        // Premultiplied colors get the alpha on top.
+        assert_eq!(
+            f.man.SetOverlayAlpha(handle, 0.5),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(
+            f.man
+                .SetOverlayFlag(handle, vr::VROverlayFlags::IsPremultiplied, true),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(layer().color_scale(), Some([0.5, 0.25, 0.125, 0.5]));
     }
 
     #[test]
