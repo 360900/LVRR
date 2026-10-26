@@ -2,7 +2,7 @@
 
 Upstream PRs integrated into xrizer-edge (personal fork of Supreeeme/xrizer) and the fork's own changes.
 
-Baseline: upstream `main` at `63fc7eb` (2026-10-14). Merge commits preserve original authors.
+Baseline: upstream `main` at `0519ded` (2026-10-20). Merge commits preserve original authors.
 
 Status: `pending` | `merged` | `superseded-by-<n>` | `blocked` | `dropped` | `revived`
 
