@@ -225,3 +225,15 @@ pub fn load_xr_input_profiles() -> Vec<OpenXrInputProfile> {
 
 	profiles
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	// the file is parsed with a panic at startup, so a typo must fail here first
+	#[test]
+	fn default_profiles_parse() {
+		let profiles: Vec<OpenXrInputProfile> = serde_json5::from_str(DEFAULT_XR_INPUT_PROFILES).unwrap();
+		assert!(profiles.iter().any(|p| p.profile == "/interaction_profiles/ext/hand_interaction_ext"));
+	}
+}
