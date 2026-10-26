@@ -854,6 +854,13 @@ void wivrn_session::operator()(from_headset::session_state_changed && event)
 			visible = true;
 			focused = true;
 			break;
+		case XR_SESSION_STATE_EXITING:
+			// LVRR: the user quit the headset app, the session ends with it; the dashboard
+			// always keeps an OpenXR client around, so it would otherwise wait forever
+			U_LOG_I("Headset app exiting, ending the session");
+			update_client_states(false, false);
+			request_stop();
+			return;
 		default:
 			visible = false;
 			focused = false;
@@ -1170,6 +1177,12 @@ void wivrn_session::quit_if_no_client()
 		U_LOG_I("No OpenXR client connected, exiting");
 		request_stop();
 	}
+	// LVRR: the dashboard is always a client, so a lost headset gets a bounded wait
+	else if (reconnect_deadline and os_monotonic_get_ns() > reconnect_deadline)
+	{
+		U_LOG_I("No headset came back in %ld minutes, exiting", long(reconnect_wait_ns / (60 * 1'000'000'000)));
+		request_stop();
+	}
 }
 
 static bool is_audio_changed(const from_headset::headset_info_packet & prev_info, const from_headset::headset_info_packet & info)
@@ -1259,6 +1272,7 @@ void wivrn_session::reconnect(std::stop_token stop)
 {
 	assert(mnd_ipc_server);
 	U_LOG_I("Waiting for new connection");
+	reconnect_deadline = os_monotonic_get_ns() + reconnect_wait_ns;
 
 	while (not stop.stop_requested())
 	{
@@ -1277,6 +1291,7 @@ void wivrn_session::reconnect(std::stop_token stop)
 
 			connection->reset(stop, std::move(*tcp), [this]() { quit_if_no_client(); });
 			*net_exception.lock() = nullptr;
+			reconnect_deadline = 0;
 
 			// validate if headset is compatible with the current session
 

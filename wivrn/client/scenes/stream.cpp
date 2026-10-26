@@ -1280,6 +1280,19 @@ void scenes::stream::render(const XrFrameState & frame_state)
 
 void scenes::stream::exit()
 {
+	// LVRR: a deliberate exit tells the PC, which ends the session instead of waiting
+	// for the headset to come back
+	if (state_ != state::shutdown and network_session)
+	{
+		try
+		{
+			network_session->send_control(from_headset::session_state_changed{.state = XR_SESSION_STATE_EXITING});
+		}
+		catch (std::exception & e)
+		{
+			spdlog::info("Could not tell the server we are leaving: {}", e.what());
+		}
+	}
 	state_ = state::shutdown;
 }
 

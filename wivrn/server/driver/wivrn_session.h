@@ -136,6 +136,9 @@ public:
 
 	void request_stop();
 	void quit_if_no_client();
+	// LVRR: how long a session waits for a lost headset, see quit_if_no_client
+	static constexpr int64_t reconnect_wait_ns = 5 * 60 * 1'000'000'000LL;
+	int64_t reconnect_deadline = 0;
 
 	clock_offset get_offset();
 	bool connected();
