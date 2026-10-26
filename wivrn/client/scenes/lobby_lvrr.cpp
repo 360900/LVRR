@@ -55,6 +55,8 @@ const char * const autoconnect_stamp = "lvrr-autoconnect";
 const char * const microphone_stamp = "lvrr-microphone";
 } // namespace
 
+// Written once hand tracking was turned on, so turning it off later sticks
+const char * const hand_tracking_stamp = "lvrr-hand-tracking";
 void scenes::lobby::lvrr_focused()
 {
 	if constexpr (lvrr::stock_ui)
@@ -82,6 +84,14 @@ void scenes::lobby::lvrr_focused()
 	}
 }
 
+
+	// Hands work out of the box too, in the lobby and in the dashboard
+	const auto hand_stamp = application::get_config_path() / hand_tracking_stamp;
+	if (system.hand_tracking_supported() and not std::filesystem::exists(hand_stamp))
+	{
+		std::ofstream{hand_stamp};
+		config.set_feature(feature::hand_tracking, true);
+	}
 void scenes::lobby::lvrr_connected()
 {
 	if constexpr (lvrr::stock_ui)
