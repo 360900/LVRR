@@ -16,17 +16,15 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
    - PSVR2 Sense: `XR_MNDX_psvr2_interaction` is a preview in Monado main only, WiVRn builds without it; works as Touch today
    - Cosmos registered device type, serials and render model names unverified; Focus 3 tracking system may be `vive_eyes` like the Cosmos; `vive_tracker_*` default bindings still ignored (trackers: 21)
    - gamepad has no tracked device or binding variant; untested on a headset
-3. Binding sources (S)
-   - legacy (low priority): fixed mappings match SteamVR's per-controller defaults; tracker, `generic`, `simulate_rendermodel` and `simulate_hmd` legacy bindings ignored
-4. Frame timing (S)
+3. Frame timing (S)
    - `XR_META_performance_metrics` unused (no Linux runtime has it)
-5. Haptics (S)
+4. Haptics (S)
    - force_sensor mode haptic not played (Alyx zeroes it, so SteamVR likely has one)
    - dpad ticks only on Index trackpads; unverified whether SteamVR ticks on joystick dpads
-6. Origin names (S)
+5. Origin names (S)
    - Focus 3 and Cosmos controller names are guesses (drivers not public)
    - several native bindings on one hand report the first, as OpenXR merges them; skeleton actions report the hand
-7. Color space (S)
+6. Color space (S)
    - Outer Wilds (NomaiVR) quirk rests on one report (#441), needs a headset check
    - D3D11 `R16G16B16A16_TYPELESS` arrives through Proton as UNORM, wrong if rendered as float
 
@@ -106,6 +104,7 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
 23. Legacy input without chosen bindings (S)
     - only six buttons; no DPad or System
     - only the main axis on controllers with a stick and a trackpad (Index, WMR)
+    - fixed mappings instead of SteamVR's per-controller default files (they match); tracker, `generic`, `simulate_rendermodel` and `simulate_hmd` legacy bindings ignored
 24. Dominant hand (S-M)
     - stored, bindings never mirrored; `supports_dominant_hand_setting` not parsed
 25. Compositor (S-M)
