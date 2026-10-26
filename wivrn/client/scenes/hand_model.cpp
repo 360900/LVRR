@@ -112,15 +112,19 @@ static const vk::VertexInputAttributeDescription & find_hand_mesh_fb_attribute(c
 	throw std::runtime_error("Missing hand mesh FB vertex attribute");
 }
 
-static std::shared_ptr<renderer::material> create_hand_mesh_fb_material(scene & scene, XrHandEXT hand)
+// LVRR: a translucent hand with a bright rim instead of a grey solid one, see hand.frag
+static std::shared_ptr<renderer::material> create_hand_material(scene & scene, XrHandEXT hand)
 {
 	return scene.create_material([hand](renderer::material & material) {
-		material.staging.base_color_factor = {0.5f, 0.5f, 0.5f, 1.0f};
+		material.staging.base_color_factor = {0.62f, 0.74f, 0.84f, 0.9f};  // fill, alpha scales the whole hand
+		material.staging.base_emissive_factor = {0.9f, 0.97f, 1.0f, 1.0f}; // rim
 		material.staging.metallic_factor = 0.0f;
-		material.staging.roughness_factor = 0.5527864f;
-		material.name = hand == XR_HAND_LEFT_EXT ? "left-hand-mesh-material" : "right-hand-mesh-material";
+		material.staging.roughness_factor = 1.0f;
+		material.name = hand == XR_HAND_LEFT_EXT ? "left-hand-material" : "right-hand-material";
+		material.fragment_shader = "hand.frag";
 		material.double_sided = false;
-		material.blend_enable = false;
+		material.blend_enable = true;
+		material.depth_write_enable = false;
 	});
 }
 
@@ -249,6 +253,20 @@ void hand_model::add_hand(scene & scene,
 
 	node.name = gltf_path.stem();
 
+	// every mesh under the hand root gets the translucent material
+	auto material = create_hand_material(scene, hand);
+	for (auto && [e, n]: scene.world.view<components::node>().each())
+	{
+		if (not n.mesh)
+			continue;
+		bool under_hand = e == entity;
+		for (auto p = n.parent; p != entt::null and not under_hand; p = scene.world.get<components::node>(p).parent)
+			under_hand = p == entity;
+		if (under_hand)
+			for (auto & primitive: n.mesh->primitives)
+				primitive.material_ = material;
+	}
+
 	for (auto [joint, name]: joints)
 	{
 		entt::entity joint_entity = find_node_by_name(scene.world, name, entity);
@@ -265,7 +283,7 @@ void hand_model::add_hand(scene & scene,
                           const xr::hand_tracker::mesh_data & mesh,
                           uint32_t layer_mask)
 {
-	auto material = create_hand_mesh_fb_material(scene, hand);
+	auto material = create_hand_material(scene, hand);
 
 	entt::entity entity = scene.world.create();
 	auto & node = scene.world.emplace<components::node>(entity);
