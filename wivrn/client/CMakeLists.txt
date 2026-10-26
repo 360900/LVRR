@@ -311,6 +311,12 @@ if(WIVRN_COMPRESS_GLB)
 else()
     wivrn_copy_file(       SOURCE ${ASSETS_SRC_DIR}/ground.glb                          DESTINATION ${ASSETS_DIR}/ground.glb                          TARGET wivrn)
 endif()
+# LVRR: the lobby's sky dome
+if(WIVRN_COMPRESS_GLB)
+    wivrn_gltf_transform_uastc(SOURCE ${ASSETS_SRC_DIR}/meadow.glb                      DESTINATION ${ASSETS_DIR}/meadow.glb                          TARGET wivrn ZSTD 20)
+else()
+    wivrn_copy_file(       SOURCE ${ASSETS_SRC_DIR}/meadow.glb                          DESTINATION ${ASSETS_DIR}/meadow.glb                          TARGET wivrn)
+endif()
 
 wivrn_webxr_download()
 wivrn_webxr_controller(PROFILE generic-trigger-squeeze DESTINATION ${ASSETS_DIR}/controllers TARGET wivrn)

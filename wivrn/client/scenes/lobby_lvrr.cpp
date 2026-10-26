@@ -65,8 +65,10 @@ void scenes::lobby::lvrr_focused()
 		return;
 
 	auto & config = application::get_config();
-	// there is no environment page, the lobby shows the room when it can
-	config.passthrough_enabled = system.passthrough_supported() != xr::passthrough_type::none;
+	// there is no environment page: the lobby shows the meadow, a sky dome that costs one
+	// textured draw, where passthrough keeps the cameras and their pipeline running
+	config.passthrough_enabled = false;
+	config.environment_model = application::get_default_config().environment_model;
 
 	if (config.first_run)
 	{

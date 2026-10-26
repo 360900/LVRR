@@ -947,7 +947,7 @@ void scenes::lobby::gui_licenses()
 	// Components shipping a license file, probed once
 	static const std::vector<std::string> components = [] {
 		std::vector<std::string> v;
-		for (const char * c: {"WiVRn", "FontAwesome", "Quicksand", "openxr-loader", "simdjson"})
+		for (const char * c: {"WiVRn", "FontAwesome", "Quicksand", "Meadow", "openxr-loader", "simdjson"})
 		{
 			try
 			{

@@ -114,7 +114,7 @@ public:
 
 	std::string virtual_keyboard_layout = "QWERTY";
 
-	std::string environment_model = "assets://ground.glb";
+	std::string environment_model = "assets://meadow.glb"; // LVRR: a sky dome, see assets-source/meadow.glb
 
 	bool override_foveation_enable = false;
 	float override_foveation_pitch = -10 * M_PI / 180;
