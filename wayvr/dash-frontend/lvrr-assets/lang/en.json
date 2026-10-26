@@ -41,6 +41,7 @@
       "TITLE": "Library",
       "VR_APPS": "VR apps",
       "LAUNCH": "Launch",
+      "BROWSER": "Web browser",
       "EMPTY": "No VR apps found. Steam VR games appear once SteamVR has run once; apps can also add the X-WiVRn-VR category to their desktop entry.",
       "LOADING": "Loading...",
       "ALL_GAMES": "All Steam games",

@@ -1,8 +1,8 @@
 //! VR applications the LVRR server can start: Steam VR games and desktop entries in the
 //! X-WiVRn-VR category. They start with the server's environment, so OpenVR games use the
-//! bundled xrizer.
+//! bundled xrizer. In VR, the system's web browser is listed too and opens as a WayVR window.
 
-use std::{collections::HashMap, marker::PhantomData, path::Path, rc::Rc};
+use std::{collections::HashMap, marker::PhantomData, path::Path, process::Command, rc::Rc};
 
 use lvrr_common::{
 	state::{LvrrRequest, VrApplication},
@@ -16,6 +16,7 @@ use wgui::{
 	widget::ConstructEssentials,
 	windowing::context_menu::{self, Blueprint, ContextMenu, TickResult},
 };
+use wlx_common::desktop_finder::DesktopEntry;
 
 use crate::{
 	frontend::{Frontend, FrontendTask},
@@ -26,8 +27,8 @@ use crate::{
 			ui::{self, Text, Ui},
 		},
 	},
-	util::{cached_fetcher::CoverArt, steam_utils::AppManifest},
-	views::game_cover,
+	util::{cached_fetcher::CoverArt, popup_manager::PopupHolder, steam_utils::AppManifest},
+	views::{app_launcher, game_cover},
 };
 
 /// The dashboard itself is listed as a VR app when WayVR is installed system-wide
@@ -71,6 +72,9 @@ pub struct TabLvrrLibrary<T> {
 	covers: HashMap<String, game_cover::View>,
 	starting: Option<Starting>,
 	context_menu: ContextMenu,
+	/// None in the desktop window, it can't show windows
+	browser: Option<Rc<DesktopEntry>>,
+	launcher: PopupHolder<app_launcher::View>,
 	marker: PhantomData<T>,
 }
 
@@ -147,12 +151,20 @@ impl<T: 'static> Tab<T> for TabLvrrLibrary<T> {
 			self.render(frontend, applications.as_deref())?;
 			self.shown = Some(applications);
 		}
+		self
+			.launcher
+			.with_view_res(|view| view.update(&mut frontend.interface, data))?;
 		Ok(())
 	}
 }
 
 impl<T: 'static> TabLvrrLibrary<T> {
-	pub fn new(frontend: &mut Frontend<T>, parent: WidgetID, _data: &mut T) -> anyhow::Result<Self> {
+	pub fn new(frontend: &mut Frontend<T>, parent: WidgetID, data: &mut T) -> anyhow::Result<Self> {
+		let browser = if frontend.interface.lvrr_desktop() {
+			None
+		} else {
+			default_browser(&frontend.interface.desktop_finder(data).find_entries())
+		};
 		let globals = frontend.layout.state.globals.clone();
 		let state = wgui::parser::parse_from_assets(&ui::doc_params(&globals), &mut frontend.layout, parent)?;
 		let tasks = Tasks::new();
@@ -168,6 +180,8 @@ impl<T: 'static> TabLvrrLibrary<T> {
 			covers: HashMap::new(),
 			starting: None,
 			context_menu: ContextMenu::default(),
+			browser,
+			launcher: PopupHolder::default(),
 			marker: PhantomData,
 		})
 	}
@@ -204,6 +218,37 @@ impl<T: 'static> TabLvrrLibrary<T> {
 			let row = ui.row(group)?;
 			ui.text(row, Text::Key("LVRR.LIBRARY.STARTING"))?;
 			ui.bold(row, Text::Raw(&starting.name), 16)?;
+		}
+
+		if let Some(browser) = &self.browser {
+			let row = ui.row(group)?;
+			let (frontend_tasks, globals, entry, launcher) = (
+				frontend.tasks.clone(),
+				globals.clone(),
+				browser.clone(),
+				self.launcher.clone(),
+			);
+			ui.button(
+				row,
+				Text::Key("LVRR.LIBRARY.LAUNCH"),
+				"@/dashboard/play.svg",
+				move || {
+					app_launcher::mount_popup(
+						frontend_tasks.clone(),
+						globals.clone(),
+						entry.clone(),
+						launcher.clone(),
+						Box::new(|| {}),
+						None,
+					);
+				},
+			)?;
+			if let Some(icon) = browser.icon_path.as_deref().and_then(icon_path)
+				&& let Err(e) = ui.file_icon(row, icon)
+			{
+				log::warn!("Could not show the icon of {}: {e:?}", browser.app_id);
+			}
+			ui.bold(row, Text::Key("LVRR.LIBRARY.BROWSER"), 16)?;
 		}
 
 		let Some(applications) = applications else {
@@ -326,6 +371,57 @@ fn parse_controllers_action(name: &str) -> Option<Task> {
 fn session_ids<T>(frontend: &mut Frontend<T>, data: &mut T) -> Vec<i64> {
 	let clients = frontend.interface.monado_client_list(data, true).unwrap_or_default();
 	clients.iter().map(|c| c.id).collect()
+}
+
+/// The default handler of https links, else any web browser
+fn default_browser(entries: &HashMap<String, Rc<DesktopEntry>>) -> Option<Rc<DesktopEntry>> {
+	let default = Command::new("xdg-mime")
+		.args(["query", "default", "x-scheme-handler/https"])
+		.output()
+		.ok()
+		.and_then(|o| String::from_utf8(o.stdout).ok())
+		.and_then(|s| {
+			let id = s.trim().trim_end_matches(".desktop");
+			entries.get(id).cloned().or_else(|| hidden_entry(id))
+		});
+	default.or_else(|| {
+		let mut browsers: Vec<_> = entries
+			.values()
+			.filter(|e| e.categories.iter().any(|c| &**c == "WebBrowser"))
+			.collect();
+		browsers.sort_by(|a, b| a.app_id.cmp(&b.app_id));
+		browsers.first().map(|e| (*e).clone())
+	})
+}
+
+/// Defaults set by browsers or `xdg-mime` are often `NoDisplay` entries, which the app list skips
+fn hidden_entry(id: &str) -> Option<Rc<DesktopEntry>> {
+	if id.is_empty() {
+		return None;
+	}
+	let no_locales: &[&str] = &[];
+	let path = freedesktop_desktop_entry::default_paths()
+		.map(|dir| dir.join(format!("{id}.desktop")))
+		.find(|path| path.is_file())?;
+	let entry = freedesktop_desktop_entry::DesktopEntry::from_path(path, Some(no_locales)).ok()?;
+	let exec_argv: Rc<[Rc<str>]> = entry
+		.parse_exec_with_uris(&[], no_locales)
+		.ok()?
+		.into_iter()
+		.map(Rc::from)
+		.collect();
+	if exec_argv.is_empty() {
+		return None;
+	}
+	Some(Rc::new(DesktopEntry {
+		exec_argv,
+		app_id: id.into(),
+		app_name: entry
+			.name(no_locales)
+			.map_or_else(|| id.into(), |name| name.as_ref().into()),
+		icon_path: entry.icon().filter(|icon| icon.starts_with('/')).map(Rc::from),
+		categories: Rc::new([]),
+	}))
 }
 
 /// An icon file the dashboard can draw
