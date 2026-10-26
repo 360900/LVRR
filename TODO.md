@@ -30,8 +30,6 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
 
 ## 2. Fake success and crash insurance
 
-8. Calls that succeed without doing anything (S)
-   - `SetOverlayRaw` fails before the app's first frame (nothing says which graphics API to upload with yet) and from a thread without the app's GL context; the pixels could be kept until a backend exists
 10. Device properties (S)
     - HMD `RegisteredDeviceType` and `InputProfilePath` unknown for WMR, Steam Link, Pico, Cosmos, Focus 3 and Frame headsets (reported as unknown and as the tracking system name)
     - `SecondsFromVsyncToPhotons` is 0, as `GetTimeSinceLastVsync` counts from the display time; SteamVR's drivers report ~11 ms before an earlier vsync
