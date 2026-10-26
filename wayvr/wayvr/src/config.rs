@@ -223,7 +223,8 @@ pub fn save_settings(config: &GeneralConfig) -> anyhow::Result<()> {
         keyboard_sound_enabled: config.keyboard_sound_enabled,
         upright_screen_fix: config.upright_screen_fix,
         double_cursor_fix: config.double_cursor_fix,
-        enable_watch: config.enable_watch,
+        // LVRR: the watch is the way to the dashboard, a config that turned it off is ignored
+        enable_watch: true,
         sets_on_watch: config.sets_on_watch,
         hide_grab_help: config.hide_grab_help,
         allow_sliding: config.allow_sliding,
