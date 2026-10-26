@@ -345,22 +345,58 @@ impl OverlayMan {
                 layer_flags |= xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA;
             }
 
-            macro_rules! layer_init {
-                ($ty:ident) => {{
-                    $ty::new()
-                        .space(space)
-                        .layer_flags(layer_flags)
-                        .eye_visibility(xr::EyeVisibility::BOTH)
-                        .sub_image(
-                            xr::SwapchainSubImage::new()
-                                .image_array_index(vr::EVREye::Left.0)
-                                .swapchain(swapchain)
-                                .image_rect(rect),
-                        )
-                }};
-            }
+            // Side-by-side overlays show each half of the texture to one eye.
+            let parallel = overlay.has_flag(vr::VROverlayFlags::SideBySide_Parallel);
+            let crossed = overlay.has_flag(vr::VROverlayFlags::SideBySide_Crossed);
+            let views = if (parallel || crossed)
+                && !matches!(overlay.kind, OverlayKind::Equirect { .. })
+                && rect.extent.width >= 2
+            {
+                let half = xr::Extent2Di {
+                    width: rect.extent.width / 2,
+                    height: rect.extent.height,
+                };
+                let first = xr::Rect2Di {
+                    offset: rect.offset,
+                    extent: half,
+                };
+                let second = xr::Rect2Di {
+                    offset: xr::Offset2Di {
+                        x: rect.offset.x + half.width,
+                        y: rect.offset.y,
+                    },
+                    extent: half,
+                };
+                let (left, right) = if parallel {
+                    (first, second)
+                } else {
+                    (second, first)
+                };
+                vec![
+                    (xr::EyeVisibility::LEFT, left),
+                    (xr::EyeVisibility::RIGHT, right),
+                ]
+            } else {
+                vec![(xr::EyeVisibility::BOTH, rect)]
+            };
 
-            macro_rules! lifetime_extend {
+            for (eye_visibility, rect) in views {
+                macro_rules! layer_init {
+                    ($ty:ident) => {{
+                        $ty::new()
+                            .space(space)
+                            .layer_flags(layer_flags)
+                            .eye_visibility(eye_visibility)
+                            .sub_image(
+                                xr::SwapchainSubImage::new()
+                                    .image_array_index(vr::EVREye::Left.0)
+                                    .swapchain(swapchain)
+                                    .image_rect(rect),
+                            )
+                    }};
+                }
+
+                macro_rules! lifetime_extend {
                 ($ty:ident, $layer:expr) => {{
                     fn lifetime_extend<'a, 'b: 'a, G: xr::Graphics>(
                         layer: $ty<'a, G>,
@@ -377,89 +413,90 @@ impl OverlayMan {
                 }}
             }
 
-            // OC-style size: width = widthMeters * scaleX, height = widthMeters * scaleY / aspect
-            let aspect = if rect.extent.height > 0 {
-                rect.extent.width as f32 * overlay.texel_aspect / rect.extent.height as f32
-            } else {
-                1.0
-            };
-            let width = overlay.width * overlay.scale.0;
-            let height = overlay.width * overlay.scale.1 / aspect;
-            // The runtime rejects the whole frame if any layer is invalid.
-            if !(is_valid_pose(&pose) && is_positive(width) && is_positive(height)) {
-                crate::warn_once!("Skipping overlay {:?} with invalid placement", overlay.name);
-                continue;
-            }
-
-            let layer = match overlay.kind {
-                OverlayKind::Quad => {
-                    use xr::CompositionLayerQuad;
-                    let layer = layer_init!(CompositionLayerQuad)
-                        .pose(pose)
-                        .size(xr::Extent2Df { width, height });
-                    OverlayLayerInner::Quad(lifetime_extend!(CompositionLayerQuad, layer))
+                // OC-style size: width = widthMeters * scaleX, height = widthMeters * scaleY / aspect
+                let aspect = if rect.extent.height > 0 {
+                    rect.extent.width as f32 * overlay.texel_aspect / rect.extent.height as f32
+                } else {
+                    1.0
+                };
+                let width = overlay.width * overlay.scale.0;
+                let height = overlay.width * overlay.scale.1 / aspect;
+                // The runtime rejects the whole frame if any layer is invalid.
+                if !(is_valid_pose(&pose) && is_positive(width) && is_positive(height)) {
+                    crate::warn_once!("Skipping overlay {:?} with invalid placement", overlay.name);
+                    continue;
                 }
-                // SetOverlayCurvature and set_skybox check for khr_composition_layer_cylinder
-                OverlayKind::Curved { curvature } => {
-                    // OpenVR: curvature = width / (2π * radius), so a curvature of 1 closes the
-                    // cylinder. OpenXR wants an angle below 2π, which f32 2π isn't.
-                    let angle = (TAU * curvature).min(TAU - 1e-4);
-                    let radius = width / angle;
-                    // The pose is the middle of the arc, which faces the cylinder's axis.
-                    let (rot, pos) = to_glam(&pose);
-                    let center = pos + rot.mul_vec3(Vec3::Z * radius);
-                    if !(is_positive(angle) && is_positive(radius) && center.is_finite()) {
-                        crate::warn_once!(
-                            "Skipping overlay {:?} with invalid curvature",
-                            overlay.name
-                        );
-                        continue;
+
+                let layer = match overlay.kind {
+                    OverlayKind::Quad => {
+                        use xr::CompositionLayerQuad;
+                        let layer = layer_init!(CompositionLayerQuad)
+                            .pose(pose)
+                            .size(xr::Extent2Df { width, height });
+                        OverlayLayerInner::Quad(lifetime_extend!(CompositionLayerQuad, layer))
                     }
+                    // SetOverlayCurvature and set_skybox check for khr_composition_layer_cylinder
+                    OverlayKind::Curved { curvature } => {
+                        // OpenVR: curvature = width / (2π * radius), so a curvature of 1 closes the
+                        // cylinder. OpenXR wants an angle below 2π, which f32 2π isn't.
+                        let angle = (TAU * curvature).min(TAU - 1e-4);
+                        let radius = width / angle;
+                        // The pose is the middle of the arc, which faces the cylinder's axis.
+                        let (rot, pos) = to_glam(&pose);
+                        let center = pos + rot.mul_vec3(Vec3::Z * radius);
+                        if !(is_positive(angle) && is_positive(radius) && center.is_finite()) {
+                            crate::warn_once!(
+                                "Skipping overlay {:?} with invalid curvature",
+                                overlay.name
+                            );
+                            continue;
+                        }
 
-                    use xr::CompositionLayerCylinderKHR;
-                    let layer = layer_init!(CompositionLayerCylinderKHR)
-                        .radius(radius)
-                        .central_angle(angle)
-                        .aspect_ratio(width / height)
-                        .pose(xr::Posef {
-                            orientation: pose.orientation,
-                            position: xr::Vector3f {
-                                x: center.x,
-                                y: center.y,
-                                z: center.z,
-                            },
-                        });
-                    OverlayLayerInner::Cylinder(lifetime_extend!(
-                        CompositionLayerCylinderKHR,
-                        layer
-                    ))
+                        use xr::CompositionLayerCylinderKHR;
+                        let layer = layer_init!(CompositionLayerCylinderKHR)
+                            .radius(radius)
+                            .central_angle(angle)
+                            .aspect_ratio(width / height)
+                            .pose(xr::Posef {
+                                orientation: pose.orientation,
+                                position: xr::Vector3f {
+                                    x: center.x,
+                                    y: center.y,
+                                    z: center.z,
+                                },
+                            });
+                        OverlayLayerInner::Cylinder(lifetime_extend!(
+                            CompositionLayerCylinderKHR,
+                            layer
+                        ))
+                    }
+                    // set_skybox checks for khr_composition_layer_equirect2
+                    OverlayKind::Equirect { eye } => {
+                        use xr::CompositionLayerEquirect2KHR;
+                        // A radius of 0 is infinitely far away, like a skybox should be.
+                        let layer = layer_init!(CompositionLayerEquirect2KHR)
+                            .eye_visibility(eye)
+                            .pose(pose)
+                            .radius(0.0)
+                            .central_horizontal_angle(TAU)
+                            .upper_vertical_angle(FRAC_PI_2)
+                            .lower_vertical_angle(-FRAC_PI_2);
+                        OverlayLayerInner::Equirect2(lifetime_extend!(
+                            CompositionLayerEquirect2KHR,
+                            layer
+                        ))
+                    }
+                };
+                let mut layer = OverlayLayer::from(layer);
+                if overlay.alpha.is_some() || overlay.color.is_some() {
+                    layer.set_color_scale(
+                        overlay.color.unwrap_or([1.0; 3]),
+                        overlay.alpha.unwrap_or(1.0),
+                        premultiplied,
+                    );
                 }
-                // set_skybox checks for khr_composition_layer_equirect2
-                OverlayKind::Equirect { eye } => {
-                    use xr::CompositionLayerEquirect2KHR;
-                    // A radius of 0 is infinitely far away, like a skybox should be.
-                    let layer = layer_init!(CompositionLayerEquirect2KHR)
-                        .eye_visibility(eye)
-                        .pose(pose)
-                        .radius(0.0)
-                        .central_horizontal_angle(TAU)
-                        .upper_vertical_angle(FRAC_PI_2)
-                        .lower_vertical_angle(-FRAC_PI_2);
-                    OverlayLayerInner::Equirect2(lifetime_extend!(
-                        CompositionLayerEquirect2KHR,
-                        layer
-                    ))
-                }
-            };
-            let mut layer = OverlayLayer::from(layer);
-            if overlay.alpha.is_some() || overlay.color.is_some() {
-                layer.set_color_scale(
-                    overlay.color.unwrap_or([1.0; 3]),
-                    overlay.alpha.unwrap_or(1.0),
-                    premultiplied,
-                );
+                layers.push((overlay.z_order, layer));
             }
-            layers.push((overlay.z_order, layer));
         }
 
         // Sort by z_order asc
@@ -3427,6 +3464,48 @@ mod tests {
             f.man.SetOverlayTexelAspect(handle, 0.0),
             vr::EVROverlayError::InvalidParameter
         );
+    }
+
+    #[test]
+    fn side_by_side_overlay_shows_one_half_per_eye() {
+        let f = RealSessionFixture::new();
+        let handle = f.textured_overlay(c"key");
+        let views = || -> Vec<_> {
+            f.layers(false)
+                .iter()
+                .map(|l| match l {
+                    TestLayer::Quad(q, _) => (
+                        q.eye_visibility,
+                        q.sub_image.image_rect.offset.x,
+                        q.sub_image.image_rect.extent.width,
+                        q.size.height,
+                    ),
+                    other => panic!("expected quads, got {other:?}"),
+                })
+                .collect()
+        };
+        assert_eq!(views(), [(xr::EyeVisibility::BOTH, 0, 10, 1.0)]);
+
+        for (flag, left_x, right_x) in [
+            (vr::VROverlayFlags::SideBySide_Parallel, 0, 5),
+            (vr::VROverlayFlags::SideBySide_Crossed, 5, 0),
+        ] {
+            assert_eq!(
+                f.man.SetOverlayFlag(handle, flag, true),
+                vr::EVROverlayError::None
+            );
+            assert_eq!(
+                views(),
+                [
+                    (xr::EyeVisibility::LEFT, left_x, 5, 2.0),
+                    (xr::EyeVisibility::RIGHT, right_x, 5, 2.0)
+                ]
+            );
+            assert_eq!(
+                f.man.SetOverlayFlag(handle, flag, false),
+                vr::EVROverlayError::None
+            );
+        }
     }
 
     #[test]
