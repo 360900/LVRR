@@ -81,6 +81,8 @@ public:
 	bool passthrough_enabled = false;
 	// XR_META_boundary_visibility, the boundary is always shown outside passthrough
 	bool passthrough_boundary_enabled = false;
+	// LVRR: fades the stream over passthrough, 0: opaque
+	float see_through = 0;
 	bool mic_unprocessed_audio = false;
 
 	// Input forwarding, per device. Off by default; only effective if the server permits it.

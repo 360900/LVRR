@@ -111,6 +111,7 @@
       "EXTENDED_CONFIG": "Allow unsafe values",
       "HIGH_POWER": "High power mode",
       "BOUNDARY": "Show the boundary in passthrough",
+      "SEE_THROUGH": "See-through (%)",
       "USB_NETWORK": "USB networking",
       "OFFLINE": "The headset isn't connected. Changes apply when it connects.",
       "PENDING": "On connect",

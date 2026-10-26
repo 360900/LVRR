@@ -1151,12 +1151,18 @@ void scenes::stream::render(const XrFrameState & frame_state)
 #endif
 		swapchain.release();
 
-		if (use_alpha)
+		// LVRR: see-through fades the opaque stream over passthrough
+		float see_through = 0;
+		if (not use_alpha and composition_layer_color_scale_bias_supported and system.passthrough_supported() != xr::passthrough_type::none)
+			see_through = std::clamp(application::get_config().see_through, 0.f, lvrr::max_see_through);
+		const bool passthrough = use_alpha or see_through > 0;
+
+		if (passthrough)
 			session.enable_passthrough(system);
 		else
 			session.disable_passthrough();
 
-		render_start(use_alpha, frame_state.predictedDisplayTime);
+		render_start(passthrough, frame_state.predictedDisplayTime);
 
 		// full-FOV dummy layer for Meta foveation, used when cropping FOV
 		if (auto layer = foveation_center.get_layer())
@@ -1183,9 +1189,15 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			        };
 		}
 		add_projection_layer(
-		        use_alpha ? XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT : 0,
+		        passthrough ? XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT : 0,
 		        application::space(xr::spaces::world),
 		        layer_view);
+		if (see_through > 0)
+		{
+			// premultiplied: the stream is opaque, so alpha is scaled with the color
+			const float opacity = 1 - see_through;
+			set_color_scale_bias({opacity, opacity, opacity, opacity}, {});
+		}
 
 		if (const configuration::openxr_post_processing_settings openxr_post_processing = application::get_config().openxr_post_processing;
 		    (openxr_post_processing.sharpening | openxr_post_processing.super_sampling) > 0)

@@ -37,6 +37,7 @@
         90.0,
         120.0
       ],
+      "see_through": true,
       "spacewarp": true,
       "usb_network": false
     },
@@ -70,6 +71,7 @@
       "posture": "standing",
       "preferred_refresh_rate": 90.0,
       "resolution_scale": 1.2000000476837158,
+      "see_through": 0.0,
       "sharpening": "normal",
       "super_sampling": "off",
       "usb_network": false

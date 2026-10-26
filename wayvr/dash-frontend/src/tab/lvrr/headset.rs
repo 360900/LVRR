@@ -434,6 +434,18 @@ fn settings() -> Vec<Setting> {
 			control: toggle(|c| c.passthrough_boundary),
 		},
 		Setting {
+			key: "see_through",
+			label: "LVRR.HEADSET.SEE_THROUGH",
+			section: System,
+			restart: false,
+			show: |h| h.capabilities.see_through,
+			control: Control::Slider {
+				range: |_| (0.0, 80.0, 5.0),
+				get: |c| c.see_through * 100.0,
+				set: |v| json!(v / 100.0),
+			},
+		},
+		Setting {
 			key: "usb_network",
 			label: "LVRR.HEADSET.USB_NETWORK",
 			section: System,

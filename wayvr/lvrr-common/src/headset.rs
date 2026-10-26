@@ -99,6 +99,7 @@ pub struct Capabilities {
 	pub post_processing: bool,
 	pub high_power_mode: bool,
 	pub passthrough_boundary: bool,
+	pub see_through: bool,
 	pub usb_network: bool,
 	pub keyboard_mouse: bool,
 	pub hand_tracking: bool,
@@ -138,6 +139,7 @@ pub struct Config {
 	pub height_offset: f32,
 	pub high_power_mode: bool,
 	pub passthrough_boundary: bool,
+	pub see_through: f32,
 	pub usb_network: bool,
 	pub extended_config: bool,
 }

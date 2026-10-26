@@ -26,6 +26,9 @@
 // protocol hash changes with them, so LVRR and stock WiVRn refuse to talk to each other.
 namespace wivrn::lvrr
 {
+// The dashboard is part of the stream, it must stay visible
+constexpr float max_see_through = 0.8f;
+
 enum class codec_choice : uint8_t
 {
 	automatic,
@@ -89,6 +92,7 @@ struct headset_config
 	std::optional<float> height_offset; // meters, for the current posture
 	std::optional<bool> high_power_mode;
 	std::optional<bool> passthrough_boundary;
+	std::optional<float> see_through; // 0: opaque stream, up to max_see_through
 	std::optional<bool> usb_network;
 	std::optional<bool> extended_config;
 };
@@ -109,6 +113,7 @@ struct headset_capabilities
 	bool post_processing;
 	bool high_power_mode;
 	bool passthrough_boundary;
+	bool see_through;
 	bool usb_network;
 	bool keyboard_mouse;
 	bool hand_tracking;

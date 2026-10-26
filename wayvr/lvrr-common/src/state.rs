@@ -33,6 +33,7 @@ pub const HEADSET_KEYS: &[&str] = &[
 	"height_offset",
 	"high_power_mode",
 	"passthrough_boundary",
+	"see_through",
 	"usb_network",
 	"extended_config",
 ];

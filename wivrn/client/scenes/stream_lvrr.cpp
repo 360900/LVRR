@@ -159,6 +159,7 @@ lvrr::headset_capabilities scenes::stream::lvrr_capabilities()
 	caps.post_processing = application::get_openxr_post_processing_supported();
 	caps.high_power_mode = instance.has_extension(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
 	caps.passthrough_boundary = session.boundary_visibility_supported();
+	caps.see_through = composition_layer_color_scale_bias_supported and system.passthrough_supported() != xr::passthrough_type::none;
 #ifdef __ANDROID__
 	caps.usb_network = application::get_hmd_traits().usb_net;
 #endif
@@ -216,6 +217,7 @@ lvrr::headset_config scenes::stream::lvrr_config()
 	        .height_offset = config.get_height_offset(),
 	        .high_power_mode = config.high_power_mode,
 	        .passthrough_boundary = config.passthrough_boundary_enabled,
+	        .see_through = config.see_through,
 	        .usb_network = config.usb_network,
 	        .extended_config = config.extended_config,
 	};
@@ -372,6 +374,8 @@ bool scenes::stream::lvrr_apply(const lvrr::headset_config & patch)
 		config.passthrough_boundary_enabled = *patch.passthrough_boundary;
 		session.set_passthrough_boundary_enabled(config.passthrough_boundary_enabled);
 	}
+	if (patch.see_through and caps.see_through)
+		config.see_through = std::clamp(*patch.see_through, 0.f, lvrr::max_see_through);
 #ifdef __ANDROID__
 	if (patch.usb_network and caps.usb_network)
 	{
