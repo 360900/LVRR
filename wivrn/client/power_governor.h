@@ -66,7 +66,7 @@ private:
 		XrTime last_probe = 0;                                                   // when it last went down
 		XrDuration hold = 0;                                                     // current hold, grows with every early re-raise
 		int over_budget = 0;                                                     // consecutive frames over the time budget
-		bool probed_savings = false;                                             // the one try at power savings in a stream
+		XrDuration savings_backoff = 0;                                          // quiet time before a stream tries power savings, doubles on failure
 	};
 
 	xr::session * session = nullptr;

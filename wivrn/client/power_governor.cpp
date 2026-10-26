@@ -39,8 +39,10 @@ constexpr int misses_to_raise = 2;
 constexpr float budget = 0.6f;
 constexpr int over_budget_to_raise = 3;
 
-// a stream tries power savings once after this long without any raise
-constexpr XrDuration savings_probe_after = 2 * 60 * second;
+// a stream tries power savings after this long without any raise; a failed try costs a
+// couple of missed frames, so the wait doubles each time, up to an hour
+constexpr XrDuration savings_probe_min = 2 * 60 * second;
+constexpr XrDuration savings_probe_max = 60 * 60 * second;
 
 const char * name(power_governor::domain d)
 {
@@ -167,9 +169,13 @@ void power_governor::raise(domain d, XrTime now, const char * why)
 		s.hold = hold_min;
 	s.hold_until = now + s.hold;
 	s.over_budget = 0;
-	// a stream that could not live at power savings stays above it
+	// a stream that could not live at power savings goes back above it, and waits
+	// twice as long before trying again
 	if (s.level == XR_PERF_SETTINGS_LEVEL_POWER_SAVINGS_EXT and not menu)
+	{
 		s.floor = XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT;
+		s.savings_backoff = std::min(s.savings_backoff * 2, savings_probe_max);
+	}
 
 	spdlog::info("{} clocks raised: {}, for at least {}s", name(d), why, s.hold / second);
 	apply(d, target);
@@ -223,12 +229,13 @@ void power_governor::frame(XrTime now, XrDuration display_period, XrDuration rea
 		if (s.level != s.floor and now > s.hold_until and now - last_miss > quiet_before_relax)
 			relax(d, now);
 
-		// a stream that ran a long while without trouble tries power savings, once
-		if (not menu and not s.probed_savings and s.level == XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT and now - quiet_since > savings_probe_after)
+		// a stream that ran a while without trouble tries power savings
+		if (s.savings_backoff == 0)
+			s.savings_backoff = savings_probe_min;
+		if (not menu and s.level == XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT and s.floor == XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT and now - quiet_since > s.savings_backoff)
 		{
-			s.probed_savings = true;
 			s.floor = XR_PERF_SETTINGS_LEVEL_POWER_SAVINGS_EXT;
-			spdlog::info("{} clocks: trying power savings", name(d));
+			spdlog::info("{} clocks: trying power savings after {}s quiet", name(d), s.savings_backoff / second);
 			relax(d, now);
 		}
 	}
