@@ -2,6 +2,7 @@ mod action_manifest;
 mod binding_sources;
 mod custom_bindings;
 mod devices;
+mod emulation;
 mod haptics;
 mod legacy;
 mod origins;
@@ -3589,19 +3590,24 @@ impl<C: openxr_data::Compositor> Input<C> {
             };
 
             if let Some(mut data) = ProfileData::for_profile_name(&profile_name) {
-                if let Some(properties) = session_data
-                    .input_data
-                    .get_loaded_actions()
-                    .and_then(|loaded| loaded.simulated_properties.get(&profile_path))
+                let loaded = session_data.input_data.get_loaded_actions();
+                if let Some(properties) =
+                    loaded.and_then(|loaded| loaded.simulated_properties.get(&profile_path))
                 {
                     data.properties = properties;
+                    data.headset = properties;
+                }
+                if let Some(emulated) =
+                    loaded.and_then(|loaded| loaded.emulated_profiles.get(&profile_path))
+                {
+                    data = data.emulating(emulated);
                 }
                 {
                     // simple_controller says nothing about the headset, so don't let it replace a
                     // real controller (e.g. when switching to hand tracking).
                     let mut last_profile = self.last_profile_properties.lock().unwrap();
-                    if last_profile.is_none() || !is_simple_controller(data.properties) {
-                        *last_profile = Some(data.properties);
+                    if last_profile.is_none() || !is_simple_controller(data.headset) {
+                        *last_profile = Some(data.headset);
                     }
                 }
                 if let Some(controller) = controller.as_mut() {
@@ -3932,6 +3938,8 @@ struct ManifestLoadedActions {
     /// The identity of the controller that converted bindings were made for, per interaction
     /// profile that shows it instead of its own, like SteamVR.
     simulated_properties: HashMap<xr::Path, &'static ProfileProperties>,
+    /// The controller each interaction profile shows instead of its own, see [emulation].
+    emulated_profiles: HashMap<xr::Path, action_manifest::ControllerType>,
     /// The controller speeds grab bindings drop with, if any binding reads them.
     hand_speeds: Option<Arc<custom_bindings::HandSpeeds>>,
 }

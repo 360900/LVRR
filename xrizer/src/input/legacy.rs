@@ -26,6 +26,10 @@ pub(super) struct LegacyState {
     /// Controller state per hand as of the last legacy action sync, including its packet number
     /// so both are published together.
     hands: [Mutex<HandState>; 2],
+    /// The headset only reports k_EButton_ProximitySensor, as in SteamVR's generic HMD legacy
+    /// bindings. None before the first sync, which sends no events since the headset was already
+    /// on or off.
+    hmd: Mutex<Option<vr::VRControllerState_t>>,
 }
 
 #[derive(Default)]
@@ -299,6 +303,14 @@ impl<C: openxr_data::Compositor> Input<C> {
             return false;
         }
 
+        if device_index == vr::k_unTrackedDeviceIndex_Hmd {
+            let Some(hmd) = *self.legacy_state.hmd.lock().unwrap() else {
+                return false;
+            };
+            **state = hmd;
+            return true;
+        }
+
         let Some(hand) = self.device_index_to_hand(device_index) else {
             debug!(
                 "tried getting controller state, but device index {device_index} is invalid or not a controller!"
@@ -391,42 +403,69 @@ impl<C: openxr_data::Compositor> Input<C> {
             new.state.unPacketNum = packet_num;
             let (old, new_state) = (&hand_state.state, &new.state);
 
-            let mut events = self.events.lock().unwrap();
-            let mut push = |ty, id: vr::EVRButtonId| {
-                events.push_back(super::InputEvent {
-                    ty,
-                    index: device_index,
-                    data: vr::VREvent_Controller_t { button: id.0 },
-                });
-            };
-            for id in BUTTONS {
-                let mask = button_mask_from_id(id);
-                let touched = new_state.ulButtonTouched & mask != 0;
-                let pressed = new_state.ulButtonPressed & mask != 0;
-                let touch_changed = touched != (old.ulButtonTouched & mask != 0);
-                // Touch comes before the press, and the untouch after the release.
-                if touch_changed && touched {
-                    push(vr::EVREventType::ButtonTouch, id);
-                }
-                if pressed != (old.ulButtonPressed & mask != 0) {
-                    push(
-                        if pressed {
-                            vr::EVREventType::ButtonPress
-                        } else {
-                            vr::EVREventType::ButtonUnpress
-                        },
-                        id,
-                    );
-                }
-                if touch_changed && !touched {
-                    push(vr::EVREventType::ButtonUntouch, id);
-                }
-            }
-            let excess = events.len().saturating_sub(MAX_QUEUED_EVENTS);
-            events.drain(..excess);
-
+            self.push_button_events(device_index, &BUTTONS, old, new_state);
             *hand_state = new;
         }
+
+        let mut hmd = self.legacy_state.hmd.lock().unwrap();
+        let mut new = vr::VRControllerState_t {
+            unPacketNum: packet_num,
+            ..Default::default()
+        };
+        if self.openxr.user_present() {
+            new.ulButtonPressed = button_mask_from_id(vr::EVRButtonId::ProximitySensor);
+        }
+        if let Some(old) = &*hmd {
+            self.push_button_events(
+                vr::k_unTrackedDeviceIndex_Hmd,
+                &[vr::EVRButtonId::ProximitySensor],
+                old,
+                &new,
+            );
+        }
+        *hmd = Some(new);
+    }
+
+    fn push_button_events(
+        &self,
+        device_index: vr::TrackedDeviceIndex_t,
+        buttons: &[vr::EVRButtonId],
+        old: &vr::VRControllerState_t,
+        new: &vr::VRControllerState_t,
+    ) {
+        let mut events = self.events.lock().unwrap();
+        let mut push = |ty, id: vr::EVRButtonId| {
+            events.push_back(super::InputEvent {
+                ty,
+                index: device_index,
+                data: vr::VREvent_Controller_t { button: id.0 },
+            });
+        };
+        for &id in buttons {
+            let mask = button_mask_from_id(id);
+            let touched = new.ulButtonTouched & mask != 0;
+            let pressed = new.ulButtonPressed & mask != 0;
+            let touch_changed = touched != (old.ulButtonTouched & mask != 0);
+            // Touch comes before the press, and the untouch after the release.
+            if touch_changed && touched {
+                push(vr::EVREventType::ButtonTouch, id);
+            }
+            if pressed != (old.ulButtonPressed & mask != 0) {
+                push(
+                    if pressed {
+                        vr::EVREventType::ButtonPress
+                    } else {
+                        vr::EVREventType::ButtonUnpress
+                    },
+                    id,
+                );
+            }
+            if touch_changed && !touched {
+                push(vr::EVREventType::ButtonUntouch, id);
+            }
+        }
+        let excess = events.len().saturating_sub(MAX_QUEUED_EVENTS);
+        events.drain(..excess);
     }
 }
 
@@ -1632,6 +1671,32 @@ mod tests {
         assert_eq!({ get_state(&f, 1).unPacketNum }, first);
         f.input.frame_start_update();
         assert_ne!({ get_state(&f, 1).unPacketNum }, first);
+    }
+
+    #[test]
+    fn head_proximity() {
+        const PROXIMITY: vr::EVRButtonId = vr::EVRButtonId::ProximitySensor;
+        let (f, _) = legacy_fixture(|actions| actions.a.as_raw());
+        f.input.frame_start_update();
+        expect_no_event(&f);
+        let worn =
+            |f: &Fixture| get_state(f, 0).ulButtonPressed == super::button_mask_from_id(PROXIMITY);
+        let set_present = |f: &Fixture, present| {
+            fakexr::set_user_presence(f.raw_session(), present);
+            f.input.openxr.poll_events();
+            f.input.frame_start_update();
+        };
+        assert!(worn(&f));
+
+        set_present(&f, false);
+        assert!(!worn(&f));
+        expect_button_event(&f, vr::EVREventType::ButtonUnpress, 0, PROXIMITY);
+        expect_no_event(&f);
+
+        set_present(&f, true);
+        assert!(worn(&f));
+        expect_button_event(&f, vr::EVREventType::ButtonPress, 0, PROXIMITY);
+        expect_no_event(&f);
     }
 
     #[test]

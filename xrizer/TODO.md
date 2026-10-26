@@ -16,24 +16,20 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
    - PSVR2 Sense: `XR_MNDX_psvr2_interaction` is a preview in Monado main only, WiVRn builds without it; works as Touch today
    - Cosmos registered device type, serials and render model names unverified; Focus 3 tracking system may be `vive_eyes` like the Cosmos; `vive_tracker_*` default bindings still ignored (trackers: 21)
    - gamepad has no tracked device or binding variant; untested on a headset
-3. Binding sources (S)
-   - legacy: controllers without a chosen binding keep the fixed mapping, not SteamVR's per-controller defaults; `Head_Proximity`, `simulate_rendermodel`, `simulate_hmd`, tracker and `generic` legacy bindings ignored
-4. Frame timing (S)
+3. Frame timing (S)
    - `XR_META_performance_metrics` unused (no Linux runtime has it)
-5. Haptics (S)
+4. Haptics (S)
    - force_sensor mode haptic not played (Alyx zeroes it, so SteamVR likely has one)
    - dpad ticks only on Index trackpads; unverified whether SteamVR ticks on joystick dpads
-6. Origin names (S)
+5. Origin names (S)
    - Focus 3 and Cosmos controller names are guesses (drivers not public)
    - several native bindings on one hand report the first, as OpenXR merges them; skeleton actions report the hand
-7. Color space (S)
+6. Color space (S)
    - Outer Wilds (NomaiVR) quirk rests on one report (#441), needs a headset check
    - D3D11 `R16G16B16A16_TYPELESS` arrives through Proton as UNORM, wrong if rendered as float
 
 ## 2. Fake success and crash insurance
 
-8. Calls that succeed without doing anything (S)
-   - `SetOverlayRaw` fails before the app's first frame (nothing says which graphics API to upload with yet) and from a thread without the app's GL context; the pixels could be kept until a backend exists
 10. Device properties (S)
     - HMD `RegisteredDeviceType` and `InputProfilePath` unknown for WMR, Steam Link, Pico, Cosmos, Focus 3 and Frame headsets (reported as unknown and as the tracking system name)
     - `SecondsFromVsyncToPhotons` is 0, as `GetTimeSinceLastVsync` counts from the display time; SteamVR's drivers report ~11 ms before an earlier vsync
@@ -43,11 +39,10 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
 
 ## 3. Overlay apps and interactive overlays
 
-12. Overlay apps can't draw (L)
-    - Overlay app type gets a headless session, `SetOverlayTexture` returns `RequestFailed`
-    - XSOverlay, OVR Toolkit, Desktop+, fpsVR, OVR Advanced Settings, VRCX (#99, #322)
-    - needs `XR_EXTX_overlay` and our own frame loop
-    - WiVRn: `XR_EXTX_overlay` supported, overlay sessions composited above the app by z-order
+12. Overlay apps (M)
+    - drawn in an `XR_EXTX_overlay` session with our own frame loop; untested on a headset (XSOverlay, OVR Toolkit, Desktop+, fpsVR, OVR Advanced Settings, VRCX, #99, #322)
+    - without `XR_EXTX_overlay` they stay headless and `SetOverlayTexture` returns `RequestFailed`
+    - Vulkan apps' queue is used by our frame thread's `xrEndFrame` without the app's locking
 13. Overlay input (L)
     - no laser, no hit testing, no mouse, scroll or focus events
     - `ComputeOverlayIntersection`, `IsHoverTargetOverlay`, `HandleControllerOverlayInteractionAsMouse` return false
@@ -61,10 +56,9 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
     - no `KeyboardCharInput`, no `*_Global` events
     - option: WayVR's keyboard over WayVR IPC
 16. Overlay rendering (S-M each)
-    - side-by-side stereo overlays show both halves to each eye
     - panorama overlays ignored; cubemap skybox shows only the front face (`XR_KHR_composition_layer_cube`, not on WiVRn)
-    - `SetOverlayColor`, texel aspect, pre-curve pitch, auto-curve range ignored
-    - OverlayRelative, Cursor, Projection, TrackedComponent transforms
+    - pre-curve pitch, auto-curve range ignored
+    - Cursor (needs 13), Projection, TrackedComponent transforms
     - subviews, render-model overlays
     - `SetOverlayFromFile`, `GetOverlayTexture`, `GetOverlayImageData`, IVROverlayView
     - overlays past the runtime's layer limit are dropped (SteamVR allows 128)
@@ -86,7 +80,7 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
     - `xrRequestDisplayRefreshRateFB` never called
     - WiVRn: no `views_change`; `xrRequestDisplayRefreshRateFB` works and disables its automatic rate
 20. Events (S-M)
-    - `TrackedDeviceUpdated`, `PropertyChanged`, `TrackedDeviceRoleChanged`, `IpdChanged`
+    - `TrackedDeviceUpdated`, `PropertyChanged` (only sent for refresh rate changes), `TrackedDeviceRoleChanged`, `IpdChanged`
     - `EnterStandbyMode`/`LeaveStandbyMode`
     - `SceneApplicationChanged`, `ProcessQuit`
     - `Input_BindingLoadSuccessful`/`Failed`, `ActionBindingReloaded`, `Input_ActionManifestReloaded`
@@ -98,7 +92,7 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
     - no hot-plug: `XrEventDataXDevListChangedMNDX` unhandled
     - no `TrackedDeviceDeactivated` for removed trackers; no tracker battery
     - body tracking extensions unused
-    - WiVRn: body tracking parts are xdevs named `WiVRn generic tracker (<part>)` (Chest, Hip, Left/Right Elbow, Knee, Foot); they pass our filter but get no role, map them to `vive_tracker_<role>`; device list fixed at connect, no hot-plug
+    - WiVRn: body tracking parts are xdevs named `WiVRn generic tracker (<part>)` (Chest, Hip, Left/Right Elbow, Knee, Foot); device list fixed at connect, no hot-plug
 22. Skeletal (S-M)
     - compressed bone data calls unimplemented
     - tracked bones ignore motion range (`XR_EXT_hand_joints_motion_range`)
@@ -108,6 +102,7 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
 23. Legacy input without chosen bindings (S)
     - only six buttons; no DPad or System
     - only the main axis on controllers with a stick and a trackpad (Index, WMR)
+    - fixed mappings instead of SteamVR's per-controller default files (they match); tracker, `generic`, `simulate_rendermodel` and `simulate_hmd` legacy bindings ignored
 24. Dominant hand (S-M)
     - stored, bindings never mirrored; `supports_dominant_hand_setting` not parsed
 25. Compositor (S-M)
@@ -136,7 +131,7 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
     - no capture, files or `Screenshot*` events
 32. Input paths and identity (S-M)
     - `/user/head` pose bindings, gamepad, treadmill, stylus dropped
-    - no way to report another controller type to games that gate on it
+    - games without an action manifest can't be shown another controller type
 
 ## Out of scope
 

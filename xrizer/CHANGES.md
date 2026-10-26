@@ -98,6 +98,7 @@ Status: `pending` | `merged` | `superseded-by-<n>` | `blocked` | `dropped` | `re
 | `ef5dbfb` | gl: fbconfig of contexts created without one taken from the drawable |
 | `176f51f` | applications: added manifests and the app's identity kept for the process |
 | `9714aab` | apps that don't quit 5 s after the runtime asks (30 s if acknowledged) are killed, like SteamVR; `XRIZER_KILL_ON_QUIT=0` opts out |
+| `d9d3e55` | games can be shown Index or Touch controllers whatever the real ones are (`XRIZER_CONTROLLER_TYPE`, or `controller_type` in `~/.config/xrizer/apps/<app key>.json`): bindings converted, that controller's identity and poses, the headset keeps its own |
 
 ## Audit fixes (2026-10-22, 335 commits `9a6d924`..`3323c56`)
 
@@ -166,8 +167,18 @@ Calls that faked success, interfaces apps crashed without, and device properties
 
 | Area | Change | Commits |
 |------|--------|---------|
-| faked success | `ShowMessageOverlay` answers `CouldntFindSystemOverlay`; `SetOverlayInputMethod` fails for mouse input and `GetOverlayInputMethod` reports `None`; `HookScreenshot` fails, as nothing requests screenshots; `GetComponentStateForBinding` fills the render model's component state; `SetOverlayRaw` draws the pixels (RGBA8 or RGB8, through the session's Vulkan, OpenGL or GL bridge backend, in the overlay's colour space) and sends `ImageLoaded`/`ImageFailed` | `2572062` `7cda0ad` `561996c` |
+| faked success | `ShowMessageOverlay` answers `CouldntFindSystemOverlay`; `SetOverlayInputMethod` fails for mouse input and `GetOverlayInputMethod` reports `None`; `HookScreenshot` fails, as nothing requests screenshots; `GetComponentStateForBinding` fills the render model's component state; `SetOverlayRaw` draws the pixels (RGBA8 or RGB8, through the session's Vulkan, OpenGL or GL bridge backend, in the overlay's colour space) and sends `ImageLoaded`/`ImageFailed`; pixels sent before the first frame or without the app's GL context wait for it | `2572062` `7cda0ad` `561996c` `a3193f9` |
 | interfaces | IVRTrackedCamera (001, 003 to 006), IVRResources, IVRNotifications, IVRDriverManager, IVRSpatialAnchors, IVRIOBuffer (001, 002), IVRIPCResourceManagerClient (002, 003) and IVRControlPanel_001 served, every call reporting nothing available with its out parameters written; bindings generated for them, with field renames and 0.9.12's `CameraVideoStreamFrame_t` layout handled | `62d0c2c` `43c8eee` |
 | device properties | `WrongDataType` for properties of another type, `UnknownProperty` only for ones the device lacks; HMD `Has*Component_Bool`, `SecondsFromVsyncToPhotons` (0, see TODO), `DashboardScale` (1), `CurrentUniverseId` (1), identity camera, status display and IMU transforms; `DisplaySupportsRuntimeFramerateChange`, `DisplaySupportsMultipleFramerates` and `DisplayAvailableFrameRates_Float_Array` (`GetArrayTrackedDeviceProperty`) from `XR_FB_display_refresh_rate`; HMD `RenderModelName` (`generic_hmd`), `RegisteredDeviceType`, `InputProfilePath` and `ResourceRoot` from the identifying controller profile, `ResourceRoot` for controllers; trackers named after a body part (WiVRn) identify as `vive_tracker_<role>` with that role's input profile | `c571e3d` |
 | device presence | controller slots report `Invalid` until a controller was there; `GetTrackedDeviceIndexForControllerRole` answers only for connected controllers; trackers' role is `OptOut` like their hint; a hand tracked after its controller lost its profile replaces it (Quest on WiVRn), and the controller replaces the hand when its profile returns | `b16cccb` |
 | tests | fakexr lists refresh rates (`xrEnumerateDisplayRefreshRatesFB`) and takes named trackers (`add_tracker`); the fake Vulkan device gained buffers, mapped memory, flushes and buffer to image copies | `c571e3d` `7cda0ad` |
+
+## TODO section 3 (2026-10-26, `5518260`..)
+
+Overlay apps and overlay rendering.
+
+| Area | Change | Commits |
+|------|--------|---------|
+| overlay apps | Overlay apps get an `XR_EXTX_overlay` session (create info chained by wrapping `xrCreateSession`) instead of a headless one when the runtime has it; a frame thread draws their overlays; their GL textures go through the GL bridge; scene `Submit` still rejected | `5518260` |
+| overlay rendering | `SetOverlayColor` tints layers (`XR_KHR_composition_layer_color_scale_bias`); `SetOverlayTexelAspect` applied; side-by-side overlays show one half to each eye (parallel and crossed); overlay relative transforms (old interfaces) follow their parent | `5b655e9` `66d3097` `46abd17` `f61f308` |
+| tests | fakexr accepts and records the overlay session create info | `5518260` |

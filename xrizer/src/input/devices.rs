@@ -16,7 +16,9 @@ use openxr as xr;
 use openxr::sys::Handle;
 
 use crate::input::BoundPoseType;
+use crate::input::action_manifest::ControllerType;
 use crate::input::profiles::knuckles::Knuckles;
+use crate::input::profiles::oculus_touch::OculusTouch;
 #[cfg(feature = "monado")]
 use crate::input::profiles::vive_tracker::ViveTracker;
 #[cfg(feature = "monado")]
@@ -144,6 +146,8 @@ impl std::fmt::Debug for TrackedDeviceType {
 
 pub struct ProfileData {
     pub properties: &'static ProfileProperties,
+    /// The profile the headset's identity comes from, the real one unless simulated.
+    pub headset: &'static ProfileProperties,
     get_hand_offset: fn(Hand) -> Mat4,
     get_pose_transformation: fn(BoundPoseType) -> Option<PoseTransformations>,
     /// For Knuckles, the skeleton thumb tries to accurately match where the physical
@@ -166,6 +170,7 @@ impl ProfileData {
     pub fn new<P: InteractionProfile>() -> Self {
         Self {
             properties: P::properties(),
+            headset: P::properties(),
             get_hand_offset: P::offset_grip_pose,
             get_pose_transformation: P::pose_transformation,
             force_estimated_thumb: TypeId::of::<P>() == TypeId::of::<Knuckles>(),
@@ -173,6 +178,24 @@ impl ProfileData {
             senses_fingers: P::SENSES_FINGERS,
             legacy_trigger_click: P::LEGACY_TRIGGER_CLICK,
             legacy_grip_click: P::LEGACY_GRIP_CLICK,
+        }
+    }
+
+    /// The profile data of this controller showing as `controller_type`, see [super::emulation]:
+    /// that controller's identity and poses, with this one's headset and physical traits.
+    pub(super) fn emulating(self, controller_type: &ControllerType) -> Self {
+        let emulated = match controller_type {
+            ControllerType::Knuckles => Self::new::<Knuckles>(),
+            ControllerType::OculusTouch => Self::new::<OculusTouch>(),
+            _ => return self,
+        };
+        Self {
+            headset: self.headset,
+            skeletal_tracking_level: self.skeletal_tracking_level,
+            senses_fingers: self.senses_fingers,
+            legacy_trigger_click: self.legacy_trigger_click,
+            legacy_grip_click: self.legacy_grip_click,
+            ..emulated
         }
     }
 
@@ -852,7 +875,7 @@ impl TrackedDevice {
                 let profiles = || {
                     controllers()
                         .filter_map(|controller| controller.profile_data.as_ref())
-                        .map(|data| data.properties)
+                        .map(|data| data.headset)
                 };
                 // simple_controller says nothing about the headset, so prefer any real
                 // controller seen before, then tracked hands.

@@ -84,6 +84,7 @@ impl BindingSources {
         BindingChoices {
             category: self.category,
             files: self.chosen.into_inner(),
+            emulated: None,
         }
     }
 }
@@ -93,11 +94,19 @@ impl BindingSources {
 pub(super) struct BindingChoices {
     category: Category,
     files: Vec<(ControllerType, Option<PathBuf>)>,
+    /// The controller chosen for the game to see, see [super::emulation].
+    pub emulated: Option<ControllerType>,
 }
 
 impl BindingChoices {
     /// Whether the app would get other bindings as `app_key`.
     pub fn changed_for(&self, app_key: &str) -> bool {
+        // Legacy input doesn't emulate controllers.
+        if self.category == Category::SteamVrInput
+            && super::emulation::emulated_controller(Some(app_key.to_owned())) != self.emulated
+        {
+            return true;
+        }
         let sources = BindingSources::new(Some(app_key.to_owned()), self.category);
         self.files
             .iter()
@@ -133,17 +142,22 @@ fn steamvr_saved_bindings(keys: &[String]) -> Option<SavedBindings> {
 
 /// Where per-app custom bindings are kept.
 fn config_dir() -> Option<PathBuf> {
+    Some(xrizer_config_dir()?.join("bindings"))
+}
+
+/// `$XDG_CONFIG_HOME/xrizer`.
+pub(super) fn xrizer_config_dir() -> Option<PathBuf> {
     let non_empty = |name| isolated_env_var(name).filter(|value| !value.is_empty());
     let config = non_empty("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .filter(|dir| dir.is_absolute())
         .or_else(|| Some(Path::new(&non_empty("HOME")?).join(".config")))?;
-    Some(config.join("xrizer/bindings"))
+    Some(config.join("xrizer"))
 }
 
 /// The directory named after an app key: lowercase, as SteamVR matches keys ignoring case, with
 /// characters other than letters, digits, `.`, `_` and `-` replaced by `_`.
-fn key_dir_name(key: &str) -> Option<String> {
+pub(super) fn key_dir_name(key: &str) -> Option<String> {
     let name: String = key
         .chars()
         .map(|c| match c.to_ascii_lowercase() {

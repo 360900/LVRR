@@ -205,7 +205,9 @@ impl SupportedBackend {
     }
 
     /// Returns None for texture types we don't support and for textures without a handle.
-    pub fn new(texture: &vr::Texture_t, instance: &xr::Instance) -> Option<Self> {
+    /// `gl_bridge` copies OpenGL textures through Vulkan even on the runtime's device, so frames
+    /// can be ended without the app's context.
+    pub fn new(texture: &vr::Texture_t, instance: &xr::Instance, gl_bridge: bool) -> Option<Self> {
         if texture.handle.is_null() {
             return None;
         }
@@ -220,7 +222,7 @@ impl SupportedBackend {
             }
             vr::ETextureType::OpenGL => {
                 let gl = GlData::new(instance)?;
-                if gl.on_runtime_device(instance) {
+                if !gl_bridge && gl.on_runtime_device(instance) {
                     Some(Self::OpenGL(gl))
                 } else {
                     GlBridgeData::new(gl, instance).map(Self::GlBridge)

@@ -217,6 +217,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             head_proximity,
             scalar_constants,
             simulated_properties,
+            emulated_profiles,
             binding_haptics,
             hand_speeds,
             uses_hand_speeds,
@@ -395,6 +396,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             binding_choices,
             legacy: None,
             simulated_properties,
+            emulated_profiles,
             hand_speeds: uses_hand_speeds.then_some(hand_speeds),
         };
         loaded.direct_origins = loaded.find_direct_origins();
@@ -604,10 +606,28 @@ impl<C: openxr_data::Compositor> Input<C> {
                         "Ignoring {controller_type} bindings, the runtime doesn't report user presence"
                     );
                 }
-            } else {
-                self.load_controller_bindings(&controller_type, &bindings, context, &mut variants);
             }
             loaded.push((controller_type, bindings));
+        }
+
+        // With a controller chosen for the game to see, every other controller gets its
+        // bindings converted, if the game has any for it.
+        let requested = super::emulation::emulated_controller(self.app_key());
+        let emulated = requested
+            .as_ref()
+            .and_then(|ty| loaded.iter().find(|(loaded, _)| loaded == ty));
+        match (&requested, emulated) {
+            (Some(ty), Some(_)) => info!("Showing the controllers as {ty}"),
+            (Some(ty), None) => info!("Can't show the controllers as {ty}, no bindings for it"),
+            _ => {}
+        }
+        for (controller_type, bindings) in &loaded {
+            use actions::ControllerType::{Gamepad, GenericHmd};
+            let replaced = controller_type != &Gamepad
+                && emulated.is_some_and(|(ty, _)| ty != controller_type);
+            if controller_type != &GenericHmd && !replaced {
+                self.load_controller_bindings(controller_type, bindings, context, &mut variants);
+            }
         }
 
         // Controllers the game has no bindings for get bindings converted from the closest
@@ -616,6 +636,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             input: self,
             context,
             loaded: &loaded,
+            emulated,
             sources: &sources,
             variants: &mut variants,
         };
@@ -625,6 +646,8 @@ impl<C: openxr_data::Compositor> Input<C> {
             input: &'a Input<C>,
             context: &'b mut BindingsLoadContext<'c>,
             loaded: &'a [(actions::ControllerType, bindings::Bindings)],
+            /// The controller every other is converted from, see [super::emulation].
+            emulated: Option<&'a (actions::ControllerType, bindings::Bindings)>,
             sources: &'a BindingSources,
             variants: &'a mut HashMap<xr::Path, String>,
         }
@@ -648,13 +671,22 @@ impl<C: openxr_data::Compositor> Input<C> {
                     return;
                 };
 
-                let source = native
-                    .conversion_sources()
-                    .into_iter()
-                    .find_map(|ty| self.loaded.iter().find(|(loaded, _)| *loaded == ty));
+                // Nothing converts to or from the gamepad's bindings.
+                let emulated = self
+                    .emulated
+                    .filter(|_| native != actions::ControllerType::Gamepad);
+                let source = emulated.or_else(|| {
+                    native
+                        .conversion_sources()
+                        .into_iter()
+                        .find_map(|ty| self.loaded.iter().find(|(loaded, _)| *loaded == ty))
+                });
                 // Custom bindings and those chosen in SteamVR may be for controllers the game has
                 // none for.
-                let own_path = self.sources.file_for(&native);
+                let own_path = emulated
+                    .is_none()
+                    .then(|| self.sources.file_for(&native))
+                    .flatten();
                 let bindings = if let Some((path, own)) = own_path.and_then(|path| {
                     let bindings = read_bindings(&path, &native)?;
                     Some((path, bindings))
@@ -662,13 +694,21 @@ impl<C: openxr_data::Compositor> Input<C> {
                     info!("Using {} for {profile}", path.display());
                     own
                 } else if let Some((source, bindings)) = source {
-                    crate::log_unique!(
-                        log::Level::Info,
-                        "No {native} bindings for {profile}, converting the {source} bindings"
-                    );
+                    if emulated.is_some() {
+                        info!("Converting the {source} bindings for {profile}");
+                    } else {
+                        crate::log_unique!(
+                            log::Level::Info,
+                            "No {native} bindings for {profile}, converting the {source} bindings"
+                        );
+                    }
                     let mut bindings = bindings.clone();
                     fallback::convert(&mut bindings, source, has_input::<P>);
-                    if let Some(properties) = source
+                    if emulated.is_some() {
+                        self.context
+                            .emulated_profiles
+                            .insert(profile_path, source.clone());
+                    } else if let Some(properties) = source
                         .simulated_properties()
                         .filter(|_| P::SIMULATE_CONVERTED)
                     {
@@ -691,7 +731,9 @@ impl<C: openxr_data::Compositor> Input<C> {
             }
         }
 
-        (variants, sources.into_choices())
+        let mut choices = sources.into_choices();
+        choices.emulated = requested;
+        (variants, choices)
     }
 
     /// Suggests `bindings` for the profiles of `controller_type`, recording their variant.

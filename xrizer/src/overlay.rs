@@ -71,39 +71,36 @@ impl OverlayMan {
         self.check_can_show_textures()?;
 
         if !self.openxr.session_data.get().is_real_session() {
-            let Some(compositor) = self.compositor.get() else {
+            // Overlay apps rarely request IVRCompositor, but theirs runs the frame loop.
+            let compositor = if self.openxr.overlay_session {
+                Some(
+                    self.compositor
+                        .force(|injector| Compositor::new(self.openxr.clone(), injector)),
+                )
+            } else {
+                self.compositor.get()
+            };
+            let Some(compositor) = compositor else {
                 crate::warn_once!("Can't show overlay textures before IVRCompositor is requested");
                 return Err(vr::EVROverlayError::RequestFailed);
             };
             compositor
                 .initialize_real_session(texture, bounds, vr::EVRSubmitFlags::Default)
                 .map_err(|_| vr::EVROverlayError::InvalidTexture)?;
+            compositor.start_overlay_frames();
         }
         Ok(RealSessionData(self.openxr.session_data.get()))
     }
 
-    /// The real session for a raw texture, which doesn't say which graphics API the app uses, so
-    /// no session can be set up for it.
-    fn get_existing_real_session_data(&self) -> Result<RealSessionData<'_>, vr::EVROverlayError> {
-        self.check_can_show_textures()?;
-        let session = self.openxr.session_data.get();
-        if !session.is_real_session() {
-            crate::warn_once!(
-                "Can't show raw overlay textures before the app submits a frame or an overlay texture"
-            );
-            return Err(vr::EVROverlayError::RequestFailed);
-        }
-        Ok(RealSessionData(session))
-    }
-
-    /// What showing any overlay texture needs: a session that isn't lost, of an app that renders.
+    /// What showing any overlay texture needs: a session that isn't lost, of an app that renders
+    /// or has an overlay session.
     fn check_can_show_textures(&self) -> Result<(), vr::EVROverlayError> {
         if self.openxr.is_lost() {
             return Err(vr::EVROverlayError::RequestFailed);
         }
-        // Overlays are only drawn by the scene app's frame loop. Without a compositor there is
-        // nothing to restart the session.
-        if !self.openxr.can_render() {
+        // Overlays are drawn by the scene app's frame loop, or by ours in an overlay session.
+        // Other apps have headless sessions, which can't draw.
+        if !self.openxr.can_render() && !self.openxr.overlay_session {
             crate::warn_once!(
                 "{:?} applications can't show overlay textures",
                 self.openxr.application_type
@@ -279,8 +276,27 @@ impl OverlayMan {
             };
             trace!("overlay rect: {rect:#?}");
 
+            // Overlay relative transforms chain onto their parent's placement.
+            let mut relative = xr::Posef::IDENTITY;
+            let mut root = overlay;
+            for _ in 0..=MAX_OVERLAY_DEPTH {
+                let Some(OverlayTransform {
+                    kind: TransformKind::OverlayRelative(parent),
+                    pose,
+                    ..
+                }) = &root.transform
+                else {
+                    break;
+                };
+                relative = pose_mul(pose, &relative);
+                let Some(parent) = overlays.get(*parent) else {
+                    break;
+                };
+                root = parent;
+            }
+
             let tracking_space = session.get_space_for_origin(session.current_origin);
-            let (space, pose) = match &overlay.transform {
+            let (space, pose) = match &root.transform {
                 None => (
                     tracking_space,
                     xr::Posef {
@@ -319,9 +335,13 @@ impl OverlayMan {
                             ),
                         )
                     }
-                    TransformKind::TrackedComponent(..) => continue,
+                    // A missing parent, or a cycle.
+                    TransformKind::TrackedComponent(..) | TransformKind::OverlayRelative(_) => {
+                        continue;
+                    }
                 },
             };
+            let pose = pose_mul(&pose, &relative);
 
             // OpenVR overlays have straight alpha unless they say otherwise.
             let premultiplied = overlay.has_flag(vr::VROverlayFlags::IsPremultiplied);
@@ -334,22 +354,58 @@ impl OverlayMan {
                 layer_flags |= xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA;
             }
 
-            macro_rules! layer_init {
-                ($ty:ident) => {{
-                    $ty::new()
-                        .space(space)
-                        .layer_flags(layer_flags)
-                        .eye_visibility(xr::EyeVisibility::BOTH)
-                        .sub_image(
-                            xr::SwapchainSubImage::new()
-                                .image_array_index(vr::EVREye::Left.0)
-                                .swapchain(swapchain)
-                                .image_rect(rect),
-                        )
-                }};
-            }
+            // Side-by-side overlays show each half of the texture to one eye.
+            let parallel = overlay.has_flag(vr::VROverlayFlags::SideBySide_Parallel);
+            let crossed = overlay.has_flag(vr::VROverlayFlags::SideBySide_Crossed);
+            let views = if (parallel || crossed)
+                && !matches!(overlay.kind, OverlayKind::Equirect { .. })
+                && rect.extent.width >= 2
+            {
+                let half = xr::Extent2Di {
+                    width: rect.extent.width / 2,
+                    height: rect.extent.height,
+                };
+                let first = xr::Rect2Di {
+                    offset: rect.offset,
+                    extent: half,
+                };
+                let second = xr::Rect2Di {
+                    offset: xr::Offset2Di {
+                        x: rect.offset.x + half.width,
+                        y: rect.offset.y,
+                    },
+                    extent: half,
+                };
+                let (left, right) = if parallel {
+                    (first, second)
+                } else {
+                    (second, first)
+                };
+                vec![
+                    (xr::EyeVisibility::LEFT, left),
+                    (xr::EyeVisibility::RIGHT, right),
+                ]
+            } else {
+                vec![(xr::EyeVisibility::BOTH, rect)]
+            };
 
-            macro_rules! lifetime_extend {
+            for (eye_visibility, rect) in views {
+                macro_rules! layer_init {
+                    ($ty:ident) => {{
+                        $ty::new()
+                            .space(space)
+                            .layer_flags(layer_flags)
+                            .eye_visibility(eye_visibility)
+                            .sub_image(
+                                xr::SwapchainSubImage::new()
+                                    .image_array_index(vr::EVREye::Left.0)
+                                    .swapchain(swapchain)
+                                    .image_rect(rect),
+                            )
+                    }};
+                }
+
+                macro_rules! lifetime_extend {
                 ($ty:ident, $layer:expr) => {{
                     fn lifetime_extend<'a, 'b: 'a, G: xr::Graphics>(
                         layer: $ty<'a, G>,
@@ -366,85 +422,90 @@ impl OverlayMan {
                 }}
             }
 
-            // OC-style size: width = widthMeters * scaleX, height = widthMeters * scaleY / aspect
-            let aspect = if rect.extent.height > 0 {
-                rect.extent.width as f32 / rect.extent.height as f32
-            } else {
-                1.0
-            };
-            let width = overlay.width * overlay.scale.0;
-            let height = overlay.width * overlay.scale.1 / aspect;
-            // The runtime rejects the whole frame if any layer is invalid.
-            if !(is_valid_pose(&pose) && is_positive(width) && is_positive(height)) {
-                crate::warn_once!("Skipping overlay {:?} with invalid placement", overlay.name);
-                continue;
-            }
-
-            let layer = match overlay.kind {
-                OverlayKind::Quad => {
-                    use xr::CompositionLayerQuad;
-                    let layer = layer_init!(CompositionLayerQuad)
-                        .pose(pose)
-                        .size(xr::Extent2Df { width, height });
-                    OverlayLayerInner::Quad(lifetime_extend!(CompositionLayerQuad, layer))
+                // OC-style size: width = widthMeters * scaleX, height = widthMeters * scaleY / aspect
+                let aspect = if rect.extent.height > 0 {
+                    rect.extent.width as f32 * overlay.texel_aspect / rect.extent.height as f32
+                } else {
+                    1.0
+                };
+                let width = overlay.width * overlay.scale.0;
+                let height = overlay.width * overlay.scale.1 / aspect;
+                // The runtime rejects the whole frame if any layer is invalid.
+                if !(is_valid_pose(&pose) && is_positive(width) && is_positive(height)) {
+                    crate::warn_once!("Skipping overlay {:?} with invalid placement", overlay.name);
+                    continue;
                 }
-                // SetOverlayCurvature and set_skybox check for khr_composition_layer_cylinder
-                OverlayKind::Curved { curvature } => {
-                    // OpenVR: curvature = width / (2π * radius), so a curvature of 1 closes the
-                    // cylinder. OpenXR wants an angle below 2π, which f32 2π isn't.
-                    let angle = (TAU * curvature).min(TAU - 1e-4);
-                    let radius = width / angle;
-                    // The pose is the middle of the arc, which faces the cylinder's axis.
-                    let (rot, pos) = to_glam(&pose);
-                    let center = pos + rot.mul_vec3(Vec3::Z * radius);
-                    if !(is_positive(angle) && is_positive(radius) && center.is_finite()) {
-                        crate::warn_once!(
-                            "Skipping overlay {:?} with invalid curvature",
-                            overlay.name
-                        );
-                        continue;
+
+                let layer = match overlay.kind {
+                    OverlayKind::Quad => {
+                        use xr::CompositionLayerQuad;
+                        let layer = layer_init!(CompositionLayerQuad)
+                            .pose(pose)
+                            .size(xr::Extent2Df { width, height });
+                        OverlayLayerInner::Quad(lifetime_extend!(CompositionLayerQuad, layer))
                     }
+                    // SetOverlayCurvature and set_skybox check for khr_composition_layer_cylinder
+                    OverlayKind::Curved { curvature } => {
+                        // OpenVR: curvature = width / (2π * radius), so a curvature of 1 closes the
+                        // cylinder. OpenXR wants an angle below 2π, which f32 2π isn't.
+                        let angle = (TAU * curvature).min(TAU - 1e-4);
+                        let radius = width / angle;
+                        // The pose is the middle of the arc, which faces the cylinder's axis.
+                        let (rot, pos) = to_glam(&pose);
+                        let center = pos + rot.mul_vec3(Vec3::Z * radius);
+                        if !(is_positive(angle) && is_positive(radius) && center.is_finite()) {
+                            crate::warn_once!(
+                                "Skipping overlay {:?} with invalid curvature",
+                                overlay.name
+                            );
+                            continue;
+                        }
 
-                    use xr::CompositionLayerCylinderKHR;
-                    let layer = layer_init!(CompositionLayerCylinderKHR)
-                        .radius(radius)
-                        .central_angle(angle)
-                        .aspect_ratio(width / height)
-                        .pose(xr::Posef {
-                            orientation: pose.orientation,
-                            position: xr::Vector3f {
-                                x: center.x,
-                                y: center.y,
-                                z: center.z,
-                            },
-                        });
-                    OverlayLayerInner::Cylinder(lifetime_extend!(
-                        CompositionLayerCylinderKHR,
-                        layer
-                    ))
+                        use xr::CompositionLayerCylinderKHR;
+                        let layer = layer_init!(CompositionLayerCylinderKHR)
+                            .radius(radius)
+                            .central_angle(angle)
+                            .aspect_ratio(width / height)
+                            .pose(xr::Posef {
+                                orientation: pose.orientation,
+                                position: xr::Vector3f {
+                                    x: center.x,
+                                    y: center.y,
+                                    z: center.z,
+                                },
+                            });
+                        OverlayLayerInner::Cylinder(lifetime_extend!(
+                            CompositionLayerCylinderKHR,
+                            layer
+                        ))
+                    }
+                    // set_skybox checks for khr_composition_layer_equirect2
+                    OverlayKind::Equirect { eye } => {
+                        use xr::CompositionLayerEquirect2KHR;
+                        // A radius of 0 is infinitely far away, like a skybox should be.
+                        let layer = layer_init!(CompositionLayerEquirect2KHR)
+                            .eye_visibility(eye)
+                            .pose(pose)
+                            .radius(0.0)
+                            .central_horizontal_angle(TAU)
+                            .upper_vertical_angle(FRAC_PI_2)
+                            .lower_vertical_angle(-FRAC_PI_2);
+                        OverlayLayerInner::Equirect2(lifetime_extend!(
+                            CompositionLayerEquirect2KHR,
+                            layer
+                        ))
+                    }
+                };
+                let mut layer = OverlayLayer::from(layer);
+                if overlay.alpha.is_some() || overlay.color.is_some() {
+                    layer.set_color_scale(
+                        overlay.color.unwrap_or([1.0; 3]),
+                        overlay.alpha.unwrap_or(1.0),
+                        premultiplied,
+                    );
                 }
-                // set_skybox checks for khr_composition_layer_equirect2
-                OverlayKind::Equirect { eye } => {
-                    use xr::CompositionLayerEquirect2KHR;
-                    // A radius of 0 is infinitely far away, like a skybox should be.
-                    let layer = layer_init!(CompositionLayerEquirect2KHR)
-                        .eye_visibility(eye)
-                        .pose(pose)
-                        .radius(0.0)
-                        .central_horizontal_angle(TAU)
-                        .upper_vertical_angle(FRAC_PI_2)
-                        .lower_vertical_angle(-FRAC_PI_2);
-                    OverlayLayerInner::Equirect2(lifetime_extend!(
-                        CompositionLayerEquirect2KHR,
-                        layer
-                    ))
-                }
-            };
-            let mut layer = OverlayLayer::from(layer);
-            if let Some(alpha) = overlay.alpha {
-                layer.set_alpha(alpha, premultiplied);
+                layers.push((overlay.z_order, layer));
             }
-            layers.push((overlay.z_order, layer));
         }
 
         // Sort by z_order asc
@@ -562,27 +623,22 @@ impl<G: xr::Graphics> Drop for OverlayLayer<'_, G> {
 }
 
 impl<G: xr::Graphics> OverlayLayer<'_, G> {
-    fn set_alpha(&mut self, alpha: f32, premultiplied: bool) {
+    fn set_color_scale(&mut self, color: [f32; 3], alpha: f32, premultiplied: bool) {
         // only one instance is stored, so this would cause segfault due to UAF
         debug_assert!(
             self.color_bias_khr.is_none(),
-            "attempted to set_alpha on the same CompositorLayer twice!"
+            "attempted to set_color_scale on the same CompositorLayer twice!"
         );
 
         // Monado scales the color as submitted, without unpremultiplying it first, so
         // premultiplied colors have to be scaled along with the alpha.
-        let rgb = if premultiplied { alpha } else { 1.0 };
+        let [r, g, b] = color.map(|c| if premultiplied { c * alpha } else { c });
         self.color_bias_khr = {
             let payload = Box::new(xr::sys::CompositionLayerColorScaleBiasKHR {
                 ty: xr::StructureType::COMPOSITION_LAYER_COLOR_SCALE_BIAS_KHR,
                 next: std::ptr::null(),
                 color_bias: Default::default(),
-                color_scale: xr::Color4f {
-                    r: rgb,
-                    g: rgb,
-                    b: rgb,
-                    a: alpha,
-                },
+                color_scale: xr::Color4f { r, g, b, a: alpha },
             });
 
             let payload = NonNull::from(Box::leak(payload));
@@ -821,7 +877,12 @@ enum TransformKind {
     /// SteamVR draws these on the device's render model, and only while it draws the device itself,
     /// which it doesn't for a scene app. We never draw devices, so these aren't drawn either.
     TrackedComponent(vr::TrackedDeviceIndex_t, CString),
+    /// Relative to the middle of the parent overlay.
+    OverlayRelative(OverlayKey),
 }
+
+/// How many parents an overlay relative transform may chain through.
+const MAX_OVERLAY_DEPTH: usize = 16;
 
 struct OverlayTransform {
     kind: TransformKind,
@@ -836,11 +897,15 @@ struct Overlay {
     name: CString,
     /// Only allowed to be Some if KHR_composition_layer_color_scale_bias is active
     alpha: Option<f32>,
+    /// From SetOverlayColor, with the same rule as `alpha`
+    color: Option<[f32; 3]>,
     width: f32,
     /// Scale factors of the transform matrix.
     /// Applied to the quad size like OpenComposite does, so games that encode
     /// non-unit scale in the transform get the size they expect.
     scale: (f32, f32),
+    /// Width over height of a texel, from SetOverlayTexelAspect.
+    texel_aspect: f32,
     visible: bool,
     kind: OverlayKind,
     z_order: i64,
@@ -852,6 +917,37 @@ struct Overlay {
     rect: Option<xr::Rect2Di>,
     flags: u32,
     events: VecDeque<vr::VREvent_t>,
+    /// SetOverlayRaw pixels waiting for the app's graphics, see [OverlayMan::upload_pending_raw].
+    pending_raw: Option<PendingRaw>,
+}
+
+struct PendingRaw {
+    pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+/// Why an overlay texture wasn't shown.
+enum ShowError {
+    /// Raw pixels that can't be uploaded yet: no real session, the app's graphics context isn't
+    /// current or the backend's last upload is still being read.
+    NotYet,
+    Failed(vr::EVROverlayError),
+}
+
+impl From<vr::EVROverlayError> for ShowError {
+    fn from(e: vr::EVROverlayError) -> Self {
+        Self::Failed(e)
+    }
+}
+
+impl From<ShowError> for vr::EVROverlayError {
+    fn from(e: ShowError) -> Self {
+        match e {
+            ShowError::NotYet => vr::EVROverlayError::RequestFailed,
+            ShowError::Failed(e) => e,
+        }
+    }
 }
 
 impl Overlay {
@@ -860,8 +956,10 @@ impl Overlay {
             key,
             name,
             alpha: None,
+            color: None,
             width: 1.0,
             scale: (1.0, 1.0),
+            texel_aspect: 1.0,
             visible: false,
             kind: OverlayKind::Quad,
             z_order: 0,
@@ -877,6 +975,7 @@ impl Overlay {
             rect: None,
             flags: 0,
             events: VecDeque::new(),
+            pending_raw: None,
         }
     }
 
@@ -895,8 +994,12 @@ impl Overlay {
         }
         let backend = match self.compositor.take() {
             Some(b) => b,
-            None => SupportedBackend::new(&texture, session_data.session.instance())
-                .ok_or(vr::EVROverlayError::InvalidTexture)?,
+            None => SupportedBackend::new(
+                &texture,
+                session_data.session.instance(),
+                openxr.overlay_session,
+            )
+            .ok_or(vr::EVROverlayError::InvalidTexture)?,
         };
         self.show(
             openxr,
@@ -905,6 +1008,7 @@ impl Overlay {
             backend,
             TextureSource::Texture(texture),
         )
+        .map_err(Into::into)
     }
 
     /// Shows `width` x `height` RGBA8 pixels, see SetOverlayRaw. `backend` is for an overlay
@@ -919,10 +1023,10 @@ impl Overlay {
         pixels: &[u8],
         width: u32,
         height: u32,
-    ) -> Result<(), vr::EVROverlayError> {
+    ) -> Result<(), ShowError> {
         let Some(backend) = self.compositor.take().or(backend) else {
             debug!("no graphics backend for the raw texture of {:?}", self.name);
-            return Err(vr::EVROverlayError::RequestFailed);
+            return Err(ShowError::NotYet);
         };
         self.show(
             openxr,
@@ -945,7 +1049,7 @@ impl Overlay {
         session_data: &RealSessionData<'_>,
         backend: SupportedBackend,
         source: TextureSource<'_>,
-    ) -> Result<(), vr::EVROverlayError> {
+    ) -> Result<(), ShowError> {
         /// Overlays are drawn into the scene app's frames, so their swapchains are the session's.
         #[macros::any_graphics(SupportedBackend)]
         fn uses_session_api<G: GraphicsBackend>(_: &G, session_data: &SessionData) -> bool
@@ -963,7 +1067,7 @@ impl Overlay {
         }
 
         if !backend.with_any_graphics::<uses_session_api>(session_data) {
-            return Err(vr::EVROverlayError::InvalidTexture);
+            return Err(vr::EVROverlayError::InvalidTexture.into());
         }
         let backend = self.compositor.insert(backend);
 
@@ -999,7 +1103,8 @@ impl Overlay {
                     swapchains,
                     key,
                     texture,
-                )),
+                ))
+                .map_err(ShowError::Failed),
             TextureSource::Raw {
                 pixels,
                 width,
@@ -1111,7 +1216,7 @@ fn set_swapchain_raw<G: GraphicsBackend>(
     width: u32,
     height: u32,
     color_space: vr::EColorSpace,
-) -> Result<xr::Extent2Di, vr::EVROverlayError>
+) -> Result<xr::Extent2Di, ShowError>
 where
     for<'a> &'a mut SwapchainMap<G::Api>:
         TryFrom<&'a mut AnySwapchainMap, Error: std::fmt::Display>,
@@ -1119,10 +1224,10 @@ where
     G::Format: Eq,
 {
     let Some(b_texture) = backend.raw_texture(pixels, width, height) else {
-        debug!("couldn't upload the raw overlay texture");
-        return Err(vr::EVROverlayError::RequestFailed);
+        debug!("couldn't upload the raw overlay texture yet");
+        return Err(ShowError::NotYet);
     };
-    update_swapchain(
+    Ok(update_swapchain(
         backend,
         openxr,
         session_data,
@@ -1131,7 +1236,7 @@ where
         key,
         b_texture,
         color_space,
-    )
+    )?)
 }
 
 /// Copies `texture` into the overlay's swapchain in `map`, replacing the swapchain if the texture
@@ -1282,7 +1387,8 @@ fn image_event(ty: vr::EVREventType, handle: vr::VROverlayHandle_t) -> vr::VREve
 }
 
 impl OverlayMan {
-    /// SetOverlayRaw, without its events.
+    /// SetOverlayRaw, without its events. False if the pixels are kept for
+    /// [Self::upload_pending_raw], as they can't be uploaded yet.
     fn set_overlay_raw(
         &self,
         handle: vr::VROverlayHandle_t,
@@ -1290,8 +1396,61 @@ impl OverlayMan {
         width: u32,
         height: u32,
         bytes_per_pixel: u32,
-    ) -> Result<(), vr::EVROverlayError> {
+    ) -> Result<bool, vr::EVROverlayError> {
         let key = OverlayKey::from(KeyData::from_ffi(handle));
+        if !self.overlays.read().unwrap().contains_key(key) {
+            return Err(vr::EVROverlayError::UnknownOverlay);
+        }
+        let pixels = raw_pixels(buffer, width, height, bytes_per_pixel)?;
+        debug!(
+            "setting raw overlay texture of {width}x{height}, {bytes_per_pixel} bytes per pixel"
+        );
+
+        let result = self.upload_raw(key, &pixels, width, height);
+        let mut overlays = self.overlays.write().unwrap();
+        let overlay = overlays
+            .get_mut(key)
+            .ok_or(vr::EVROverlayError::UnknownOverlay)?;
+        // Older pixels that are still waiting are replaced by these.
+        overlay.pending_raw = None;
+        match result {
+            Ok(()) => Ok(true),
+            Err(ShowError::NotYet) => {
+                debug!(
+                    "keeping the raw overlay texture of {:?} until it can be uploaded",
+                    overlay.name
+                );
+                overlay.pending_raw = Some(PendingRaw {
+                    pixels: pixels.into_owned(),
+                    width,
+                    height,
+                });
+                Ok(false)
+            }
+            Err(ShowError::Failed(e)) => Err(e),
+        }
+    }
+
+    /// Shows `width` x `height` RGBA8 pixels in the overlay, if the app's graphics allow it now.
+    /// Like the rest of the raw texture calls, this mustn't be called while holding the session
+    /// or overlay locks.
+    fn upload_raw(
+        &self,
+        key: OverlayKey,
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<(), ShowError> {
+        self.check_can_show_textures()?;
+        // The pixels don't say which graphics API the app uses, so no session can be set up for
+        // them: they wait for the app's first frame or overlay texture.
+        let session = self.openxr.session_data.get();
+        if !session.is_real_session() {
+            return Err(ShowError::NotYet);
+        }
+        let session_data = RealSessionData(session);
+        // The frame thread takes the overlay lock while holding the session's, so these come
+        // before it.
         let has_backend = self
             .overlays
             .read()
@@ -1300,14 +1459,6 @@ impl OverlayMan {
             .ok_or(vr::EVROverlayError::UnknownOverlay)?
             .compositor
             .is_some();
-        let pixels = raw_pixels(buffer, width, height, bytes_per_pixel)?;
-        debug!(
-            "setting raw overlay texture of {width}x{height}, {bytes_per_pixel} bytes per pixel"
-        );
-
-        // The frame thread takes the overlay lock while holding the session's, so these come
-        // before it.
-        let session_data = self.get_existing_real_session_data()?;
         let backend = if has_backend {
             None
         } else {
@@ -1320,26 +1471,67 @@ impl OverlayMan {
         let overlay = overlays
             .get_mut(key)
             .ok_or(vr::EVROverlayError::UnknownOverlay)?;
-        match overlay.set_raw_texture(
+        let result = overlay.set_raw_texture(
             &self.openxr,
             key,
             &session_data,
             backend,
-            &pixels,
+            pixels,
             width,
             height,
-        ) {
-            Ok(()) => {
-                debug!("set raw overlay texture for {:?}", overlay.name);
-                Ok(())
-            }
-            Err(e) => {
-                debug!(
-                    "failed to set raw overlay texture for {:?}: {e:?}",
-                    overlay.name
-                );
-                Err(e)
-            }
+        );
+        match &result {
+            Ok(()) => debug!("set raw overlay texture for {:?}", overlay.name),
+            Err(ShowError::NotYet) => {}
+            Err(ShowError::Failed(e)) => debug!(
+                "failed to set raw overlay texture for {:?}: {e:?}",
+                overlay.name
+            ),
+        }
+        result
+    }
+
+    /// Uploads the SetOverlayRaw pixels that had to wait, telling the overlays how it went. Called
+    /// where the app's graphics context is likely current: when it submits a frame or an overlay
+    /// texture, or polls overlay events. Not while holding the session or overlay locks.
+    pub fn upload_pending_raw(&self) {
+        let waiting: Vec<OverlayKey> = self
+            .overlays
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(_, overlay)| overlay.pending_raw.is_some())
+            .map(|(key, _)| key)
+            .collect();
+        for key in waiting {
+            let Some(raw) = self
+                .overlays
+                .write()
+                .unwrap()
+                .get_mut(key)
+                .and_then(|overlay| overlay.pending_raw.take())
+            else {
+                continue;
+            };
+            let result = self.upload_raw(key, &raw.pixels, raw.width, raw.height);
+            let mut overlays = self.overlays.write().unwrap();
+            let Some(overlay) = overlays.get_mut(key) else {
+                continue;
+            };
+            let event = match result {
+                Ok(()) => vr::EVREventType::ImageLoaded,
+                // Unless newer pixels came in meanwhile.
+                Err(ShowError::NotYet) => {
+                    if overlay.pending_raw.is_none() {
+                        overlay.pending_raw = Some(raw);
+                    }
+                    continue;
+                }
+                Err(ShowError::Failed(_)) => vr::EVREventType::ImageFailed,
+            };
+            overlay
+                .events
+                .push_back(image_event(event, key.data().as_ffi()));
         }
     }
 
@@ -1532,20 +1724,27 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         };
 
         let key = OverlayKey::from(KeyData::from_ffi(handle));
-        get_overlay!(self, handle, mut overlay);
-        match overlay.set_texture(&self.openxr, key, &data, texture) {
-            Err(e) => {
-                debug!(
-                    "failed to set overlay texture for {:?}: {e:?}",
-                    overlay.name
-                );
-                e
+        let result = {
+            get_overlay!(self, handle, mut overlay);
+            match overlay.set_texture(&self.openxr, key, &data, texture) {
+                Err(e) => {
+                    debug!(
+                        "failed to set overlay texture for {:?}: {e:?}",
+                        overlay.name
+                    );
+                    e
+                }
+                Ok(_) => {
+                    debug!("set overlay texture for {:?}", overlay.name);
+                    overlay.pending_raw = None;
+                    vr::EVROverlayError::None
+                }
             }
-            Ok(_) => {
-                debug!("set overlay texture for {:?}", overlay.name);
-                vr::EVROverlayError::None
-            }
-        }
+        };
+        drop(data);
+        // The session may have just been set up, which the other overlays' raw pixels waited for.
+        self.upload_pending_raw();
+        result
     }
 
     fn CloseMessageOverlay(&self) {
@@ -1716,9 +1915,11 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         bytes_per_pixel: u32,
     ) -> vr::EVROverlayError {
         let result = self.set_overlay_raw(handle, texture, width, height, bytes_per_pixel);
-        // SteamVR tells the overlay how loading its image went.
+        // SteamVR tells the overlay how loading its image went, which for kept pixels
+        // upload_pending_raw does.
         let event = match result {
-            Ok(()) => vr::EVREventType::ImageLoaded,
+            Ok(false) => return vr::EVROverlayError::None,
+            Ok(true) => vr::EVREventType::ImageLoaded,
             Err(_) => vr::EVREventType::ImageFailed,
         };
         let key = OverlayKey::from(KeyData::from_ffi(handle));
@@ -1732,6 +1933,7 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         // The swapchain stays for the next texture: destroying it here could free images that the
         // last copy into it is still writing to.
         overlay.rect = None;
+        overlay.pending_raw = None;
         vr::EVROverlayError::None
     }
     fn ClearOverlayCursorPositionOverride(&self, _: vr::VROverlayHandle_t) -> vr::EVROverlayError {
@@ -1843,6 +2045,7 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         if event.is_null() {
             return false;
         }
+        self.upload_pending_raw();
         let mut overlays = self.overlays.write().unwrap();
         let Some(queued) = overlays
             .get_mut(OverlayKey::from(KeyData::from_ffi(handle)))
@@ -2056,6 +2259,8 @@ impl vr::IVROverlay028_Interface for OverlayMan {
             Some(TransformKind::TrackedComponent(..)) => {
                 vr::VROverlayTransformType::TrackedComponent
             }
+            // Only old interfaces have these, and no type for them.
+            Some(TransformKind::OverlayRelative(_)) => vr::VROverlayTransformType::Invalid,
         };
         unsafe { ty.write(kind) };
         vr::EVROverlayError::None
@@ -2192,12 +2397,29 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         overlay.z_order = value as _;
         vr::EVROverlayError::None
     }
-    fn GetOverlayTexelAspect(&self, _: vr::VROverlayHandle_t, _: *mut f32) -> vr::EVROverlayError {
-        crate::warn_unimplemented!("GetOverlayTexelAspect");
-        vr::EVROverlayError::RequestFailed
+    fn GetOverlayTexelAspect(
+        &self,
+        handle: vr::VROverlayHandle_t,
+        value: *mut f32,
+    ) -> vr::EVROverlayError {
+        get_overlay!(self, handle, overlay);
+        if value.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        unsafe { *value = overlay.texel_aspect };
+        vr::EVROverlayError::None
     }
-    fn SetOverlayTexelAspect(&self, _: vr::VROverlayHandle_t, _: f32) -> vr::EVROverlayError {
-        crate::warn_unimplemented!("SetOverlayTexelAspect");
+    fn SetOverlayTexelAspect(
+        &self,
+        handle: vr::VROverlayHandle_t,
+        value: f32,
+    ) -> vr::EVROverlayError {
+        get_overlay!(self, handle, mut overlay);
+        if !is_positive(value) {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        debug!("setting overlay {:?} texel aspect to {value}", overlay.name);
+        overlay.texel_aspect = value;
         vr::EVROverlayError::None
     }
     fn GetOverlayAlpha(
@@ -2212,22 +2434,46 @@ impl vr::IVROverlay028_Interface for OverlayMan {
 
     fn GetOverlayColor(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: *mut f32,
-        _: *mut f32,
-        _: *mut f32,
+        handle: vr::VROverlayHandle_t,
+        red: *mut f32,
+        green: *mut f32,
+        blue: *mut f32,
     ) -> vr::EVROverlayError {
-        crate::warn_unimplemented!("GetOverlayColor");
-        vr::EVROverlayError::RequestFailed
+        get_overlay!(self, handle, overlay);
+        if red.is_null() || green.is_null() || blue.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        let [r, g, b] = overlay.color.unwrap_or([1.0; 3]);
+        unsafe {
+            *red = r;
+            *green = g;
+            *blue = b;
+        }
+        vr::EVROverlayError::None
     }
     fn SetOverlayColor(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: f32,
-        _: f32,
-        _: f32,
+        handle: vr::VROverlayHandle_t,
+        red: f32,
+        green: f32,
+        blue: f32,
     ) -> vr::EVROverlayError {
-        crate::warn_unimplemented!("SetOverlayColor");
+        get_overlay!(self, handle, mut overlay);
+        if !self
+            .openxr
+            .enabled_extensions
+            .khr_composition_layer_color_scale_bias
+        {
+            crate::warn_once!(
+                "Cannot SetOverlayColor on {:?}: Runtime does not support KHR_composition_layer_color_scale_bias",
+                overlay.name
+            );
+            return vr::EVROverlayError::None;
+        }
+
+        let color = [red, green, blue];
+        debug!("setting overlay {:?} color to {color:?}", overlay.name);
+        overlay.color = (color != [1.0; 3]).then_some(color);
         vr::EVROverlayError::None
     }
     fn GetOverlayFlags(
@@ -2366,20 +2612,48 @@ impl vr::IVROverlay028_Interface for OverlayMan {
 impl vr::IVROverlay026On027 for OverlayMan {
     fn SetOverlayTransformOverlayRelative(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: vr::VROverlayHandle_t,
-        _: *const vr::HmdMatrix34_t,
+        handle: vr::VROverlayHandle_t,
+        parent: vr::VROverlayHandle_t,
+        transform: *const vr::HmdMatrix34_t,
     ) -> vr::EVROverlayError {
-        crate::warn_unimplemented!("SetOverlayTransformOverlayRelative");
+        let parent = OverlayKey::from(KeyData::from_ffi(parent));
+        let mut overlays = self.overlays.write().unwrap();
+        if !overlays.contains_key(parent) {
+            return vr::EVROverlayError::UnknownOverlay;
+        }
+        let Some(overlay) = overlays.get_mut(OverlayKey::from(KeyData::from_ffi(handle))) else {
+            return vr::EVROverlayError::UnknownOverlay;
+        };
+        if transform.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        overlay.set_transform(TransformKind::OverlayRelative(parent), unsafe {
+            transform.read()
+        });
         vr::EVROverlayError::None
     }
     fn GetOverlayTransformOverlayRelative(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: *mut vr::VROverlayHandle_t,
-        _: *mut vr::HmdMatrix34_t,
+        handle: vr::VROverlayHandle_t,
+        out_parent: *mut vr::VROverlayHandle_t,
+        out_transform: *mut vr::HmdMatrix34_t,
     ) -> vr::EVROverlayError {
-        crate::warn_unimplemented!("GetOverlayTransformOverlayRelative");
+        get_overlay!(self, handle, overlay);
+        let Some(OverlayTransform {
+            kind: TransformKind::OverlayRelative(parent),
+            matrix,
+            ..
+        }) = &overlay.transform
+        else {
+            return vr::EVROverlayError::WrongTransformType;
+        };
+        if out_parent.is_null() || out_transform.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        unsafe {
+            out_parent.write(parent.data().as_ffi());
+            out_transform.write(*matrix);
+        }
         vr::EVROverlayError::None
     }
 }
@@ -3168,6 +3442,7 @@ mod tests {
             xr.compositor.set(Arc::downgrade(&comp));
             let man = Arc::new(OverlayMan::new(xr.clone(), &Injector::default()));
             man.compositor.set(Arc::downgrade(&comp));
+            comp.overlays.set(Arc::downgrade(&man));
             Self {
                 man,
                 _comp: comp,
@@ -3303,6 +3578,110 @@ mod tests {
         set_flag(OverlayFlags::IsPremultiplied, false);
         set_flag(OverlayFlags::IgnoreTextureAlpha, true);
         assert_eq!(layer().flags(), Flags::UNPREMULTIPLIED_ALPHA);
+    }
+
+    #[test]
+    fn overlay_color_tints_layer() {
+        let f = RealSessionFixture::with_extensions(|e| {
+            e.khr_composition_layer_color_scale_bias = true
+        });
+        let handle = f.textured_overlay(c"key");
+        let layer = || f.layers(false).pop().unwrap();
+        assert_eq!(layer().color_scale(), None);
+
+        assert_eq!(
+            f.man.SetOverlayColor(handle, 1.0, 0.5, 0.25),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(layer().color_scale(), Some([1.0, 0.5, 0.25, 1.0]));
+        let mut color = [0.0; 3];
+        let [r, g, b] = color.each_mut();
+        assert_eq!(
+            f.man.GetOverlayColor(handle, r, g, b),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(color, [1.0, 0.5, 0.25]);
+
+        // Premultiplied colors get the alpha on top.
+        assert_eq!(
+            f.man.SetOverlayAlpha(handle, 0.5),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(
+            f.man
+                .SetOverlayFlag(handle, vr::VROverlayFlags::IsPremultiplied, true),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(layer().color_scale(), Some([0.5, 0.25, 0.125, 0.5]));
+    }
+
+    #[test]
+    fn texel_aspect_stretches_overlay() {
+        let f = RealSessionFixture::new();
+        let handle = f.textured_overlay(c"key");
+        let size = || match f.layers(false).as_slice() {
+            [TestLayer::Quad(q, _)] => (q.size.width, q.size.height),
+            other => panic!("expected one quad, got {other:?}"),
+        };
+        assert_eq!(size(), (1.0, 1.0));
+
+        assert_eq!(
+            f.man.SetOverlayTexelAspect(handle, 2.0),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(size(), (1.0, 0.5));
+        let mut aspect = 0.0;
+        assert_eq!(
+            f.man.GetOverlayTexelAspect(handle, &mut aspect),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(aspect, 2.0);
+        assert_eq!(
+            f.man.SetOverlayTexelAspect(handle, 0.0),
+            vr::EVROverlayError::InvalidParameter
+        );
+    }
+
+    #[test]
+    fn side_by_side_overlay_shows_one_half_per_eye() {
+        let f = RealSessionFixture::new();
+        let handle = f.textured_overlay(c"key");
+        let views = || -> Vec<_> {
+            f.layers(false)
+                .iter()
+                .map(|l| match l {
+                    TestLayer::Quad(q, _) => (
+                        q.eye_visibility,
+                        q.sub_image.image_rect.offset.x,
+                        q.sub_image.image_rect.extent.width,
+                        q.size.height,
+                    ),
+                    other => panic!("expected quads, got {other:?}"),
+                })
+                .collect()
+        };
+        assert_eq!(views(), [(xr::EyeVisibility::BOTH, 0, 10, 1.0)]);
+
+        for (flag, left_x, right_x) in [
+            (vr::VROverlayFlags::SideBySide_Parallel, 0, 5),
+            (vr::VROverlayFlags::SideBySide_Crossed, 5, 0),
+        ] {
+            assert_eq!(
+                f.man.SetOverlayFlag(handle, flag, true),
+                vr::EVROverlayError::None
+            );
+            assert_eq!(
+                views(),
+                [
+                    (xr::EyeVisibility::LEFT, left_x, 5, 2.0),
+                    (xr::EyeVisibility::RIGHT, right_x, 5, 2.0)
+                ]
+            );
+            assert_eq!(
+                f.man.SetOverlayFlag(handle, flag, false),
+                vr::EVROverlayError::None
+            );
+        }
     }
 
     #[test]
@@ -3498,6 +3877,68 @@ mod tests {
             vr::EVROverlayError::None
         );
         assert_eq!(f.layers(false).len(), 0);
+    }
+
+    #[test]
+    fn overlay_relative_transform_follows_parent() {
+        use vr::IVROverlay026On027 as Old;
+        let f = RealSessionFixture::new();
+        let parent = f.textured_overlay(c"parent");
+        let child = f.textured_overlay(c"child");
+        let at = |x: f32| -> vr::HmdMatrix34_t {
+            xr::Posef {
+                position: xr::Vector3f { x, y: 0.0, z: 0.0 },
+                orientation: xr::Quaternionf::IDENTITY,
+            }
+            .into()
+        };
+        assert_eq!(
+            f.man.SetOverlayTransformAbsolute(
+                parent,
+                vr::ETrackingUniverseOrigin::Standing,
+                &at(1.0)
+            ),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(
+            Old::SetOverlayTransformOverlayRelative(&*f.man, child, parent, &at(2.0)),
+            vr::EVROverlayError::None
+        );
+        let mut xs: Vec<_> = f
+            .layers(false)
+            .iter()
+            .map(|l| match l {
+                TestLayer::Quad(q, _) => q.pose.position.x,
+                other => panic!("expected quads, got {other:?}"),
+            })
+            .collect();
+        xs.sort_by(f32::total_cmp);
+        assert_eq!(xs, [1.0, 3.0]);
+
+        let mut out_parent = 0;
+        let mut out_transform = at(0.0);
+        assert_eq!(
+            Old::GetOverlayTransformOverlayRelative(
+                &*f.man,
+                child,
+                &mut out_parent,
+                &mut out_transform
+            ),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(out_parent, parent);
+        assert_eq!(out_transform.m[0][3], 2.0);
+
+        // A cycle isn't drawn.
+        assert_eq!(
+            Old::SetOverlayTransformOverlayRelative(&*f.man, parent, child, &at(0.0)),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(f.layers(false).len(), 0);
+        assert_eq!(
+            Old::SetOverlayTransformOverlayRelative(&*f.man, child, 12345, &at(0.0)),
+            vr::EVROverlayError::UnknownOverlay
+        );
     }
 
     /// The frame thread takes the overlay lock while holding the session lock, so the first
@@ -3967,27 +4408,24 @@ mod tests {
         assert_eq!(f.extent(handle), Some((2, 1)));
     }
 
-    /// Raw pixels don't say which graphics API the app uses, so they can't set up the session.
+    /// Raw pixels don't say which graphics API the app uses, so they can't set up the session and
+    /// wait for it.
     #[test]
-    fn raw_texture_before_the_first_texture_fails() {
+    fn raw_texture_waits_for_the_first_texture() {
         let f = RealSessionFixture::new();
         let handle = create(&f.man, c"key", c"name");
         let session = f.xr.session_data.get().session.as_raw();
         assert_eq!(
             f.set_raw(handle, &rgba(2, 2), 2, 2, 4),
-            vr::EVROverlayError::RequestFailed
+            vr::EVROverlayError::None
         );
-        f.image_event(vr::EVREventType::ImageFailed, handle);
+        assert!(poll_overlay_event(&f.man, handle).is_none());
         assert_eq!(f.xr.session_data.get().session.as_raw(), session);
         assert_eq!(f.extent(handle), None);
 
         f.textured_overlay(c"textured");
-        assert_eq!(
-            f.set_raw(handle, &rgba(2, 2), 2, 2, 4),
-            vr::EVROverlayError::None
-        );
-        f.image_event(vr::EVREventType::ImageLoaded, handle);
         assert_eq!(f.extent(handle), Some((2, 2)));
+        f.image_event(vr::EVREventType::ImageLoaded, handle);
     }
 
     /// Headless sessions can't create swapchains, and moving a Background app to a graphics
@@ -4011,27 +4449,103 @@ mod tests {
         }
     }
 
-    /// Like GL copies, GL uploads need the app's context. The overlay keeps its backend for a
-    /// later try.
+    /// Overlay apps with an overlay session draw without IVRCompositor or a frame loop of their
+    /// own, but still can't submit scene frames.
     #[test]
-    fn raw_texture_without_graphics_context_fails() {
+    fn overlay_app_draws_in_overlay_session() {
+        fakexr::advertise_extension(xr::sys::EXTX_OVERLAY_EXTENSION_NAME);
+        let f = RealSessionFixture::with_app_type(vr::EVRApplicationType::Overlay);
+        assert!(f.xr.overlay_session && !f.xr.headless);
+        f.textured_overlay(c"overlay");
+        let session = f.xr.session_data.get().session.as_raw();
+        assert!(f.xr.session_data.get().is_real_session());
+        assert!(fakexr::session_is_overlay(session));
+
+        let start = std::time::Instant::now();
+        while fakexr::last_layer_count(session) != 1 {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(5),
+                "no frame with the overlay ended"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(
+            vr::IVRCompositor029_Interface::Submit(
+                &*f._comp,
+                vr::EVREye::Left,
+                &f.texture(),
+                std::ptr::null(),
+                vr::EVRSubmitFlags::Default
+            ),
+            vr::EVRCompositorError::IsNotSceneApplication
+        );
+    }
+
+    /// Like GL copies, GL uploads need the app's context, so the pixels wait for the app's next
+    /// frame. Newer pixels replace them.
+    #[test]
+    fn raw_texture_waits_for_graphics_context() {
         use crate::compositor::FakeGraphicsData;
         let f = RealSessionFixture::new();
         f.textured_overlay(c"textured");
         let handle = create(&f.man, c"raw", c"raw");
         FakeGraphicsData::set_context_current(false);
-        let result = f.set_raw(handle, &rgba(2, 2), 2, 2, 4);
-        FakeGraphicsData::set_context_current(true);
-        assert_eq!(result, vr::EVROverlayError::RequestFailed);
-        f.image_event(vr::EVREventType::ImageFailed, handle);
+        for size in [2, 3] {
+            assert_eq!(
+                f.set_raw(handle, &rgba(size, size), size, size, 4),
+                vr::EVROverlayError::None
+            );
+        }
+        assert!(poll_overlay_event(&f.man, handle).is_none());
         assert_eq!(f.extent(handle), None);
         assert!(FakeGraphicsData::raw_uploads().is_empty());
 
+        FakeGraphicsData::set_context_current(true);
+        let comp: &dyn vr::IVRCompositor029_Interface = &*f._comp;
+        comp.WaitGetPoses(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
         assert_eq!(
-            f.set_raw(handle, &rgba(2, 2), 2, 2, 4),
+            comp.Submit(
+                vr::EVREye::Left,
+                &f.texture(),
+                std::ptr::null(),
+                vr::EVRSubmitFlags::Default,
+            ),
+            vr::EVRCompositorError::None
+        );
+        assert_eq!(f.extent(handle), Some((3, 3)));
+        assert_eq!(FakeGraphicsData::raw_uploads(), [(3, 3, rgba(3, 3))]);
+        f.image_event(vr::EVREventType::ImageLoaded, handle);
+    }
+
+    /// Waiting pixels go with a clear or the app's texture.
+    #[test]
+    fn waiting_raw_texture_is_dropped() {
+        use crate::compositor::FakeGraphicsData;
+        let f = RealSessionFixture::new();
+        let cleared = f.textured_overlay(c"cleared");
+        let textured = create(&f.man, c"textured", c"textured");
+        FakeGraphicsData::set_context_current(false);
+        for handle in [cleared, textured] {
+            assert_eq!(
+                f.set_raw(handle, &rgba(2, 2), 2, 2, 4),
+                vr::EVROverlayError::None
+            );
+        }
+        assert_eq!(
+            f.man.ClearOverlayTexture(cleared),
             vr::EVROverlayError::None
         );
-        assert_eq!(f.extent(handle), Some((2, 2)));
+        assert_eq!(
+            f.man.SetOverlayTexture(textured, &f.texture()),
+            vr::EVROverlayError::None
+        );
+        FakeGraphicsData::set_context_current(true);
+        for handle in [cleared, textured] {
+            assert!(poll_overlay_event(&f.man, handle).is_none());
+        }
+        assert!(FakeGraphicsData::raw_uploads().is_empty());
+        assert_eq!(f.extent(cleared), None);
+        assert_eq!(f.extent(textured), Some((10, 10)));
     }
 
     /// Raw pixels and the app's textures share the overlay's swapchain, which a clear keeps and

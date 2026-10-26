@@ -1090,6 +1090,81 @@ fn converted_bindings_simulate_their_controller() {
 }
 
 #[test]
+fn chosen_controller_type_is_emulated() {
+    use super::profiles::vive_controller::ViveWands;
+    use vr::ETrackedDeviceProperty as Prop;
+
+    let get = |f: &Fixture, index, prop| {
+        f.input
+            .get_device_string_tracked_property(index, prop)
+            .map(|s| s.into_string().unwrap())
+            .unwrap()
+    };
+    let identity = |f: &Fixture| {
+        [
+            get(f, 1, Prop::ControllerType_String),
+            get(
+                f,
+                vr::k_unTrackedDeviceIndex_Hmd,
+                Prop::ControllerType_String,
+            ),
+        ]
+    };
+    fn connect<P: InteractionProfile>(f: &mut Fixture, set: &CStr) {
+        f.set_interaction_profile::<P>(LeftHand);
+        f.set_interaction_profile::<P>(RightHand);
+        let set = f.get_action_set_handle(set);
+        f.sync(vr::VRActiveActionSet_t {
+            ulActionSet: set,
+            ..Default::default()
+        });
+    }
+
+    // Chosen in the app's settings, the Touch controllers show as Index ones and get the game's
+    // Index bindings, the headset keeps its identity.
+    let steam = FakeSteam::new("emulated-controller");
+    let apps = steam.home.join(".config/xrizer/apps");
+    std::fs::create_dir_all(&apps).unwrap();
+    std::fs::write(
+        apps.join(format!("{}.json", FakeSteam::APP_KEY)),
+        r#"{"controller_type": "knuckles"}"#,
+    )
+    .unwrap();
+    let mut f = Fixture::new();
+    f.load_actions(c"actions.json");
+    connect::<OculusTouch>(&mut f, c"/actions/set1");
+    assert_eq!(identity(&f), ["knuckles", "rift"]);
+    let touch = f
+        .input
+        .openxr
+        .instance
+        .string_to_path(OculusTouch::profile_path())
+        .unwrap();
+    let boolact = f.get_action::<bool>(f.get_action_handle(c"/actions/set1/in/boolact"));
+    let bindings = fakexr::get_suggested_bindings(boolact, touch);
+    // Converted from Index's a button, not the game's Touch bindings' menu button.
+    assert!(bindings.contains(&"/user/hand/left/input/x/click".to_string()));
+    assert!(!bindings.contains(&"/user/hand/left/input/menu/click".to_string()));
+    // So do other controllers.
+    connect::<ViveWands>(&mut f, c"/actions/set1");
+    assert_eq!(identity(&f), ["knuckles", "vive"]);
+
+    // The environment wins.
+    set_test_env("XRIZER_CONTROLLER_TYPE", "auto");
+    let mut f = Fixture::new();
+    f.load_actions(c"actions.json");
+    connect::<OculusTouch>(&mut f, c"/actions/set1");
+    assert_eq!(identity(&f), ["oculus_touch", "rift"]);
+
+    // Without bindings for it, the game sees the real controllers.
+    set_test_env("XRIZER_CONTROLLER_TYPE", "knuckles");
+    let mut f = Fixture::new();
+    f.load_actions(c"actions_vive_only.json");
+    connect::<OculusTouch>(&mut f, c"/actions/main");
+    assert_eq!(identity(&f), ["oculus_touch", "rift"]);
+}
+
+#[test]
 fn controllers_tracked_without_bindings() {
     let f = Fixture::new();
     f.load_actions(c"actions_no_bindings.json");
