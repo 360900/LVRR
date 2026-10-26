@@ -500,6 +500,10 @@ impl Compositor {
         if let Some(input) = self.input.get() {
             input.load_pending_manifest();
         }
+        // Raw overlay pixels wait for the app's graphics context, current while it submits.
+        if let Some(overlays) = self.overlays.get() {
+            overlays.upload_pending_raw();
+        }
 
         let mut session_lock = self.openxr.session_data.get();
         let mut frame_lock = session_lock.comp_data.ctrl.lock().unwrap();
