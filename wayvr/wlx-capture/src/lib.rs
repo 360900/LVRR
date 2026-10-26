@@ -21,6 +21,12 @@ pub mod pipewire;
 #[cfg(feature = "pipewire")]
 pub mod kde_screencast;
 
+#[cfg(feature = "pipewire")]
+pub mod mutter_screencast;
+
+#[cfg(feature = "wayland")]
+pub mod ext_image_copy_capture;
+
 #[cfg(feature = "xshm")]
 pub mod xshm;
 

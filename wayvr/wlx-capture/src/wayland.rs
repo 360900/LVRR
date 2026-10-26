@@ -24,14 +24,25 @@ use wayland_client::{
     backend::WaylandError,
     globals::{GlobalList, GlobalListContents, registry_queue_init},
     protocol::{
+        wl_buffer::WlBuffer,
         wl_output::{self, Transform, WlOutput},
         wl_registry::{self, WlRegistry},
         wl_seat::WlSeat,
         wl_shm::WlShm,
+        wl_shm_pool::WlShmPool,
     },
 };
-use wayland_protocols::wp::linux_dmabuf::zv1::client::{
-    zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1, zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
+use wayland_protocols::{
+    ext::{
+        image_capture_source::v1::client::{
+            ext_image_capture_source_v1::ExtImageCaptureSourceV1,
+            ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1,
+        },
+        image_copy_capture::v1::client::ext_image_copy_capture_manager_v1::ExtImageCopyCaptureManagerV1,
+    },
+    wp::linux_dmabuf::zv1::client::{
+        zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1, zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
+    },
 };
 use wayland_protocols_plasma::screencast::v1::client::{
     zkde_screencast_stream_unstable_v1::{self, ZkdeScreencastStreamUnstableV1},
@@ -71,6 +82,9 @@ pub struct WlxClient {
     pub maybe_wlr_screencopy_mgr: Option<ZwlrScreencopyManagerV1>,
     /// LVRR: KWin streams an output over PipeWire on request, without the portal's picker
     pub maybe_kde_screencast_mgr: Option<ZkdeScreencastUnstableV1>,
+    /// LVRR: ext-image-copy-capture-v1, the standard successor of wlr-screencopy
+    pub maybe_ext_image_copy_capture_mgr: Option<ExtImageCopyCaptureManagerV1>,
+    pub maybe_ext_output_source_mgr: Option<ExtOutputImageCaptureSourceManagerV1>,
     pub maybe_zwp_linux_dmabuf: Option<ZwpLinuxDmabufV1>,
     pub wl_seat: WlSeat,
     pub wl_shm: WlShm,
@@ -104,6 +118,8 @@ impl WlxClient {
             maybe_wlr_dmabuf_mgr: globals.bind(&qh, 1..=1, ()).ok(),
             maybe_wlr_screencopy_mgr: globals.bind(&qh, 3..=3, ()).ok(),
             maybe_kde_screencast_mgr: globals.bind(&qh, 1..=4, ()).ok(),
+            maybe_ext_image_copy_capture_mgr: globals.bind(&qh, 1..=1, ()).ok(),
+            maybe_ext_output_source_mgr: globals.bind(&qh, 1..=1, ()).ok(),
             maybe_zwp_linux_dmabuf: globals.bind(&qh, 4..=4, ()).ok(),
             outputs: IdMap::new(),
             queue: Arc::new(Mutex::new(queue)),
@@ -225,7 +241,7 @@ impl WlxClient {
     }
 }
 
-fn wl_transform_to_frame_transform(transform: Transform) -> frame::Transform {
+pub(crate) fn wl_transform_to_frame_transform(transform: Transform) -> frame::Transform {
     match transform {
         Transform::Normal => frame::Transform::Normal,
         Transform::_90 => frame::Transform::Rotated90,
@@ -479,6 +495,42 @@ impl Dispatch<ZkdeScreencastStreamUnstableV1, KdeStreamResult> for WlxClient {
     }
 }
 
+impl Dispatch<ExtImageCopyCaptureManagerV1, ()> for WlxClient {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ExtImageCopyCaptureManagerV1,
+        _event: <ExtImageCopyCaptureManagerV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<ExtOutputImageCaptureSourceManagerV1, ()> for WlxClient {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ExtOutputImageCaptureSourceManagerV1,
+        _event: <ExtOutputImageCaptureSourceManagerV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<ExtImageCaptureSourceV1, ()> for WlxClient {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ExtImageCaptureSourceV1,
+        _event: <ExtImageCaptureSourceV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+    }
+}
+
 impl Dispatch<ZwlrScreencopyManagerV1, ()> for WlxClient {
     fn event(
         _state: &mut Self,
@@ -532,6 +584,32 @@ impl Dispatch<ZwpLinuxBufferParamsV1, ()> for WlxClient {
         _state: &mut Self,
         _proxy: &ZwpLinuxBufferParamsV1,
         _event: <ZwpLinuxBufferParamsV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+// LVRR: buffer plumbing shared by the screencopy and image copy capture backends
+
+impl Dispatch<WlShmPool, ()> for WlxClient {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WlShmPool,
+        _event: <WlShmPool as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WlBuffer, ()> for WlxClient {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WlBuffer,
+        _event: <WlBuffer as Proxy>::Event,
         _data: &(),
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,

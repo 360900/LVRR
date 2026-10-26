@@ -446,29 +446,3 @@ fn fourcc_from_wlshm(shm_format: Format) -> Option<DrmFourcc> {
         _ => None,
     }
 }
-
-// Plumbing below
-
-impl Dispatch<WlShmPool, ()> for WlxClient {
-    fn event(
-        _state: &mut Self,
-        _proxy: &WlShmPool,
-        _event: <WlShmPool as Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<WlBuffer, ()> for WlxClient {
-    fn event(
-        _state: &mut Self,
-        _proxy: &WlBuffer,
-        _event: <WlBuffer as Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-    }
-}
