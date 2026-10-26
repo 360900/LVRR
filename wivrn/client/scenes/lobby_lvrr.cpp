@@ -277,7 +277,6 @@ void scenes::lobby::lvrr_gui_shell(XrTime predicted_display_time)
 {
 	namespace ui = wivrn::ui;
 	using namespace ui::metrics;
-	const auto & t = ui::current();
 
 	const ImVec2 win{1400, 900};
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
