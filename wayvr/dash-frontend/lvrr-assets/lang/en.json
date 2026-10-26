@@ -43,6 +43,7 @@
       "EMPTY": "No VR apps found. Steam VR games appear once SteamVR has run once; apps can also add the X-WiVRn-VR category to their desktop entry.",
       "LOADING": "Loading...",
       "ALL_GAMES": "All Steam games",
+      "STARTING": "Starting",
       "REFRESH": "Refresh"
     },
     "RUNNING": {
