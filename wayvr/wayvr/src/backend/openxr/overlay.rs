@@ -22,6 +22,7 @@ pub struct OpenXrOverlayData {
     pub(super) cur_visible: bool,
     color_bias_khr: Option<Box<xr::sys::CompositionLayerColorScaleBiasKHR>>,
     layer_alpha_blend_fb: Option<Box<xr::sys::CompositionLayerAlphaBlendFB>>,
+    layer_settings_fb: Option<Box<xr::sys::CompositionLayerSettingsFB>>,
 }
 
 impl OverlayWindowData<OpenXrOverlayData> {
@@ -133,6 +134,15 @@ impl OverlayWindowData<OpenXrOverlayData> {
             self.data.layer_alpha_blend_fb = None;
         }
 
+        // LVRR: the compositor samples the panel several times per pixel, so text doesn't shimmer
+        if xr.extra_exts.fb_composition_layer_settings && self.data.layer_settings_fb.is_none() {
+            self.data.layer_settings_fb = Some(Box::new(xr::sys::CompositionLayerSettingsFB {
+                ty: xr::sys::CompositionLayerSettingsFB::TYPE,
+                next: std::ptr::null(),
+                layer_flags: xr::sys::CompositionLayerSettingsFlagsFB::NORMAL_SUPER_SAMPLING,
+            }));
+        }
+
         if let Some(curvature) = state.curvature {
             let radius = scale_x / (2.0 * PI * curvature);
             let quat = helpers::transform_to_norm_quat(&transform);
@@ -166,6 +176,12 @@ impl OverlayWindowData<OpenXrOverlayData> {
                         cylinder = xr::CompositionLayerCylinderKHR::from_raw(raw);
                     }
                 }
+                if let Some(layer_settings_fb) = self.data.layer_settings_fb.as_mut() {
+                    unsafe {
+                        let raw = next_chain_insert!(cylinder, layer_settings_fb);
+                        cylinder = xr::CompositionLayerCylinderKHR::from_raw(raw);
+                    }
+                }
 
                 layers.push(CompositionLayer::Cylinder(cylinder));
             }
@@ -194,6 +210,12 @@ impl OverlayWindowData<OpenXrOverlayData> {
                 if let Some(color_bias_khr) = self.data.color_bias_khr.as_mut() {
                     unsafe {
                         let raw = next_chain_insert!(quad, color_bias_khr);
+                        quad = xr::CompositionLayerQuad::from_raw(raw);
+                    }
+                }
+                if let Some(layer_settings_fb) = self.data.layer_settings_fb.as_mut() {
+                    unsafe {
+                        let raw = next_chain_insert!(quad, layer_settings_fb);
                         quad = xr::CompositionLayerQuad::from_raw(raw);
                     }
                 }

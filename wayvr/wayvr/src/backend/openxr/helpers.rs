@@ -23,6 +23,8 @@ use crate::state::AppState;
 pub(super) struct ExtraExts {
     pub mndx_composition_layer_alpha_blend_system_ui: bool,
     pub ext_eye_gaze_interaction: bool,
+    /// LVRR: supersampling of our layers in the server's compositor
+    pub fb_composition_layer_settings: bool,
 }
 
 pub(super) fn init_xr() -> Result<(xr::Instance, xr::SystemId, ExtraExts), anyhow::Error> {
@@ -86,6 +88,12 @@ pub(super) fn init_xr() -> Result<(xr::Instance, xr::SystemId, ExtraExts), anyho
         enabled_extensions.khr_composition_layer_color_scale_bias = true;
     } else {
         log::warn!("Missing XR_KHR_composition_layer_color_scale_bias extension.");
+    }
+    if available_extensions.fb_composition_layer_settings {
+        enabled_extensions.fb_composition_layer_settings = true;
+        extra_exts.fb_composition_layer_settings = true;
+    } else {
+        log::warn!("Missing XR_FB_composition_layer_settings extension.");
     }
 
     let xr_extension = b"XR_MNDX_composition_layer_alpha_blend_system_ui\0".to_vec();
