@@ -108,7 +108,7 @@ pub(in crate::input) const SETS: [&str; 2] = [LEGACY_SET, MIRRORED_SET];
 
 fn manifest() -> actions::ActionManifest {
     let action = |name: String, ty: &str| serde_json::json!({ "name": name, "type": ty });
-    // Not driven: the legacy controller state has no headset.
+    // Not driven: the headset's legacy state follows user presence instead.
     let mut list = vec![action(format!("{LEGACY_SET}/in/head_proximity"), "boolean")];
     for hand in [Hand::Left, Hand::Right] {
         list.extend(

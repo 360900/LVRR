@@ -17,7 +17,7 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
    - Cosmos registered device type, serials and render model names unverified; Focus 3 tracking system may be `vive_eyes` like the Cosmos; `vive_tracker_*` default bindings still ignored (trackers: 21)
    - gamepad has no tracked device or binding variant; untested on a headset
 3. Binding sources (S)
-   - legacy: controllers without a chosen binding keep the fixed mapping, not SteamVR's per-controller defaults; `Head_Proximity`, `simulate_rendermodel`, `simulate_hmd`, tracker and `generic` legacy bindings ignored
+   - legacy (low priority): fixed mappings match SteamVR's per-controller defaults; tracker, `generic`, `simulate_rendermodel` and `simulate_hmd` legacy bindings ignored
 4. Frame timing (S)
    - `XR_META_performance_metrics` unused (no Linux runtime has it)
 5. Haptics (S)
