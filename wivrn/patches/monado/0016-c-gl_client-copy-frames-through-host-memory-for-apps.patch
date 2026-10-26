@@ -1,0 +1,1291 @@
+From 0051ac229422b79cb0eb57061ee85841018bc147 Mon Sep 17 00:00:00 2001
+From: 360900 <ziyad.koca@hotmail.com>
+Date: Mon, 26 Oct 2026 17:09:23 +0300
+Subject: [PATCH] c/gl_client: copy frames through host memory for apps on
+ another GPU
+
+An OpenGL app whose context is on another GPU than the runtime, such as
+the integrated GPU of a hybrid laptop, can't import the runtime's images;
+Mesa crashes in the import of a memory object from another device. The
+app's and the runtime's device UUIDs are compared when the client
+compositor is created, and when they differ the app draws into plain
+textures, which are read back into host memory on release and copied into
+the native images by a Vulkan device on the runtime's GPU. Depth images
+are not copied, nothing reads them.
+
+The OpenXR state tracker passes the runtime's device UUID to the GL
+client compositors for the comparison.
+---
+ src/xrt/compositor/client/CMakeLists.txt      |   5 +-
+ src/xrt/compositor/client/comp_egl_client.c   |   4 +-
+ src/xrt/compositor/client/comp_gl_client.c    |  38 +-
+ src/xrt/compositor/client/comp_gl_client.h    |  22 +-
+ .../client/comp_gl_hostcopy_swapchain.c       | 830 ++++++++++++++++++
+ .../client/comp_gl_hostcopy_swapchain.h       |  68 ++
+ .../compositor/client/comp_gl_win32_client.c  |   1 +
+ .../compositor/client/comp_gl_xlib_client.c   |   6 +-
+ .../compositor/client/comp_gl_xlib_client.h   |   3 +-
+ src/xrt/compositor/client/comp_gl_xlib_glue.c |   7 +-
+ src/xrt/include/xrt/xrt_gfx_egl.h             |   1 +
+ src/xrt/include/xrt/xrt_gfx_xlib.h            |   3 +-
+ .../state_trackers/oxr/oxr_session_gfx_egl.c  |   1 +
+ .../oxr/oxr_session_gfx_gl_xlib.c             |  10 +-
+ .../oxr/oxr_session_gfx_gles_android.c        |   1 +
+ 15 files changed, 982 insertions(+), 18 deletions(-)
+ create mode 100644 src/xrt/compositor/client/comp_gl_hostcopy_swapchain.c
+ create mode 100644 src/xrt/compositor/client/comp_gl_hostcopy_swapchain.h
+
+diff --git a/src/xrt/compositor/client/CMakeLists.txt b/src/xrt/compositor/client/CMakeLists.txt
+index 4afe083dd..98c07b229 100644
+--- a/src/xrt/compositor/client/CMakeLists.txt
++++ b/src/xrt/compositor/client/CMakeLists.txt
+@@ -16,13 +16,14 @@ target_link_libraries(
+ 
+ if(XRT_HAVE_VULKAN)
+ 	target_sources(comp_client PRIVATE comp_vk_client.c comp_vk_client.h comp_vk_glue.c)
+-	target_link_libraries(comp_client PRIVATE aux_vk)
++	target_link_libraries(comp_client PRIVATE aux_vk xrt-external-vulkan-loader)
+ endif()
+ 
+ if(XRT_HAVE_OPENGL OR XRT_HAVE_OPENGLES)
+ 	target_sources(
+ 		comp_client PRIVATE comp_gl_client.c comp_gl_client.h comp_gl_memobj_swapchain.c
+-				    comp_gl_memobj_swapchain.h
++				    comp_gl_memobj_swapchain.h comp_gl_hostcopy_swapchain.c
++				    comp_gl_hostcopy_swapchain.h
+ 		)
+ 	target_link_libraries(comp_client PRIVATE aux_ogl)
+ endif()
+diff --git a/src/xrt/compositor/client/comp_egl_client.c b/src/xrt/compositor/client/comp_egl_client.c
+index 12b13e773..2d698401f 100644
+--- a/src/xrt/compositor/client/comp_egl_client.c
++++ b/src/xrt/compositor/client/comp_egl_client.c
+@@ -679,6 +679,7 @@ xrt_gfx_provider_create_gl_egl(struct xrt_compositor_native *xcn,
+                                EGLContext context,
+                                PFNEGLGETPROCADDRESSPROC get_gl_procaddr,
+                                bool renderdoc_enabled,
++                               const xrt_uuid_t *runtime_device_uuid,
+                                struct xrt_compositor **out_xc)
+ {
+ 	log_level = debug_get_log_option_egl_log();
+@@ -793,7 +794,8 @@ xrt_gfx_provider_create_gl_egl(struct xrt_compositor_native *xcn,
+ 	    client_egl_context_begin,          // context_begin
+ 	    client_egl_context_end,            // context_end
+ 	    sc_create_func,                    // create_swapchain
+-	    insert_fence_func);                // insert_fence
++	    insert_fence_func,                 // insert_fence
++	    runtime_device_uuid);              // runtime_device_uuid
+ 	if (!bret) {
+ 		free(ceglc);
+ 		EGL_ERROR("Failed to initialize compositor");
+diff --git a/src/xrt/compositor/client/comp_gl_client.c b/src/xrt/compositor/client/comp_gl_client.c
+index 479b276fa..46c46e37f 100644
+--- a/src/xrt/compositor/client/comp_gl_client.c
++++ b/src/xrt/compositor/client/comp_gl_client.c
+@@ -26,6 +26,7 @@
+ #include "ogl/ogl_helpers.h"
+ 
+ #include "client/comp_gl_client.h"
++#include "client/comp_gl_hostcopy_swapchain.h"
+ 
+ #include "util/u_logging.h"
+ #include "util/u_trace_marker.h"
+@@ -60,8 +61,8 @@ to_native_compositor(struct xrt_compositor *xc)
+ 	return &client_gl_compositor(xc)->xcn->base;
+ }
+ 
+-static int64_t
+-gl_format_to_vk(int64_t format)
++int64_t
++client_gl_format_to_vk(int64_t format)
+ {
+ 	switch (format) {
+ 	case GL_RGB8: return 23 /*VK_FORMAT_R8G8B8_UNORM*/; // Should not be used, colour precision.
+@@ -422,7 +423,7 @@ client_gl_compositor_get_swapchain_create_properties(struct xrt_compositor *xc,
+ {
+ 	struct client_gl_compositor *c = client_gl_compositor(xc);
+ 
+-	int64_t vk_format = gl_format_to_vk(info->format);
++	int64_t vk_format = client_gl_format_to_vk(info->format);
+ 	if (vk_format == 0) {
+ 		U_LOG_E("Invalid format!");
+ 		return XRT_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED;
+@@ -451,7 +452,7 @@ client_gl_swapchain_create(struct xrt_compositor *xc,
+ 	}
+ 
+ 	// Check before setting the context.
+-	int64_t vk_format = gl_format_to_vk(info->format);
++	int64_t vk_format = client_gl_format_to_vk(info->format);
+ 	if (vk_format == 0) {
+ 		U_LOG_E("Invalid format!");
+ 		return XRT_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED;
+@@ -479,6 +480,12 @@ client_gl_swapchain_create(struct xrt_compositor *xc,
+ 	vkinfo.format = vk_format;
+ 	vkinfo.bits |= xsccp.extra_bits;
+ 
++	if (c->hostcopy != NULL) {
++		// The frames are copied into the native images.
++		xinfo.bits |= XRT_SWAPCHAIN_USAGE_TRANSFER_DST;
++		vkinfo.bits |= XRT_SWAPCHAIN_USAGE_TRANSFER_DST;
++	}
++
+ 	struct xrt_swapchain_native *xscn = NULL; // Has to be NULL.
+ 	xret = xrt_comp_native_create_swapchain(c->xcn, &vkinfo, &xscn);
+ 
+@@ -580,6 +587,7 @@ client_gl_compositor_destroy(struct xrt_compositor *xc)
+ void
+ client_gl_compositor_fini(struct client_gl_compositor *c)
+ {
++	client_gl_hostcopy_destroy(&c->hostcopy);
+ 	os_mutex_destroy(&c->context_mutex);
+ }
+ 
+@@ -589,7 +597,8 @@ client_gl_compositor_init(struct client_gl_compositor *c,
+                           client_gl_context_begin_locked_func_t context_begin_locked,
+                           client_gl_context_end_locked_func_t context_end_locked,
+                           client_gl_swapchain_create_func_t create_swapchain,
+-                          client_gl_insert_fence_func_t insert_fence)
++                          client_gl_insert_fence_func_t insert_fence,
++                          const xrt_uuid_t *runtime_device_uuid)
+ {
+ 	assert(context_begin_locked != NULL);
+ 	assert(context_end_locked != NULL);
+@@ -646,5 +655,24 @@ client_gl_compositor_init(struct client_gl_compositor *c,
+ 
+ 	os_mutex_init(&c->context_mutex);
+ 
++	// An app on another GPU than the runtime can't import its images.
++	c->hostcopy = NULL;
++	if (runtime_device_uuid != NULL &&
++	    client_gl_compositor_context_begin(&c->base, CLIENT_GL_CONTEXT_REASON_OTHER) == XRT_SUCCESS) {
++		bool needed = client_gl_hostcopy_needed(runtime_device_uuid);
++		client_gl_compositor_context_end(&c->base, CLIENT_GL_CONTEXT_REASON_OTHER);
++
++		if (needed) {
++			c->hostcopy = client_gl_hostcopy_create(runtime_device_uuid);
++			if (c->hostcopy == NULL) {
++				U_LOG_E(
++				    "The OpenGL context is on another GPU than the runtime and frames can't be copied");
++				os_mutex_destroy(&c->context_mutex);
++				return false;
++			}
++			c->create_swapchain = client_gl_hostcopy_swapchain_create;
++		}
++	}
++
+ 	return true;
+ }
+diff --git a/src/xrt/compositor/client/comp_gl_client.h b/src/xrt/compositor/client/comp_gl_client.h
+index b498f2e78..52f4d83d0 100644
+--- a/src/xrt/compositor/client/comp_gl_client.h
++++ b/src/xrt/compositor/client/comp_gl_client.h
+@@ -9,6 +9,7 @@
+ 
+ #pragma once
+ 
++#include "xrt/xrt_defines.h"
+ #include "xrt/xrt_compositor.h"
+ #include "os/os_threading.h"
+ 
+@@ -172,6 +173,12 @@ struct client_gl_compositor
+ 	struct os_mutex context_mutex;
+ 
+ 	bool renderdoc_enabled;
++
++	/*!
++	 * Set when the app's OpenGL device is not the runtime's: swapchains go
++	 * through host memory, see @ref client_gl_hostcopy_swapchain_create.
++	 */
++	struct client_gl_hostcopy *hostcopy;
+ };
+ 
+ 
+@@ -191,6 +198,14 @@ client_gl_compositor(struct xrt_compositor *xc)
+ 	return (struct client_gl_compositor *)xc;
+ }
+ 
++/*!
++ * Convert an OpenGL internal format to a Vulkan one, 0 if not possible.
++ *
++ * @ingroup comp_client
++ */
++int64_t
++client_gl_format_to_vk(int64_t format);
++
+ /*!
+  * Fill in a client_gl_compositor and do common OpenGL readiness checking.
+  *
+@@ -202,6 +217,10 @@ client_gl_compositor(struct xrt_compositor *xc)
+  * Be sure to load your GL loader/wrapper (GLAD) before calling into here, it
+  * won't be called for you.
+  *
++ * @p runtime_device_uuid is the Vulkan device of the runtime, may be NULL.
++ * When the app's OpenGL device is another one, @p create_swapchain is
++ * replaced with one that copies frames through host memory.
++ *
+  * @public @memberof client_gl_compositor
+  * @see xrt_compositor_native, client_gl_compositor_fini
+  */
+@@ -211,7 +230,8 @@ client_gl_compositor_init(struct client_gl_compositor *c,
+                           client_gl_context_begin_locked_func_t context_begin,
+                           client_gl_context_end_locked_func_t context_end,
+                           client_gl_swapchain_create_func_t create_swapchain,
+-                          client_gl_insert_fence_func_t insert_fence);
++                          client_gl_insert_fence_func_t insert_fence,
++                          const xrt_uuid_t *runtime_device_uuid);
+ 
+ /*!
+  * Free all resources from the client_gl_compositor, does not free the
+diff --git a/src/xrt/compositor/client/comp_gl_hostcopy_swapchain.c b/src/xrt/compositor/client/comp_gl_hostcopy_swapchain.c
+new file mode 100644
+index 000000000..d1797c129
+--- /dev/null
++++ b/src/xrt/compositor/client/comp_gl_hostcopy_swapchain.c
+@@ -0,0 +1,830 @@
++// Copyright 2026, 360900
++// SPDX-License-Identifier: BSL-1.0
++/*!
++ * @file
++ * @brief  OpenGL client swapchain for apps on another GPU than the runtime.
++ * @ingroup comp_client
++ */
++
++#include "xrt/xrt_config_have.h"
++#include "xrt/xrt_config_os.h"
++#include "xrt/xrt_handles.h"
++
++#include "util/u_misc.h"
++#include "util/u_logging.h"
++#include "util/u_native_images.h"
++
++#include "ogl/ogl_api.h"
++#include "ogl/ogl_helpers.h"
++
++#include "client/comp_gl_client.h"
++#include "client/comp_gl_hostcopy_swapchain.h"
++
++#if defined(XRT_HAVE_VULKAN) && defined(XRT_GRAPHICS_BUFFER_HANDLE_IS_FD)
++#define HOSTCOPY_SUPPORTED
++#include "util/u_extension_list.h"
++#include "vk/vk_helpers.h"
++#include "vk/vk_cmd_pool.h"
++#endif
++
++#include <stdlib.h>
++#include <string.h>
++
++
++#ifdef HOSTCOPY_SUPPORTED
++
++/*
++ *
++ * Structs.
++ *
++ */
++
++struct client_gl_hostcopy
++{
++	struct vk_bundle vk;
++	struct vk_cmd_pool pool;
++	bool mutex_initialized;
++};
++
++//! Enough for a 65536 pixel wide texture.
++#define HOSTCOPY_MAX_LEVELS 16
++
++struct client_gl_hostcopy_swapchain
++{
++	struct client_gl_swapchain base;
++
++	struct client_gl_hostcopy *hc;
++
++	//! The create info with the OpenGL format.
++	struct xrt_swapchain_create_info info;
++
++	//! Depth images are not uploaded, nothing on the runtime's side reads them.
++	bool upload;
++
++	//! How glReadPixels reads the texture's format.
++	GLenum read_format;
++	GLenum read_type;
++	uint32_t bytes_per_pixel;
++
++	//! Where each mip level starts in the staging buffer, all its layers one after the other.
++	VkDeviceSize level_offset[HOSTCOPY_MAX_LEVELS];
++
++	//! Framebuffer the textures are attached to for reading.
++	GLuint fbo;
++
++	//! The native images, imported into the hostcopy device.
++	VkImage images[XRT_MAX_SWAPCHAIN_IMAGES];
++	VkDeviceMemory mems[XRT_MAX_SWAPCHAIN_IMAGES];
++
++	//! Host visible buffer the frames are read into and uploaded from.
++	VkBuffer staging;
++	VkDeviceMemory staging_mem;
++	VkDeviceSize staging_size;
++	void *staging_map;
++
++	bool logged_error;
++};
++
++static_assert(GL_UUID_SIZE_EXT == XRT_UUID_SIZE, "OpenGL and xrt UUIDs differ in size");
++
++
++/*
++ *
++ * Helpers.
++ *
++ */
++
++static inline struct client_gl_hostcopy_swapchain *
++client_gl_hostcopy_swapchain(struct xrt_swapchain *xsc)
++{
++	return (struct client_gl_hostcopy_swapchain *)xsc;
++}
++
++static bool
++read_format_for(uint32_t gl_format, GLenum *out_format, GLenum *out_type, uint32_t *out_bytes_per_pixel)
++{
++	switch (gl_format) {
++	case GL_RGBA8:
++	case GL_SRGB8_ALPHA8:
++		*out_format = GL_RGBA;
++		*out_type = GL_UNSIGNED_BYTE;
++		*out_bytes_per_pixel = 4;
++		return true;
++	case GL_RGB10_A2:
++		// Red in the low bits, like VK_FORMAT_A2B10G10R10_UNORM_PACK32.
++		*out_format = GL_RGBA;
++		*out_type = GL_UNSIGNED_INT_2_10_10_10_REV;
++		*out_bytes_per_pixel = 4;
++		return true;
++	case GL_RGBA16:
++		*out_format = GL_RGBA;
++		*out_type = GL_UNSIGNED_SHORT;
++		*out_bytes_per_pixel = 8;
++		return true;
++	case GL_RGBA16F:
++		*out_format = GL_RGBA;
++		*out_type = GL_HALF_FLOAT;
++		*out_bytes_per_pixel = 8;
++		return true;
++	case GL_RGB8:
++	case GL_SRGB8:
++		*out_format = GL_RGB;
++		*out_type = GL_UNSIGNED_BYTE;
++		*out_bytes_per_pixel = 3;
++		return true;
++	case GL_RGB16:
++		*out_format = GL_RGB;
++		*out_type = GL_UNSIGNED_SHORT;
++		*out_bytes_per_pixel = 6;
++		return true;
++	case GL_RGB16F:
++		*out_format = GL_RGB;
++		*out_type = GL_HALF_FLOAT;
++		*out_bytes_per_pixel = 6;
++		return true;
++	default: return false;
++	}
++}
++
++static inline uint32_t
++level_extent(uint32_t extent, uint32_t level)
++{
++	uint32_t e = extent >> level;
++	return e > 0 ? e : 1;
++}
++
++static VkResult
++find_physical_device(struct vk_bundle *vk, const xrt_uuid_t *uuid, int *out_index)
++{
++	VkPhysicalDevice *devices = NULL;
++	uint32_t count = 0;
++
++	VkResult ret = vk_enumerate_physical_devices(vk, &count, &devices);
++	if (ret != VK_SUCCESS) {
++		return ret;
++	}
++
++	*out_index = -1;
++	for (uint32_t i = 0; i < count; i++) {
++		VkPhysicalDeviceIDProperties id_props = {
++		    .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
++		};
++		VkPhysicalDeviceProperties2 props = {
++		    .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
++		    .pNext = &id_props,
++		};
++		vk->vkGetPhysicalDeviceProperties2(devices[i], &props);
++
++		if (memcmp(id_props.deviceUUID, uuid->data, XRT_UUID_SIZE) == 0) {
++			*out_index = (int)i;
++			break;
++		}
++	}
++
++	free(devices);
++
++	return VK_SUCCESS;
++}
++
++
++/*
++ *
++ * Device.
++ *
++ */
++
++bool
++client_gl_hostcopy_needed(const xrt_uuid_t *runtime_device_uuid)
++{
++	if (runtime_device_uuid == NULL || !GLAD_GL_EXT_memory_object) {
++		return false;
++	}
++
++	GLint count = 0;
++	glGetIntegerv(GL_NUM_DEVICE_UUIDS_EXT, &count);
++	if (count <= 0) {
++		return false;
++	}
++
++	for (GLint i = 0; i < count; i++) {
++		GLubyte uuid[GL_UUID_SIZE_EXT] = {0};
++		glGetUnsignedBytei_vEXT(GL_DEVICE_UUID_EXT, (GLuint)i, uuid);
++		if (memcmp(uuid, runtime_device_uuid->data, XRT_UUID_SIZE) == 0) {
++			return false;
++		}
++	}
++
++	U_LOG_I("The OpenGL context is on another GPU than the runtime, copying frames through host memory");
++
++	return true;
++}
++
++struct client_gl_hostcopy *
++client_gl_hostcopy_create(const xrt_uuid_t *runtime_device_uuid)
++{
++	struct client_gl_hostcopy *hc = U_TYPED_CALLOC(struct client_gl_hostcopy);
++	struct vk_bundle *vk = &hc->vk;
++	VkResult ret;
++
++	vk->log_level = U_LOGGING_WARN;
++
++	ret = vk_get_loader_functions(vk, vkGetInstanceProcAddr);
++	if (ret != VK_SUCCESS) {
++		U_LOG_E("vk_get_loader_functions: %s", vk_result_string(ret));
++		goto err;
++	}
++
++
++	/*
++	 * Instance.
++	 */
++
++	static const char *const required_instance_extensions[] = {
++	    VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME,
++	    VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME,
++	};
++
++	struct u_extension_list *required = u_extension_list_create_from_array( //
++	    required_instance_extensions, ARRAY_SIZE(required_instance_extensions));
++	struct u_extension_list *optional = u_extension_list_create();
++	struct u_extension_list *instance_extensions = NULL;
++
++	ret = vk_build_instance_extensions(vk, required, optional, &instance_extensions);
++	u_extension_list_destroy(&required);
++	u_extension_list_destroy(&optional);
++	if (ret != VK_SUCCESS) {
++		U_LOG_E("vk_build_instance_extensions: %s", vk_result_string(ret));
++		goto err;
++	}
++
++	VkApplicationInfo app_info = {
++	    .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
++	    .pApplicationName = "Monado OpenGL client",
++	    .pEngineName = "Monado",
++	    .apiVersion = VK_API_VERSION_1_1,
++	};
++
++	VkInstanceCreateInfo instance_info = {
++	    .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
++	    .pApplicationInfo = &app_info,
++	    .enabledExtensionCount = u_extension_list_get_size(instance_extensions),
++	    .ppEnabledExtensionNames = u_extension_list_get_data(instance_extensions),
++	};
++
++	ret = vk->vkCreateInstance(&instance_info, NULL, &vk->instance);
++	if (ret != VK_SUCCESS) {
++		u_extension_list_destroy(&instance_extensions);
++		U_LOG_E("vkCreateInstance: %s", vk_result_string(ret));
++		goto err;
++	}
++
++	vk->version = VK_API_VERSION_1_1;
++	vk_fill_in_has_instance_extensions(vk, instance_extensions);
++	u_extension_list_destroy(&instance_extensions);
++
++	ret = vk_get_instance_functions(vk);
++	if (ret != VK_SUCCESS) {
++		U_LOG_E("vk_get_instance_functions: %s", vk_result_string(ret));
++		goto err;
++	}
++
++
++	/*
++	 * Device, the runtime's.
++	 */
++
++	int index = -1;
++	ret = find_physical_device(vk, runtime_device_uuid, &index);
++	if (ret != VK_SUCCESS) {
++		U_LOG_E("vk_enumerate_physical_devices: %s", vk_result_string(ret));
++		goto err;
++	}
++	if (index < 0) {
++		U_LOG_E("No Vulkan device has the runtime's device UUID");
++		goto err;
++	}
++
++	static const char *const required_device_extensions[] = {
++	    VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
++	};
++	static const char *const optional_device_extensions[] = {
++	    VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
++	    VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME,
++	    VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME,
++	    VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME,
++	};
++
++	required = u_extension_list_create_from_array( //
++	    required_device_extensions, ARRAY_SIZE(required_device_extensions));
++	optional = u_extension_list_create_from_array( //
++	    optional_device_extensions, ARRAY_SIZE(optional_device_extensions));
++
++	ret = vk_init_mutex(vk);
++	if (ret != VK_SUCCESS) {
++		u_extension_list_destroy(&required);
++		u_extension_list_destroy(&optional);
++		U_LOG_E("vk_init_mutex: %s", vk_result_string(ret));
++		goto err;
++	}
++	hc->mutex_initialized = true;
++
++	ret = vk_create_device(                  //
++	    vk,                                  //
++	    index,                               // forced_index
++	    false,                               // only_compute
++	    VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_EXT, //
++	    required,                            //
++	    optional,                            //
++	    NULL);                               // optional_device_features
++	u_extension_list_destroy(&required);
++	u_extension_list_destroy(&optional);
++	if (ret != VK_SUCCESS) {
++		U_LOG_E("vk_create_device: %s", vk_result_string(ret));
++		goto err;
++	}
++
++	ret = vk_cmd_pool_init(vk, &hc->pool, VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT);
++	if (ret != VK_SUCCESS) {
++		U_LOG_E("vk_cmd_pool_init: %s", vk_result_string(ret));
++		goto err;
++	}
++
++	return hc;
++
++err:
++	client_gl_hostcopy_destroy(&hc);
++	return NULL;
++}
++
++void
++client_gl_hostcopy_destroy(struct client_gl_hostcopy **hc_ptr)
++{
++	struct client_gl_hostcopy *hc = *hc_ptr;
++	if (hc == NULL) {
++		return;
++	}
++	struct vk_bundle *vk = &hc->vk;
++
++	if (vk->device != VK_NULL_HANDLE) {
++		vk->vkDeviceWaitIdle(vk->device);
++		vk_cmd_pool_destroy(vk, &hc->pool);
++		vk->vkDestroyDevice(vk->device, NULL);
++		vk->device = VK_NULL_HANDLE;
++	}
++	if (hc->mutex_initialized) {
++		vk_deinit_mutex(vk);
++	}
++	if (vk->instance != VK_NULL_HANDLE) {
++		vk->vkDestroyInstance(vk->instance, NULL);
++		vk->instance = VK_NULL_HANDLE;
++	}
++
++	free(hc);
++	*hc_ptr = NULL;
++}
++
++
++/*
++ *
++ * Swapchain.
++ *
++ */
++
++/*!
++ * Reads the texture into the staging buffer, with the app's context current.
++ */
++static xrt_result_t
++read_back(struct client_gl_hostcopy_swapchain *sc, uint32_t index)
++{
++	struct xrt_compositor *xc = &sc->base.gl_compositor->base;
++	const struct xrt_swapchain_create_info *info = &sc->info;
++	const bool layered = info->array_size > 1;
++	GLuint tex = sc->base.base.images[index];
++
++	xrt_result_t xret = client_gl_compositor_context_begin(xc, CLIENT_GL_CONTEXT_REASON_SYNCHRONIZE);
++	if (xret != XRT_SUCCESS) {
++		return xret;
++	}
++
++	// Save what we touch.
++	GLint prev_read_fbo = 0;
++	GLint prev_pack_buffer = 0;
++	GLint prev_pack_alignment = 4;
++	GLint prev_pack_row_length = 0;
++	GLint prev_pack_skip_pixels = 0;
++	GLint prev_pack_skip_rows = 0;
++	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prev_read_fbo);
++	glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &prev_pack_buffer);
++	glGetIntegerv(GL_PACK_ALIGNMENT, &prev_pack_alignment);
++	glGetIntegerv(GL_PACK_ROW_LENGTH, &prev_pack_row_length);
++	glGetIntegerv(GL_PACK_SKIP_PIXELS, &prev_pack_skip_pixels);
++	glGetIntegerv(GL_PACK_SKIP_ROWS, &prev_pack_skip_rows);
++
++	glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
++	glPixelStorei(GL_PACK_ALIGNMENT, 1);
++	glPixelStorei(GL_PACK_ROW_LENGTH, 0);
++	glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
++	glPixelStorei(GL_PACK_SKIP_ROWS, 0);
++	glBindFramebuffer(GL_READ_FRAMEBUFFER, sc->fbo);
++	glReadBuffer(GL_COLOR_ATTACHMENT0);
++
++	uint8_t *staging = (uint8_t *)sc->staging_map;
++	for (uint32_t level = 0; level < info->mip_count; level++) {
++		uint32_t w = level_extent(info->width, level);
++		uint32_t h = level_extent(info->height, level);
++		size_t layer_size = (size_t)w * h * sc->bytes_per_pixel;
++
++		for (uint32_t layer = 0; layer < info->array_size; layer++) {
++			if (layered) {
++				glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, tex, (GLint)level,
++				                          (GLint)layer);
++			} else {
++				glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, sc->base.tex_target,
++				                       tex, (GLint)level);
++			}
++			glReadPixels(0, 0, (GLsizei)w, (GLsizei)h, sc->read_format, sc->read_type,
++			             staging + sc->level_offset[level] + layer * layer_size);
++		}
++	}
++
++	// Don't keep the texture attached, the app may delete or change it.
++	glFramebufferTexture(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, 0, 0);
++
++	GLenum err = glGetError();
++
++	glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)prev_read_fbo);
++	glPixelStorei(GL_PACK_ALIGNMENT, prev_pack_alignment);
++	glPixelStorei(GL_PACK_ROW_LENGTH, prev_pack_row_length);
++	glPixelStorei(GL_PACK_SKIP_PIXELS, prev_pack_skip_pixels);
++	glPixelStorei(GL_PACK_SKIP_ROWS, prev_pack_skip_rows);
++	glBindBuffer(GL_PIXEL_PACK_BUFFER, (GLuint)prev_pack_buffer);
++
++	client_gl_compositor_context_end(xc, CLIENT_GL_CONTEXT_REASON_SYNCHRONIZE);
++
++	if (err != GL_NO_ERROR) {
++		if (!sc->logged_error) {
++			U_LOG_E("Reading the swapchain texture back failed: 0x%04x", err);
++			sc->logged_error = true;
++		}
++		return XRT_ERROR_OPENGL;
++	}
++
++	return XRT_SUCCESS;
++}
++
++/*!
++ * Copies the staging buffer into the native image and hands it to the
++ * compositor, like the Vulkan client does. Waits for the copy, so the
++ * buffer can be reused and the compositor needs no fence.
++ */
++static xrt_result_t
++upload(struct client_gl_hostcopy_swapchain *sc, uint32_t index)
++{
++	struct client_gl_hostcopy *hc = sc->hc;
++	struct vk_bundle *vk = &hc->vk;
++	const struct xrt_swapchain_create_info *info = &sc->info;
++	VkImage image = sc->images[index];
++	VkCommandBuffer cmd = VK_NULL_HANDLE;
++	VkResult ret;
++
++	VkImageSubresourceRange range = {
++	    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
++	    .baseMipLevel = 0,
++	    .levelCount = VK_REMAINING_MIP_LEVELS,
++	    .baseArrayLayer = 0,
++	    .layerCount = VK_REMAINING_ARRAY_LAYERS,
++	};
++
++	VkBufferImageCopy regions[HOSTCOPY_MAX_LEVELS];
++	for (uint32_t level = 0; level < info->mip_count; level++) {
++		regions[level] = (VkBufferImageCopy){
++		    .bufferOffset = sc->level_offset[level],
++		    .bufferRowLength = 0,
++		    .bufferImageHeight = 0,
++		    .imageSubresource =
++		        {
++		            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
++		            .mipLevel = level,
++		            .baseArrayLayer = 0,
++		            .layerCount = info->array_size,
++		        },
++		    .imageOffset = {0, 0, 0},
++		    .imageExtent = {level_extent(info->width, level), level_extent(info->height, level), 1},
++		};
++	}
++
++	vk_cmd_pool_lock(&hc->pool);
++
++	ret = vk_cmd_pool_create_and_begin_cmd_buffer_locked(vk, &hc->pool, 0, &cmd);
++	if (ret != VK_SUCCESS) {
++		vk_cmd_pool_unlock(&hc->pool);
++		goto err;
++	}
++
++	// Take the image, whatever it holds is overwritten.
++	vk_cmd_image_barrier_locked(              //
++	    vk,                                   //
++	    cmd,                                  //
++	    image,                                //
++	    0,                                    // src_access_mask
++	    VK_ACCESS_TRANSFER_WRITE_BIT,         // dst_access_mask
++	    VK_IMAGE_LAYOUT_UNDEFINED,            // old_image_layout
++	    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, // new_image_layout
++	    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,    // src_stage_mask
++	    VK_PIPELINE_STAGE_TRANSFER_BIT,       // dst_stage_mask
++	    range);                               //
++
++	vk->vkCmdCopyBufferToImage(cmd, sc->staging, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, info->mip_count,
++	                           regions);
++
++	// Hand it to the compositor, in the layout the Vulkan client leaves images in.
++	VkImageMemoryBarrier release = {
++	    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++	    .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
++	    .dstAccessMask = 0,
++	    .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
++	    .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
++	    .srcQueueFamilyIndex = vk->main_queue->family_index,
++	    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL,
++	    .image = image,
++	    .subresourceRange = range,
++	};
++	vk->vkCmdPipelineBarrier(                 //
++	    cmd,                                  // commandBuffer
++	    VK_PIPELINE_STAGE_TRANSFER_BIT,       // srcStageMask
++	    VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, // dstStageMask
++	    0,                                    // dependencyFlags
++	    0,                                    // memoryBarrierCount
++	    NULL,                                 // pMemoryBarriers
++	    0,                                    // bufferMemoryBarrierCount
++	    NULL,                                 // pBufferMemoryBarriers
++	    1,                                    // imageMemoryBarrierCount
++	    &release);                            // pImageMemoryBarriers
++
++	ret = vk_cmd_pool_end_submit_wait_and_free_cmd_buffer_locked(vk, &hc->pool, cmd);
++	vk_cmd_pool_unlock(&hc->pool);
++	if (ret != VK_SUCCESS) {
++		goto err;
++	}
++
++	return XRT_SUCCESS;
++
++err:
++	if (!sc->logged_error) {
++		U_LOG_E("Uploading the swapchain image failed: %s", vk_result_string(ret));
++		sc->logged_error = true;
++	}
++	return XRT_ERROR_VULKAN;
++}
++
++static xrt_result_t
++client_gl_hostcopy_swapchain_release_image(struct xrt_swapchain *xsc, uint32_t index)
++{
++	struct client_gl_hostcopy_swapchain *sc = client_gl_hostcopy_swapchain(xsc);
++
++	if (sc->upload && index < sc->base.base.base.image_count) {
++		xrt_result_t xret = read_back(sc, index);
++		if (xret == XRT_SUCCESS) {
++			xret = upload(sc, index);
++		}
++		if (xret != XRT_SUCCESS) {
++			return xret;
++		}
++	}
++
++	// Pipe down call into native swapchain.
++	return xrt_swapchain_release_image(&sc->base.xscn->base, index);
++}
++
++/*!
++ * Frees the OpenGL objects, with the app's context current.
++ */
++static void
++free_gl_resources(struct client_gl_hostcopy_swapchain *sc)
++{
++	uint32_t image_count = sc->base.base.base.image_count;
++
++	if (image_count > 0) {
++		glDeleteTextures(image_count, &sc->base.base.images[0]);
++	}
++	if (sc->fbo != 0) {
++		glDeleteFramebuffers(1, &sc->fbo);
++	}
++	U_ZERO_ARRAY(sc->base.base.images);
++	sc->fbo = 0;
++}
++
++static void
++client_gl_hostcopy_swapchain_destroy(struct xrt_swapchain *xsc)
++{
++	struct client_gl_hostcopy_swapchain *sc = client_gl_hostcopy_swapchain(xsc);
++	struct client_gl_compositor *c = sc->base.gl_compositor;
++	struct vk_bundle *vk = &sc->hc->vk;
++
++	enum xrt_result xret = client_gl_compositor_context_begin(&c->base, CLIENT_GL_CONTEXT_REASON_OTHER);
++	if (xret == XRT_SUCCESS) {
++		free_gl_resources(sc);
++		client_gl_compositor_context_end(&c->base, CLIENT_GL_CONTEXT_REASON_OTHER);
++	}
++
++	// Every upload was waited for, nothing is in flight.
++	if (sc->staging_map != NULL) {
++		vk->vkUnmapMemory(vk->device, sc->staging_mem);
++	}
++	if (sc->staging != VK_NULL_HANDLE) {
++		vk->vkDestroyBuffer(vk->device, sc->staging, NULL);
++	}
++	if (sc->staging_mem != VK_NULL_HANDLE) {
++		vk->vkFreeMemory(vk->device, sc->staging_mem, NULL);
++	}
++	for (uint32_t i = 0; i < XRT_MAX_SWAPCHAIN_IMAGES; i++) {
++		if (sc->images[i] != VK_NULL_HANDLE) {
++			vk->vkDestroyImage(vk->device, sc->images[i], NULL);
++		}
++		if (sc->mems[i] != VK_NULL_HANDLE) {
++			vk->vkFreeMemory(vk->device, sc->mems[i], NULL);
++		}
++	}
++
++	// Drop our reference, does NULL checking.
++	xrt_swapchain_reference((struct xrt_swapchain **)&sc->base.xscn, NULL);
++
++	free(sc);
++}
++
++struct xrt_swapchain *
++client_gl_hostcopy_swapchain_create(struct xrt_compositor *xc,
++                                    const struct xrt_swapchain_create_info *info,
++                                    struct xrt_swapchain_native *xscn,
++                                    struct client_gl_swapchain **out_cglsc)
++{
++	struct client_gl_compositor *c = client_gl_compositor(xc);
++	struct client_gl_hostcopy *hc = c->hostcopy;
++
++	if (hc == NULL || xscn == NULL) {
++		U_LOG_E("No hostcopy device or native swapchain!");
++		return NULL;
++	}
++	if (info->face_count == 6) {
++		U_LOG_E("Cube swapchains are not supported through host memory");
++		return NULL;
++	}
++	if (info->mip_count == 0 || info->mip_count > HOSTCOPY_MAX_LEVELS || info->array_size == 0) {
++		U_LOG_E("Unsupported swapchain: %u mip levels, %u layers", info->mip_count, info->array_size);
++		return NULL;
++	}
++
++	struct vk_bundle *vk = &hc->vk;
++	const uint32_t image_count = xscn->base.image_count;
++	struct xrt_image_native *native_images = xscn->images;
++
++	GLuint binding_enum = 0;
++	GLuint tex_target = 0;
++	ogl_texture_target_for_swapchain_info(info, &tex_target, &binding_enum);
++
++	struct client_gl_hostcopy_swapchain *sc = U_TYPED_CALLOC(struct client_gl_hostcopy_swapchain);
++	sc->base.base.base.destroy = client_gl_hostcopy_swapchain_destroy;
++	sc->base.base.base.release_image = client_gl_hostcopy_swapchain_release_image;
++	sc->base.base.base.reference.count = 1;
++	sc->base.base.base.image_count = image_count;
++	sc->base.xscn = xscn;
++	sc->base.tex_target = tex_target;
++	sc->base.gl_compositor = c;
++	sc->hc = hc;
++	sc->info = *info;
++
++	// Depth and stencil never reach the runtime's side.
++	int64_t vk_format = client_gl_format_to_vk(info->format);
++	sc->upload = (info->bits & XRT_SWAPCHAIN_USAGE_DEPTH_STENCIL) == 0 && vk_format != 0 &&
++	             vk_format < 124 /*VK_FORMAT_D16_UNORM*/;
++
++
++	/*
++	 * The textures the app draws into.
++	 */
++
++	struct xrt_swapchain_gl *xscgl = &sc->base.base;
++	glGenTextures(image_count, xscgl->images);
++
++	for (uint32_t i = 0; i < image_count; i++) {
++		glBindTexture(tex_target, xscgl->images[i]);
++		if (info->array_size == 1) {
++			glTexStorage2D(tex_target, (GLsizei)info->mip_count, (GLenum)info->format, (GLsizei)info->width,
++			               (GLsizei)info->height);
++		} else {
++			glTexStorage3D(tex_target, (GLsizei)info->mip_count, (GLenum)info->format, (GLsizei)info->width,
++			               (GLsizei)info->height, (GLsizei)info->array_size);
++		}
++	}
++
++	if (!sc->upload) {
++		// The native images are never used.
++		u_native_images_unref_all(native_images, image_count);
++		*out_cglsc = &sc->base;
++		return &sc->base.base.base;
++	}
++
++
++	/*
++	 * The way to the runtime.
++	 */
++
++	if (!read_format_for(info->format, &sc->read_format, &sc->read_type, &sc->bytes_per_pixel)) {
++		U_LOG_E("Can't read back OpenGL format %" PRIu32, info->format);
++		goto err;
++	}
++
++	VkDeviceSize offset = 0;
++	for (uint32_t level = 0; level < info->mip_count; level++) {
++		sc->level_offset[level] = offset;
++		offset += (VkDeviceSize)level_extent(info->width, level) * level_extent(info->height, level) *
++		          sc->bytes_per_pixel * info->array_size;
++	}
++	sc->staging_size = offset;
++
++	if (!vk_buffer_init(                                                                //
++	        vk,                                                                         //
++	        sc->staging_size,                                                           //
++	        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,                                           //
++	        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, //
++	        &sc->staging,                                                               //
++	        &sc->staging_mem)) {
++		U_LOG_E("Could not create the staging buffer");
++		goto err;
++	}
++
++	VkResult ret = vk->vkMapMemory(vk->device, sc->staging_mem, 0, VK_WHOLE_SIZE, 0, &sc->staging_map);
++	if (ret != VK_SUCCESS) {
++		U_LOG_E("vkMapMemory: %s", vk_result_string(ret));
++		goto err;
++	}
++
++	// The native images were created from this info with Vulkan formats.
++	struct xrt_swapchain_create_info vkinfo = *info;
++	vkinfo.format = (uint32_t)vk_format;
++	for (uint32_t i = 0; i < vkinfo.format_count; i++) {
++		vkinfo.formats[i] = (uint32_t)client_gl_format_to_vk(vkinfo.formats[i]);
++	}
++
++	for (uint32_t i = 0; i < image_count; i++) {
++		ret = vk_create_image_from_native(vk, &vkinfo, &native_images[i], &sc->images[i], &sc->mems[i]);
++		if (ret != VK_SUCCESS) {
++			U_LOG_E("vk_create_image_from_native: %s", vk_result_string(ret));
++			goto err;
++		}
++	}
++
++	glGenFramebuffers(1, &sc->fbo);
++
++	// Also closes the handles the import didn't take.
++	u_native_images_unref_all(native_images, image_count);
++
++	*out_cglsc = &sc->base;
++
++	return &sc->base.base.base;
++
++err:
++	u_native_images_unref_all(native_images, image_count);
++	// The caller holds the context and drops the native swapchain.
++	free_gl_resources(sc);
++	sc->base.xscn = NULL;
++	client_gl_hostcopy_swapchain_destroy(&sc->base.base.base);
++	return NULL;
++}
++
++#else // !HOSTCOPY_SUPPORTED
++
++bool
++client_gl_hostcopy_needed(const xrt_uuid_t *runtime_device_uuid)
++{
++	(void)runtime_device_uuid;
++	return false;
++}
++
++struct client_gl_hostcopy *
++client_gl_hostcopy_create(const xrt_uuid_t *runtime_device_uuid)
++{
++	(void)runtime_device_uuid;
++	return NULL;
++}
++
++void
++client_gl_hostcopy_destroy(struct client_gl_hostcopy **hc_ptr)
++{
++	*hc_ptr = NULL;
++}
++
++struct xrt_swapchain *
++client_gl_hostcopy_swapchain_create(struct xrt_compositor *xc,
++                                    const struct xrt_swapchain_create_info *info,
++                                    struct xrt_swapchain_native *xscn,
++                                    struct client_gl_swapchain **out_cglsc)
++{
++	(void)xc;
++	(void)info;
++	(void)xscn;
++	(void)out_cglsc;
++	return NULL;
++}
++
++#endif
+diff --git a/src/xrt/compositor/client/comp_gl_hostcopy_swapchain.h b/src/xrt/compositor/client/comp_gl_hostcopy_swapchain.h
+new file mode 100644
+index 000000000..1f064519e
+--- /dev/null
++++ b/src/xrt/compositor/client/comp_gl_hostcopy_swapchain.h
+@@ -0,0 +1,68 @@
++// Copyright 2026, 360900
++// SPDX-License-Identifier: BSL-1.0
++/*!
++ * @file
++ * @brief  OpenGL client swapchain for apps on another GPU than the runtime.
++ * @ingroup comp_client
++ */
++
++#pragma once
++
++#include "xrt/xrt_defines.h"
++#include "xrt/xrt_compositor.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++struct client_gl_swapchain;
++
++/*!
++ * The Vulkan device on the runtime's GPU that uploads the frames of a
++ * @ref client_gl_hostcopy_swapchain, one per @ref client_gl_compositor.
++ *
++ * An OpenGL app whose context is on another GPU than the runtime, such as the
++ * integrated GPU of a hybrid laptop, can't import the runtime's images: Mesa
++ * crashes when a memory object of another device is imported. The app draws
++ * into plain textures instead, which are read back into host memory when
++ * released and copied into the native images by this device.
++ */
++struct client_gl_hostcopy;
++
++/*!
++ * Whether the current OpenGL context's device is another one than the
++ * runtime's. Needs GL_EXT_memory_object for the device UUIDs, without it
++ * returns false and the usual import is tried.
++ *
++ * The app's context must be current.
++ */
++bool
++client_gl_hostcopy_needed(const xrt_uuid_t *runtime_device_uuid);
++
++/*!
++ * Creates a Vulkan device on the runtime's GPU, NULL if there is none.
++ */
++struct client_gl_hostcopy *
++client_gl_hostcopy_create(const xrt_uuid_t *runtime_device_uuid);
++
++void
++client_gl_hostcopy_destroy(struct client_gl_hostcopy **hc_ptr);
++
++/*!
++ * Create a swapchain, belonging to a client_gl_compositor with a
++ * @ref client_gl_hostcopy, whose frames go through host memory.
++ *
++ * The caller must ensure that the app context is current.
++ *
++ * @see client_gl_swapchain_create_func_t, client_gl_compositor_init
++ */
++struct xrt_swapchain *
++client_gl_hostcopy_swapchain_create(struct xrt_compositor *xc,
++                                    const struct xrt_swapchain_create_info *info,
++                                    struct xrt_swapchain_native *xscn,
++                                    struct client_gl_swapchain **out_cglsc);
++
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/src/xrt/compositor/client/comp_gl_win32_client.c b/src/xrt/compositor/client/comp_gl_win32_client.c
+index fef1be4fb..f19a40b6c 100644
+--- a/src/xrt/compositor/client/comp_gl_win32_client.c
++++ b/src/xrt/compositor/client/comp_gl_win32_client.c
+@@ -229,6 +229,7 @@ client_gl_win32_compositor_create(struct xrt_compositor_native *xcn, void *hDC,
+ 	        client_gl_context_begin_locked,    //
+ 	        client_gl_context_end_locked,      //
+ 	        client_gl_memobj_swapchain_create, //
++	        NULL,                              //
+ 	        NULL)) {                           //
+ 		U_LOG_E("Failed to init parent GL client compositor!");
+ 		FreeLibrary(opengl);
+diff --git a/src/xrt/compositor/client/comp_gl_xlib_client.c b/src/xrt/compositor/client/comp_gl_xlib_client.c
+index 761b341e6..d31e0aa9a 100644
+--- a/src/xrt/compositor/client/comp_gl_xlib_client.c
++++ b/src/xrt/compositor/client/comp_gl_xlib_client.c
+@@ -132,7 +132,8 @@ client_gl_xlib_compositor_create(struct xrt_compositor_native *xcn,
+                                  uint32_t visualid,
+                                  GLXFBConfig glxFBConfig,
+                                  GLXDrawable glxDrawable,
+-                                 GLXContext glxContext)
++                                 GLXContext glxContext,
++                                 const xrt_uuid_t *runtime_device_uuid)
+ {
+ 	// We're not using any GLX extensions so screen number is irrelevant.
+ 	gladLoadGLX(xDisplay, 0, glXGetProcAddress);
+@@ -198,7 +199,8 @@ client_gl_xlib_compositor_create(struct xrt_compositor_native *xcn,
+ 	        client_gl_context_begin_locked,    //
+ 	        client_gl_context_end_locked,      //
+ 	        client_gl_memobj_swapchain_create, //
+-	        NULL)) {                           //
++	        NULL,                              //
++	        runtime_device_uuid)) {            //
+ 		free(c);
+ 		return NULL;
+ 	}
+diff --git a/src/xrt/compositor/client/comp_gl_xlib_client.h b/src/xrt/compositor/client/comp_gl_xlib_client.h
+index f8b212a0f..6d4f0f7fa 100644
+--- a/src/xrt/compositor/client/comp_gl_xlib_client.h
++++ b/src/xrt/compositor/client/comp_gl_xlib_client.h
+@@ -59,7 +59,8 @@ client_gl_xlib_compositor_create(struct xrt_compositor_native *xcn,
+                                  uint32_t visualid,
+                                  GLXFBConfig glxFBConfig,
+                                  GLXDrawable glxDrawable,
+-                                 GLXContext glxContext);
++                                 GLXContext glxContext,
++                                 const xrt_uuid_t *runtime_device_uuid);
+ 
+ 
+ #ifdef __cplusplus
+diff --git a/src/xrt/compositor/client/comp_gl_xlib_glue.c b/src/xrt/compositor/client/comp_gl_xlib_glue.c
+index 285e23546..fbb108134 100644
+--- a/src/xrt/compositor/client/comp_gl_xlib_glue.c
++++ b/src/xrt/compositor/client/comp_gl_xlib_glue.c
+@@ -21,10 +21,11 @@ xrt_gfx_provider_create_gl_xlib(struct xrt_compositor_native *xcn,
+                                 uint32_t visualid,
+                                 GLXFBConfig glxFBConfig,
+                                 GLXDrawable glxDrawable,
+-                                GLXContext glxContext)
++                                GLXContext glxContext,
++                                const xrt_uuid_t *runtime_device_uuid)
+ {
+-	struct client_gl_xlib_compositor *xcc =
+-	    client_gl_xlib_compositor_create(xcn, xDisplay, visualid, glxFBConfig, glxDrawable, glxContext);
++	struct client_gl_xlib_compositor *xcc = client_gl_xlib_compositor_create(
++	    xcn, xDisplay, visualid, glxFBConfig, glxDrawable, glxContext, runtime_device_uuid);
+ 
+ 	return &xcc->base.base;
+ }
+diff --git a/src/xrt/include/xrt/xrt_gfx_egl.h b/src/xrt/include/xrt/xrt_gfx_egl.h
+index bc2304f18..bf6547b8b 100644
+--- a/src/xrt/include/xrt/xrt_gfx_egl.h
++++ b/src/xrt/include/xrt/xrt_gfx_egl.h
+@@ -36,6 +36,7 @@ xrt_gfx_provider_create_gl_egl(struct xrt_compositor_native *xcn,
+                                EGLContext context,
+                                PFNEGLGETPROCADDRESSPROC get_gl_procaddr,
+                                bool renderdoc_enabled,
++                               const xrt_uuid_t *runtime_device_uuid,
+                                struct xrt_compositor **out_xc);
+ 
+ #ifdef __cplusplus
+diff --git a/src/xrt/include/xrt/xrt_gfx_xlib.h b/src/xrt/include/xrt/xrt_gfx_xlib.h
+index aa6152802..9ccd56851 100644
+--- a/src/xrt/include/xrt/xrt_gfx_xlib.h
++++ b/src/xrt/include/xrt/xrt_gfx_xlib.h
+@@ -35,7 +35,8 @@ xrt_gfx_provider_create_gl_xlib(struct xrt_compositor_native *xcn,
+                                 uint32_t visualid,
+                                 GLXFBConfig glxFBConfig,
+                                 GLXDrawable glxDrawable,
+-                                GLXContext glxContext);
++                                GLXContext glxContext,
++                                const xrt_uuid_t *runtime_device_uuid);
+ 
+ 
+ #ifdef __cplusplus
+diff --git a/src/xrt/state_trackers/oxr/oxr_session_gfx_egl.c b/src/xrt/state_trackers/oxr/oxr_session_gfx_egl.c
+index 22e9e983a..4f3d11a7a 100644
+--- a/src/xrt/state_trackers/oxr/oxr_session_gfx_egl.c
++++ b/src/xrt/state_trackers/oxr/oxr_session_gfx_egl.c
+@@ -69,6 +69,7 @@ oxr_session_populate_egl(struct oxr_logger *log,
+ 	    next->context,                                  //
+ 	    (PFNEGLGETPROCADDRESSPROC)next->getProcAddress, //
+ 	    renderdoc_enabled,                              // renderdoc_enabled
++	    &sys->xsysc->info.client_vk_deviceUUID,         // runtime_device_uuid
+ 	    &xc);                                           //
+ 
+ 	if (xret == XRT_ERROR_EGL_CONFIG_MISSING) {
+diff --git a/src/xrt/state_trackers/oxr/oxr_session_gfx_gl_xlib.c b/src/xrt/state_trackers/oxr/oxr_session_gfx_gl_xlib.c
+index 380cc234e..5eff72a48 100644
+--- a/src/xrt/state_trackers/oxr/oxr_session_gfx_gl_xlib.c
++++ b/src/xrt/state_trackers/oxr/oxr_session_gfx_gl_xlib.c
+@@ -36,8 +36,14 @@ oxr_session_populate_gl_xlib(struct oxr_logger *log,
+                              struct oxr_session *sess)
+ {
+ 	struct xrt_compositor_native *xcn = sess->xcn;
+-	struct xrt_compositor *xc = xrt_gfx_provider_create_gl_xlib(
+-	    xcn, next->xDisplay, next->visualid, next->glxFBConfig, next->glxDrawable, next->glxContext);
++	struct xrt_compositor *xc = xrt_gfx_provider_create_gl_xlib( //
++	    xcn,                                                     //
++	    next->xDisplay,                                          //
++	    next->visualid,                                          //
++	    next->glxFBConfig,                                       //
++	    next->glxDrawable,                                       //
++	    next->glxContext,                                        //
++	    &sys->xsysc->info.client_vk_deviceUUID);                 //
+ 
+ 	if (xc == NULL) {
+ 		return oxr_error(log, XR_ERROR_INITIALIZATION_FAILED, "Failed to create an xlib client compositor");
+diff --git a/src/xrt/state_trackers/oxr/oxr_session_gfx_gles_android.c b/src/xrt/state_trackers/oxr/oxr_session_gfx_gles_android.c
+index 8d97b1512..69e2d78ef 100644
+--- a/src/xrt/state_trackers/oxr/oxr_session_gfx_gles_android.c
++++ b/src/xrt/state_trackers/oxr/oxr_session_gfx_gles_android.c
+@@ -93,6 +93,7 @@ oxr_session_populate_gles_android(struct oxr_logger *log,
+ 	    next->context,                                  //
+ 	    get_proc_addr,                                  //
+ 	    renderdoc_enabled,                              //
++	    &sess->sys->xsysc->info.client_vk_deviceUUID,   //
+ 	    &xc);                                           //
+ 
+ 	if (xret == XRT_ERROR_EGL_CONFIG_MISSING) {
+-- 
+2.56.0
+
