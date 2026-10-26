@@ -1,4 +1,4 @@
-use super::actions::{LoadedActionDataMap, XrNames};
+use super::actions::{ControllerType, LoadedActionDataMap, XrNames};
 use super::bindings::{ActionPath, DpadParameters, DpadSubMode};
 use crate::input::custom_bindings::{
     BoolBindingData, BoolBindingType, DpadActions, HandSpeeds, ScalarConstantBinding,
@@ -45,6 +45,9 @@ pub(super) struct BindingsLoadContext<'a> {
     /// The identity of the controller that converted bindings were made for, per interaction
     /// profile that shows it (see [InteractionProfile::SIMULATE_CONVERTED]).
     pub simulated_properties: HashMap<xr::Path, &'static ProfileProperties>,
+    /// The controller each interaction profile shows instead of its own, see
+    /// [super::super::emulation].
+    pub emulated_profiles: HashMap<xr::Path, ControllerType>,
     /// SteamVR's binding haptics, with the set and action of their binding.
     pub binding_haptics: Vec<(String, String, BindingHapticData)>,
     /// The controller speeds grab bindings drop with, if any binding reads them.
@@ -82,6 +85,7 @@ impl<'a> BindingsLoadContext<'a> {
             head_proximity: Default::default(),
             scalar_constants: Default::default(),
             simulated_properties: Default::default(),
+            emulated_profiles: Default::default(),
             binding_haptics: Default::default(),
             hand_speeds: Default::default(),
             uses_hand_speeds: false,
