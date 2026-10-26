@@ -29,7 +29,8 @@ LVRR's server (`wivrn-server`) keeps WiVRn's session bus interface: name `io.git
 | `foveation_override` | boolean | now |
 | `foveation_pitch` | radians | now |
 | `foveation_distance` | meters | now |
-| `super_sampling`, `sharpening` | `off`, `normal`, `quality` | now |
+| `super_sampling` | `off`, `normal`, `quality` | now |
+| `sharpening` | 0 (off) to 1, sharpens the decoded stream on the headset | now |
 | `microphone`, `mic_unprocessed` | boolean | restart |
 | `forward_keyboard`, `forward_mouse`, `forward_gamepad` | boolean | now |
 | `hand_tracking`, `eye_gaze`, `face_tracking`, `body_tracking` | boolean | restart |

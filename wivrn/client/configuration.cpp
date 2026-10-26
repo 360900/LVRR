@@ -333,6 +333,7 @@ const std::vector<config_field> & configuration::config_fields()
 	        scalar("passthrough_enabled", &configuration::passthrough_enabled),
 	        scalar("passthrough_boundary_enabled", &configuration::passthrough_boundary_enabled),
 	        scalar("see_through", &configuration::see_through),
+	        scalar("sharpness", &configuration::sharpness),
 	        scalar("mic_unprocessed_audio", &configuration::mic_unprocessed_audio),
 	        scalar("forward_keyboard", &configuration::forward_keyboard),
 	        scalar("forward_mouse", &configuration::forward_mouse),

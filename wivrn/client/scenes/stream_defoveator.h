@@ -89,6 +89,7 @@ public:
 	        const std::array<input, 2> & inputs,
 	        std::array<float, 4> scale,
 	        std::array<float, 4> bias,
+	        float sharpness,
 	        int destination);
 
 	static XrExtent2Di defoveated_size(const wivrn::to_headset::foveation_parameter &);

@@ -33,7 +33,7 @@ impl Codec {
 	}
 }
 
-/// Supersampling and sharpening levels
+/// Supersampling levels
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PostProcessing {
@@ -124,7 +124,7 @@ pub struct Config {
 	pub foveation_pitch: f32,
 	pub foveation_distance: f32,
 	pub super_sampling: PostProcessing,
-	pub sharpening: PostProcessing,
+	pub sharpening: f32,
 	pub microphone: bool,
 	pub mic_unprocessed: bool,
 	pub forward_keyboard: bool,
@@ -215,7 +215,7 @@ mod tests {
 		assert_eq!(settings.capabilities.refresh_rates, [72.0, 90.0, 120.0]);
 		assert_eq!(settings.capabilities.codecs, [Codec::H264, Codec::H265, Codec::Av1]);
 		assert_eq!(settings.config.codec, Codec::Automatic);
-		assert_eq!(settings.config.sharpening, PostProcessing::Normal);
+		assert_eq!(settings.config.sharpening, 0.5);
 		assert_eq!(settings.config.body_parts, ["chest", "hip"]);
 		assert_eq!(settings.permission_pending, ["microphone"]);
 		assert!(settings.restart_required);

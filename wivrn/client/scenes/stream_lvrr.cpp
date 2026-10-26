@@ -203,7 +203,7 @@ lvrr::headset_config scenes::stream::lvrr_config()
 	        .foveation_pitch = config.override_foveation_pitch,
 	        .foveation_distance = config.override_foveation_distance,
 	        .super_sampling = to_level(config.openxr_post_processing.super_sampling),
-	        .sharpening = to_level(config.openxr_post_processing.sharpening),
+	        .sharpening = config.sharpness,
 	        .microphone = config.check_feature(feature::microphone),
 	        .mic_unprocessed = config.mic_unprocessed_audio,
 	        .forward_keyboard = config.forward_keyboard,
@@ -335,12 +335,13 @@ bool scenes::stream::lvrr_apply(const lvrr::headset_config & patch)
 		});
 	}
 
-	if (caps.post_processing)
+	if (patch.super_sampling and caps.post_processing)
+		config.openxr_post_processing.super_sampling = to_flags(*patch.super_sampling, XR_COMPOSITION_LAYER_SETTINGS_NORMAL_SUPER_SAMPLING_BIT_FB, XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SUPER_SAMPLING_BIT_FB);
+	if (patch.sharpening)
 	{
-		if (patch.super_sampling)
-			config.openxr_post_processing.super_sampling = to_flags(*patch.super_sampling, XR_COMPOSITION_LAYER_SETTINGS_NORMAL_SUPER_SAMPLING_BIT_FB, XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SUPER_SAMPLING_BIT_FB);
-		if (patch.sharpening)
-			config.openxr_post_processing.sharpening = to_flags(*patch.sharpening, XR_COMPOSITION_LAYER_SETTINGS_NORMAL_SHARPENING_BIT_FB, XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SHARPENING_BIT_FB);
+		config.sharpness = std::clamp(*patch.sharpening, 0.f, 1.f);
+		// replaced by our own sharpening, don't stack the runtime's on top
+		config.openxr_post_processing.sharpening = 0;
 	}
 
 	if (patch.mic_unprocessed)

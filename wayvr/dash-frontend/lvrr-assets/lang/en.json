@@ -87,7 +87,7 @@
       "FOVEATION_HEIGHT": "Foveation center height (degrees)",
       "FOVEATION_DISTANCE": "Foveation center distance (m)",
       "SUPERSAMPLING": "Supersampling",
-      "SHARPENING": "Sharpening",
+      "SHARPENING": "Sharpening (%)",
       "PP_OFF": "Off",
       "PP_NORMAL": "Normal",
       "PP_QUALITY": "Quality",

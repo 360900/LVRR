@@ -72,7 +72,7 @@
       "preferred_refresh_rate": 90.0,
       "resolution_scale": 1.2000000476837158,
       "see_through": 0.0,
-      "sharpening": "normal",
+      "sharpening": 0.5,
       "super_sampling": "off",
       "usb_network": false
     },

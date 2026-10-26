@@ -100,7 +100,7 @@ lvrr::headset_settings example_settings()
 	                .foveation_pitch = -0.17f,
 	                .foveation_distance = 3,
 	                .super_sampling = lvrr::pp_level::off,
-	                .sharpening = lvrr::pp_level::normal,
+	                .sharpening = 0.5f,
 	                .microphone = false,
 	                .mic_unprocessed = false,
 	                .forward_keyboard = false,

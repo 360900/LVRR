@@ -372,10 +372,11 @@ fn settings() -> Vec<Setting> {
 			label: "LVRR.HEADSET.SHARPENING",
 			section: PostProcessing,
 			restart: false,
-			show: |h| h.capabilities.post_processing,
-			control: Control::Choice {
-				options: post_processing_options,
-				get: |c| json!(c.sharpening.key()),
+			show: always,
+			control: Control::Slider {
+				range: |_| (0.0, 100.0, 5.0),
+				get: |c| c.sharpening * 100.0,
+				set: |v| json!(v / 100.0),
 			},
 		},
 		Setting {

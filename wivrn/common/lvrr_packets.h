@@ -77,7 +77,7 @@ struct headset_config
 	std::optional<float> foveation_pitch;    // radians
 	std::optional<float> foveation_distance; // meters
 	std::optional<pp_level> super_sampling;
-	std::optional<pp_level> sharpening;
+	std::optional<float> sharpening;     // 0: off, up to 1
 	std::optional<bool> microphone;      // restart
 	std::optional<bool> mic_unprocessed; // restart
 	std::optional<bool> forward_keyboard;

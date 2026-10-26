@@ -1080,6 +1080,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		                      images,
 		                      {scale, scale, scale, 1.},
 		                      {bias, bias, bias, 0.},
+		                      application::get_config().sharpness,
 		                      image_index);
 
 #if WIVRN_USE_V4L2

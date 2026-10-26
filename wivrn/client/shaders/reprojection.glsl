@@ -24,6 +24,7 @@ layout(push_constant) uniform pc
 	ivec4 a_rect;
 	vec4 scale;
 	vec4 bias;
+	float sharpness;
 };
 
 #ifdef VERT_SHADER
@@ -69,6 +70,23 @@ vec4 sRGB_to_linear_rgba(vec4 x)
 	        x.a);
 }
 
+// LVRR: contrast adaptive sharpening, after AMD FidelityFX CAS (MIT), 5 taps
+vec3 sharpen(vec3 e, vec2 uv)
+{
+	vec2 texel = 1.0 / vec2(rgb_rect.zw);
+	vec3 b = texture(rgb[0], uv - vec2(0, texel.y)).rgb;
+	vec3 d = texture(rgb[0], uv - vec2(texel.x, 0)).rgb;
+	vec3 f = texture(rgb[0], uv + vec2(texel.x, 0)).rgb;
+	vec3 h = texture(rgb[0], uv + vec2(0, texel.y)).rgb;
+
+	vec3 mn = min(min(min(b, d), min(f, h)), e);
+	vec3 mx = max(max(max(b, d), max(f, h)), e);
+
+	vec3 amp = sqrt(clamp(min(mn, 1.0 - mx) / max(mx, 1e-5), 0.0, 1.0));
+	vec3 w = amp * (-1.0 / mix(8.0, 5.0, sharpness));
+	return clamp(((b + d + f + h) * w + e) / (1.0 + 4.0 * w), 0.0, 1.0);
+}
+
 void main()
 {
 	if (alpha == 1)
@@ -82,6 +100,9 @@ void main()
 	}
 	else
 		outColor = texture(rgb[0], inUV.xy).rgba;
+
+	if (sharpness > 0)
+		outColor.rgb = sharpen(outColor.rgb, inUV.xy);
 
 	if (do_srgb)
 	{
