@@ -28,6 +28,8 @@ namespace wivrn::lvrr
 {
 // The dashboard is part of the stream, it must stay visible
 constexpr float max_see_through = 0.8f;
+// Smallest scale of the FOV tangents reported to the server
+constexpr float min_fov_tangent = 0.7f;
 
 enum class codec_choice : uint8_t
 {
@@ -69,6 +71,8 @@ struct headset_config
 	std::optional<float> minimum_refresh_rate;   // 0: none, for automatic
 	std::optional<uint32_t> fps_divider;         // 2: application SpaceWarp
 	std::optional<float> resolution_scale;       // restart
+	std::optional<float> fov_horizontal;         // tangent scale, min_fov_tangent to 1
+	std::optional<float> fov_vertical;           // tangent scale, min_fov_tangent to 1
 	std::optional<float> foveation;              // 1 - stream scale, restart
 	std::optional<codec_choice> codec;           // restart
 	std::optional<uint8_t> bit_depth;            // 8 or 10, restart

@@ -124,6 +124,9 @@ bool same(const lvrr::headset_config & a, const lvrr::headset_config & b)
 void scenes::stream::lvrr_start()
 {
 	lvrr_session_config = restart_fields(lvrr_config());
+	const auto & config = application::get_config();
+	lvrr_fov_horizontal = std::clamp(config.fov_horizontal, lvrr::min_fov_tangent, 1.f);
+	lvrr_fov_vertical = std::clamp(config.fov_vertical, lvrr::min_fov_tangent, 1.f);
 	lvrr_report(0);
 }
 
@@ -195,6 +198,8 @@ lvrr::headset_config scenes::stream::lvrr_config()
 	        .minimum_refresh_rate = config.minimum_refresh_rate.value_or(0),
 	        .fps_divider = config.fps_divider,
 	        .resolution_scale = config.resolution_scale,
+	        .fov_horizontal = config.fov_horizontal,
+	        .fov_vertical = config.fov_vertical,
 	        .foveation = 1 - config.get_stream_scale(),
 	        .codec = config.codec ? to_choice(*config.codec) : lvrr::codec_choice::automatic,
 	        .bit_depth = config.bit_depth,
@@ -299,6 +304,10 @@ bool scenes::stream::lvrr_apply(const lvrr::headset_config & patch)
 
 	if (patch.resolution_scale)
 		config.resolution_scale = std::clamp(*patch.resolution_scale, 0.5f, config.extended_config ? 3.5f : 1.5f);
+	if (patch.fov_horizontal)
+		lvrr_fov_horizontal = config.fov_horizontal = std::clamp(*patch.fov_horizontal, lvrr::min_fov_tangent, 1.f);
+	if (patch.fov_vertical)
+		lvrr_fov_vertical = config.fov_vertical = std::clamp(*patch.fov_vertical, lvrr::min_fov_tangent, 1.f);
 	if (patch.foveation)
 		config.set_stream_scale(1 - std::clamp(*patch.foveation, config.extended_config ? 0.f : 0.3f, 0.8f));
 	if (patch.codec)

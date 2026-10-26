@@ -116,6 +116,8 @@ pub struct Config {
 	pub minimum_refresh_rate: f32,
 	pub fps_divider: u32,
 	pub resolution_scale: f32,
+	pub fov_horizontal: f32,
+	pub fov_vertical: f32,
 	pub foveation: f32,
 	pub codec: Codec,
 	pub bit_depth: u8,
@@ -216,6 +218,7 @@ mod tests {
 		assert_eq!(settings.capabilities.codecs, [Codec::H264, Codec::H265, Codec::Av1]);
 		assert_eq!(settings.config.codec, Codec::Automatic);
 		assert_eq!(settings.config.sharpening, 0.5);
+		assert_eq!(settings.config.fov_vertical, 0.9);
 		assert_eq!(settings.config.body_parts, ["chest", "hip"]);
 		assert_eq!(settings.permission_pending, ["microphone"]);
 		assert!(settings.restart_required);

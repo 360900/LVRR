@@ -92,6 +92,8 @@ lvrr::headset_settings example_settings()
 	                .minimum_refresh_rate = 0,
 	                .fps_divider = 1,
 	                .resolution_scale = 1.2f,
+	                .fov_horizontal = 1,
+	                .fov_vertical = 0.9f,
 	                .foveation = 0.5f,
 	                .codec = lvrr::codec_choice::automatic,
 	                .bit_depth = 10,

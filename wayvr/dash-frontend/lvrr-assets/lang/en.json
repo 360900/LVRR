@@ -79,6 +79,8 @@
       "REFRESH_RATE": "Refresh rate",
       "SPACEWARP": "Application SpaceWarp (half frame rate)",
       "RESOLUTION": "Render resolution (%)",
+      "FOV_HORIZONTAL": "Horizontal FOV (%)",
+      "FOV_VERTICAL": "Vertical FOV (%)",
       "FOVEATION": "Foveated encoding (%)",
       "CODEC": "Video codec",
       "TEN_BIT": "10-bit color",

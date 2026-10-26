@@ -507,6 +507,13 @@ void scenes::stream::tracking()
 							{
 								j.pose = i.pose;
 								j.fov = i.fov;
+								// LVRR: games render a smaller FOV, the headset leaves the edges black
+								const float h = lvrr_fov_horizontal, v = lvrr_fov_vertical;
+								auto scale = [](float angle, float k) { return std::atan(std::tan(angle) * k); };
+								j.fov.angleLeft = scale(j.fov.angleLeft, h);
+								j.fov.angleRight = scale(j.fov.angleRight, h);
+								j.fov.angleUp = scale(j.fov.angleUp, v);
+								j.fov.angleDown = scale(j.fov.angleDown, v);
 							}
 
 							locate_spaces.add_space(item.device, view_space, tracking.timestamp, tracking.device_poses);

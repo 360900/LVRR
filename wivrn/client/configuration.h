@@ -85,6 +85,9 @@ public:
 	float see_through = 0;
 	// LVRR: contrast adaptive sharpening of the decoded stream, 0: off, up to 1
 	float sharpness = 0;
+	// LVRR: scale of the FOV tangents reported to the server, 1: headset FOV
+	float fov_horizontal = 1;
+	float fov_vertical = 1;
 	bool mic_unprocessed_audio = false;
 
 	// Input forwarding, per device. Off by default; only effective if the server permits it.

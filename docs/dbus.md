@@ -22,6 +22,7 @@ LVRR's server (`wivrn-server`) keeps WiVRn's session bus interface: name `io.git
 | `minimum_refresh_rate` | number, 0 for none | now |
 | `fps_divider` | 1, or 2 for SpaceWarp | now |
 | `resolution_scale` | number | restart |
+| `fov_horizontal`, `fov_vertical` | 0.7 to 1, scales the FOV tangents games render | now |
 | `foveation` | number, 0 to 0.8 | restart |
 | `codec` | `automatic`, `h264`, `h265`, `av1` | restart |
 | `bit_depth` | 8 or 10 | restart |

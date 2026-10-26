@@ -77,6 +77,8 @@ void publish_offline()
 	X(minimum_refresh_rate)   \
 	X(fps_divider)            \
 	X(resolution_scale)       \
+	X(fov_horizontal)         \
+	X(fov_vertical)           \
 	X(foveation)              \
 	X(codec)                  \
 	X(bit_depth)              \

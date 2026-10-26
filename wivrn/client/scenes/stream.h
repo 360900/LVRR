@@ -211,6 +211,8 @@ private:
 	void lvrr_connection_lost(const std::exception &);
 	std::atomic<uint8_t> lvrr_permission_pending = 0;
 	std::atomic<uint8_t> lvrr_permission_denied = 0;
+	std::atomic<float> lvrr_fov_horizontal = 1; // read by the tracking thread
+	std::atomic<float> lvrr_fov_vertical = 1;
 	lvrr::headset_config lvrr_session_config; // connection-time settings of this stream
 	XrTime lvrr_last_stats = 0;
 	int lvrr_stats_offset = 0;

@@ -10,6 +10,8 @@ pub const HEADSET_KEYS: &[&str] = &[
 	"minimum_refresh_rate",
 	"fps_divider",
 	"resolution_scale",
+	"fov_horizontal",
+	"fov_vertical",
 	"foveation",
 	"codec",
 	"bit_depth",

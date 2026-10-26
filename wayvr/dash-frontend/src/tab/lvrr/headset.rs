@@ -273,6 +273,30 @@ fn settings() -> Vec<Setting> {
 			},
 		},
 		Setting {
+			key: "fov_horizontal",
+			label: "LVRR.HEADSET.FOV_HORIZONTAL",
+			section: Video,
+			restart: false,
+			show: always,
+			control: Control::Slider {
+				range: |_| (70.0, 100.0, 1.0),
+				get: |c| c.fov_horizontal * 100.0,
+				set: |v| json!(v / 100.0),
+			},
+		},
+		Setting {
+			key: "fov_vertical",
+			label: "LVRR.HEADSET.FOV_VERTICAL",
+			section: Video,
+			restart: false,
+			show: always,
+			control: Control::Slider {
+				range: |_| (70.0, 100.0, 1.0),
+				get: |c| c.fov_vertical * 100.0,
+				set: |v| json!(v / 100.0),
+			},
+		},
+		Setting {
 			key: "foveation",
 			label: "LVRR.HEADSET.FOVEATION",
 			section: Streaming,
