@@ -20,6 +20,10 @@ const CONFIG_FILE: &str = "lvrr.json5";
 pub struct LvrrApp {
     pub link: Option<LvrrLink>,
     pub perf_overlay: bool,
+    /// The dashboard has a focused edit box, the keyboard types into it
+    pub dash_text_focus: bool,
+    /// Typed text for the dashboard
+    pub dash_text: Vec<String>,
 }
 
 /// LVRR's own WayVR settings

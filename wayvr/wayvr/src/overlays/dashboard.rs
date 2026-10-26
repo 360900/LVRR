@@ -14,7 +14,7 @@ use wayvr_ipc::{
 use wgui::{
     event::{
         DeviceBitmask, Event as WguiEvent, MouseButtonEvent, MouseButtonIndex, MouseLeaveEvent,
-        MouseMotionEvent, MouseWheelEvent,
+        MouseMotionEvent, MouseWheelEvent, TextInputEvent,
     },
     gfx::cmd::WGfxClearMode,
     renderer::context::Context as WguiContext,
@@ -154,6 +154,9 @@ impl OverlayBackend for DashFrontend {
             save_settings(&app.session.config)?;
             app.session.config_dirty = false;
         }
+        self.inner.layout.set_focus(None)?;
+        app.lvrr.dash_text_focus = false;
+        app.lvrr.dash_text.clear();
 
         Ok(())
     }
@@ -168,6 +171,17 @@ impl OverlayBackend for DashFrontend {
         while self.timestep.on_tick() {
             self.inner.layout.tick()?;
         }
+
+        // LVRR: the keyboard types into a focused edit box, until a window or screen is clicked
+        if !app.lvrr.dash_text_focus && self.inner.layout.has_focus() {
+            self.inner.layout.set_focus(None)?;
+        }
+        for text in std::mem::take(&mut app.lvrr.dash_text) {
+            self.push_event(&WguiEvent::TextInput(TextInputEvent {
+                text: Some(text.into()),
+            }));
+        }
+        app.lvrr.dash_text_focus = self.inner.layout.has_focus();
 
         if let Err(e) = self.update(app, self.timestep.alpha) {
             log::error!("uncaught exception: {e:?}");
@@ -271,7 +285,7 @@ impl OverlayBackend for DashFrontend {
         self.push_event(&e);
     }
 
-    fn on_pointer(&mut self, _app: &mut AppState, hit: &PointerHit, pressed: bool) {
+    fn on_pointer(&mut self, app: &mut AppState, hit: &PointerHit, pressed: bool) {
         let index = match hit.mode {
             PointerMode::Left => MouseButtonIndex::Left,
             PointerMode::Right => MouseButtonIndex::Right,
@@ -293,6 +307,7 @@ impl OverlayBackend for DashFrontend {
             })
         };
         self.push_event(&e);
+        app.lvrr.dash_text_focus = self.inner.layout.has_focus();
 
         // released while off-panel → send mouse leave as well
         if !pressed && !self.has_focus[hit.pointer] {

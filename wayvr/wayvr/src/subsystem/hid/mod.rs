@@ -352,6 +352,23 @@ impl XkbKeymap {
         state.key_get_utf8(xkb::Keycode::from(key as u32))
     }
 
+    /// LVRR: the text a key types with all of the given modifiers
+    pub fn text_for_key(&self, key: VirtualKey, modifiers: KeyModifier) -> String {
+        let mut state = xkb::State::new(&self.inner);
+        for bit in (0..8)
+            .map(|i| (1 as KeyModifier) << i)
+            .filter(|bit| modifiers & bit != 0)
+        {
+            if let Some(mod_key) = MODS_TO_KEYS.get(bit) {
+                state.update_key(
+                    xkb::Keycode::from(mod_key[0] as u32),
+                    xkb::KeyDirection::Down,
+                );
+            }
+        }
+        state.key_get_utf8(xkb::Keycode::from(key as u32))
+    }
+
     pub fn has_altgr(&self) -> bool {
         let state0 = xkb::State::new(&self.inner);
         let mut state1 = xkb::State::new(&self.inner);

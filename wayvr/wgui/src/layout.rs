@@ -830,6 +830,11 @@ impl Layout {
 		Ok(())
 	}
 
+	/// Whether a component such as an edit box has focus and takes text input
+	pub fn has_focus(&self) -> bool {
+		self.focused_component.as_ref().is_some_and(|c| c.upgrade().is_some())
+	}
+
 	fn set_style_request(&mut self, widget_id: WidgetID, style_request: &event::StyleSetRequest) {
 		let Some(node_id) = self.state.nodes.get(widget_id) else {
 			return;

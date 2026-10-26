@@ -147,6 +147,7 @@ impl Layout {
                 button_state = KeyButtonData::Key {
                     vk,
                     pressed: false.into(),
+                    typed: false.into(),
                 };
             }
         } else if let Some(macro_verbs) = self.macros.get(key) {

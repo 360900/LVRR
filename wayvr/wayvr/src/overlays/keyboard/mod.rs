@@ -451,6 +451,8 @@ enum KeyButtonData {
     Key {
         vk: VirtualKey,
         pressed: Cell<bool>,
+        /// LVRR: typed into the dashboard instead of the window
+        typed: Cell<bool>,
     },
     Modifier {
         modifier: KeyModifier,
@@ -477,12 +479,25 @@ fn handle_press(
     button: MouseButtonEvent,
 ) {
     match &key.button_state {
-        KeyButtonData::Key { vk, pressed } => {
+        KeyButtonData::Key { vk, pressed, typed } => {
             keyboard.modifiers |= match button.index {
                 MouseButtonIndex::Right => SHIFT,
                 MouseButtonIndex::Middle => keyboard.alt_modifier,
                 _ => 0,
             };
+
+            if app.lvrr.dash_text_focus
+                && let Some(keymap) = &app.hid_provider.keymap
+            {
+                let text = keymap.text_for_key(*vk, keyboard.modifiers);
+                if !text.is_empty() {
+                    app.lvrr.dash_text.push(text);
+                }
+                typed.set(true);
+                pressed.set(true);
+                play_key_click(app);
+                return;
+            }
 
             app.hid_provider
                 .set_modifiers_routed(app.wvr_server.as_mut(), keyboard.modifiers);
@@ -538,7 +553,7 @@ fn handle_press(
 
 fn handle_release(app: &mut AppState, key: &KeyState, keyboard: &mut KeyboardState) -> bool {
     match &key.button_state {
-        KeyButtonData::Key { vk, pressed } => {
+        KeyButtonData::Key { vk, pressed, typed } => {
             pressed.set(false);
 
             for m in &AUTO_RELEASE_MODS {
@@ -546,8 +561,10 @@ fn handle_release(app: &mut AppState, key: &KeyState, keyboard: &mut KeyboardSta
                     keyboard.modifiers &= !*m;
                 }
             }
-            app.hid_provider
-                .send_key_routed(app.wvr_server.as_mut(), *vk, false);
+            if !typed.replace(false) {
+                app.hid_provider
+                    .send_key_routed(app.wvr_server.as_mut(), *vk, false);
+            }
             app.hid_provider
                 .set_modifiers_routed(app.wvr_server.as_mut(), keyboard.modifiers);
             true

@@ -481,6 +481,10 @@ fn populate_lines(
 }
 
 fn update_focus(app: &mut AppState, overlay_input_focus: Option<InputFocus>) {
+    if overlay_input_focus.is_some() {
+        // LVRR: typing goes back from the dashboard to windows
+        app.lvrr.dash_text_focus = false;
+    }
     if let Some(f) = &overlay_input_focus
         && app.input_state.picking_focus.is_none()
         && app
