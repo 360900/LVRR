@@ -379,7 +379,7 @@ impl OverlayMan {
 
             // OC-style size: width = widthMeters * scaleX, height = widthMeters * scaleY / aspect
             let aspect = if rect.extent.height > 0 {
-                rect.extent.width as f32 / rect.extent.height as f32
+                rect.extent.width as f32 * overlay.texel_aspect / rect.extent.height as f32
             } else {
                 1.0
             };
@@ -853,6 +853,8 @@ struct Overlay {
     /// Applied to the quad size like OpenComposite does, so games that encode
     /// non-unit scale in the transform get the size they expect.
     scale: (f32, f32),
+    /// Width over height of a texel, from SetOverlayTexelAspect.
+    texel_aspect: f32,
     visible: bool,
     kind: OverlayKind,
     z_order: i64,
@@ -875,6 +877,7 @@ impl Overlay {
             color: None,
             width: 1.0,
             scale: (1.0, 1.0),
+            texel_aspect: 1.0,
             visible: false,
             kind: OverlayKind::Quad,
             z_order: 0,
@@ -2209,12 +2212,29 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         overlay.z_order = value as _;
         vr::EVROverlayError::None
     }
-    fn GetOverlayTexelAspect(&self, _: vr::VROverlayHandle_t, _: *mut f32) -> vr::EVROverlayError {
-        crate::warn_unimplemented!("GetOverlayTexelAspect");
-        vr::EVROverlayError::RequestFailed
+    fn GetOverlayTexelAspect(
+        &self,
+        handle: vr::VROverlayHandle_t,
+        value: *mut f32,
+    ) -> vr::EVROverlayError {
+        get_overlay!(self, handle, overlay);
+        if value.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        unsafe { *value = overlay.texel_aspect };
+        vr::EVROverlayError::None
     }
-    fn SetOverlayTexelAspect(&self, _: vr::VROverlayHandle_t, _: f32) -> vr::EVROverlayError {
-        crate::warn_unimplemented!("SetOverlayTexelAspect");
+    fn SetOverlayTexelAspect(
+        &self,
+        handle: vr::VROverlayHandle_t,
+        value: f32,
+    ) -> vr::EVROverlayError {
+        get_overlay!(self, handle, mut overlay);
+        if !is_positive(value) {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        debug!("setting overlay {:?} texel aspect to {value}", overlay.name);
+        overlay.texel_aspect = value;
         vr::EVROverlayError::None
     }
     fn GetOverlayAlpha(
@@ -3380,6 +3400,33 @@ mod tests {
             vr::EVROverlayError::None
         );
         assert_eq!(layer().color_scale(), Some([0.5, 0.25, 0.125, 0.5]));
+    }
+
+    #[test]
+    fn texel_aspect_stretches_overlay() {
+        let f = RealSessionFixture::new();
+        let handle = f.textured_overlay(c"key");
+        let size = || match f.layers(false).as_slice() {
+            [TestLayer::Quad(q, _)] => (q.size.width, q.size.height),
+            other => panic!("expected one quad, got {other:?}"),
+        };
+        assert_eq!(size(), (1.0, 1.0));
+
+        assert_eq!(
+            f.man.SetOverlayTexelAspect(handle, 2.0),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(size(), (1.0, 0.5));
+        let mut aspect = 0.0;
+        assert_eq!(
+            f.man.GetOverlayTexelAspect(handle, &mut aspect),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(aspect, 2.0);
+        assert_eq!(
+            f.man.SetOverlayTexelAspect(handle, 0.0),
+            vr::EVROverlayError::InvalidParameter
+        );
     }
 
     #[test]
