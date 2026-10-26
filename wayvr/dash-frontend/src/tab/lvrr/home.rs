@@ -397,7 +397,14 @@ impl<T: 'static> TabLvrrHome<T> {
 	fn update_batteries(&self, frontend: &mut Frontend<T>) {
 		for (battery, &label) in self.batteries.iter().zip(&self.battery_labels) {
 			let layout = &mut frontend.layout;
-			let text = format!("{:.0}%", battery.level * 100.0);
+			let mut text = format!("{:.0}%", battery.level * 100.0);
+			if battery.charging {
+				text = layout
+					.state
+					.globals
+					.i18n()
+					.translate_and_replace("LVRR.BATTERY.CHARGING", ("{PERCENT}", &text));
+			}
 			ui::set_label(layout, label, Translation::from_raw_text_string(text));
 			let color = if battery.charging {
 				WguiColorName::Primary

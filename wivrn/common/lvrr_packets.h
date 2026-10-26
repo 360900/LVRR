@@ -174,6 +174,8 @@ struct headset_stats
 	float tx_bps;
 	float display_hz;
 	float motion_to_photon_ms;
+	std::optional<float> battery; // the headset's, 0 to 1
+	bool charging;
 	struct decoder_timing
 	{
 		float encode_ms;

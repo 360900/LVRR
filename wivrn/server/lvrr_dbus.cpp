@@ -435,6 +435,8 @@ json to_json(const lvrr::headset_stats & stats)
 	        {"tx_bps", stats.tx_bps},
 	        {"display_hz", stats.display_hz},
 	        {"motion_to_photon_ms", stats.motion_to_photon_ms},
+	        {"battery", stats.battery ? json(*stats.battery) : json(nullptr)},
+	        {"charging", stats.charging},
 	        {"decoders", decoders},
 	};
 }

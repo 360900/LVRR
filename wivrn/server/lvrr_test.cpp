@@ -137,6 +137,8 @@ lvrr::headset_stats example_stats()
 	        .tx_bps = 0.4e6f,
 	        .display_hz = 90,
 	        .motion_to_photon_ms = 38,
+	        .battery = 0.8f,
+	        .charging = true,
 	        .decoders = {
 	                {.encode_ms = 3, .send_ms = 1, .network_ms = 4, .decode_ms = 5, .display_ms = 9, .total_ms = 22},
 	                {.encode_ms = 3, .send_ms = 1, .network_ms = 4, .decode_ms = 5, .display_ms = 9, .total_ms = 22},

@@ -18,6 +18,7 @@
 #include "stream.h"
 
 #include "application.h"
+#include "battery.h"
 #include "configuration.h"
 #include "decoder/decoder.h"
 #include "utils/i18n.h"
@@ -460,6 +461,7 @@ void scenes::stream::lvrr_stats(XrTime now)
 		return;
 	lvrr_last_stats = now;
 
+	const auto battery = get_battery_status();
 	lvrr::headset_stats stats{
 	        .cpu_time_ms = compact_cpu_time * 1000,
 	        .gpu_time_ms = compact_gpu_time * 1000,
@@ -467,6 +469,8 @@ void scenes::stream::lvrr_stats(XrTime now)
 	        .tx_bps = compact_bandwidth_tx * 8,
 	        .display_hz = real_display_period ? 1e9f / float(real_display_period) : 0.f,
 	        .motion_to_photon_ms = float(tracking_control.lock()->motions_to_photons) / 1e6f,
+	        .battery = battery.charge,
+	        .charging = battery.charging,
 	};
 
 	// Average the frames measured since the last report

@@ -192,6 +192,9 @@ pub struct HeadsetStats {
 	pub tx_bps: f32,
 	pub display_hz: f32,
 	pub motion_to_photon_ms: f32,
+	/// The headset's, from 0 to 1
+	pub battery: Option<f32>,
+	pub charging: bool,
 	pub decoders: Vec<DecoderTiming>,
 }
 
@@ -199,6 +202,11 @@ impl HeadsetStats {
 	/// Latency from encoding to display, of the slowest video stream
 	pub fn latency_ms(&self) -> f32 {
 		self.decoders.iter().map(|d| d.total_ms).fold(0.0, f32::max)
+	}
+
+	/// The slowest video stream's timings
+	pub fn slowest_decoder(&self) -> Option<&DecoderTiming> {
+		self.decoders.iter().max_by(|a, b| a.total_ms.total_cmp(&b.total_ms))
 	}
 }
 
@@ -228,6 +236,9 @@ mod tests {
 		let stats: HeadsetStats = serde_json::from_value(example["HeadsetStats"].clone()).unwrap();
 		assert_eq!(stats.decoders.len(), 2);
 		assert_eq!(stats.latency_ms(), 22.0);
+		assert_eq!(stats.slowest_decoder().unwrap().network_ms, 4.0);
+		assert_eq!(stats.battery, Some(0.8));
+		assert!(stats.charging);
 	}
 
 	// Without a headset, the server sends the last one's settings with the changes waiting for it

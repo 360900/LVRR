@@ -10,7 +10,7 @@ use std::{
 
 use lvrr_common::{
 	doctor::{Report, Status},
-	headset::HeadsetStats,
+	headset::{DecoderTiming, HeadsetStats},
 	server_config::{ENCODERS, Encoder, OpenVrCompat, ServerConfig},
 	state::{LvrrRequest, LvrrState},
 };
@@ -24,7 +24,7 @@ use wgui::{
 	},
 	drawing::Color,
 	i18n::Translation,
-	layout::WidgetID,
+	layout::{Layout, WidgetID},
 	parser::{Fetchable, ParseDocumentParams, ParserState},
 	task::Tasks,
 	windowing::context_menu::{self, Blueprint, ContextMenu, TickResult},
@@ -137,7 +137,19 @@ struct Graphs {
 	network: Rc<ComponentBarGraph>,
 	latency: Rc<ComponentBarGraph>,
 	motion_to_photon: Rc<ComponentBarGraph>,
+	/// The latency's stages, in `LATENCY_STAGES` order
+	stages: Vec<WidgetID>,
 }
+
+type Stage = (&'static str, fn(&DecoderTiming) -> f32);
+
+const LATENCY_STAGES: [Stage; 5] = [
+	("LVRR.PC.ENCODE", |d| d.encode_ms),
+	("LVRR.PC.SEND", |d| d.send_ms),
+	("LVRR.PC.TRANSFER", |d| d.network_ms),
+	("LVRR.PC.DECODE", |d| d.decode_ms),
+	("LVRR.PC.DISPLAY", |d| d.display_ms),
+];
 
 type ChecksResult = Arc<Mutex<Option<Result<Report, String>>>>;
 
@@ -249,7 +261,7 @@ impl<T: 'static> Tab<T> for TabLvrrPc<T> {
 			if let (Some(graphs), Some(state)) = (&self.graphs, frontend.interface.lvrr_state(data))
 				&& let Some(stats) = state.latest_stats()
 			{
-				push_stats(graphs, stats);
+				push_stats(&mut frontend.layout, graphs, stats);
 				frontend.layout.mark_redraw();
 			}
 		}
@@ -293,7 +305,13 @@ fn cell(value: f32, warn: f32) -> ValueCell {
 	ValueCell { value, color }
 }
 
-fn push_stats(graphs: &Graphs, stats: &HeadsetStats) {
+fn push_stats(layout: &mut Layout, graphs: &Graphs, stats: &HeadsetStats) {
+	if let Some(decoder) = stats.slowest_decoder() {
+		for (&id, (_, get)) in graphs.stages.iter().zip(LATENCY_STAGES) {
+			let text = format!("{:.1} ms", get(decoder));
+			ui::set_label(layout, id, Translation::from_raw_text_string(text));
+		}
+	}
 	let budget = if stats.display_hz > 0.0 {
 		1000.0 / stats.display_hz
 	} else {
@@ -454,9 +472,17 @@ impl<T: 'static> TabLvrrPc<T> {
 			network: ui.graph(row, "LVRR.PC.NETWORK", "Mbit/s", network_max)?,
 			latency: ui.graph(row, "LVRR.PC.LATENCY", "ms", 100.0)?,
 			motion_to_photon: ui.graph(row, "LVRR.PC.MOTION_TO_PHOTON", "ms", 100.0)?,
+			stages: Vec::new(),
 		};
+		ui.muted(group, Text::Key("LVRR.PC.LATENCY_STAGES"))?;
+		let row = ui.row(group)?;
+		let stages = LATENCY_STAGES
+			.iter()
+			.map(|(key, _)| ui.stat(row, key))
+			.collect::<anyhow::Result<_>>()?;
+		let graphs = Graphs { stages, ..graphs };
 		for stats in &state.stats {
-			push_stats(&graphs, stats);
+			push_stats(ui.layout, &graphs, stats);
 		}
 		Ok(Some(graphs))
 	}

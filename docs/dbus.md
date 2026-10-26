@@ -66,6 +66,7 @@ When that headset connects, the server sends the pending changes. Once the heads
 `HeadsetStats` (property, `s`): JSON updated about once per second while streaming, `""` otherwise.
 - Times are in milliseconds, network rates in bit/s.
 - `decoders` has one entry per video stream.
+- `battery` is the headset's, from 0 to 1, or null when unknown; `charging` is a boolean.
 
 ## Session
 

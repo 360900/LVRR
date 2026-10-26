@@ -13,7 +13,7 @@ use std::{
 };
 
 use dbus::blocking::{Connection, stdintf::org_freedesktop_dbus::Properties};
-use lvrr_common::state::{LvrrBackend, LvrrRequest, LvrrState, Notice};
+use lvrr_common::state::{Battery, BatteryDevice, LvrrBackend, LvrrRequest, LvrrState, Notice};
 use wayvr_ipc::{
 	packet_client::WvrProcessLaunchParams,
 	packet_server::{WvrProcess, WvrProcessHandle, WvrWindow, WvrWindowHandle},
@@ -123,6 +123,22 @@ impl DashInterface<()> for UiInterface {
 
 	fn lvrr_request(&mut self, _: &mut (), request: LvrrRequest) -> anyhow::Result<()> {
 		self.lvrr.request(request)
+	}
+
+	// only the headset's: the controllers' are read from OpenXR, in VR
+	fn lvrr_batteries(&mut self, _: &mut ()) -> Vec<Battery> {
+		let state = self.lvrr.state();
+		let stats = state.latest_stats().filter(|_| state.headset_connected);
+		stats
+			.and_then(|s| {
+				Some(Battery {
+					device: BatteryDevice::Headset,
+					level: s.battery?,
+					charging: s.charging,
+				})
+			})
+			.into_iter()
+			.collect()
 	}
 
 	fn lvrr_desktop(&self) -> bool {

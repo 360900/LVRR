@@ -91,6 +91,8 @@
     "server_input_forwarding": true
   },
   "HeadsetStats": {
+    "battery": 0.800000011920929,
+    "charging": true,
     "cpu_time_ms": 4.199999809265137,
     "decoders": [
       {

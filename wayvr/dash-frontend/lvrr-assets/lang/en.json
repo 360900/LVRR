@@ -15,7 +15,8 @@
       "HEADSET": "Headset battery",
       "LEFT": "Left controller",
       "RIGHT": "Right controller",
-      "TRACKER": "Tracker"
+      "TRACKER": "Tracker",
+      "CHARGING": "{PERCENT}, charging"
     },
     "HOME": {
       "CONNECTED": "Connected",
@@ -142,6 +143,12 @@
       "NETWORK": "Network (Mbit/s)",
       "LATENCY": "Latency (ms)",
       "MOTION_TO_PHOTON": "Motion to photon (ms)",
+      "LATENCY_STAGES": "Latency of the slowest video stream, by stage:",
+      "ENCODE": "Encode",
+      "SEND": "Send",
+      "TRANSFER": "Transfer",
+      "DECODE": "Decode",
+      "DISPLAY": "Display",
       "NO_STATS": "Statistics appear while a headset streams.",
       "PERF_OVERLAY": "Show the performance overlay in VR",
       "PAIRED_HEADSETS": "Paired headsets",
