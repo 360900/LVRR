@@ -51,6 +51,8 @@ constexpr auto retry_delay = 1s;
 
 // Written once autoconnect was turned on for the first paired PC, so it is only done once
 const char * const autoconnect_stamp = "lvrr-autoconnect";
+// Written once the microphone was turned on, so turning it off later sticks
+const char * const microphone_stamp = "lvrr-microphone";
 } // namespace
 
 void scenes::lobby::lvrr_focused()
@@ -69,6 +71,14 @@ void scenes::lobby::lvrr_focused()
 		if (system.hand_tracking_supported())
 			config.set_feature(feature::hand_tracking, true);
 		config.save();
+	}
+
+	// The microphone streams by default, like Virtual Desktop; this asks for the permission once
+	const auto mic_stamp = application::get_config_path() / microphone_stamp;
+	if (not std::filesystem::exists(mic_stamp))
+	{
+		std::ofstream{mic_stamp};
+		config.set_feature(feature::microphone, true);
 	}
 }
 
