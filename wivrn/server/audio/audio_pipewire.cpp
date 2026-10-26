@@ -64,6 +64,12 @@ struct pipewire_device : public audio_device
 	audio_data mic_current;
 	std::unique_ptr<pw_stream, deleter> microphone;
 	std::atomic<std::underlying_type_t<pw_stream_state>> mic_state{PW_STREAM_STATE_UNCONNECTED};
+	// LVRR: the stream pauses and resumes with its consumers, sometimes every second; the
+	// headset only hears about a pause that lasts
+	spa_source * mic_off_timer = nullptr;
+	bool mic_on_sent = false;
+	static void mic_off_timeout(void * self_v, uint64_t expirations);
+	void arm_mic_off(bool arm);
 	pw_stream_events mic_events{
 	        .version = PW_VERSION_STREAM_EVENTS,
 	        .state_changed = &pipewire_device::mic_state_changed,
@@ -252,10 +258,15 @@ struct pipewire_device : public audio_device
 			U_LOG_I("pipewire microphone stream created (quantum: %u frames, %.2f ms)", quantum_size, (quantum_size * 1000.0) / desc.microphone->sample_rate);
 		}
 
+		if (desc.microphone)
+			mic_off_timer = pw_loop_add_timer(pw_main_loop_get_loop(pw_loop.get()), &pipewire_device::mic_off_timeout, this);
+
 		if (desc.speaker or desc.microphone)
 			thread = std::jthread(
 			        [this](std::stop_token) {
 				pw_main_loop_run(pw_loop.get());
+				if (mic_off_timer)
+					pw_loop_destroy_source(pw_main_loop_get_loop(pw_loop.get()), mic_off_timer);
 				speaker.reset();
 				microphone.reset();
 				; });
@@ -342,9 +353,9 @@ void pipewire_device::mic_state_changed(void * self_v, pw_stream_state old, pw_s
 	auto self = (pipewire_device *)self_v;
 	self->mic_state = state;
 	if (error)
-		U_LOG_I("Microphone state changed from %s to %s (error: %s)", magic_enum::enum_name(old).data(), magic_enum::enum_name(state).data(), error);
+		U_LOG_D("Microphone state changed from %s to %s (error: %s)", magic_enum::enum_name(old).data(), magic_enum::enum_name(state).data(), error);
 	else
-		U_LOG_I("Microphone state changed from %s to %s", magic_enum::enum_name(old).data(), magic_enum::enum_name(state).data());
+		U_LOG_D("Microphone state changed from %s to %s", magic_enum::enum_name(old).data(), magic_enum::enum_name(state).data());
 	switch (state)
 	{
 		case PW_STREAM_STATE_ERROR:
@@ -353,25 +364,46 @@ void pipewire_device::mic_state_changed(void * self_v, pw_stream_state old, pw_s
 		case PW_STREAM_STATE_UNCONNECTED:
 		case PW_STREAM_STATE_CONNECTING:
 		case PW_STREAM_STATE_PAUSED:
-			try
-			{
-				self->session.send_control(to_headset::feature_control{to_headset::feature_control::microphone, false});
-			}
-			catch (std::exception & e)
-			{
-				U_LOG_W("failed to update microphone state: %s", e.what());
-			}
+			self->arm_mic_off(true);
 			return;
 		case PW_STREAM_STATE_STREAMING:
+			self->arm_mic_off(false);
+			if (self->mic_on_sent)
+				return;
 			try
 			{
 				self->session.send_control(to_headset::feature_control{to_headset::feature_control::microphone, true});
+				self->mic_on_sent = true;
 			}
 			catch (std::exception & e)
 			{
 				U_LOG_W("failed to update microphone state: %s", e.what());
 			}
 			return;
+	}
+}
+
+void pipewire_device::arm_mic_off(bool arm)
+{
+	if (not mic_off_timer)
+		return;
+	timespec value{.tv_sec = arm ? 3 : 0, .tv_nsec = 0};
+	pw_loop_update_timer(pw_main_loop_get_loop(pw_loop.get()), mic_off_timer, &value, nullptr, false);
+}
+
+void pipewire_device::mic_off_timeout(void * self_v, uint64_t)
+{
+	auto self = (pipewire_device *)self_v;
+	if (self->mic_state == PW_STREAM_STATE_STREAMING)
+		return;
+	try
+	{
+		self->session.send_control(to_headset::feature_control{to_headset::feature_control::microphone, false});
+		self->mic_on_sent = false;
+	}
+	catch (std::exception & e)
+	{
+		U_LOG_W("failed to update microphone state: %s", e.what());
 	}
 }
 
@@ -419,7 +451,8 @@ void pipewire_device::pause()
 void pipewire_device::resume()
 {
 	session.send_control(to_headset::audio_stream_description{desc});
-	session.send_control(to_headset::feature_control{to_headset::feature_control::microphone, mic_state == PW_STREAM_STATE_STREAMING});
+	mic_on_sent = mic_state == PW_STREAM_STATE_STREAMING;
+	session.send_control(to_headset::feature_control{to_headset::feature_control::microphone, mic_on_sent});
 }
 
 std::unique_ptr<audio_device> create_pipewire_handle(
