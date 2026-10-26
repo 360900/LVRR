@@ -40,6 +40,7 @@ static theme dark_default()
 	t.on_accent = rgb(255, 255, 255);
 
 	t.background = rgb(10, 11, 13);
+	t.background_contrast = rgb(4, 5, 6);
 	t.card = rgb(22, 24, 29);
 	t.card_hovered = rgb(28, 30, 36);
 	t.control = rgb(35, 38, 46);
@@ -48,6 +49,7 @@ static theme dark_default()
 
 	t.text = rgb(244, 245, 248);
 	t.text_muted = rgb(150, 156, 167);
+	t.heading = t.accent;
 	t.border = rgb(40, 43, 51);
 
 	t.danger = rgb(239, 68, 68);
@@ -149,9 +151,54 @@ static theme light()
 	return t;
 }
 
+// LVRR: the dashboard's default palette (wgui palette.rs), so the lobby and the
+// dashboard look like one application
+static theme wayvr()
+{
+	theme t = dark_default();
+	t.name = "WayVR";
+	t.localized_name = "WayVR";
+
+	t.accent = rgb(33, 173, 255);
+	t.accent_hovered = rgb(80, 192, 255);
+	t.accent_active = rgb(20, 150, 230);
+	t.on_accent = rgb(234, 247, 255);
+
+	t.background = rgb(0, 46, 67);
+	t.background_contrast = rgb(0, 19, 28);
+	t.card = rgb(0, 19, 28, 0.5f);
+	t.card_hovered = rgb(12, 81, 112, 0.5f);
+	t.control = rgb(12, 81, 112);
+	t.control_hovered = rgb(22, 100, 136);
+	t.control_active = rgb(32, 118, 158);
+
+	t.text = rgb(228, 245, 246);
+	t.text_muted = rgb(181, 202, 204);
+	t.heading = rgb(244, 201, 93);
+	t.border = rgb(28, 103, 136);
+
+	t.danger = rgb(247, 70, 154);
+	t.danger_hovered = rgb(255, 104, 176);
+	t.success = rgb(0, 212, 67);
+	t.warning = rgb(244, 201, 93);
+
+	t.dimming = rgb(0, 0, 0, 0.5f);
+
+	t.rounding = 6;
+	t.card_rounding = 11;
+	t.border_size = 2;
+	return t;
+}
+
 std::vector<theme> presets()
 {
-	return {oled(), dark_default(), midnight(), graphite(), slate_light(), light()};
+	return {wayvr(), oled(), dark_default(), midnight(), graphite(), slate_light(), light()};
+}
+
+ImFont *& bold_font()
+{
+	static ImFont * f = nullptr;
+	return f;
 }
 
 std::vector<accent_swatch> accent_swatches()
@@ -176,7 +223,7 @@ void set_accent(const accent_swatch & swatch)
 
 theme & current()
 {
-	static theme t = dark_default();
+	static theme t = wayvr();
 	return t;
 }
 

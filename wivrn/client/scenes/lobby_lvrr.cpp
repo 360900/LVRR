@@ -19,6 +19,7 @@
 
 #include "application.h"
 #include "configuration.h"
+#include "gui_common.h"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "lvrr.h"
@@ -30,6 +31,7 @@
 #include <IconsFontAwesome7.h>
 #include <chrono>
 #include <cmath>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <imspinner.h>
@@ -53,10 +55,10 @@ constexpr auto retry_delay = 1s;
 const char * const autoconnect_stamp = "lvrr-autoconnect";
 // Written once the microphone was turned on, so turning it off later sticks
 const char * const microphone_stamp = "lvrr-microphone";
-} // namespace
-
 // Written once hand tracking was turned on, so turning it off later sticks
 const char * const hand_tracking_stamp = "lvrr-hand-tracking";
+} // namespace
+
 void scenes::lobby::lvrr_focused()
 {
 	if constexpr (lvrr::stock_ui)
@@ -82,8 +84,6 @@ void scenes::lobby::lvrr_focused()
 		std::ofstream{mic_stamp};
 		config.set_feature(feature::microphone, true);
 	}
-}
-
 
 	// Hands work out of the box too, in the lobby and in the dashboard
 	const auto hand_stamp = application::get_config_path() / hand_tracking_stamp;
@@ -92,6 +92,8 @@ void scenes::lobby::lvrr_focused()
 		std::ofstream{hand_stamp};
 		config.set_feature(feature::hand_tracking, true);
 	}
+}
+
 void scenes::lobby::lvrr_connected()
 {
 	if constexpr (lvrr::stock_ui)
@@ -192,6 +194,14 @@ void scenes::lobby::lvrr_disconnect()
 	current_tab = tab::server_list;
 }
 
+std::string scenes::lobby::lvrr_waiting_title() const
+{
+	// connections from an intent (USB) have no server name
+	if (async_error)
+		return server_name.empty() ? _("Disconnected") : fmt::format(_F("Disconnected from {}"), server_name);
+	return server_name.empty() ? _("Starting LVRR") : fmt::format(_F("Starting LVRR on {}"), server_name);
+}
+
 void scenes::lobby::lvrr_gui_waiting()
 {
 	namespace ui = wivrn::ui;
@@ -209,23 +219,22 @@ void scenes::lobby::lvrr_gui_waiting()
 		return;
 	}
 
-	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {34, 34});
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {10, 10});
+	ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4{0, 0, 0, 0});
 	ImGui::BeginChild("waiting", {0, 0}, ImGuiChildFlags_AlwaysUseWindowPadding);
 
 	const float header_top = ImGui::GetCursorPosY();
-	// connections from an intent (USB) have no server name
-	std::string title;
+	// the title is in the shell's title pill, only the status goes here
+	ImGui::PushStyleColor(ImGuiCol_Text, ui::current().text_muted);
+	ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x * 0.6f);
 	if (async_error)
-		title = server_name.empty() ? _("Disconnected") : fmt::format(_F("Disconnected from {}"), server_name);
-	else
-		title = server_name.empty() ? _("Starting LVRR") : fmt::format(_F("Starting LVRR on {}"), server_name);
-
-	if (async_error)
-		ui::page_header(title, *async_error);
+		ImGui::TextUnformatted(async_error->c_str());
 	else if (next_scene)
-		ui::page_header(title, _("The desktop appears here in a moment. If it does not, restart it."));
+		ImGui::TextUnformatted(_S("The desktop appears here in a moment. If it does not, restart it."));
 	else
-		ui::page_header(title, _("Reconnecting to the PC."));
+		ImGui::TextUnformatted(_S("Reconnecting to the PC."));
+	ImGui::PopTextWrapPos();
+	ImGui::PopStyleColor();
 
 	const std::string close_label = async_error ? _("Close") : _("Disconnect");
 	const std::string restart_label = _("Restart desktop");
@@ -248,28 +257,121 @@ void scenes::lobby::lvrr_gui_waiting()
 		ImGui::EndDisabled();
 	}
 
-	ImGui::EndChild();
-	ImGui::PopStyleVar();
-
 	if (not async_error)
 	{
 		const float r = ui::metrics::app_spinner_radius;
 		ImGui::SetCursorPos(ImGui::GetWindowSize() / 2 - ImVec2{r, r});
-		ImSpinner::SpinnerAng("waiting", r, ui::metrics::app_spinner_thickness, ImColor{ui::current().accent}, ImColor{ui::current().card}, 6, 0.75f * 2 * M_PI);
+		ImSpinner::SpinnerAng("waiting", r, ui::metrics::app_spinner_thickness, ImColor{ui::current().accent}, ImColor{ui::current().control}, 6, 0.75f * 2 * M_PI);
 	}
+
+	ImGui::EndChild();
+	ImGui::PopStyleColor();
+	ImGui::PopStyleVar();
 }
 
-void scenes::lobby::lvrr_gui_sidebar()
+// The dashboard's layout (wayvr dashboard.xml): a pill of round buttons on the left, the
+// page title in a pill on top with a close button, the page in a panel, a bar below
+void scenes::lobby::lvrr_gui_shell(XrTime predicted_display_time)
 {
-	if (wivrn::ui::nav_item(ICON_FA_COMPUTER, _cS("tab label", "Computers"), current_tab == tab::server_list))
-		current_tab = tab::server_list;
+	namespace ui = wivrn::ui;
+	using namespace ui::metrics;
+	const auto & t = ui::current();
 
-	// pinned to the bottom
-	wivrn::ui::sidebar_footer();
-	if (wivrn::ui::nav_item(ICON_FA_SCALE_BALANCED, _cS("tab label", "Licenses"), current_tab == tab::licenses))
+	const ImVec2 win{1400, 900};
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
+	ImGui::SetNextWindowSize(win);
+	ImGui::Begin("WiVRn", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBackground);
+
+	const float col_x = shell_pad + shell_side_width + shell_gap;
+	const float col_w = win.x - col_x - shell_pad;
+	const float content_y = shell_pad + shell_top_height + shell_gap;
+	const float content_h = win.y - shell_pad - shell_bottom_height - shell_gap - content_y;
+
+	// which page: the waiting page is the Computers one while a PC starts
+	const bool on_computers = current_tab == tab::server_list or current_tab == tab::connected;
+
+	ImGui::SetCursorPos({shell_pad, shell_pad});
+	ui::shell_side_begin(win.y - 2 * shell_pad, 2, 1);
+	if (ui::shell_side_button(ICON_FA_COMPUTER, _cS("tab label", "Computers"), on_computers) and not on_computers)
+		current_tab = tab::server_list;
+	ui::shell_side_separator();
+	if (ui::shell_side_button(ICON_FA_SCALE_BALANCED, _cS("tab label", "Licenses"), current_tab == tab::licenses))
 		current_tab = tab::licenses;
-	if (wivrn::ui::nav_item(ICON_FA_DOOR_OPEN, _cS("exit button in the lobby", "Exit"), current_tab == tab::exit))
-		current_tab = tab::exit;
+	ui::shell_side_end();
+
+	const char * icon = ICON_FA_COMPUTER;
+	std::string title = _cS("tab label", "Computers");
+	switch (current_tab)
+	{
+		case tab::connected:
+			icon = ICON_FA_PLAY;
+			title = lvrr_waiting_title();
+			break;
+		case tab::licenses:
+			icon = ICON_FA_SCALE_BALANCED;
+			title = _cS("tab label", "Licenses");
+			break;
+		default:
+			break;
+	}
+
+	ImGui::SetCursorPos({col_x, shell_pad});
+	bool close = ui::shell_top(col_w, icon, title, _cS("tooltip of the close button in the lobby", "Stop LVRR"));
+
+	ImGui::SetCursorPos({col_x, content_y});
+	ui::shell_content_begin({col_w, content_h}, shell_content_padding);
+	switch (current_tab)
+	{
+		case tab::connected:
+			gui_connected(predicted_display_time);
+			break;
+		case tab::licenses:
+			gui_licenses();
+			break;
+		case tab::server_list:
+			gui_server_list();
+			break;
+		default:
+			current_tab = tab::server_list;
+			break;
+	}
+	if (current_tab != last_current_tab)
+	{
+		last_current_tab = current_tab;
+		ImGui::SetScrollY(0);
+	}
+	ui::shell_content_end();
+
+	ImGui::SetCursorPos({col_x, win.y - shell_pad - shell_bottom_height});
+	const float side = ImGui::GetFrameHeight() * control_height;
+	ui::shell_bottom(
+	        col_w,
+	        [&] {
+		        if (auto bat = wivrn::gui::battery_status_indicator(instance.now()))
+			        ui::chip(bat->label, bat->style, false, side);
+		        else
+			        ImGui::Dummy({0, side});
+	        },
+	        [&] {
+		        // the clock, like the dashboard's bar
+		        std::time_t now = std::time(nullptr);
+		        std::tm tm{};
+		        localtime_r(&now, &tm);
+		        char clock[16];
+		        std::strftime(clock, sizeof(clock), "%H:%M", &tm);
+		        ImGui::PushFont(ui::bold_font(), ImGui::GetStyle().FontSizeBase * 1.1f);
+		        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (side - ImGui::GetFontSize()) * 0.5f);
+		        ImGui::TextUnformatted(clock);
+		        ImGui::PopFont();
+	        });
+
+	if (close)
+		ImGui::OpenPopup("stop lvrr");
+	if (ui::confirm_modal("stop lvrr", _cS("confirmation messagebox title", "Stop LVRR"), _S("Close the headset app? The PC keeps running."), _cS("button", "Stop"), _("Cancel"), true) == 1)
+		application::pop_scene();
+
+	ImGui::End();
+	ImGui::PopStyleVar(); // ImGuiStyleVar_WindowPadding
 }
 
 void scenes::lobby::lvrr_gui_version()

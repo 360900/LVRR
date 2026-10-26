@@ -196,4 +196,30 @@ void end_sidebar();
 // Hairline dividers separating the top bar, sidebar and content, dimmed with the panel
 void shell_dividers(float top_bar_h, float tab_width);
 
+// LVRR: the dashboard's shell (dashboard.xml) for the lobby, drawn at the cursor inside the
+// main window: a pill of round buttons on the left, a title pill with a close button on top,
+// a content panel with the dashboard's gradient and a bar at the bottom
+
+// Rounded rectangle whose fill goes from top to bottom, with the vertex alpha kept for AA
+void gradient_rect(ImDrawList * draw, const ImVec2 & min, const ImVec2 & max, float rounding, const ImVec4 & top, const ImVec4 & bottom);
+
+// Side pill of height h holding buttons round buttons and separators separators, centered vertically
+void shell_side_begin(float height, int buttons, int separators);
+bool shell_side_button(const char * icon, const std::string & tooltip, bool selected);
+void shell_side_separator();
+void shell_side_end();
+
+// Title pill centered in width, close button at the right edge; true when close is clicked
+bool shell_top(float width, const char * icon, const std::string & title, const std::string & close_tooltip);
+
+// Content panel; the cursor is inside a scrolling child with padding, pair with shell_content_end
+void shell_content_begin(const ImVec2 & size, const ImVec2 & padding);
+void shell_content_end();
+
+// Bottom bar; left and right draw their items at the cursor, right-aligned for right
+void shell_bottom(float width, const std::function<void()> & left, const std::function<void()> & right);
+
+// Card title: icon and bold label in the heading color over a rule, like the dashboard's group box
+void card_title(const char * icon, const std::string & title);
+
 } // namespace wivrn::ui

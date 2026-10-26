@@ -18,6 +18,7 @@
  */
 
 #include "lobby.h"
+#include "lvrr.h"
 
 #include "application.h"
 #include "configuration.h"
@@ -29,6 +30,16 @@ namespace ui = wivrn::ui;
 void scenes::lobby::apply_theme_settings()
 {
 	auto & config = application::get_config();
+
+	// LVRR: the lobby wears the dashboard's look, there is no theme page to pick another
+	if constexpr (not wivrn::lvrr::stock_ui)
+	{
+		ui::set_theme(ui::presets().front());
+		ui::theme & theme = ui::current();
+		theme.font_scale = config.theme_font_scale;
+		ui::background_alpha() = 1;
+		return;
+	}
 
 	// preset by name, surfaces only, accent applied separately below
 	for (const auto & p: ui::presets())

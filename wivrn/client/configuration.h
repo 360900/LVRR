@@ -97,12 +97,12 @@ public:
 	uint32_t app_icon_size = 0;
 
 	// interface theme, defaults match the built-in "Dark" preset and "Blue" accent
-	std::string theme_preset = "Dark";
+	std::string theme_preset = "WayVR";
 	std::string theme_accent = "Blue";
-	float theme_rounding = 8;
-	float theme_card_rounding = 14;
+	float theme_rounding = 6;
+	float theme_card_rounding = 11;
 	float theme_font_scale = 1.0;
-	float theme_background_alpha = 0.75;
+	float theme_background_alpha = 1.0;
 
 	// XR_FB_composition_layer_settings extension flags
 	struct openxr_post_processing_settings

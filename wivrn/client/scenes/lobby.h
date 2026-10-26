@@ -274,8 +274,9 @@ class lobby : public scene_impl<lobby>
 	bool lvrr_stream_ended();
 	void lvrr_tick();
 	void lvrr_disconnect();
+	void lvrr_gui_shell(XrTime predicted_display_time);
 	void lvrr_gui_waiting();
-	void lvrr_gui_sidebar();
+	std::string lvrr_waiting_title() const;
 	void lvrr_gui_version();
 
 public:

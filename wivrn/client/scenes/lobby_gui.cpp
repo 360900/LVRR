@@ -371,25 +371,22 @@ void scenes::lobby::gui_server_list()
 	auto & config = application::get_config();
 	const auto & t = ui::current();
 
-	// header with an Add server button on the right
-	const ImVec2 hstart = ImGui::GetCursorPos();
-	const float header_avail = ImGui::GetContentRegionAvail().x;
-	ui::page_header(_cS("page header title", "Computers"), _cS("page header subtitle", "Pick a PC running the LVRR server to stream from."));
-	const ImVec2 hend = ImGui::GetCursorPos();
-
 	const std::string add_label = _("Add server");
 	const float add_w = ui::button_width(ICON_FA_PLUS, add_label);
-	ImGui::SetCursorPos({hstart.x + header_avail - add_w, hstart.y});
-	if (ui::button(ICON_FA_PLUS, add_label, ui::button_style::primary))
+	bool add_server = false;
+
+	if constexpr (lvrr::stock_ui)
 	{
-		add_server_cookie = "";
-		add_server_window_prettyname = "";
-		add_server_window_hostname = "";
-		add_server_window_port = wivrn::default_port;
-		add_server_tcp_only = false;
-		ImGui::OpenPopup("add or edit server");
+		// header with an Add server button on the right
+		const ImVec2 hstart = ImGui::GetCursorPos();
+		const float header_avail = ImGui::GetContentRegionAvail().x;
+		ui::page_header(_cS("page header title", "Computers"), _cS("page header subtitle", "Pick a PC running the LVRR server to stream from."));
+		const ImVec2 hend = ImGui::GetCursorPos();
+
+		ImGui::SetCursorPos({hstart.x + header_avail - add_w, hstart.y});
+		add_server = ui::button(ICON_FA_PLUS, add_label, ui::button_style::primary);
+		ImGui::SetCursorPos(hend);
 	}
-	ImGui::SetCursorPos(hend);
 
 	std::multimap<std::string, std::string> sorted_cookies;
 	for (auto && [cookie, data]: config.servers)
@@ -402,6 +399,31 @@ void scenes::lobby::gui_server_list()
 	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ui::metrics::card_item_spacing);
 	ui::begin_list_card("##servers");
 	{
+		if constexpr (not lvrr::stock_ui)
+		{
+			// LVRR: the dashboard's group box, its title row holds the Add server button
+			const ImVec2 hstart = ImGui::GetCursorPos();
+			const float header_avail = ImGui::GetContentRegionAvail().x;
+			ui::card_title(ICON_FA_COMPUTER, _cS("page header title", "Computers"));
+			const ImVec2 hend = ImGui::GetCursorPos();
+			const float bh = ImGui::GetFrameHeight() * ui::metrics::control_height;
+			ImGui::SetCursorPos({hstart.x + header_avail - add_w, hstart.y - (bh - ImGui::GetFontSize() * 1.05f) * 0.5f});
+			add_server = ui::button(ICON_FA_PLUS, add_label, ui::button_style::primary);
+			ImGui::SetCursorPos(hend);
+			ImGui::PushStyleColor(ImGuiCol_Text, t.text_muted);
+			ImGui::TextUnformatted(_S("Pick a PC running the LVRR server to stream from."));
+			ImGui::PopStyleColor();
+		}
+
+		if (add_server)
+		{
+			add_server_cookie = "";
+			add_server_window_prettyname = "";
+			add_server_window_hostname = "";
+			add_server_window_port = wivrn::default_port;
+			add_server_tcp_only = false;
+			open_add_edit = true;
+		}
 		if (sorted_cookies.empty())
 		{
 			ImGui::PushStyleColor(ImGuiCol_Text, t.text_muted);
@@ -918,13 +940,14 @@ void scenes::lobby::gui_licenses()
 	namespace ui = wivrn::ui;
 	const auto & t = ui::current();
 
-	ui::page_header(_S("Licenses"), _S("Open-source components bundled with LVRR."));
+	if constexpr (lvrr::stock_ui)
+		ui::page_header(_S("Licenses"), _S("Open-source components bundled with LVRR."));
 	lvrr_gui_version();
 
 	// Components shipping a license file, probed once
 	static const std::vector<std::string> components = [] {
 		std::vector<std::string> v;
-		for (const char * c: {"WiVRn", "FontAwesome", "openxr-loader", "simdjson"})
+		for (const char * c: {"WiVRn", "FontAwesome", "Quicksand", "openxr-loader", "simdjson"})
 		{
 			try
 			{
@@ -1107,6 +1130,11 @@ std::vector<std::pair<int, XrCompositionLayerQuad>> scenes::lobby::draw_gui(XrTi
 		ImGui::End();
 		ImGui::PopStyleVar(4); // ImGuiStyleVar_FrameRounding, ImGuiStyleVar_WindowPadding, ImGuiStyleVar_WindowRounding, ImGuiStyleVar_WindowBorderSize
 	}
+	else if (not lvrr::stock_ui)
+	{
+		// LVRR: every page sits in the dashboard's shell
+		lvrr_gui_shell(predicted_display_time);
+	}
 	else if (current_tab == tab::connected)
 	{
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
@@ -1256,10 +1284,7 @@ std::vector<std::pair<int, XrCompositionLayerQuad>> scenes::lobby::draw_gui(XrTi
 		ImGui::EndChild();
 		ImGui::PopStyleVar(2); // ImGuiStyleVar_FrameRounding, ImGuiStyleVar_WindowPadding
 
-		wivrn::ui::begin_sidebar(TopBarH, TabWidth, lvrr::stock_ui ? 3 : 2);
-		if constexpr (not lvrr::stock_ui)
-			lvrr_gui_sidebar();
-		else
+		wivrn::ui::begin_sidebar(TopBarH, TabWidth, 3);
 		{
 			if (wivrn::ui::nav_item(ICON_FA_COMPUTER, _cS("tab label", "Computers"), current_tab == tab::server_list))
 				current_tab = tab::server_list;

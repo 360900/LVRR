@@ -541,21 +541,34 @@ void imgui_context::initialize_fonts()
 	font_awesome.emplace_back("assets://Font Awesome 7 Free-Solid-900.otf");
 	font_awesome.emplace_back("assets://Font Awesome 7 Brands-Regular-400.otf");
 
-	ImFontConfig config;
-	config.FontDataOwnedByAtlas = true;
+	// LVRR: the dashboard's font comes first, the system fonts fill in the scripts it lacks
+	assert(ui_font.empty());
+	ui_font.emplace_back("assets://Quicksand-Regular.ttf");
+	ui_font.emplace_back("assets://Quicksand-Bold.ttf");
 
 	for (auto & font: fonts)
-	{
 		spdlog::info("Using font {}", font, application::get_messages_info().language);
-		io.Fonts->AddFontFromFileTTF(font.c_str(), constants::gui::font_size_small, &config);
-		config.MergeMode = true;
-	}
 
-	config.FontDataOwnedByAtlas = false;
-	config.MergeMode = true;
-	config.GlyphMinAdvanceX = 40; // Use if you want to make the icon monospaced
-	for (auto & fa: font_awesome)
-		io.Fonts->AddFontFromMemoryTTF(const_cast<std::byte *>(fa.data()), fa.size(), constants::gui::font_size_small, &config);
+	auto add_family = [&](const utils::mapped_file & base) {
+		ImFontConfig config;
+		config.FontDataOwnedByAtlas = false;
+		ImFont * f = io.Fonts->AddFontFromMemoryTTF(const_cast<std::byte *>(base.data()), base.size(), constants::gui::font_size_small, &config);
+
+		config.MergeMode = true;
+		config.FontDataOwnedByAtlas = true;
+		for (auto & font: fonts)
+			io.Fonts->AddFontFromFileTTF(font.c_str(), constants::gui::font_size_small, &config);
+
+		config.FontDataOwnedByAtlas = false;
+		config.GlyphMinAdvanceX = 40; // Use if you want to make the icon monospaced
+		for (auto & fa: font_awesome)
+			io.Fonts->AddFontFromMemoryTTF(const_cast<std::byte *>(fa.data()), fa.size(), constants::gui::font_size_small, &config);
+		return f;
+	};
+
+	add_family(ui_font[0]);
+	bold = add_family(ui_font[1]);
+	wivrn::ui::bold_font() = bold;
 }
 
 std::vector<imgui_context::controller_state> imgui_context::read_controllers_state(XrTime display_time)
@@ -772,6 +785,7 @@ void imgui_context::new_frame(XrTime display_time)
 {
 	ImGui::SetCurrentContext(context);
 	ImPlot::SetCurrentContext(plot_context);
+	wivrn::ui::bold_font() = bold;
 
 	if (last_display_time)
 		io.DeltaTime = std::clamp((display_time - last_display_time) * 1e-9f, 0.001f, 0.0166f);
@@ -955,6 +969,15 @@ std::vector<std::pair<int, XrCompositionLayerQuad>> imgui_context::end_frame()
 
 	ImGui::Render();
 
+	// LVRR: nothing changed since the last submitted image, the layers below keep
+	// pointing at it (a swapchain shows its most recently released image)
+	if (not draw_data_changed(ImGui::GetDrawData()))
+		return build_layers();
+
+	image_index = swapchain.acquire();
+	swapchain.wait();
+	vk::Image destination = swapchain.image(image_index);
+
 	current_command_buffer = (current_command_buffer + 1) % command_buffers.size();
 
 	auto & f = get_frame(destination);
@@ -968,15 +991,6 @@ std::vector<std::pair<int, XrCompositionLayerQuad>> imgui_context::end_frame()
 	cb.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
 
 	vk::ClearValue clear{vk::ClearColorValue(0, 0, 0, 0)};
-
-	// LVRR: nothing changed since the last submitted image, the layers below keep
-	// pointing at it (a swapchain shows its most recently released image)
-	if (not draw_data_changed(ImGui::GetDrawData()))
-		return build_layers();
-
-	image_index = swapchain.acquire();
-	swapchain.wait();
-	vk::Image destination = swapchain.image(image_index);
 
 	cb.beginRenderPass(vk::RenderPassBeginInfo{
 	                           .renderPass = *renderpass,
@@ -1005,22 +1019,8 @@ std::vector<std::pair<int, XrCompositionLayerQuad>> imgui_context::end_frame()
 	                     *fence);
 
 	swapchain.release();
-
-	std::vector<std::pair<int, XrCompositionLayerQuad>> quads;
-	quads.reserve(layers_.size());
-
-	for (auto & i: layers_)
-	{
-		bool visible = false;
-
-		ImRect layer_rect(
-		        i.vp_origin.x,
-		        i.vp_origin.y,
-		        i.vp_origin.x + i.vp_size.x,
-		        i.vp_origin.y + i.vp_size.y);
-
 	have_image = true;
-		ImRect all_windows_rect{
+
 	return build_layers();
 }
 
@@ -1068,6 +1068,20 @@ bool imgui_context::draw_data_changed(const ImDrawData * draw_data)
 
 std::vector<std::pair<int, XrCompositionLayerQuad>> imgui_context::build_layers()
 {
+	std::vector<std::pair<int, XrCompositionLayerQuad>> quads;
+	quads.reserve(layers_.size());
+
+	for (auto & i: layers_)
+	{
+		bool visible = false;
+
+		ImRect layer_rect(
+		        i.vp_origin.x,
+		        i.vp_origin.y,
+		        i.vp_origin.x + i.vp_size.x,
+		        i.vp_origin.y + i.vp_size.y);
+
+		ImRect all_windows_rect{
 		        std::numeric_limits<float>::max(),
 		        std::numeric_limits<float>::max(),
 		        std::numeric_limits<float>::lowest(),
@@ -1275,6 +1289,7 @@ void imgui_context::set_current()
 {
 	ImGui::SetCurrentContext(context);
 	ImPlot::SetCurrentContext(plot_context);
+	wivrn::ui::bold_font() = bold;
 }
 
 void imgui_context::set_controllers_enabled(bool value)

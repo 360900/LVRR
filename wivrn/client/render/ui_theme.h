@@ -39,6 +39,7 @@ struct theme
 
 	// Surfaces, back to front
 	ImVec4 background;
+	ImVec4 background_contrast; // LVRR: pills and bars of the dashboard shell, modal fill
 	ImVec4 card;
 	ImVec4 card_hovered;
 	ImVec4 control; // slider rail, secondary button, input
@@ -48,6 +49,7 @@ struct theme
 	// Content
 	ImVec4 text;
 	ImVec4 text_muted;
+	ImVec4 heading; // LVRR: card titles, the dashboard's secondary color
 	ImVec4 border;
 
 	// Semantic
@@ -127,6 +129,20 @@ constexpr float sidebar_width = 300;
 constexpr float top_bar_height = 72;
 constexpr float content_margin = 20; // gap around the main content panel
 
+// LVRR: the lobby shell, the dashboard's layout (dashboard.xml) at 1.4x its logical pixels
+constexpr float shell_pad = 6;         // around everything
+constexpr float shell_gap = 12;        // between the pills, the panel and the bar
+constexpr float shell_side_width = 68; // side pill and its round buttons
+constexpr float shell_side_glyph = 34; // icon in a side button
+constexpr float shell_top_height = 56; // title pill and close button
+constexpr float shell_title_min_width = 420;
+constexpr float shell_title_glyph = 30;
+constexpr float shell_bottom_height = 68;
+constexpr float shell_panel_rounding = 11;
+constexpr ImVec2 shell_content_padding = {24, 20};
+constexpr float card_title_rule = 2;    // rule under a card title
+constexpr float button_gradient = 0.3f; // the dashboard darkens the bottom of a button this much
+
 // application launcher grid
 constexpr float app_icon_small = 120;
 constexpr float app_icon_medium = 176;
@@ -153,6 +169,9 @@ constexpr float pin_entry_popup_width = 3 * pin_entry_key_size.x + 2 * pin_entry
 
 // theme in effect, call current().apply() after mutating
 theme & current();
+
+// LVRR: the bold face of the UI font, set by the imgui context that owns it, null when none
+ImFont *& bold_font();
 void set_theme(const theme & t);
 
 // panel and card background opacity, 0..1, kept out of the presets so switching palette keeps it

@@ -206,9 +206,13 @@ private:
 #endif
 
 	beman::inplace_vector::inplace_vector<utils::mapped_file, 3> font_awesome;
+	beman::inplace_vector::inplace_vector<utils::mapped_file, 2> ui_font; // LVRR: regular and bold
+	ImFont * bold = nullptr;
 	void initialize_fonts();
 
 	std::vector<controller_state> read_controllers_state(XrTime display_time);
+	bool draw_data_changed(const ImDrawData * draw_data);
+	std::vector<std::pair<int, XrCompositionLayerQuad>> build_layers();
 	size_t choose_focused_controller(const std::vector<controller_state> & new_states) const;
 
 public:
