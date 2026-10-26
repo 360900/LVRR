@@ -131,7 +131,7 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
     - no capture, files or `Screenshot*` events
 32. Input paths and identity (S-M)
     - `/user/head` pose bindings, gamepad, treadmill, stylus dropped
-    - no way to report another controller type to games that gate on it
+    - games without an action manifest can't be shown another controller type
 
 ## Out of scope
 

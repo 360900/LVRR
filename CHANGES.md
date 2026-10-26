@@ -98,6 +98,7 @@ Status: `pending` | `merged` | `superseded-by-<n>` | `blocked` | `dropped` | `re
 | `ef5dbfb` | gl: fbconfig of contexts created without one taken from the drawable |
 | `176f51f` | applications: added manifests and the app's identity kept for the process |
 | `9714aab` | apps that don't quit 5 s after the runtime asks (30 s if acknowledged) are killed, like SteamVR; `XRIZER_KILL_ON_QUIT=0` opts out |
+| `d9d3e55` | games can be shown Index or Touch controllers whatever the real ones are (`XRIZER_CONTROLLER_TYPE`, or `controller_type` in `~/.config/xrizer/apps/<app key>.json`): bindings converted, that controller's identity and poses, the headset keeps its own |
 
 ## Audit fixes (2026-10-22, 335 commits `9a6d924`..`3323c56`)
 
