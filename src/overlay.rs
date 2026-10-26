@@ -290,8 +290,27 @@ impl OverlayMan {
             };
             trace!("overlay rect: {rect:#?}");
 
+            // Overlay relative transforms chain onto their parent's placement.
+            let mut relative = xr::Posef::IDENTITY;
+            let mut root = overlay;
+            for _ in 0..=MAX_OVERLAY_DEPTH {
+                let Some(OverlayTransform {
+                    kind: TransformKind::OverlayRelative(parent),
+                    pose,
+                    ..
+                }) = &root.transform
+                else {
+                    break;
+                };
+                relative = pose_mul(pose, &relative);
+                let Some(parent) = overlays.get(*parent) else {
+                    break;
+                };
+                root = parent;
+            }
+
             let tracking_space = session.get_space_for_origin(session.current_origin);
-            let (space, pose) = match &overlay.transform {
+            let (space, pose) = match &root.transform {
                 None => (
                     tracking_space,
                     xr::Posef {
@@ -330,9 +349,13 @@ impl OverlayMan {
                             ),
                         )
                     }
-                    TransformKind::TrackedComponent(..) => continue,
+                    // A missing parent, or a cycle.
+                    TransformKind::TrackedComponent(..) | TransformKind::OverlayRelative(_) => {
+                        continue;
+                    }
                 },
             };
+            let pose = pose_mul(&pose, &relative);
 
             // OpenVR overlays have straight alpha unless they say otherwise.
             let premultiplied = overlay.has_flag(vr::VROverlayFlags::IsPremultiplied);
@@ -868,7 +891,12 @@ enum TransformKind {
     /// SteamVR draws these on the device's render model, and only while it draws the device itself,
     /// which it doesn't for a scene app. We never draw devices, so these aren't drawn either.
     TrackedComponent(vr::TrackedDeviceIndex_t, CString),
+    /// Relative to the middle of the parent overlay.
+    OverlayRelative(OverlayKey),
 }
+
+/// How many parents an overlay relative transform may chain through.
+const MAX_OVERLAY_DEPTH: usize = 16;
 
 struct OverlayTransform {
     kind: TransformKind,
@@ -2113,6 +2141,8 @@ impl vr::IVROverlay028_Interface for OverlayMan {
             Some(TransformKind::TrackedComponent(..)) => {
                 vr::VROverlayTransformType::TrackedComponent
             }
+            // Only old interfaces have these, and no type for them.
+            Some(TransformKind::OverlayRelative(_)) => vr::VROverlayTransformType::Invalid,
         };
         unsafe { ty.write(kind) };
         vr::EVROverlayError::None
@@ -2464,20 +2494,48 @@ impl vr::IVROverlay028_Interface for OverlayMan {
 impl vr::IVROverlay026On027 for OverlayMan {
     fn SetOverlayTransformOverlayRelative(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: vr::VROverlayHandle_t,
-        _: *const vr::HmdMatrix34_t,
+        handle: vr::VROverlayHandle_t,
+        parent: vr::VROverlayHandle_t,
+        transform: *const vr::HmdMatrix34_t,
     ) -> vr::EVROverlayError {
-        crate::warn_unimplemented!("SetOverlayTransformOverlayRelative");
+        let parent = OverlayKey::from(KeyData::from_ffi(parent));
+        let mut overlays = self.overlays.write().unwrap();
+        if !overlays.contains_key(parent) {
+            return vr::EVROverlayError::UnknownOverlay;
+        }
+        let Some(overlay) = overlays.get_mut(OverlayKey::from(KeyData::from_ffi(handle))) else {
+            return vr::EVROverlayError::UnknownOverlay;
+        };
+        if transform.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        overlay.set_transform(TransformKind::OverlayRelative(parent), unsafe {
+            transform.read()
+        });
         vr::EVROverlayError::None
     }
     fn GetOverlayTransformOverlayRelative(
         &self,
-        _: vr::VROverlayHandle_t,
-        _: *mut vr::VROverlayHandle_t,
-        _: *mut vr::HmdMatrix34_t,
+        handle: vr::VROverlayHandle_t,
+        out_parent: *mut vr::VROverlayHandle_t,
+        out_transform: *mut vr::HmdMatrix34_t,
     ) -> vr::EVROverlayError {
-        crate::warn_unimplemented!("GetOverlayTransformOverlayRelative");
+        get_overlay!(self, handle, overlay);
+        let Some(OverlayTransform {
+            kind: TransformKind::OverlayRelative(parent),
+            matrix,
+            ..
+        }) = &overlay.transform
+        else {
+            return vr::EVROverlayError::WrongTransformType;
+        };
+        if out_parent.is_null() || out_transform.is_null() {
+            return vr::EVROverlayError::InvalidParameter;
+        }
+        unsafe {
+            out_parent.write(parent.data().as_ffi());
+            out_transform.write(*matrix);
+        }
         vr::EVROverlayError::None
     }
 }
@@ -3701,6 +3759,68 @@ mod tests {
             vr::EVROverlayError::None
         );
         assert_eq!(f.layers(false).len(), 0);
+    }
+
+    #[test]
+    fn overlay_relative_transform_follows_parent() {
+        use vr::IVROverlay026On027 as Old;
+        let f = RealSessionFixture::new();
+        let parent = f.textured_overlay(c"parent");
+        let child = f.textured_overlay(c"child");
+        let at = |x: f32| -> vr::HmdMatrix34_t {
+            xr::Posef {
+                position: xr::Vector3f { x, y: 0.0, z: 0.0 },
+                orientation: xr::Quaternionf::IDENTITY,
+            }
+            .into()
+        };
+        assert_eq!(
+            f.man.SetOverlayTransformAbsolute(
+                parent,
+                vr::ETrackingUniverseOrigin::Standing,
+                &at(1.0)
+            ),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(
+            Old::SetOverlayTransformOverlayRelative(&*f.man, child, parent, &at(2.0)),
+            vr::EVROverlayError::None
+        );
+        let mut xs: Vec<_> = f
+            .layers(false)
+            .iter()
+            .map(|l| match l {
+                TestLayer::Quad(q, _) => q.pose.position.x,
+                other => panic!("expected quads, got {other:?}"),
+            })
+            .collect();
+        xs.sort_by(f32::total_cmp);
+        assert_eq!(xs, [1.0, 3.0]);
+
+        let mut out_parent = 0;
+        let mut out_transform = at(0.0);
+        assert_eq!(
+            Old::GetOverlayTransformOverlayRelative(
+                &*f.man,
+                child,
+                &mut out_parent,
+                &mut out_transform
+            ),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(out_parent, parent);
+        assert_eq!(out_transform.m[0][3], 2.0);
+
+        // A cycle isn't drawn.
+        assert_eq!(
+            Old::SetOverlayTransformOverlayRelative(&*f.man, parent, child, &at(0.0)),
+            vr::EVROverlayError::None
+        );
+        assert_eq!(f.layers(false).len(), 0);
+        assert_eq!(
+            Old::SetOverlayTransformOverlayRelative(&*f.man, child, 12345, &at(0.0)),
+            vr::EVROverlayError::UnknownOverlay
+        );
     }
 
     /// The frame thread takes the overlay lock while holding the session lock, so the first
