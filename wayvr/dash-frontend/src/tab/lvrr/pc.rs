@@ -611,6 +611,7 @@ impl<T: 'static> TabLvrrPc<T> {
 			ui.slider(
 				group,
 				"LVRR.PC.LH_EXTRAPOLATION",
+				None,
 				(0.0, 100.0, 1.0),
 				config.number("lh-max-extrapolation").unwrap_or(0.0) as f32,
 				move |v| {
@@ -624,6 +625,7 @@ impl<T: 'static> TabLvrrPc<T> {
 			ui.slider(
 				group,
 				"LVRR.PC.LH_DEADZONE",
+				None,
 				(0.0, 0.5, 0.01),
 				config.number("lh-stick-deadzone").unwrap_or(0.0) as f32,
 				move |v| {

@@ -187,6 +187,11 @@ impl ComponentSlider {
 		state.set_value(common, &self.data, index, new_value);
 	}
 
+	/// Whether a pointer holds a handle
+	pub fn is_dragging(&self) -> bool {
+		self.state.borrow().dragged_by.is_some()
+	}
+
 	pub fn set_value_primary(&self, common: &mut CallbackDataCommon, new_value: f32) {
 		self.set_value(common, ValueIndex::Primary, new_value);
 	}

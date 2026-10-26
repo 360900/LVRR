@@ -57,12 +57,9 @@
     <CheckBox id="${id}" text="${text}" translation="${translation}" checked="${checked}" />
   </template>
 
-  <!-- id, translation, min, max, step, value -->
+  <!-- id, min, max, step, value; the label goes above it, see Ui::slider -->
   <template name="Slider">
-    <div flex_direction="column" gap="4">
-      <label translation="${translation}" />
-      <Slider id="${id}" width="300" height="24" min_value="${min}" max_value="${max}" step="${step}" value="${value}" />
-    </div>
+    <Slider id="${id}" width="300" height="24" min_value="${min}" max_value="${max}" step="${step}" value="${value}" />
   </template>
 
   <!-- id, text; only the desktop window has a keyboard for it -->

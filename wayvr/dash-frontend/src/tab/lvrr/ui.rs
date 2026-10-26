@@ -172,24 +172,32 @@ impl<'a> Ui<'a> {
 		Ok(checkbox)
 	}
 
+	/// A slider under its label; `badge` goes next to the label, see [Self::badge]
 	pub fn slider(
 		&mut self,
 		parent: WidgetID,
 		translation: &str,
+		badge: Option<(&str, &str)>,
 		range: (f32, f32, f32),
 		value: f32,
 		on_change: impl Fn(f32) + 'static,
 	) -> anyhow::Result<Rc<ComponentSlider>> {
+		let column = self.column(parent)?;
+		let header = self.line(column)?;
+		self.text(header, Text::Key(translation))?;
+		if let Some((translation, color)) = badge {
+			self.badge(header, translation, color)?;
+		}
+
 		let id = self.id();
 		let (min, max, step) = range;
 		let mut params = TemplateParams::new();
 		params.insert("id", &id);
-		params.insert("translation", translation);
 		params.insert_rc("min", min.to_string().into());
 		params.insert_rc("max", max.to_string().into());
 		params.insert_rc("step", step.to_string().into());
 		params.insert_rc("value", value.clamp(min, max).to_string().into());
-		self.instantiate("Slider", parent, params)?;
+		self.instantiate("Slider", column, params)?;
 		let slider = self.state.fetch_component_as::<ComponentSlider>(&id)?;
 		slider.on_value_changed(Box::new(move |_common, e| on_change(e.value)));
 		Ok(slider)

@@ -15,7 +15,7 @@ use lvrr_common::{
 use serde_json::{Value, json};
 use wgui::{
 	assets::AssetPathRef,
-	components::tabs::ComponentTabs,
+	components::{slider::ComponentSlider, tabs::ComponentTabs},
 	i18n::Translation,
 	layout::WidgetID,
 	parser::{Fetchable, ParseDocumentParams, ParserState},
@@ -486,6 +486,8 @@ pub struct TabLvrrHeadset<T> {
 	rendered: Option<u64>,
 	pending: BTreeMap<&'static str, Value>,
 	last_edit: Instant,
+	/// The sliders shown, to leave one alone while it is dragged
+	sliders: Vec<Rc<ComponentSlider>>,
 	context_menu: ContextMenu,
 	marker: PhantomData<T>,
 }
@@ -519,7 +521,9 @@ impl<T: 'static> Tab<T> for TabLvrrHeadset<T> {
 			}
 		}
 
-		if !self.pending.is_empty() && self.last_edit.elapsed() >= DEBOUNCE {
+		// A dragged slider is neither sent nor rebuilt under the pointer
+		let dragging = self.sliders.iter().any(|s| s.is_dragging());
+		if !dragging && !self.pending.is_empty() && self.last_edit.elapsed() >= DEBOUNCE {
 			self.send(frontend);
 		}
 
@@ -531,7 +535,7 @@ impl<T: 'static> Tab<T> for TabLvrrHeadset<T> {
 
 		// Show the headset's answer, unless the user is still moving a slider
 		let generation = frontend.interface.lvrr_state(data).map_or(0, |s| s.generation);
-		if self.pending.is_empty() && self.rendered != Some(generation) {
+		if !dragging && self.pending.is_empty() && self.rendered != Some(generation) {
 			self.render(frontend, data, generation)?;
 		}
 		Ok(())
@@ -600,6 +604,7 @@ impl<T: 'static> TabLvrrHeadset<T> {
 			rendered: None,
 			pending: BTreeMap::new(),
 			last_edit: Instant::now(),
+			sliders: Vec::new(),
 			context_menu: ContextMenu::default(),
 			marker: PhantomData,
 		})
@@ -631,6 +636,7 @@ impl<T: 'static> TabLvrrHeadset<T> {
 			wgui::parser::parse_from_assets(&ui::doc_params(&globals), &mut frontend.layout, self.id_content)?;
 		let mut ui = Ui::new(&mut frontend.layout, &mut widgets, &globals);
 		let parent = self.id_content;
+		self.sliders.clear();
 
 		let Some(h) = headset else {
 			// the server remembers a headset's settings once it connected
@@ -665,7 +671,7 @@ impl<T: 'static> TabLvrrHeadset<T> {
 		let (title, icon) = self.section.title_icon();
 		let group = ui.group(parent, title, icon)?;
 		for setting in settings().iter().filter(|s| s.section == self.section && (s.show)(&h)) {
-			mount(&mut ui, group, setting, &h, &self.tasks)?;
+			mount(&mut ui, group, setting, &h, &self.tasks, &mut self.sliders)?;
 		}
 		if self.section == Section::Devices && !h.server_input_forwarding {
 			ui.muted(group, Text::Key("LVRR.HEADSET.NO_INPUT_FORWARDING"))?;
@@ -682,9 +688,18 @@ fn mount(
 	setting: &Setting,
 	h: &HeadsetSettings,
 	tasks: &Tasks<Task>,
+	sliders: &mut Vec<Rc<ComponentSlider>>,
 ) -> anyhow::Result<()> {
 	let row = ui.row(parent)?;
 	let key = setting.key;
+	// offline, everything applies when the headset connects
+	let badge = if h.offline {
+		h.pending.get(key).map(|_| ("LVRR.HEADSET.PENDING", "primary"))
+	} else if setting.restart {
+		Some(("LVRR.APPLIES_AFTER_RESTART", "tertiary"))
+	} else {
+		None
+	};
 	match &setting.control {
 		Control::Toggle { get, set } => {
 			let (tasks, set) = (tasks.clone(), *set);
@@ -698,13 +713,16 @@ fn mount(
 		}
 		Control::Slider { range, get, set } => {
 			let (tasks, set) = (tasks.clone(), *set);
-			ui.slider(row, setting.label, range(h), get(&h.config), move |v| {
+			let slider = ui.slider(row, setting.label, badge, range(h), get(&h.config), move |v| {
 				tasks.push(Task::Edit {
 					key,
 					value: set(v),
 					now: false,
 				});
 			})?;
+			sliders.push(slider);
+			// the badge sits next to the slider's label
+			return Ok(());
 		}
 		Control::Choice { options, get } => {
 			let current = get(&h.config);
@@ -749,13 +767,8 @@ fn mount(
 			}
 		}
 	}
-	// offline, everything applies when the headset connects
-	if h.offline {
-		if h.pending.get(key).is_some() {
-			ui.badge(row, "LVRR.HEADSET.PENDING", "primary")?;
-		}
-	} else if setting.restart {
-		ui.badge(row, "LVRR.APPLIES_AFTER_RESTART", "tertiary")?;
+	if let Some((translation, color)) = badge {
+		ui.badge(row, translation, color)?;
 	}
 	Ok(())
 }
