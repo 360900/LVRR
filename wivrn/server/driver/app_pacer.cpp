@@ -139,7 +139,10 @@ void app_pacer::predict(int64_t now_ns,
 	// Sync phase with compositor
 	last_display_time = compositor_display_time + period * ((period / 2 + last_display_time - compositor_display_time) / period);
 
-	if (min_ready > last_display_time and min_ready < last_display_time + period)
+	// LVRR: an app that can't make the next slot runs without waiting, however many slots it
+	// misses. Sleeping until the slot it could make made apps near the frame time swing
+	// between half and full rate (WiVRn #492).
+	if (min_ready > last_display_time)
 	{
 		// We are limited by app time, don't wait
 		*out_wake_up_time = now_ns;
@@ -150,10 +153,6 @@ void app_pacer::predict(int64_t now_ns,
 	}
 	else
 	{
-		// Ensure display time is achievable
-		while (last_display_time < min_ready)
-			last_display_time += period;
-
 		*out_predicted_display_time = last_display_time;
 		*out_predicted_display_period = period;
 		*out_wake_up_time = last_display_time - (cpu_time + gpu_time + compositor_time + int64_t(U_TIME_1MS_IN_NS * min_margin_ms.val));
