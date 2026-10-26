@@ -50,7 +50,14 @@
       "CONTROLLERS_AUTO": "Auto",
       "CONTROLLERS_TOUCH": "Touch",
       "CONTROLLERS_INDEX": "Index",
-      "REFRESH": "Refresh"
+      "REFRESH": "Refresh",
+      "SORT": "Sort",
+      "SORT_RECENT": "Recently played",
+      "SORT_NAME": "Name",
+      "SEARCH": "Search",
+      "NO_MATCH": "No VR app matches the search.",
+      "RECENT": "Recently played",
+      "ALL_APPS": "All VR apps"
     },
     "RUNNING": {
       "TITLE": "Running",

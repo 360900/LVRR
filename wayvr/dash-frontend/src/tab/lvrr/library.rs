@@ -5,10 +5,12 @@
 use std::{collections::HashMap, marker::PhantomData, path::Path, process::Command, rc::Rc};
 
 use lvrr_common::{
+	library::{self, LibraryState, Sort},
 	state::{LvrrRequest, VrApplication},
 	xrizer_apps::{self, ControllerType},
 };
 use wgui::{
+	components::editbox::ComponentEditBox,
 	i18n::Translation,
 	layout::WidgetID,
 	parser::ParserState,
@@ -16,7 +18,7 @@ use wgui::{
 	widget::ConstructEssentials,
 	windowing::context_menu::{self, Blueprint, ContextMenu, TickResult},
 };
-use wlx_common::desktop_finder::DesktopEntry;
+use wlx_common::{async_executor::AsyncExecutor, desktop_finder::DesktopEntry};
 
 use crate::{
 	frontend::{Frontend, FrontendTask},
@@ -27,7 +29,11 @@ use crate::{
 			ui::{self, Text, Ui},
 		},
 	},
-	util::{cached_fetcher::CoverArt, popup_manager::PopupHolder, steam_utils::AppManifest},
+	util::{
+		cached_fetcher::CoverArt,
+		popup_manager::PopupHolder,
+		steam_utils::{AppManifest, GameSortMethod, SteamUtils},
+	},
 	views::{app_launcher, game_cover},
 };
 
@@ -41,6 +47,8 @@ const STARTING_TIMEOUT_MS: u32 = 180_000;
 
 /// Followed by the Steam app id and the index in `ControllerType::ALL`
 const CONTROLLER_ACTION_PREFIX: &str = "lvrr-controllers;";
+/// Followed by the index in `Sort::ALL`
+const SORT_ACTION_PREFIX: &str = "lvrr-sort;";
 
 #[derive(Clone)]
 enum Task {
@@ -50,6 +58,7 @@ enum Task {
 	Start { id: String, name: String },
 	OpenMenu(context_menu::Position, Vec<context_menu::Cell>),
 	SetControllers(u64, ControllerType),
+	SetSort(Sort),
 }
 
 /// An app that was started and has no session yet
@@ -63,13 +72,21 @@ struct Starting {
 
 pub struct TabLvrrLibrary<T> {
 	state: ParserState,
+	toolbar_widgets: Option<ParserState>,
 	widgets: Option<ParserState>,
 	tasks: Tasks<Task>,
-	parent: WidgetID,
+	toolbar: WidgetID,
+	list: WidgetID,
+	search_box: Option<Rc<ComponentEditBox>>,
+	search: String,
+	library: LibraryState,
+	/// Steam's last played times, by app id
+	steam_played: HashMap<String, u64>,
 	/// The inner None until the server answered
 	shown: Option<Option<Vec<VrApplication>>>,
 	cover_common: game_cover::ViewCommon,
-	covers: HashMap<String, game_cover::View>,
+	/// A game can be shown twice, as recent and in the list
+	covers: HashMap<String, Vec<game_cover::View>>,
 	starting: Option<Starting>,
 	context_menu: ContextMenu,
 	/// None in the desktop window, it can't show windows
@@ -90,7 +107,7 @@ impl<T: 'static> Tab<T> for TabLvrrLibrary<T> {
 				Task::Request(request) => frontend.tasks.push(FrontendTask::Lvrr(request)),
 				Task::Frontend(task) => frontend.tasks.push(task),
 				Task::SetCover(id, cover) => {
-					if let Some(view) = self.covers.get_mut(&id) {
+					for view in self.covers.get_mut(&id).into_iter().flatten() {
 						view.set_cover_art(&mut self.cover_common, &mut frontend.layout, &cover)?;
 					}
 				}
@@ -102,6 +119,8 @@ impl<T: 'static> Tab<T> for TabLvrrLibrary<T> {
 						since_ms: time_ms,
 						polled_ms: time_ms,
 					});
+					self.library.mark_started(&id);
+					self.save_library();
 					frontend
 						.tasks
 						.push(FrontendTask::Lvrr(LvrrRequest::StartApplication(id)));
@@ -118,10 +137,16 @@ impl<T: 'static> Tab<T> for TabLvrrLibrary<T> {
 					}
 					redraw = true;
 				}
+				Task::SetSort(sort) => {
+					self.library.sort = sort;
+					self.save_library();
+					self.render_toolbar(frontend)?;
+					redraw = true;
+				}
 			}
 		}
 		if let TickResult::Action(name) = self.context_menu.tick(&mut frontend.layout, &mut self.state)?
-			&& let Some(task) = parse_controllers_action(&name)
+			&& let Some(task) = parse_controllers_action(&name).or_else(|| parse_sort_action(&name))
 		{
 			self.tasks.push(task);
 		}
@@ -136,6 +161,12 @@ impl<T: 'static> Tab<T> for TabLvrrLibrary<T> {
 				self.starting = None;
 				redraw = true;
 			}
+		}
+		if let Some(search_box) = &self.search_box
+			&& *search_box.get_text() != self.search
+		{
+			self.search = search_box.get_text().clone();
+			redraw = true;
 		}
 		if redraw {
 			self.shown = None;
@@ -166,15 +197,25 @@ impl<T: 'static> TabLvrrLibrary<T> {
 			default_browser(&frontend.interface.desktop_finder(data).find_entries())
 		};
 		let globals = frontend.layout.state.globals.clone();
-		let state = wgui::parser::parse_from_assets(&ui::doc_params(&globals), &mut frontend.layout, parent)?;
+		let mut state = wgui::parser::parse_from_assets(&ui::doc_params(&globals), &mut frontend.layout, parent)?;
+		let mut ui = Ui::new(&mut frontend.layout, &mut state, &globals);
+		let group = ui.group(parent, "LVRR.LIBRARY.VR_APPS", "@/dashboard/games.svg")?;
+		let toolbar = ui.row(group)?;
+		let list = ui.column(group)?;
 		let tasks = Tasks::new();
 		// the list may have changed since the last visit
 		tasks.push(Task::Request(LvrrRequest::RefreshApplications));
-		Ok(Self {
+		let mut tab = Self {
 			state,
+			toolbar_widgets: None,
 			widgets: None,
 			tasks,
-			parent,
+			toolbar,
+			list,
+			search_box: None,
+			search: String::new(),
+			library: LibraryState::load(),
+			steam_played: steam_played(),
 			shown: None,
 			cover_common: game_cover::ViewCommon::new(globals),
 			covers: HashMap::new(),
@@ -183,18 +224,30 @@ impl<T: 'static> TabLvrrLibrary<T> {
 			browser,
 			launcher: PopupHolder::default(),
 			marker: PhantomData,
-		})
+		};
+		tab.render_toolbar(frontend)?;
+		Ok(tab)
 	}
 
-	fn render(&mut self, frontend: &mut Frontend<T>, applications: Option<&[VrApplication]>) -> anyhow::Result<()> {
-		frontend.layout.remove_children(self.parent);
-		self.covers.clear();
-		let globals = frontend.layout.state.globals.clone();
-		let mut widgets = wgui::parser::parse_from_assets(&ui::doc_params(&globals), &mut frontend.layout, self.parent)?;
-		let mut ui = Ui::new(&mut frontend.layout, &mut widgets, &globals);
+	fn save_library(&self) {
+		if let Err(e) = self.library.save() {
+			log::warn!("Could not save the library state: {e:?}");
+		}
+	}
 
-		let group = ui.group(self.parent, "LVRR.LIBRARY.VR_APPS", "@/dashboard/games.svg")?;
-		let row = ui.row(group)?;
+	fn last_played(&self, app: &VrApplication) -> Option<u64> {
+		let steam = self.steam_played.get(&app.id).copied();
+		let ours = self.library.started.get(&app.id).copied();
+		steam.max(ours)
+	}
+
+	fn render_toolbar(&mut self, frontend: &mut Frontend<T>) -> anyhow::Result<()> {
+		frontend.layout.remove_children(self.toolbar);
+		let globals = frontend.layout.state.globals.clone();
+		let mut widgets = wgui::parser::parse_from_assets(&ui::doc_params(&globals), &mut frontend.layout, self.toolbar)?;
+		let mut ui = Ui::new(&mut frontend.layout, &mut widgets, &globals);
+		let row = self.toolbar;
+
 		let tasks = self.tasks.clone();
 		ui.button(
 			row,
@@ -213,6 +266,36 @@ impl<T: 'static> TabLvrrLibrary<T> {
 				tasks.push(Task::Frontend(FrontendTask::SetTab(TabType::Games)));
 			},
 		)?;
+
+		let cells = Sort::ALL
+			.iter()
+			.enumerate()
+			.map(|(i, sort)| ui::menu_cell(format!("{SORT_ACTION_PREFIX}{i}"), sort_label(*sort)))
+			.collect();
+		let tasks = self.tasks.clone();
+		ui.dropdown(
+			row,
+			"LVRR.LIBRARY.SORT",
+			sort_label(self.library.sort),
+			cells,
+			move |position, cells| tasks.push(Task::OpenMenu(position, cells)),
+		)?;
+
+		ui.text(row, Text::Key("LVRR.LIBRARY.SEARCH"))?;
+		self.search_box = Some(ui.editbox(row, &self.search)?);
+
+		self.toolbar_widgets = Some(widgets);
+		Ok(())
+	}
+
+	fn render(&mut self, frontend: &mut Frontend<T>, applications: Option<&[VrApplication]>) -> anyhow::Result<()> {
+		frontend.layout.remove_children(self.list);
+		self.covers.clear();
+		let globals = frontend.layout.state.globals.clone();
+		let executor = frontend.executor.clone();
+		let mut widgets = wgui::parser::parse_from_assets(&ui::doc_params(&globals), &mut frontend.layout, self.list)?;
+		let mut ui = Ui::new(&mut frontend.layout, &mut widgets, &globals);
+		let group = self.list;
 
 		if let Some(starting) = &self.starting {
 			let row = ui.row(group)?;
@@ -259,7 +342,39 @@ impl<T: 'static> TabLvrrLibrary<T> {
 		if applications.is_empty() {
 			ui.muted(group, Text::Key("LVRR.LIBRARY.EMPTY"))?;
 		}
-		let (steam, other): (Vec<_>, Vec<_>) = applications.iter().partition(|a| a.steam_app_id().is_some());
+
+		let mut shown: Vec<_> = applications
+			.iter()
+			.filter(|app| library::matches(app, &self.search))
+			.collect();
+		if !applications.is_empty() && shown.is_empty() {
+			ui.muted(group, Text::Key("LVRR.LIBRARY.NO_MATCH"))?;
+		}
+		library::sort(&mut shown, self.library.sort, |app| self.last_played(app));
+
+		if self.search.trim().is_empty() {
+			let recent = library::recent(&shown, |app| self.last_played(app));
+			if !recent.is_empty() {
+				ui.muted(group, Text::Key("LVRR.LIBRARY.RECENT"))?;
+				self.mount_apps(&executor, &mut ui, group, &recent)?;
+				ui.muted(group, Text::Key("LVRR.LIBRARY.ALL_APPS"))?;
+			}
+		}
+		self.mount_apps(&executor, &mut ui, group, &shown)?;
+
+		self.widgets = Some(widgets);
+		Ok(())
+	}
+
+	fn mount_apps(
+		&mut self,
+		executor: &AsyncExecutor,
+		ui: &mut Ui,
+		group: WidgetID,
+		apps: &[&VrApplication],
+	) -> anyhow::Result<()> {
+		let (steam, other): (Vec<&VrApplication>, Vec<&VrApplication>) =
+			apps.iter().copied().partition(|a| a.steam_app_id().is_some());
 
 		// Steam games as covers, like the Games tab
 		if !steam.is_empty() {
@@ -282,7 +397,7 @@ impl<T: 'static> TabLvrrLibrary<T> {
 						layout: ui.layout,
 						parent: stack,
 					},
-					executor: &frontend.executor,
+					executor,
 					manifest: &manifest,
 					scale: 1.0,
 					on_loaded,
@@ -295,9 +410,9 @@ impl<T: 'static> TabLvrrLibrary<T> {
 					});
 					Ok(())
 				}));
-				self.covers.insert(app.id.clone(), view);
+				self.covers.entry(app.id.clone()).or_default().push(view);
 				if let Some(app_id) = app.steam_app_id() {
-					self.mount_controllers(&mut ui, stack, app_id)?;
+					self.mount_controllers(ui, stack, app_id)?;
 				}
 			}
 		}
@@ -324,8 +439,6 @@ impl<T: 'static> TabLvrrLibrary<T> {
 			}
 			ui.bold(row, Text::Raw(&app.name), 16)?;
 		}
-
-		self.widgets = Some(widgets);
 		Ok(())
 	}
 
@@ -365,6 +478,33 @@ fn parse_controllers_action(name: &str) -> Option<Task> {
 	let (app_id, index) = name.strip_prefix(CONTROLLER_ACTION_PREFIX)?.split_once(';')?;
 	let ty = *ControllerType::ALL.get(index.parse::<usize>().ok()?)?;
 	Some(Task::SetControllers(app_id.parse().ok()?, ty))
+}
+
+fn sort_label(sort: Sort) -> Translation {
+	Translation::from_translation_key(match sort {
+		Sort::Recent => "LVRR.LIBRARY.SORT_RECENT",
+		Sort::Name => "LVRR.LIBRARY.SORT_NAME",
+	})
+}
+
+fn parse_sort_action(name: &str) -> Option<Task> {
+	let index = name.strip_prefix(SORT_ACTION_PREFIX)?.parse::<usize>().ok()?;
+	Some(Task::SetSort(*Sort::ALL.get(index)?))
+}
+
+/// When Steam last started each installed game, also outside LVRR
+fn steam_played() -> HashMap<String, u64> {
+	let games = SteamUtils::new().and_then(|steam| steam.list_installed_games(GameSortMethod::None));
+	match games {
+		Ok(games) => games
+			.into_iter()
+			.filter_map(|game| Some((game.app_id, game.last_played.filter(|t| *t > 0)?)))
+			.collect(),
+		Err(e) => {
+			log::debug!("No Steam play times: {e:?}");
+			HashMap::new()
+		}
+	}
 }
 
 /// VR sessions other than overlays such as the dashboard

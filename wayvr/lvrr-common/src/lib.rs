@@ -3,6 +3,7 @@
 pub mod doctor;
 pub mod emulator;
 pub mod headset;
+pub mod library;
 #[cfg(feature = "dbus")]
 pub mod link;
 pub mod rebrand;
