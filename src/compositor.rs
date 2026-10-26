@@ -86,7 +86,7 @@ pub struct Compositor {
     tmp_backend: Mutex<Option<AnyTempBackendData>>,
     /// Serializes setting up the real session. Never take it while holding a session guard.
     real_session_init: Mutex<()>,
-    overlays: Injected<OverlayMan>,
+    pub(crate) overlays: Injected<OverlayMan>,
     metrics: FrameMetrics,
     timer: Arc<FrameTimer>,
     timing_mode: Mutex<vr::EVRCompositorTimingMode>,
@@ -96,6 +96,13 @@ pub struct Compositor {
     focused: Once,
     /// The scene and background fades.
     fades: Mutex<[Fade; 2]>,
+    overlay_frames: Mutex<Option<OverlayFrames>>,
+}
+
+/// The frame loop of an overlay session, which has no scene app to draw its overlays.
+struct OverlayFrames {
+    stop: Arc<AtomicBool>,
+    thread: std::thread::JoinHandle<()>,
 }
 
 #[derive(Copy, Clone)]
@@ -174,6 +181,65 @@ impl Compositor {
             submitted: false.into(),
             focused: Once::new(),
             fades: Mutex::default(),
+            overlay_frames: Mutex::default(),
+        }
+    }
+
+    /// Starts ending frames with the overlays of an overlay session on our own thread, once the
+    /// real session exists. Does nothing for other sessions.
+    pub fn start_overlay_frames(self: &Arc<Self>) {
+        if !self.openxr.overlay_session {
+            return;
+        }
+        let mut frames = self.overlay_frames.lock().unwrap();
+        if frames.is_some() {
+            return;
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let compositor = Arc::downgrade(self);
+        let thread = std::thread::Builder::new()
+            .name("xrizer-overlay-frames".into())
+            .spawn(move || {
+                while !thread_stop.load(Ordering::Relaxed) {
+                    let Some(compositor) = compositor.upgrade() else {
+                        break;
+                    };
+                    compositor.overlay_frame();
+                }
+            });
+        match thread {
+            Ok(thread) => *frames = Some(OverlayFrames { stop, thread }),
+            Err(e) => log::error!("Failed to start the overlay frame thread: {e}"),
+        }
+    }
+
+    /// Stops the overlay frame thread, so it doesn't outlive the session.
+    pub fn stop_overlay_frames(&self) {
+        let Some(frames) = self.overlay_frames.lock().unwrap().take() else {
+            return;
+        };
+        frames.stop.store(true, Ordering::Relaxed);
+        // The thread drops the last reference itself if Cleanup didn't stop it.
+        if frames.thread.thread().id() != std::thread::current().id() {
+            let _ = frames.thread.join();
+        }
+    }
+
+    fn overlay_frame(&self) {
+        let paced = !self.openxr.is_lost() && {
+            let session_data = self.openxr.session_data.get();
+            // Without a frame controller (on a temporary session again), nothing blocks.
+            self.maybe_wait_frame(&session_data)
+                && session_data.comp_data.ctrl.lock().unwrap().is_some()
+        };
+        vr::IVRCompositor029_Interface::PostPresentHandoff(self);
+        if !paced {
+            let period = self.openxr.display_period();
+            std::thread::sleep(period.clamp(
+                std::time::Duration::from_millis(1),
+                std::time::Duration::from_millis(100),
+            ));
         }
     }
 
@@ -309,8 +375,10 @@ impl Compositor {
             crate::warn_once!("OpenGL texture submitted, but the runtime has no OpenGL support");
             return Err(vr::EVRCompositorError::InvalidTexture);
         }
-        let backend = SupportedBackend::new(texture, &self.openxr.instance)
-            .ok_or(vr::EVRCompositorError::InvalidTexture)?;
+        // Overlay sessions end frames on our own thread, where the app's context isn't current.
+        let backend =
+            SupportedBackend::new(texture, &self.openxr.instance, self.openxr.overlay_session)
+                .ok_or(vr::EVRCompositorError::InvalidTexture)?;
         let direct_gl = matches!(backend, SupportedBackend::OpenGL(_));
 
         // Submit and the overlay calls can race to get here. Restarting again would destroy the
@@ -521,6 +589,12 @@ fn fill_vk_extensions_buffer(extensions: String, buffer: *mut c_char, buffer_siz
     }
 
     bytes.len() as u32 + 1
+}
+
+impl Drop for Compositor {
+    fn drop(&mut self) {
+        self.stop_overlay_frames();
+    }
 }
 
 impl openxr_data::Compositor for Compositor {

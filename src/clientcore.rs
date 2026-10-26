@@ -283,6 +283,15 @@ impl IVRClientCore003_Interface for ClientCore {
         }
     }
     fn Cleanup(&self) {
+        let compositor = self
+            .openxr
+            .read()
+            .unwrap()
+            .as_ref()
+            .and_then(|data| data.compositor.get());
+        if let Some(compositor) = compositor {
+            compositor.stop_overlay_frames();
+        }
         self.interface_store.lock().unwrap().clear();
 
         let Some(data) = self.openxr.write().unwrap().take() else {
@@ -876,6 +885,32 @@ mod tests {
             assert!(core.openxr.read().unwrap().as_ref().unwrap().headless);
             core.clone().Cleanup();
         }
+    }
+
+    #[test]
+    fn overlay_apps_get_overlay_session() {
+        fakexr::advertise_extension(xr::sys::EXTX_OVERLAY_EXTENSION_NAME);
+        let core = ClientCore::new(c"IVRClientCore_003").unwrap();
+        assert_eq!(
+            core.clone()
+                .Init(vr::EVRApplicationType::Overlay, std::ptr::null()),
+            vr::EVRInitError::None
+        );
+        {
+            let data = core.openxr.read().unwrap();
+            let data = data.as_ref().unwrap();
+            assert!(data.overlay_session && !data.headless);
+            let session = data.session_data.get().session.as_raw();
+            assert!(fakexr::session_is_overlay(session));
+        }
+        core.clone().Cleanup();
+
+        // Utility apps don't show overlays.
+        assert_eq!(
+            core.clone()
+                .Init(vr::EVRApplicationType::Utility, std::ptr::null()),
+            vr::EVRInitError::Init_InvalidApplicationType
+        );
     }
 
     /// A second Init (e.g. from an overlay mod inside a game) must not fail the first one.

@@ -52,7 +52,6 @@ pub trait Compositor: vr::InterfaceImpl {
 
 pub type RealOpenXrData = OpenXrData<crate::compositor::Compositor>;
 pub struct OpenXrData<C: Compositor> {
-    _entry: xr::Entry,
     pub instance: xr::Instance,
     pub system_id: xr::SystemId,
     pub session_data: SessionReadGuard,
@@ -69,6 +68,9 @@ pub struct OpenXrData<C: Compositor> {
     pub probed_profiles: crate::input::ProbedProfiles,
     pub application_type: vr::EVRApplicationType,
     pub headless: bool,
+    /// An Overlay app with an XR_EXTX_overlay session, whose overlays are drawn above the scene
+    /// app's by our own frame loop.
+    pub overlay_session: bool,
     /// Set while we are ending the session ourselves (restart or shutdown), so the resulting
     /// STOPPING state isn't reported to the application as a Quit.
     exit_requested: AtomicBool,
@@ -105,6 +107,9 @@ pub struct OpenXrData<C: Compositor> {
     pub(crate) input: Injected<crate::input::Input<C>>,
     pub(crate) compositor: Injected<C>,
     pub(crate) system: Injected<System>,
+    /// Last, as it keeps the loader loaded for the instance, which the instance itself doesn't
+    /// do for overlay sessions.
+    _entry: xr::Entry,
 }
 
 impl<C: Compositor> Drop for OpenXrData<C> {
@@ -197,6 +202,66 @@ pub fn load_entry() -> Result<xr::Entry, InitError> {
     entry
 }
 
+/// XR_EXTX_overlay sessions are made by chaining a struct into xrCreateSession, which the
+/// openxr crate builds itself. This wraps the loader's xrGetInstanceProcAddr to chain it into
+/// every session of an instance created through [overlay_entry].
+mod overlay_session {
+    use openxr as xr;
+    use std::ffi::{CStr, c_char};
+    use xr::sys::pfn;
+
+    static REAL_GIPA: parking_lot::Mutex<Option<pfn::GetInstanceProcAddr>> =
+        parking_lot::Mutex::new(None);
+    static REAL_CREATE_SESSION: parking_lot::Mutex<Option<pfn::CreateSession>> =
+        parking_lot::Mutex::new(None);
+
+    /// The returned entry doesn't keep the loader loaded, so `entry` must outlive its instance.
+    pub fn overlay_entry(entry: &xr::Entry) -> xr::Result<xr::Entry> {
+        *REAL_GIPA.lock() = Some(entry.fp().get_instance_proc_addr);
+        unsafe { xr::Entry::from_get_instance_proc_addr(get_instance_proc_addr, &()) }
+    }
+
+    unsafe extern "system" fn get_instance_proc_addr(
+        instance: xr::sys::Instance,
+        name: *const c_char,
+        function: *mut Option<pfn::VoidFunction>,
+    ) -> xr::sys::Result {
+        let real = REAL_GIPA.lock().expect("overlay entry without a loader");
+        let result = unsafe { real(instance, name, function) };
+        if result == xr::sys::Result::SUCCESS
+            && unsafe { CStr::from_ptr(name) } == c"xrCreateSession"
+        {
+            unsafe {
+                *REAL_CREATE_SESSION.lock() = (*function).map(|f| std::mem::transmute(f));
+                *function = Some(
+                    std::mem::transmute::<pfn::CreateSession, pfn::VoidFunction>(create_session),
+                );
+            }
+        }
+        result
+    }
+
+    unsafe extern "system" fn create_session(
+        instance: xr::sys::Instance,
+        create_info: *const xr::sys::SessionCreateInfo,
+        session: *mut xr::sys::Session,
+    ) -> xr::sys::Result {
+        let real = REAL_CREATE_SESSION
+            .lock()
+            .expect("xrCreateSession wasn't loaded");
+        let mut info = unsafe { *create_info };
+        // Placement 0 puts our layers right above the scene app's.
+        let overlay = xr::sys::SessionCreateInfoOverlayEXTX {
+            ty: xr::sys::SessionCreateInfoOverlayEXTX::TYPE,
+            next: info.next,
+            create_flags: xr::sys::OverlaySessionCreateFlagsEXTX::EMPTY,
+            session_layers_placement: 0,
+        };
+        info.next = &overlay as *const _ as *const _;
+        unsafe { real(instance, &info, session) }
+    }
+}
+
 fn make_version() -> u32 {
     env!("CARGO_PKG_VERSION_MAJOR").parse::<u32>().unwrap_or(0) * 1000000
         + env!("CARGO_PKG_VERSION_MINOR").parse::<u32>().unwrap_or(0) * 1000
@@ -215,7 +280,12 @@ impl<C: Compositor> OpenXrData<C> {
             .enumerate_extensions()
             .map_err(InitError::EnumeratingExtensionsFailed)?;
 
+        // Overlay apps get an overlay session where possible, which draws above the scene app
+        // instead of taking the display from it.
+        let overlay_session =
+            application_type == vr::EVRApplicationType::Overlay && supported_exts.extx_overlay;
         let headless = match application_type {
+            vr::EVRApplicationType::Overlay if overlay_session => false,
             vr::EVRApplicationType::Background
             | vr::EVRApplicationType::Overlay
             | vr::EVRApplicationType::Utility => {
@@ -236,6 +306,7 @@ impl<C: Compositor> OpenXrData<C> {
         // A graphics session for these could take the display from the app that renders. Background
         // apps still fall back to one, since Proton's helper inits as Background on any runtime.
         if !headless
+            && !overlay_session
             && matches!(
                 application_type,
                 vr::EVRApplicationType::Overlay | vr::EVRApplicationType::Utility
@@ -249,6 +320,7 @@ impl<C: Compositor> OpenXrData<C> {
             exts.mnd_headless = supported_exts.mnd_headless;
             exts.khr_convert_timespec_time = supported_exts.khr_convert_timespec_time;
         }
+        exts.extx_overlay = overlay_session;
         exts.khr_vulkan_enable = supported_exts.khr_vulkan_enable;
         exts.khr_opengl_enable = supported_exts.khr_opengl_enable;
         exts.mndx_egl_enable = supported_exts.mndx_egl_enable;
@@ -293,7 +365,12 @@ impl<C: Compositor> OpenXrData<C> {
                 .push([XR_MNDX_XDEV_SPACE_EXTENSION_NAME.as_bytes(), b"\0"].concat());
         }
 
-        let instance = entry
+        let instance_entry = if overlay_session {
+            overlay_session::overlay_entry(&entry).map_err(InitError::InstanceCreationFailed)?
+        } else {
+            entry.clone()
+        };
+        let instance = instance_entry
             .create_instance(
                 &xr::ApplicationInfo {
                     application_name: get_app_name().as_deref().unwrap_or("XRizer"),
@@ -334,7 +411,6 @@ impl<C: Compositor> OpenXrData<C> {
             .map_or(16, |p| p.graphics_properties.max_layer_count as usize);
 
         Ok(Self {
-            _entry: entry,
             instance,
             system_id,
             session_data,
@@ -345,6 +421,7 @@ impl<C: Compositor> OpenXrData<C> {
             probed_profiles,
             application_type,
             headless,
+            overlay_session,
             exit_requested: false.into(),
             exiting: false.into(),
             quit_watchdog: Default::default(),
@@ -362,6 +439,7 @@ impl<C: Compositor> OpenXrData<C> {
             input: injector.inject(),
             compositor: injector.inject(),
             system: injector.inject(),
+            _entry: entry,
         })
     }
 

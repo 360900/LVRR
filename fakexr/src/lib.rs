@@ -419,6 +419,10 @@ pub fn session_exists(session: xr::Session) -> bool {
     session.to_handle().is_some()
 }
 
+pub fn session_is_overlay(session: xr::Session) -> bool {
+    session.to_handle().unwrap().overlay
+}
+
 pub fn session_frame_state(session: xr::Session) -> FrameState {
     let session = session.to_handle().unwrap();
     session.frames.lock().unwrap().state()
@@ -1055,6 +1059,8 @@ struct Session {
     headless: bool,
     /// None for headless and EGL sessions.
     vk_device: Option<u64>,
+    /// Created with XR_EXTX_overlay's session create info chained.
+    overlay: bool,
     attached_sets: OnceLock<Box<[xr::ActionSet]>>,
     left_hand: HandData,
     right_hand: HandData,
@@ -1594,15 +1600,21 @@ extern "system" fn create_session(
         return xr::Result::ERROR_INSTANCE_LOST;
     }
     let info = unsafe { create_info.as_ref().unwrap() };
-    let binding = unsafe { (info.next as *const xr::BaseInStructure).as_ref() };
+    let mut next = info.next;
+    let mut binding = unsafe { (next as *const xr::BaseInStructure).as_ref() };
+    let overlay = binding.is_some_and(|b| b.ty == xr::SessionCreateInfoOverlayEXTX::TYPE);
+    if overlay {
+        next = binding.unwrap().next as *const _;
+        binding = unsafe { (next as *const xr::BaseInStructure).as_ref() };
+    }
     let vk_device = match binding.map(|binding| binding.ty) {
         None => None,
         Some(xr::GraphicsBindingVulkanKHR::TYPE) => {
-            let vk = unsafe { &*(info.next as *const xr::GraphicsBindingVulkanKHR) };
+            let vk = unsafe { &*(next as *const xr::GraphicsBindingVulkanKHR) };
             Some(vk.device as u64)
         }
         Some(xr::GraphicsBindingEGLMNDX::TYPE) => {
-            let egl = unsafe { &*(info.next as *const xr::GraphicsBindingEGLMNDX) };
+            let egl = unsafe { &*(next as *const xr::GraphicsBindingEGLMNDX) };
             if egl.get_proc_address.is_none() || egl.display.is_null() || egl.context.is_null() {
                 return xr::Result::ERROR_VALIDATION_FAILURE;
             }
@@ -1615,6 +1627,7 @@ extern "system" fn create_session(
         event_sender: instance.event_sender.clone(),
         headless: binding.is_none(),
         vk_device,
+        overlay,
         attached_sets: OnceLock::new(),
         left_hand: Default::default(),
         right_hand: Default::default(),

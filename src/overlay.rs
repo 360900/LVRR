@@ -71,13 +71,23 @@ impl OverlayMan {
         self.check_can_show_textures()?;
 
         if !self.openxr.session_data.get().is_real_session() {
-            let Some(compositor) = self.compositor.get() else {
+            // Overlay apps rarely request IVRCompositor, but theirs runs the frame loop.
+            let compositor = if self.openxr.overlay_session {
+                Some(
+                    self.compositor
+                        .force(|injector| Compositor::new(self.openxr.clone(), injector)),
+                )
+            } else {
+                self.compositor.get()
+            };
+            let Some(compositor) = compositor else {
                 crate::warn_once!("Can't show overlay textures before IVRCompositor is requested");
                 return Err(vr::EVROverlayError::RequestFailed);
             };
             compositor
                 .initialize_real_session(texture, bounds, vr::EVRSubmitFlags::Default)
                 .map_err(|_| vr::EVROverlayError::InvalidTexture)?;
+            compositor.start_overlay_frames();
         }
         Ok(RealSessionData(self.openxr.session_data.get()))
     }
@@ -96,14 +106,15 @@ impl OverlayMan {
         Ok(RealSessionData(session))
     }
 
-    /// What showing any overlay texture needs: a session that isn't lost, of an app that renders.
+    /// What showing any overlay texture needs: a session that isn't lost, of an app that renders
+    /// or has an overlay session.
     fn check_can_show_textures(&self) -> Result<(), vr::EVROverlayError> {
         if self.openxr.is_lost() {
             return Err(vr::EVROverlayError::RequestFailed);
         }
-        // Overlays are only drawn by the scene app's frame loop. Without a compositor there is
-        // nothing to restart the session.
-        if !self.openxr.can_render() {
+        // Overlays are drawn by the scene app's frame loop, or by ours in an overlay session.
+        // Other apps have headless sessions, which can't draw.
+        if !self.openxr.can_render() && !self.openxr.overlay_session {
             crate::warn_once!(
                 "{:?} applications can't show overlay textures",
                 self.openxr.application_type
@@ -895,8 +906,12 @@ impl Overlay {
         }
         let backend = match self.compositor.take() {
             Some(b) => b,
-            None => SupportedBackend::new(&texture, session_data.session.instance())
-                .ok_or(vr::EVROverlayError::InvalidTexture)?,
+            None => SupportedBackend::new(
+                &texture,
+                session_data.session.instance(),
+                openxr.overlay_session,
+            )
+            .ok_or(vr::EVROverlayError::InvalidTexture)?,
         };
         self.show(
             openxr,
@@ -3168,6 +3183,7 @@ mod tests {
             xr.compositor.set(Arc::downgrade(&comp));
             let man = Arc::new(OverlayMan::new(xr.clone(), &Injector::default()));
             man.compositor.set(Arc::downgrade(&comp));
+            comp.overlays.set(Arc::downgrade(&man));
             Self {
                 man,
                 _comp: comp,
@@ -4009,6 +4025,38 @@ mod tests {
             );
             f.image_event(vr::EVREventType::ImageFailed, handle);
         }
+    }
+
+    /// Overlay apps with an overlay session draw without IVRCompositor or a frame loop of their
+    /// own, but still can't submit scene frames.
+    #[test]
+    fn overlay_app_draws_in_overlay_session() {
+        fakexr::advertise_extension(xr::sys::EXTX_OVERLAY_EXTENSION_NAME);
+        let f = RealSessionFixture::with_app_type(vr::EVRApplicationType::Overlay);
+        assert!(f.xr.overlay_session && !f.xr.headless);
+        f.textured_overlay(c"overlay");
+        let session = f.xr.session_data.get().session.as_raw();
+        assert!(f.xr.session_data.get().is_real_session());
+        assert!(fakexr::session_is_overlay(session));
+
+        let start = std::time::Instant::now();
+        while fakexr::last_layer_count(session) != 1 {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(5),
+                "no frame with the overlay ended"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(
+            vr::IVRCompositor029_Interface::Submit(
+                &*f._comp,
+                vr::EVREye::Left,
+                &f.texture(),
+                std::ptr::null(),
+                vr::EVRSubmitFlags::Default
+            ),
+            vr::EVRCompositorError::IsNotSceneApplication
+        );
     }
 
     /// Like GL copies, GL uploads need the app's context. The overlay keeps its backend for a
