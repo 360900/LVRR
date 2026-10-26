@@ -832,6 +832,8 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	real_display_period = last_display_time ? frame_state.predictedDisplayTime - last_display_time : frame_state.predictedDisplayPeriod;
 	last_display_time = frame_state.predictedDisplayTime;
 
+	// the runtime stops asking for frames while the system menu is up or the headset is off
+	application::get_power().set_visible(frame_state.shouldRender);
 	if (frame_state.shouldRender and last_display_time)
 		application::get_power().frame(instance.now(), frame_state.predictedDisplayPeriod, real_display_period, application::get_cpu_time().count() * 1e-9f, last_gpu_time);
 

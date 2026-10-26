@@ -915,6 +915,17 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 		}
 	}
 
+	// LVRR: discovery holds the Wi-Fi multicast lock, which keeps the radio awake for every
+	// multicast packet on the network; it only runs while a PC is being looked for
+	if constexpr (not lvrr::stock_ui)
+	{
+		const bool looking = not async_session.valid() and not next_scene;
+		if (looking and not discover)
+			discover.emplace();
+		else if (not looking and discover)
+			discover.reset();
+	}
+
 	update_server_list();
 	lvrr_tick();
 
@@ -943,6 +954,12 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 			}
 		}
 	}
+
+	// LVRR: missed frames at power savings step the clocks up, see power_governor
+	application::get_power().set_visible(frame_state.shouldRender);
+	if (frame_state.shouldRender and lobby_last_display_time)
+		application::get_power().frame(instance.now(), frame_state.predictedDisplayPeriod, frame_state.predictedDisplayTime - lobby_last_display_time, application::get_cpu_time().count() * 1e-9f, 0);
+	lobby_last_display_time = frame_state.predictedDisplayTime;
 
 	if (not frame_state.shouldRender)
 	{

@@ -44,8 +44,11 @@ public:
 	// Both domains pinned at sustained high, the "High power mode" setting
 	void set_pinned_high(bool pinned);
 
-	// A menu scene: both domains at sustained low, no history
+	// A menu scene: both domains at power savings, raised one step on missed frames
 	void idle();
+
+	// The headset is not showing us (system menu, taken off): power savings until it does
+	void set_visible(bool visible);
 
 	// Once per rendered frame. real_period is the time since the previous frame, which
 	// exceeds display_period when a frame was missed. cpu_time and gpu_time are the
@@ -58,15 +61,20 @@ private:
 	struct state
 	{
 		XrPerfSettingsLevelEXT level = XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT;
-		XrTime hold_until = 0;   // not before this does a raised domain try low again
-		XrTime last_probe = 0;   // when it last went back to low
-		XrDuration hold = 0;     // current hold, grows with every early re-raise
-		int over_budget = 0;     // consecutive frames over the time budget
+		XrPerfSettingsLevelEXT floor = XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT; // where relax() goes
+		XrTime hold_until = 0;                                                   // not before this does a raised domain try lower again
+		XrTime last_probe = 0;                                                   // when it last went down
+		XrDuration hold = 0;                                                     // current hold, grows with every early re-raise
+		int over_budget = 0;                                                     // consecutive frames over the time budget
+		bool probed_savings = false;                                             // the one try at power savings in a stream
 	};
 
 	xr::session * session = nullptr;
 	bool pinned = false;
+	bool visible = true;
+	bool menu = false;
 	std::array<state, 2> domains;
+	XrTime quiet_since = 0; // start of the current stretch without a raise
 
 	// missed frames in the current window
 	XrTime miss_window_start = 0;

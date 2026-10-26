@@ -970,9 +970,17 @@ std::vector<std::pair<int, XrCompositionLayerQuad>> imgui_context::end_frame()
 	ImGui::Render();
 
 	// LVRR: nothing changed since the last submitted image, the layers below keep
-	// pointing at it (a swapchain shows its most recently released image)
+	// pointing at it (a swapchain shows its most recently released image). An animation
+	// nobody points at (a spinner, a caret) is drawn every other frame.
 	if (not draw_data_changed(ImGui::GetDrawData()))
 		return build_layers();
+	const bool pointed_at = std::ranges::any_of(controllers, [](const auto & c) { return c.second.pointer_position.has_value(); });
+	if (have_image and not pointed_at and not skipped_last)
+	{
+		skipped_last = true;
+		return build_layers();
+	}
+	skipped_last = false;
 
 	image_index = swapchain.acquire();
 	swapchain.wait();

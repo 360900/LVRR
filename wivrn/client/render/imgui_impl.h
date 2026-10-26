@@ -182,6 +182,7 @@ private:
 	// LVRR: the swapchain keeps showing its last image while the draw data does not change
 	uint64_t last_draw_hash = 0;
 	bool have_image = false;
+	bool skipped_last = false; // half rate for animations nobody points at
 
 	ImGuiContext * context;
 	ImPlotContext * plot_context;

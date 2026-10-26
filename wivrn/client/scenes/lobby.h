@@ -266,6 +266,7 @@ class lobby : public scene_impl<lobby>
 
 	// LVRR, see lobby_lvrr.cpp
 	std::optional<configuration::server_data> lvrr_server; // last server connected to
+	XrTime lobby_last_display_time = 0;                    // for the power governor
 	std::chrono::steady_clock::time_point lvrr_reconnect_until{};
 	std::chrono::steady_clock::time_point lvrr_retry_at{};
 	void lvrr_focused();
