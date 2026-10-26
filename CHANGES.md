@@ -171,3 +171,13 @@ Calls that faked success, interfaces apps crashed without, and device properties
 | device properties | `WrongDataType` for properties of another type, `UnknownProperty` only for ones the device lacks; HMD `Has*Component_Bool`, `SecondsFromVsyncToPhotons` (0, see TODO), `DashboardScale` (1), `CurrentUniverseId` (1), identity camera, status display and IMU transforms; `DisplaySupportsRuntimeFramerateChange`, `DisplaySupportsMultipleFramerates` and `DisplayAvailableFrameRates_Float_Array` (`GetArrayTrackedDeviceProperty`) from `XR_FB_display_refresh_rate`; HMD `RenderModelName` (`generic_hmd`), `RegisteredDeviceType`, `InputProfilePath` and `ResourceRoot` from the identifying controller profile, `ResourceRoot` for controllers; trackers named after a body part (WiVRn) identify as `vive_tracker_<role>` with that role's input profile | `c571e3d` |
 | device presence | controller slots report `Invalid` until a controller was there; `GetTrackedDeviceIndexForControllerRole` answers only for connected controllers; trackers' role is `OptOut` like their hint; a hand tracked after its controller lost its profile replaces it (Quest on WiVRn), and the controller replaces the hand when its profile returns | `b16cccb` |
 | tests | fakexr lists refresh rates (`xrEnumerateDisplayRefreshRatesFB`) and takes named trackers (`add_tracker`); the fake Vulkan device gained buffers, mapped memory, flushes and buffer to image copies | `c571e3d` `7cda0ad` |
+
+## TODO section 3 (2026-10-26, `5518260`..)
+
+Overlay apps and overlay rendering.
+
+| Area | Change | Commits |
+|------|--------|---------|
+| overlay apps | Overlay apps get an `XR_EXTX_overlay` session (create info chained by wrapping `xrCreateSession`) instead of a headless one when the runtime has it; a frame thread draws their overlays; their GL textures go through the GL bridge; scene `Submit` still rejected | `5518260` |
+| overlay rendering | `SetOverlayColor` tints layers (`XR_KHR_composition_layer_color_scale_bias`); `SetOverlayTexelAspect` applied; side-by-side overlays show one half to each eye (parallel and crossed); overlay relative transforms (old interfaces) follow their parent | `5b655e9` `66d3097` `46abd17` `f61f308` |
+| tests | fakexr accepts and records the overlay session create info | `5518260` |

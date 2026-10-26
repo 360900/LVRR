@@ -43,11 +43,10 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
 
 ## 3. Overlay apps and interactive overlays
 
-12. Overlay apps can't draw (L)
-    - Overlay app type gets a headless session, `SetOverlayTexture` returns `RequestFailed`
-    - XSOverlay, OVR Toolkit, Desktop+, fpsVR, OVR Advanced Settings, VRCX (#99, #322)
-    - needs `XR_EXTX_overlay` and our own frame loop
-    - WiVRn: `XR_EXTX_overlay` supported, overlay sessions composited above the app by z-order
+12. Overlay apps (M)
+    - drawn in an `XR_EXTX_overlay` session with our own frame loop; untested on a headset (XSOverlay, OVR Toolkit, Desktop+, fpsVR, OVR Advanced Settings, VRCX, #99, #322)
+    - without `XR_EXTX_overlay` they stay headless and `SetOverlayTexture` returns `RequestFailed`
+    - Vulkan apps' queue is used by our frame thread's `xrEndFrame` without the app's locking
 13. Overlay input (L)
     - no laser, no hit testing, no mouse, scroll or focus events
     - `ComputeOverlayIntersection`, `IsHoverTargetOverlay`, `HandleControllerOverlayInteractionAsMouse` return false
@@ -61,10 +60,9 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
     - no `KeyboardCharInput`, no `*_Global` events
     - option: WayVR's keyboard over WayVR IPC
 16. Overlay rendering (S-M each)
-    - side-by-side stereo overlays show both halves to each eye
     - panorama overlays ignored; cubemap skybox shows only the front face (`XR_KHR_composition_layer_cube`, not on WiVRn)
-    - `SetOverlayColor`, texel aspect, pre-curve pitch, auto-curve range ignored
-    - OverlayRelative, Cursor, Projection, TrackedComponent transforms
+    - pre-curve pitch, auto-curve range ignored
+    - Cursor (needs 13), Projection, TrackedComponent transforms
     - subviews, render-model overlays
     - `SetOverlayFromFile`, `GetOverlayTexture`, `GetOverlayImageData`, IVROverlayView
     - overlays past the runtime's layer limit are dropped (SteamVR allows 128)
@@ -86,7 +84,7 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
     - `xrRequestDisplayRefreshRateFB` never called
     - WiVRn: no `views_change`; `xrRequestDisplayRefreshRateFB` works and disables its automatic rate
 20. Events (S-M)
-    - `TrackedDeviceUpdated`, `PropertyChanged`, `TrackedDeviceRoleChanged`, `IpdChanged`
+    - `TrackedDeviceUpdated`, `PropertyChanged` (only sent for refresh rate changes), `TrackedDeviceRoleChanged`, `IpdChanged`
     - `EnterStandbyMode`/`LeaveStandbyMode`
     - `SceneApplicationChanged`, `ProcessQuit`
     - `Input_BindingLoadSuccessful`/`Failed`, `ActionBindingReloaded`, `Input_ActionManifestReloaded`
@@ -98,7 +96,7 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
     - no hot-plug: `XrEventDataXDevListChangedMNDX` unhandled
     - no `TrackedDeviceDeactivated` for removed trackers; no tracker battery
     - body tracking extensions unused
-    - WiVRn: body tracking parts are xdevs named `WiVRn generic tracker (<part>)` (Chest, Hip, Left/Right Elbow, Knee, Foot); they pass our filter but get no role, map them to `vive_tracker_<role>`; device list fixed at connect, no hot-plug
+    - WiVRn: body tracking parts are xdevs named `WiVRn generic tracker (<part>)` (Chest, Hip, Left/Right Elbow, Knee, Foot); device list fixed at connect, no hot-plug
 22. Skeletal (S-M)
     - compressed bone data calls unimplemented
     - tracked bones ignore motion range (`XR_EXT_hand_joints_motion_range`)
