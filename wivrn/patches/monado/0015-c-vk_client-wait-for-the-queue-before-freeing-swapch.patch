@@ -1,0 +1,39 @@
+From 0c3e5aa3fb463d9b5d9472be48da87f601302191 Mon Sep 17 00:00:00 2001
+From: 360900 <ziyad.koca@hotmail.com>
+Date: Mon, 26 Oct 2026 16:36:18 +0300
+Subject: [PATCH] c/vk_client: wait for the queue before freeing swapchain
+ images
+
+xrDestroySwapchain freed the images while the app's GPU work on them
+could still be running. Unity games such as Bonelab recreate their
+swapchains on a render scale change with the last frames in flight,
+which faulted the GPU (Xid 31 on NVIDIA) and lost the session.
+---
+ src/xrt/compositor/client/comp_vk_client.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/src/xrt/compositor/client/comp_vk_client.c b/src/xrt/compositor/client/comp_vk_client.c
+index ad3c7a6..d2025c6 100644
+--- a/src/xrt/compositor/client/comp_vk_client.c
++++ b/src/xrt/compositor/client/comp_vk_client.c
+@@ -286,6 +286,17 @@ client_vk_swapchain_destroy(struct xrt_swapchain *xsc)
+ 	}
+ 	vk_cmd_pool_unlock(&c->pool);
+ 
++	// The app may still have GPU work on the images: Unity games recreate their swapchains
++	// on a render scale change while the last frames with the old ones are in flight, and
++	// freeing the images under that work faulted the GPU (Xid 31 on NVIDIA) and lost the
++	// session.
++	{
++		COMP_TRACE_IDENT(queue_wait_idle);
++		vk_queue_lock(vk->main_queue);
++		vk->vkQueueWaitIdle(vk->main_queue->queue);
++		vk_queue_unlock(vk->main_queue);
++	}
++
+ 	for (uint32_t i = 0; i < sc->base.base.image_count; i++) {
+ 		if (sc->base.images[i] != VK_NULL_HANDLE) {
+ 			vk->vkDestroyImage(vk->device, sc->base.images[i], NULL);
+-- 
+2.56.0
+
