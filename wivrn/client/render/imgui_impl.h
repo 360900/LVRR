@@ -179,6 +179,9 @@ private:
 
 	xr::swapchain swapchain;
 	int image_index;
+	// LVRR: the swapchain keeps showing its last image while the draw data does not change
+	uint64_t last_draw_hash = 0;
+	bool have_image = false;
 
 	ImGuiContext * context;
 	ImPlotContext * plot_context;

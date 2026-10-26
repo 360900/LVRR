@@ -192,6 +192,9 @@ protected:
 	        XrColor4f clear_color,
 	        bool render_debug_draws = false);
 
+	// LVRR: whether render_world would draw anything for this layer mask
+	bool layer_has_content(uint32_t layer_mask) const;
+
 	void set_color_scale_bias(XrColor4f scale, XrColor4f bias);
 	void set_depth_test(bool write, XrCompareOpFB op);
 	void set_layer_settings(XrCompositionLayerSettingsFlagsFB flags);

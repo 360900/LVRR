@@ -1496,6 +1496,7 @@ void application::initialize()
 	initialize_vulkan();
 
 	xr_session = xr::session(xr_instance, xr_system_id, vk_instance, vk_physical_device, vk_device, vk_queue, vk_queue_family_index);
+	power = power_governor(xr_session);
 
 	spaces[size_t(xr::spaces::view)] = xr_session.create_reference_space(XR_REFERENCE_SPACE_TYPE_VIEW);
 	spaces[size_t(xr::spaces::world)] = xr_session.create_reference_space(XR_REFERENCE_SPACE_TYPE_STAGE);
@@ -2156,6 +2157,9 @@ void application::poll_events()
 				xr_session.on_boundary_visibility_changed(e.boundary_visibility_changed.boundaryVisibility);
 			}
 			break;
+			case XR_TYPE_EVENT_DATA_PERF_SETTINGS_EXT:
+				power.on_event(e.perf_settings, xr_instance.now());
+				break;
 			default:
 				spdlog::info("Received event type {}", xr::to_string(e.header.type));
 				break;

@@ -1099,19 +1099,26 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 	render_start(application::get_config().passthrough_enabled, frame_state.predictedDisplayTime);
 
 	const XrColor4f clear_color = application::get_config().passthrough_enabled ? XrColor4f{0, 0, 0, 0} : constants::lobby::sky_color;
-	render_world(
-	        XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT,
-	        world_space,
-	        views,
-	        width,
-	        height,
-	        composition_layer_depth_test_supported,
-	        composition_layer_depth_test_supported ? layer_lobby | layer_controllers : layer_lobby,
-	        clear_color,
-	        true);
+	// LVRR: an eye pass with nothing in it (passthrough room, no hand or controller in
+	// view) is not rendered, the compositor has one layer less to blend as well
+	const uint32_t first_pass = composition_layer_depth_test_supported ? layer_lobby | layer_controllers : layer_lobby;
+	const uint32_t second_pass = composition_layer_depth_test_supported ? layer_rays : layer_rays | layer_controllers;
+	if (layer_has_content(first_pass))
+	{
+		render_world(
+		        XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT,
+		        world_space,
+		        views,
+		        width,
+		        height,
+		        composition_layer_depth_test_supported,
+		        first_pass,
+		        clear_color,
+		        true);
 
-	if (composition_layer_depth_test_supported)
-		set_depth_test(true, XR_COMPARE_OP_ALWAYS_FB);
+		if (composition_layer_depth_test_supported)
+			set_depth_test(true, XR_COMPARE_OP_ALWAYS_FB);
+	}
 
 	for (auto & [z_index, layer]: imgui_layers)
 	{
@@ -1124,18 +1131,21 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 		}
 	}
 
-	render_world(
-	        XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT,
-	        world_space,
-	        views,
-	        width,
-	        height,
-	        composition_layer_depth_test_supported,
-	        composition_layer_depth_test_supported ? layer_rays : layer_rays | layer_controllers,
-	        {0, 0, 0, 0});
+	if (layer_has_content(second_pass))
+	{
+		render_world(
+		        XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT,
+		        world_space,
+		        views,
+		        width,
+		        height,
+		        composition_layer_depth_test_supported,
+		        second_pass,
+		        {0, 0, 0, 0});
 
-	if (composition_layer_depth_test_supported)
-		set_depth_test(true, XR_COMPARE_OP_LESS_OR_EQUAL_FB);
+		if (composition_layer_depth_test_supported)
+			set_depth_test(true, XR_COMPARE_OP_LESS_OR_EQUAL_FB);
+	}
 
 	for (auto & [z_index, layer]: imgui_layers)
 	{
@@ -1382,8 +1392,11 @@ void scenes::lobby::on_focused()
 	setup_passthrough();
 	discover.emplace();
 
-	session.set_performance_level(XR_PERF_SETTINGS_DOMAIN_CPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
-	session.set_performance_level(XR_PERF_SETTINGS_DOMAIN_GPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
+	// LVRR: a menu does not need high clocks or the fastest refresh rate; the stream
+	// picks its own rate once it starts
+	application::get_power().idle();
+	if (auto rates = session.get_refresh_rates(); not rates.empty())
+		session.set_refresh_rate(*std::ranges::min_element(rates));
 }
 
 void scenes::lobby::setup_passthrough()

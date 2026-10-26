@@ -365,9 +365,7 @@ bool scenes::stream::lvrr_apply(const lvrr::headset_config & patch)
 	if (patch.high_power_mode and caps.high_power_mode)
 	{
 		config.high_power_mode = *patch.high_power_mode;
-		auto level = config.high_power_mode ? XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT : XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT;
-		session.set_performance_level(XR_PERF_SETTINGS_DOMAIN_CPU_EXT, level);
-		session.set_performance_level(XR_PERF_SETTINGS_DOMAIN_GPU_EXT, level);
+		application::get_power().set_pinned_high(config.high_power_mode);
 	}
 	if (patch.passthrough_boundary and caps.passthrough_boundary)
 	{

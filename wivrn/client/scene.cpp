@@ -249,6 +249,28 @@ void scene::render_world(
 	        composition_layer_depth);
 }
 
+bool scene::layer_has_content(uint32_t layer_mask) const
+{
+	// same visibility rule as scene_renderer::render, without the transforms
+	for (auto && [entity, node]: world.view<const components::node>().each())
+	{
+		if (not node.mesh or node.mesh->primitives.empty())
+			continue;
+
+		bool visible = true;
+		uint32_t layers = -1;
+		for (auto i = &node; i != nullptr and visible; i = world.try_get<const components::node>(i->parent))
+		{
+			visible = visible and i->visible;
+			layers = layers bitand i->layer_mask;
+		}
+
+		if (visible and (layers & layer_mask))
+			return true;
+	}
+	return false;
+}
+
 xr::swapchain & scene::get_swapchain(vk::Format format, int32_t width, int32_t height, int sample_count, uint32_t array_size)
 {
 	// Look for an exact match

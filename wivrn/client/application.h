@@ -26,6 +26,7 @@
 
 #include "configuration.h"
 #include "hmd_traits.h"
+#include "power_governor.h"
 #include "utils/singleton.h"
 #include "utils/thread_safe.h"
 #include "vk/vk_allocator.h"
@@ -122,6 +123,7 @@ private:
 	xr::instance xr_instance;
 	xr::system xr_system_id;
 	xr::session xr_session;
+	power_governor power; // LVRR: clock levels, see power_governor.h
 	XrSessionState session_state = XR_SESSION_STATE_UNKNOWN;
 
 	std::array<xr::space, size_t(xr::spaces::count)> spaces;
@@ -402,6 +404,11 @@ public:
 	static std::chrono::nanoseconds get_cpu_time()
 	{
 		return instance().last_scene_cpu_time;
+	}
+
+	static power_governor & get_power()
+	{
+		return instance().power;
 	}
 
 	static bool get_eye_gaze_supported()

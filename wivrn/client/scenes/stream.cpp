@@ -576,16 +576,8 @@ void scenes::stream::on_focused()
 	foveation_ok = get_action("foveation_ok").first;
 	foveation_cancel = get_action("foveation_cancel").first;
 
-	if (application::get_config().high_power_mode)
-	{
-		session.set_performance_level(XR_PERF_SETTINGS_DOMAIN_CPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
-		session.set_performance_level(XR_PERF_SETTINGS_DOMAIN_GPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
-	}
-	else
-	{
-		session.set_performance_level(XR_PERF_SETTINGS_DOMAIN_CPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT);
-		session.set_performance_level(XR_PERF_SETTINGS_DOMAIN_GPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT);
-	}
+	// LVRR: clocks start low and follow the load, unless the setting pins them high
+	application::get_power().set_pinned_high(application::get_config().high_power_mode);
 }
 
 void scenes::stream::on_unfocused()
@@ -840,6 +832,9 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	real_display_period = last_display_time ? frame_state.predictedDisplayTime - last_display_time : frame_state.predictedDisplayPeriod;
 	last_display_time = frame_state.predictedDisplayTime;
 
+	if (frame_state.shouldRender and last_display_time)
+		application::get_power().frame(instance.now(), frame_state.predictedDisplayPeriod, real_display_period, application::get_cpu_time().count() * 1e-9f, last_gpu_time);
+
 	std::shared_lock lock(decoder_mutex);
 	if (not frame_state.shouldRender or decoders[0].empty() or decoders[1].empty() or state_ == state::shutdown)
 	{
@@ -883,6 +878,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 				t = (timestamps2[n++] - timestamps2[0]) * application::get_physical_device_properties().limits.timestampPeriod / 1e9;
 			});
 		}
+		last_gpu_time = timestamps.gpu_time;
 	}
 
 	// Search for frame with desired display time on all decoders

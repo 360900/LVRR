@@ -46,6 +46,7 @@ union event
 	XrEventDataVisibilityMaskChangedKHR visibility_mask_changed;
 	XrEventDataUserPresenceChangedEXT user_presence_changed;
 	XrEventDataBoundaryVisibilityChangedMETA boundary_visibility_changed;
+	XrEventDataPerfSettingsEXT perf_settings;
 };
 class instance : public utils::handle<XrInstance, xrDestroyInstance>
 {

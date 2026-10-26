@@ -120,7 +120,7 @@ public:
 	float override_foveation_pitch = -10 * M_PI / 180;
 	float override_foveation_distance = 3;
 
-	bool high_power_mode = true;
+	bool high_power_mode = false; // LVRR: clocks follow the load unless pinned, see power_governor
 	uint32_t fps_divider = 1;
 
 	bool usb_network = false;

@@ -36,6 +36,7 @@
 #include <boost/locale.hpp>
 #include <cmath>
 #include <cstddef>
+#include <cstring>
 #include <glm/gtc/matrix_access.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <imgui.h>
@@ -831,9 +832,6 @@ void imgui_context::new_frame(XrTime display_time)
 		ImGui::ShowDemoWindow(&show_demo_window);
 #endif
 
-	image_index = swapchain.acquire();
-	swapchain.wait();
-
 	hovered_item_prev = hovered_item;
 	hovered_item = 0;
 }
@@ -846,8 +844,6 @@ std::vector<std::pair<int, XrCompositionLayerQuad>> imgui_context::end_frame()
 		if (auto haptic_output = controllers[controller].first.haptic_output; haptic_output != XR_NULL_HANDLE)
 			application::haptic_start(haptic_output, XR_NULL_PATH, 10'000'000, 1000, 1);
 	}
-
-	vk::Image destination = swapchain.image(image_index);
 
 	ImGui::SetCurrentContext(context);
 	ImPlot::SetCurrentContext(plot_context);
@@ -973,6 +969,15 @@ std::vector<std::pair<int, XrCompositionLayerQuad>> imgui_context::end_frame()
 
 	vk::ClearValue clear{vk::ClearColorValue(0, 0, 0, 0)};
 
+	// LVRR: nothing changed since the last submitted image, the layers below keep
+	// pointing at it (a swapchain shows its most recently released image)
+	if (not draw_data_changed(ImGui::GetDrawData()))
+		return build_layers();
+
+	image_index = swapchain.acquire();
+	swapchain.wait();
+	vk::Image destination = swapchain.image(image_index);
+
 	cb.beginRenderPass(vk::RenderPassBeginInfo{
 	                           .renderPass = *renderpass,
 	                           .framebuffer = *f.framebuffer,
@@ -1014,7 +1019,55 @@ std::vector<std::pair<int, XrCompositionLayerQuad>> imgui_context::end_frame()
 		        i.vp_origin.x + i.vp_size.x,
 		        i.vp_origin.y + i.vp_size.y);
 
+	have_image = true;
 		ImRect all_windows_rect{
+	return build_layers();
+}
+
+bool imgui_context::draw_data_changed(const ImDrawData * draw_data)
+{
+	// textures the backend still has to create, update or destroy need a render pass
+	bool textures_pending = false;
+	if (draw_data->Textures)
+		for (ImTextureData * tex: *draw_data->Textures)
+			textures_pending |= tex->Status != ImTextureStatus_OK;
+
+	// FNV-1a over the vertex and index buffers and the draw commands, 8 bytes at a time
+	uint64_t h = 0xcbf29ce484222325;
+	auto mix = [&h](const void * data, size_t size) {
+		const std::byte * p = (const std::byte *)data;
+		for (; size >= 8; size -= 8, p += 8)
+		{
+			uint64_t v;
+			memcpy(&v, p, 8);
+			h = (h ^ v) * 0x100000001b3;
+		}
+		for (; size; --size, ++p)
+			h = (h ^ uint8_t(*p)) * 0x100000001b3;
+	};
+	mix(&draw_data->DisplaySize, sizeof(draw_data->DisplaySize));
+	for (const ImDrawList * list: draw_data->CmdLists)
+	{
+		mix(list->VtxBuffer.Data, list->VtxBuffer.size_in_bytes());
+		mix(list->IdxBuffer.Data, list->IdxBuffer.size_in_bytes());
+		for (const ImDrawCmd & cmd: list->CmdBuffer)
+		{
+			mix(&cmd.ClipRect, sizeof(cmd.ClipRect));
+			ImTextureID tex = cmd.GetTexID();
+			mix(&tex, sizeof(tex));
+			mix(&cmd.VtxOffset, sizeof(cmd.VtxOffset));
+			mix(&cmd.IdxOffset, sizeof(cmd.IdxOffset));
+			mix(&cmd.ElemCount, sizeof(cmd.ElemCount));
+		}
+	}
+
+	const bool changed = not have_image or textures_pending or h != last_draw_hash;
+	last_draw_hash = h;
+	return changed;
+}
+
+std::vector<std::pair<int, XrCompositionLayerQuad>> imgui_context::build_layers()
+{
 		        std::numeric_limits<float>::max(),
 		        std::numeric_limits<float>::max(),
 		        std::numeric_limits<float>::lowest(),
