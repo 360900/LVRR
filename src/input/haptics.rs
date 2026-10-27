@@ -593,6 +593,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // Too slow for 50 ms delays.
     fn vibration_action() {
         let mut f = touch_fixture(c"actions_haptics.json");
         let set1 = f.get_action_set_handle(c"/actions/set1");
