@@ -275,7 +275,11 @@ impl ProfileData {
 /// or tracked as a hand. WiVRn unbinds the profiles whenever the headset reports none for a
 /// moment, and SteamVR only reports a device gone when its driver does, so a blip mustn't make the
 /// app drop and set up its controllers again.
+#[cfg(not(miri))]
 pub(super) const CONNECTION_GRACE: Duration = Duration::from_millis(500);
+/// Miri is too slow for a blip to fit in 500 ms. Tests end the grace with expire_connection_grace.
+#[cfg(miri)]
+pub(super) const CONNECTION_GRACE: Duration = Duration::from_secs(30);
 
 pub struct TrackedDevice {
     device_type: TrackedDeviceType,
