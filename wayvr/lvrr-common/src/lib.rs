@@ -1,5 +1,6 @@
 //! LVRR integration shared by the WayVR crates.
 
+pub mod added_apps;
 pub mod doctor;
 pub mod emulator;
 pub mod headset;

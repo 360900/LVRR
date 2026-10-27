@@ -1,10 +1,18 @@
 //! VR applications the LVRR server can start: Steam VR games and desktop entries in the
 //! X-WiVRn-VR category. They start with the server's environment, so OpenVR games use the
 //! bundled xrizer. In VR, the system's web browser is listed too and opens as a WayVR window.
+//! Other Steam games and desktop apps can be added, see `lvrr_common::added_apps`.
 
-use std::{collections::HashMap, marker::PhantomData, path::Path, process::Command, rc::Rc};
+use std::{
+	collections::{HashMap, HashSet},
+	marker::PhantomData,
+	path::Path,
+	process::Command,
+	rc::Rc,
+};
 
 use lvrr_common::{
+	added_apps,
 	library::{self, LibraryState, Sort},
 	state::{LvrrRequest, VrApplication},
 	xrizer_apps::{self, ControllerType},
@@ -49,6 +57,8 @@ const STARTING_TIMEOUT_MS: u32 = 180_000;
 const CONTROLLER_ACTION_PREFIX: &str = "lvrr-controllers;";
 /// Followed by the index in `Sort::ALL`
 const SORT_ACTION_PREFIX: &str = "lvrr-sort;";
+/// Apps that can be added, shown at most; the search finds the others
+const MAX_CANDIDATES: usize = 30;
 
 #[derive(Clone)]
 enum Task {
@@ -59,6 +69,23 @@ enum Task {
 	OpenMenu(context_menu::Position, Vec<context_menu::Cell>),
 	SetControllers(u64, ControllerType),
 	SetSort(Sort),
+	ToggleAdding,
+	Add(Source, String),
+	Remove(String),
+}
+
+/// An app that is not in the Library yet
+#[derive(Clone)]
+enum Source {
+	Steam(u64),
+	/// A desktop entry id
+	Desktop(Rc<str>),
+}
+
+struct Candidate {
+	source: Source,
+	/// The id in the server's list if it were a VR app, the name and the icon
+	app: VrApplication,
 }
 
 /// An app that was started and has no session yet
@@ -82,6 +109,12 @@ pub struct TabLvrrLibrary<T> {
 	library: LibraryState,
 	/// Steam's last played times, by app id
 	steam_played: HashMap<String, u64>,
+	/// Installed Steam games and desktop apps
+	candidates: Vec<Candidate>,
+	/// Ids of the apps the user added
+	added: HashSet<String>,
+	/// Lists the apps that can be added, also without a search
+	adding: bool,
 	/// The inner None until the server answered
 	shown: Option<Option<Vec<VrApplication>>>,
 	cover_common: game_cover::ViewCommon,
@@ -143,6 +176,33 @@ impl<T: 'static> Tab<T> for TabLvrrLibrary<T> {
 					self.render_toolbar(frontend)?;
 					redraw = true;
 				}
+				Task::ToggleAdding => {
+					self.adding = !self.adding;
+					self.render_toolbar(frontend)?;
+					redraw = true;
+				}
+				Task::Add(source, name) => {
+					let added = match &source {
+						Source::Steam(app_id) => added_apps::add_steam(*app_id, &name),
+						Source::Desktop(id) => added_apps::add_desktop(id).map(|_| ()),
+					};
+					if let Err(e) = added {
+						log::warn!("Could not add {name} to the library: {e:?}");
+					}
+					self.added = added_apps::added();
+					frontend
+						.tasks
+						.push(FrontendTask::Lvrr(LvrrRequest::RefreshApplications));
+				}
+				Task::Remove(id) => {
+					if let Err(e) = added_apps::remove(&id) {
+						log::warn!("Could not remove {id} from the library: {e:?}");
+					}
+					self.added = added_apps::added();
+					frontend
+						.tasks
+						.push(FrontendTask::Lvrr(LvrrRequest::RefreshApplications));
+				}
 			}
 		}
 		if let TickResult::Action(name) = self.context_menu.tick(&mut frontend.layout, &mut self.state)?
@@ -191,11 +251,18 @@ impl<T: 'static> Tab<T> for TabLvrrLibrary<T> {
 
 impl<T: 'static> TabLvrrLibrary<T> {
 	pub fn new(frontend: &mut Frontend<T>, parent: WidgetID, data: &mut T) -> anyhow::Result<Self> {
+		let entries = frontend.interface.desktop_finder(data).find_entries();
 		let browser = if frontend.interface.lvrr_desktop() {
 			None
 		} else {
-			default_browser(&frontend.interface.desktop_finder(data).find_entries())
+			default_browser(&entries)
 		};
+		let steam_games = steam_games();
+		let steam_played = steam_games
+			.iter()
+			.filter_map(|game| Some((game.app_id.clone(), game.last_played.filter(|t| *t > 0)?)))
+			.collect();
+		let candidates = candidates(steam_games, &entries);
 		let globals = frontend.layout.state.globals.clone();
 		let mut state = wgui::parser::parse_from_assets(&ui::doc_params(&globals), &mut frontend.layout, parent)?;
 		let mut ui = Ui::new(&mut frontend.layout, &mut state, &globals);
@@ -215,7 +282,10 @@ impl<T: 'static> TabLvrrLibrary<T> {
 			search_box: None,
 			search: String::new(),
 			library: LibraryState::load(),
-			steam_played: steam_played(),
+			steam_played,
+			candidates,
+			added: added_apps::added(),
+			adding: false,
 			shown: None,
 			cover_common: game_cover::ViewCommon::new(globals),
 			covers: HashMap::new(),
@@ -283,6 +353,14 @@ impl<T: 'static> TabLvrrLibrary<T> {
 
 		ui.text(row, Text::Key("LVRR.LIBRARY.SEARCH"))?;
 		self.search_box = Some(ui.editbox(row, &self.search)?);
+
+		let tasks = self.tasks.clone();
+		let (label, icon) = if self.adding {
+			("LVRR.LIBRARY.ADD_DONE", "@/dashboard/close.svg")
+		} else {
+			("LVRR.LIBRARY.ADD_APPS", "@/dashboard/add.svg")
+		};
+		ui.button(row, Text::Key(label), icon, move || tasks.push(Task::ToggleAdding))?;
 
 		self.toolbar_widgets = Some(widgets);
 		Ok(())
@@ -362,7 +440,68 @@ impl<T: 'static> TabLvrrLibrary<T> {
 		}
 		self.mount_apps(&executor, &mut ui, group, &shown)?;
 
+		if self.adding || !self.search.trim().is_empty() {
+			self.mount_candidates(&mut ui, group, applications)?;
+		}
+
 		self.widgets = Some(widgets);
+		Ok(())
+	}
+
+	/// Apps matching the search that are not in the Library, with an Add button
+	fn mount_candidates(&self, ui: &mut Ui, group: WidgetID, applications: &[VrApplication]) -> anyhow::Result<()> {
+		let listed: HashSet<&str> = applications.iter().map(|a| a.id.as_str()).collect();
+		let mut shown: Vec<_> = self
+			.candidates
+			.iter()
+			.filter(|c| {
+				let added = match &c.source {
+					Source::Steam(_) => false,
+					Source::Desktop(id) => listed.contains(format!("lvrr-{id}").as_str()),
+				};
+				!added && !listed.contains(c.app.id.as_str()) && library::matches(&c.app, &self.search)
+			})
+			.collect();
+		if shown.is_empty() {
+			return Ok(());
+		}
+		shown.sort_by_cached_key(|c| c.app.name.to_lowercase());
+		ui.muted(group, Text::Key("LVRR.LIBRARY.ADD_HEADER"))?;
+		for candidate in shown.iter().take(MAX_CANDIDATES) {
+			let row = ui.row(group)?;
+			let (tasks, source, name) = (self.tasks.clone(), candidate.source.clone(), candidate.app.name.clone());
+			ui.button(row, Text::Key("LVRR.LIBRARY.ADD"), "@/dashboard/add.svg", move || {
+				tasks.push(Task::Add(source.clone(), name.clone()));
+			})?;
+			if let Some(icon) = icon_path(&candidate.app.icon)
+				&& let Err(e) = ui.file_icon(row, icon)
+			{
+				log::warn!("Could not show the icon of {}: {e:?}", candidate.app.id);
+			}
+			ui.bold(row, Text::Raw(&candidate.app.name), 16)?;
+			if matches!(candidate.source, Source::Steam(_)) {
+				ui.muted(row, Text::Key("LVRR.LIBRARY.STEAM"))?;
+			}
+		}
+		if shown.len() > MAX_CANDIDATES {
+			ui.muted(group, Text::Key("LVRR.LIBRARY.ADD_MORE"))?;
+		}
+		Ok(())
+	}
+
+	fn mount_remove(&self, ui: &mut Ui, parent: WidgetID, id: &str) -> anyhow::Result<()> {
+		if !self.added.contains(id) {
+			return Ok(());
+		}
+		let (tasks, id) = (self.tasks.clone(), id.to_owned());
+		ui.danger_button(
+			parent,
+			Text::Key("LVRR.LIBRARY.REMOVE"),
+			"@/dashboard/trash.svg",
+			move || {
+				tasks.push(Task::Remove(id.clone()));
+			},
+		)?;
 		Ok(())
 	}
 
@@ -414,6 +553,7 @@ impl<T: 'static> TabLvrrLibrary<T> {
 				if let Some(app_id) = app.steam_app_id() {
 					self.mount_controllers(ui, stack, app_id)?;
 				}
+				self.mount_remove(ui, stack, &app.id)?;
 			}
 		}
 
@@ -438,6 +578,7 @@ impl<T: 'static> TabLvrrLibrary<T> {
 				log::warn!("Could not show the icon of {}: {e:?}", app.id);
 			}
 			ui.bold(row, Text::Raw(&app.name), 16)?;
+			self.mount_remove(ui, row, &app.id)?;
 		}
 		Ok(())
 	}
@@ -492,19 +633,37 @@ fn parse_sort_action(name: &str) -> Option<Task> {
 	Some(Task::SetSort(*Sort::ALL.get(index)?))
 }
 
-/// When Steam last started each installed game, also outside LVRR
-fn steam_played() -> HashMap<String, u64> {
-	let games = SteamUtils::new().and_then(|steam| steam.list_installed_games(GameSortMethod::None));
-	match games {
-		Ok(games) => games
-			.into_iter()
-			.filter_map(|game| Some((game.app_id, game.last_played.filter(|t| *t > 0)?)))
-			.collect(),
-		Err(e) => {
-			log::debug!("No Steam play times: {e:?}");
-			HashMap::new()
-		}
-	}
+/// Installed Steam games, with when Steam last started them, also outside LVRR
+fn steam_games() -> Vec<AppManifest> {
+	SteamUtils::new()
+		.and_then(|steam| steam.list_installed_games(GameSortMethod::None))
+		.unwrap_or_else(|e| {
+			log::debug!("No Steam games: {e:?}");
+			Vec::new()
+		})
+}
+
+/// Everything that could be added to the Library
+fn candidates(steam_games: Vec<AppManifest>, entries: &HashMap<String, Rc<DesktopEntry>>) -> Vec<Candidate> {
+	let steam = steam_games.into_iter().filter_map(|game| {
+		Some(Candidate {
+			source: Source::Steam(game.app_id.parse().ok()?),
+			app: VrApplication {
+				id: game.app_id,
+				name: game.name,
+				icon: String::new(),
+			},
+		})
+	});
+	let desktop = entries.values().map(|entry| Candidate {
+		source: Source::Desktop(entry.app_id.clone()),
+		app: VrApplication {
+			id: entry.app_id.to_string(),
+			name: entry.app_name.to_string(),
+			icon: entry.icon_path.as_deref().unwrap_or_default().to_owned(),
+		},
+	});
+	steam.chain(desktop).collect()
 }
 
 /// VR sessions other than overlays such as the dashboard

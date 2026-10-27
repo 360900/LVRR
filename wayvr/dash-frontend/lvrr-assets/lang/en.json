@@ -42,7 +42,7 @@
       "VR_APPS": "VR apps",
       "LAUNCH": "Launch",
       "BROWSER": "Web browser",
-      "EMPTY": "No VR apps found. Steam VR games appear once SteamVR has run once; apps can also add the X-WiVRn-VR category to their desktop entry.",
+      "EMPTY": "No VR apps found. Steam VR games appear once SteamVR has run once; other games and apps can be added with Add apps.",
       "LOADING": "Loading...",
       "ALL_GAMES": "All Steam games",
       "STARTING": "Starting",
@@ -57,7 +57,14 @@
       "SEARCH": "Search",
       "NO_MATCH": "No VR app matches the search.",
       "RECENT": "Recently played",
-      "ALL_APPS": "All VR apps"
+      "ALL_APPS": "All VR apps",
+      "ADD_APPS": "Add apps",
+      "ADD_DONE": "Done",
+      "ADD_HEADER": "Not in the library, add games that have VR through a mod or other VR apps:",
+      "ADD": "Add",
+      "ADD_MORE": "Type in the search to find more.",
+      "STEAM": "Steam",
+      "REMOVE": "Remove"
     },
     "RUNNING": {
       "TITLE": "Running",

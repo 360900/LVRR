@@ -241,13 +241,14 @@ void return_error(GDBusMethodInvocation * invocation, const char * name, const s
 	g_dbus_method_invocation_return_dbus_error(invocation, (std::string("io.github.wivrn.Server.") + name).c_str(), message.c_str());
 }
 
-// list_applications() scans Steam and desktop files; GetApplicationIcon is called once per app
-const std::unordered_map<std::string, application> & applications()
+// list_applications() scans Steam and desktop files; GetApplicationIcon is called once per app.
+// Listing rescans, the dashboard may just have added an app.
+const std::unordered_map<std::string, application> & applications(bool rescan = false)
 {
 	static std::unordered_map<std::string, application> apps;
 	static std::chrono::steady_clock::time_point updated;
 	auto now = std::chrono::steady_clock::now();
-	if (apps.empty() or now - updated > std::chrono::seconds(10))
+	if (rescan or apps.empty() or now - updated > std::chrono::seconds(10))
 	{
 		apps = list_applications();
 		updated = now;
@@ -319,7 +320,7 @@ gboolean on_stop_session(WivrnServer * skeleton, GDBusMethodInvocation * invocat
 gboolean on_list_applications(WivrnServer * skeleton, GDBusMethodInvocation * invocation, gpointer)
 {
 	std::vector<std::tuple<std::string, std::string, std::string>> list;
-	for (const auto & [id, app]: applications())
+	for (const auto & [id, app]: applications(true))
 	{
 		auto name = app.name.find("");
 		list.emplace_back(id, name != app.name.end() ? name->second : id, app.icon_path ? app.icon_path->string() : "");
