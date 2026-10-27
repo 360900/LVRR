@@ -106,6 +106,7 @@ private:
 #endif
 	status_type encode_request{-1}; // id of the image to encode
 	std::jthread encoder_thread;
+	std::atomic<uint32_t> skipped_frames = 0; // LVRR: encoders still busy with the previous one
 
 	struct
 	{
@@ -186,6 +187,11 @@ public:
 		return frame_rate;
 	}
 	void set_framerate(float hz);
+
+	uint32_t take_skipped_frames()
+	{
+		return skipped_frames.exchange(0);
+	}
 
 	void set_bitrate(uint32_t);
 	void update_foveation(const from_headset::foveation &);

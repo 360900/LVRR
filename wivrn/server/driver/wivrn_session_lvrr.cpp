@@ -17,6 +17,7 @@
 
 #include "wivrn_session.h"
 
+#include "os/os_time.h"
 #include "util/u_logging.h"
 
 namespace wivrn
@@ -29,9 +30,25 @@ void wivrn_session::operator()(lvrr::headset_settings && settings)
 	send_to_main(std::move(settings));
 }
 
+// Adds the PC's frame rates over the same period.
 void wivrn_session::operator()(lvrr::headset_stats && stats)
 {
-	send_to_main(std::move(stats));
+	const int64_t now = os_monotonic_get_ns();
+	const auto game = app_pacers.take_game_frames();
+	const uint32_t skipped = compositor.take_skipped_frames();
+	const float seconds = (now - lvrr_stats_ns) / 1e9f;
+	const bool first = lvrr_stats_ns == 0;
+	lvrr_stats_ns = now;
+
+	lvrr::pc_stats pc{};
+	if (not first and seconds > 0)
+	{
+		if (game.shown + game.repeated > 0)
+			pc.game_fps = game.shown / seconds;
+		pc.game_missed_fps = game.repeated / seconds;
+		pc.encoder_skipped_fps = skipped / seconds;
+	}
+	send_to_main(lvrr::stats{.headset = std::move(stats), .pc = pc});
 }
 
 // Lets the headset tell a deliberate stop from a crash.

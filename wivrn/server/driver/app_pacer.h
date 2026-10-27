@@ -40,10 +40,19 @@ public:
 	using base_t = u_pacing_app_factory;
 
 	pacing_app_factory();
-	xrt_result_t create(struct u_pacing_app ** out_upa);
+	xrt_result_t create(bool is_overlay, struct u_pacing_app ** out_upa);
 	void destroy();
 
 	int64_t get_frame_time();
+
+	// LVRR: compositor frames that latched the main application's frames since the last
+	// call, new ones and repeats of the last, counted per application rather than by commits
+	struct game_frames
+	{
+		uint32_t shown;
+		uint32_t repeated;
+	};
+	game_frames take_game_frames();
 };
 
 } // namespace wivrn

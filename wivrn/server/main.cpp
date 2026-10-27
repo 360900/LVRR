@@ -602,7 +602,7 @@ gboolean control_received(gint fd, GIOCondition condition, gpointer user_data)
 			                   wivrn_server_emit_server_error(dbus_server, e.where.c_str(), e.message.c_str());
 		                   },
 		                   [&](const wivrn::lvrr::headset_settings & settings) { lvrr_dbus::on_headset_settings(settings); },
-		                   [&](const wivrn::lvrr::headset_stats & stats) { lvrr_dbus::on_headset_stats(stats); },
+		                   [&](const wivrn::lvrr::stats & stats) { lvrr_dbus::on_headset_stats(stats); },
 		                   [&](const wivrn::to_headset::server_message & message) { lvrr_dbus::on_server_message(message); },
 		           },
 		           *packet);

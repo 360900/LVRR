@@ -187,4 +187,19 @@ struct headset_stats
 	};
 	std::vector<decoder_timing> decoders;
 };
+
+// The PC's side of the statistics, measured by the session for the same period.
+struct pc_stats
+{
+	std::optional<float> game_fps; // new game frames shown per second, nullopt without a game
+	float game_missed_fps;         // compositor frames per second that repeated the game's last frame
+	float encoder_skipped_fps;     // composited frames per second the encoders were too busy for
+};
+
+// Session to main process only.
+struct stats
+{
+	headset_stats headset;
+	pc_stats pc;
+};
 } // namespace wivrn::lvrr

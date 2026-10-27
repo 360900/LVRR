@@ -417,8 +417,9 @@ json to_json(const lvrr::headset_settings & settings)
 	};
 }
 
-json to_json(const lvrr::headset_stats & stats)
+json to_json(const lvrr::stats & all)
 {
+	const auto & stats = all.headset;
 	json decoders = json::array();
 	for (const auto & d: stats.decoders)
 		decoders.push_back({
@@ -439,6 +440,9 @@ json to_json(const lvrr::headset_stats & stats)
 	        {"battery", stats.battery ? json(*stats.battery) : json(nullptr)},
 	        {"charging", stats.charging},
 	        {"decoders", decoders},
+	        {"game_fps", all.pc.game_fps ? json(*all.pc.game_fps) : json(nullptr)},
+	        {"game_missed_fps", all.pc.game_missed_fps},
+	        {"encoder_skipped_fps", all.pc.encoder_skipped_fps},
 	};
 }
 
@@ -534,7 +538,7 @@ void on_headset_settings(const lvrr::headset_settings & settings)
 	}
 }
 
-void on_headset_stats(const lvrr::headset_stats & stats)
+void on_headset_stats(const lvrr::stats & stats)
 {
 	wivrn_server_set_headset_stats(dbus_server, to_json(stats).dump().c_str());
 }

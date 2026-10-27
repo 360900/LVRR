@@ -12,6 +12,9 @@
   <elements>
     <rectangle padding="12" flex_direction="column" gap="4" min_width="300" color="background(opacity-0.75)" border_color="outline" border="2" round="8">
       <Stat id="refresh_rate" translation="LVRR.PERF.REFRESH_RATE" />
+      <Stat id="game_fps" translation="LVRR.PERF.GAME_FPS" />
+      <Stat id="game_missed" translation="LVRR.PERF.GAME_MISSED" />
+      <Stat id="encoder_skipped" translation="LVRR.PERF.ENCODER_SKIPPED" />
       <Stat id="latency" translation="LVRR.PERF.LATENCY" />
       <Stat id="encode" translation="LVRR.PERF.ENCODE" />
       <Stat id="network" translation="LVRR.PERF.NETWORK" />

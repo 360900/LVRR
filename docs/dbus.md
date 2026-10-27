@@ -67,6 +67,7 @@ When that headset connects, the server sends the pending changes. Once the heads
 - Times are in milliseconds, network rates in bit/s.
 - `decoders` has one entry per video stream.
 - `battery` is the headset's, from 0 to 1, or null when unknown; `charging` is a boolean.
+- Measured on the PC, per second: `game_fps` is the main XR application's new frames shown, null without one; `game_missed_fps` is the compositor frames that repeated its last frame; `encoder_skipped_fps` is the frames the encoders were still too busy for.
 
 ## Session
 

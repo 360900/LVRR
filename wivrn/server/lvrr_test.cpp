@@ -128,9 +128,9 @@ lvrr::headset_settings example_settings()
 	};
 }
 
-lvrr::headset_stats example_stats()
+lvrr::stats example_stats()
 {
-	return {
+	lvrr::headset_stats headset{
 	        .cpu_time_ms = 4.2f,
 	        .gpu_time_ms = 1.5f,
 	        .rx_bps = 48e6f,
@@ -143,6 +143,10 @@ lvrr::headset_stats example_stats()
 	                {.encode_ms = 3, .send_ms = 1, .network_ms = 4, .decode_ms = 5, .display_ms = 9, .total_ms = 22},
 	                {.encode_ms = 3, .send_ms = 1, .network_ms = 4, .decode_ms = 5, .display_ms = 9, .total_ms = 22},
 	        },
+	};
+	return {
+	        .headset = std::move(headset),
+	        .pc = {.game_fps = 88, .game_missed_fps = 2, .encoder_skipped_fps = 0.5f},
 	};
 }
 
@@ -177,7 +181,7 @@ int main(int argc, char ** argv)
 	auto settings = example_settings();
 	check(lvrr_dbus::to_json(round_trip(settings)) == lvrr_dbus::to_json(settings), "headset_settings round trip");
 	auto stats = example_stats();
-	check(lvrr_dbus::to_json(round_trip(stats)) == lvrr_dbus::to_json(stats), "headset_stats round trip");
+	check(lvrr_dbus::to_json(round_trip(stats)) == lvrr_dbus::to_json(stats), "stats round trip");
 	auto request = round_trip(lvrr::set_headset_settings{.request_id = 3, .config = {.bitrate_bps = 30'000'000}});
 	check(request.request_id == 3 and request.config.bitrate_bps == 30'000'000u and not request.config.codec, "set_headset_settings round trip");
 

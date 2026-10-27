@@ -2,6 +2,9 @@
   "LVRR": {
     "PERF": {
       "REFRESH_RATE": "Refresh rate",
+      "GAME_FPS": "Game",
+      "GAME_MISSED": "Missed frames",
+      "ENCODER_SKIPPED": "Skipped by encoder",
       "LATENCY": "Latency",
       "ENCODE": "Encoding",
       "NETWORK": "Network",

@@ -34,8 +34,16 @@ const REFRESH: Duration = Duration::from_millis(500);
 type Field = fn(&HeadsetStats) -> String;
 
 /// Label ids in perf_overlay.xml and their values
-const FIELDS: [(&str, Field); 7] = [
+const FIELDS: [(&str, Field); 10] = [
     ("refresh_rate", |s| format!("{:.0} Hz", s.display_hz)),
+    ("game_fps", |s| {
+        s.game_fps
+            .map_or_else(|| "-".to_string(), |fps| format!("{fps:.0} fps"))
+    }),
+    ("game_missed", |s| format!("{:.0}/s", s.game_missed_fps)),
+    ("encoder_skipped", |s| {
+        format!("{:.0}/s", s.encoder_skipped_fps)
+    }),
     ("latency", |s| format!("{:.0} ms", s.latency_ms())),
     ("encode", |s| ms(s, |d| d.encode_ms)),
     ("network", |s| ms(s, |d| d.send_ms + d.network_ms)),

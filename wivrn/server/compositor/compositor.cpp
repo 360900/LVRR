@@ -285,6 +285,8 @@ xrt_result_t compositor::layer_commit(xrt_graphics_sync_handle_t sync_handle)
 	if (encode_request >= 0 // encoders have not picked up the previous frame
 	    or not session.connected() or not session.get_offset())
 	{
+		if (encode_request >= 0 and session.connected())
+			++skipped_frames;
 		comp_frame_clear_locked(&frame.rendering);
 		return XRT_SUCCESS;
 	}

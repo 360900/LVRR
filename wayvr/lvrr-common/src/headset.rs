@@ -196,6 +196,12 @@ pub struct HeadsetStats {
 	pub battery: Option<f32>,
 	pub charging: bool,
 	pub decoders: Vec<DecoderTiming>,
+	/// Measured on the PC: the main XR application's new frames shown per second
+	pub game_fps: Option<f32>,
+	/// Compositor frames per second that repeated the game's last frame
+	pub game_missed_fps: f32,
+	/// Frames per second the encoders were too busy for
+	pub encoder_skipped_fps: f32,
 }
 
 impl HeadsetStats {
@@ -239,6 +245,8 @@ mod tests {
 		assert_eq!(stats.slowest_decoder().unwrap().network_ms, 4.0);
 		assert_eq!(stats.battery, Some(0.8));
 		assert!(stats.charging);
+		assert_eq!(stats.game_fps, Some(88.0));
+		assert_eq!(stats.encoder_skipped_fps, 0.5);
 	}
 
 	// Without a headset, the server sends the last one's settings with the changes waiting for it

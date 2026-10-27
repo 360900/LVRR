@@ -113,6 +113,9 @@
       }
     ],
     "display_hz": 90.0,
+    "encoder_skipped_fps": 0.5,
+    "game_fps": 88.0,
+    "game_missed_fps": 2.0,
     "gpu_time_ms": 1.5,
     "motion_to_photon_ms": 38.0,
     "rx_bps": 48000000.0,

@@ -57,7 +57,7 @@ using packets = std::variant<
         headset_disconnected,
         server_error,
         wivrn::lvrr::headset_settings,
-        wivrn::lvrr::headset_stats,
+        wivrn::lvrr::stats,
         wivrn::to_headset::server_message>;
 } // namespace from_monado
 

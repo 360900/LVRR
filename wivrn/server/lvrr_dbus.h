@@ -44,7 +44,7 @@ struct hooks
 void setup(WivrnServer *, hooks);
 
 void on_headset_settings(const wivrn::lvrr::headset_settings &);
-void on_headset_stats(const wivrn::lvrr::headset_stats &);
+void on_headset_stats(const wivrn::lvrr::stats &);
 void on_server_message(const wivrn::to_headset::server_message &);
 void on_headset_disconnected();
 // A session starts for the headset with this public key
@@ -54,7 +54,7 @@ void on_key_revoked(const std::string & public_key);
 
 // Exposed for tests
 nlohmann::json to_json(const wivrn::lvrr::headset_settings &);
-nlohmann::json to_json(const wivrn::lvrr::headset_stats &);
+nlohmann::json to_json(const wivrn::lvrr::stats &);
 // Throws std::invalid_argument on unknown keys or wrong types
 wivrn::lvrr::headset_config config_from_json(const nlohmann::json &);
 } // namespace lvrr_dbus

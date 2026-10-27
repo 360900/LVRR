@@ -23,6 +23,7 @@
 #include "util/u_var.h"
 #include "utils/method.h"
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cmath>
 #include <ranges>
@@ -35,7 +36,9 @@ namespace wivrn
 
 class app_pacer : public u_pacing_app
 {
+	friend class pacing_app_factory;
 	pacing_app_factory & parent;
+	const bool is_overlay;
 	int64_t frame_id = 0;
 	int64_t compositor_display_time = 0;
 	int64_t last_display_time = 0;
@@ -47,6 +50,11 @@ class app_pacer : public u_pacing_app
 	int64_t compositor_time = 0;
 
 	u_var_draggable_f32 min_margin_ms;
+
+	// LVRR: frame statistics, latched is only called by the system compositor's thread
+	int64_t last_latched = -1;
+	std::atomic<uint32_t> shown = 0;
+	std::atomic<uint32_t> repeated = 0;
 
 	struct frame
 	{
@@ -65,7 +73,7 @@ class app_pacer : public u_pacing_app
 public:
 	using base_t = u_pacing_app;
 
-	app_pacer(pacing_app_factory & parent) :
+	app_pacer(pacing_app_factory & parent, bool is_overlay) :
 	        u_pacing_app{
 	                .predict = method_pointer<&app_pacer::predict>,
 	                .mark_point = method_pointer<&app_pacer::mark_point>,
@@ -78,6 +86,7 @@ public:
 	                .destroy = method_pointer<&app_pacer::destroy>,
 	        },
 	        parent(parent),
+	        is_overlay(is_overlay),
 	        min_margin_ms{
 	                .val = debug_get_float_option_min_margin_ms(),
 	                .step = 0.1,
@@ -104,7 +113,14 @@ public:
 	void mark_discarded(int64_t frame_id, int64_t when_ns);
 	void mark_delivered(int64_t frame_id, int64_t when_ns, int64_t display_time_ns);
 	void mark_gpu_done(int64_t frame_id, int64_t when_ns);
-	void latched(int64_t frame_id, int64_t when_ns, int64_t system_frame_id) {}
+	void latched(int64_t frame_id, int64_t when_ns, int64_t system_frame_id)
+	{
+		if (frame_id == last_latched)
+			++repeated;
+		else
+			++shown;
+		last_latched = frame_id;
+	}
 	void retired(int64_t frame_id, int64_t when_ns) {}
 	void info(int64_t predicted_display_time_ns,
 	          int64_t predicted_display_period_ns,
@@ -233,11 +249,25 @@ void pacing_app_factory::remove_app(app_pacer * app)
 	std::erase(app_pacers, app);
 }
 
-xrt_result_t pacing_app_factory::create(struct u_pacing_app ** out_upa)
+xrt_result_t pacing_app_factory::create(bool is_overlay, struct u_pacing_app ** out_upa)
 {
 	std::lock_guard lock(mutex);
-	*out_upa = app_pacers.emplace_back(new app_pacer(*this));
+	*out_upa = app_pacers.emplace_back(new app_pacer(*this, is_overlay));
 	return XRT_SUCCESS;
+}
+
+pacing_app_factory::game_frames pacing_app_factory::take_game_frames()
+{
+	std::lock_guard lock(mutex);
+	game_frames result{};
+	for (app_pacer * pacer: app_pacers)
+	{
+		if (pacer->is_overlay)
+			continue;
+		result.shown += pacer->shown.exchange(0);
+		result.repeated += pacer->repeated.exchange(0);
+	}
+	return result;
 }
 
 void pacing_app_factory::destroy()
