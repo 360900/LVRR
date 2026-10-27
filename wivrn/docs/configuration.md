@@ -145,6 +145,17 @@ no permission and is always available. Only the digested controller state is for
 (buttons, two sticks, analog triggers and a d-pad), so device specific features such as gyro,
 adaptive triggers or the touchpad are not available.
 
+## `usb-auto-connect`
+Default value: `false`
+
+Needs `adb`, and USB debugging allowed on the headset.
+
+When a headset with the app installed shows up in `adb` while the server waits for a headset
+(plugged in, or the adb connection coming back after a drop), the server sets up the adb tunnel
+and starts the app on the headset, which connects to it. It does this once each time the headset
+shows up, so quitting the app doesn't start it again. A headset that shows up during a session is
+connected if the session ends within a minute.
+
 ## `debug-gui`
 Default value: `false`
 

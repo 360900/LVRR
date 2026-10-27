@@ -103,6 +103,7 @@ if (WIVRN_BUILD_SERVER)
 			hostname.cpp
 			lvrr_dbus.cpp
 			lvrr_offline.cpp
+			lvrr_usb.cpp
 			main.cpp
 			sleep_inhibitor.cpp
 			start_application.cpp

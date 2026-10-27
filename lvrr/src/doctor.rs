@@ -505,6 +505,7 @@ fn checks(root: &Path) -> Vec<Check> {
         checks::openvr(root, &config),
         checks::steam(root),
         checks::uinput(&config),
+        checks::usb(&config),
         checks::pipewire(),
     ]
 }

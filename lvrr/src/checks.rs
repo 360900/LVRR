@@ -324,6 +324,22 @@ pub fn uinput(config: &Value) -> Check {
     check("uinput", "Input forwarding", status, message.to_string())
 }
 
+pub fn usb(config: &Value) -> Check {
+    let auto = config.get("usb-auto-connect").and_then(Value::as_bool) == Some(true);
+    let (status, message) = match (auto, crate::which("adb").is_some()) {
+        (false, _) => (Status::Ok, "Connecting by USB when plugged in is off."),
+        (true, true) => (
+            Status::Ok,
+            "The headset connects when it's plugged in, if USB debugging is allowed.",
+        ),
+        (true, false) => (
+            Status::Warn,
+            "Connecting by USB when plugged in is on but adb isn't installed, install android-tools.",
+        ),
+    };
+    check("usb", "USB", status, message.to_string())
+}
+
 pub fn pipewire() -> Check {
     let dir = env::var_os("PIPEWIRE_RUNTIME_DIR").or_else(|| env::var_os("XDG_RUNTIME_DIR"));
     let running =

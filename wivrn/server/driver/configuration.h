@@ -60,6 +60,7 @@ struct configuration
 	std::optional<int64_t> lh_max_extrapolation;
 	std::optional<float> lh_stick_deadzone;
 	bool hid_forwarding = false;
+	bool usb_auto_connect = false;
 	bool tcp_only = false;
 	int port = wivrn::default_port;
 	std::string hostname = wivrn::hostname();

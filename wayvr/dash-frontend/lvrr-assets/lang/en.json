@@ -177,6 +177,7 @@
       "ENCODER": "Video encoder",
       "ENCODER_CUSTOM": "Custom (config file)",
       "HID_FORWARDING": "Accept keyboard, mouse and gamepad from the headset",
+      "USB_AUTO_CONNECT": "Connect the headset when it's plugged in (needs adb and USB debugging)",
       "STEAMVR_LH": "SteamVR Lighthouse devices",
       "LH_EXTRAPOLATION": "Lighthouse pose extrapolation limit (ms)",
       "LH_DEADZONE": "Lighthouse stick deadzone",

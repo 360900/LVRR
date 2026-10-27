@@ -620,6 +620,7 @@ impl<T: 'static> TabLvrrPc<T> {
 		// toggles
 		for (key, label) in [
 			("hid-forwarding", "LVRR.PC.HID_FORWARDING"),
+			("usb-auto-connect", "LVRR.PC.USB_AUTO_CONNECT"),
 			("use-steamvr-lh", "LVRR.PC.STEAMVR_LH"),
 		] {
 			let tasks = self.tasks.clone();

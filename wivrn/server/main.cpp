@@ -36,6 +36,7 @@
 #include "exit_codes.h"
 #include "ipc_server_cb.h"
 #include "lvrr_dbus.h"
+#include "lvrr_usb.h"
 #include "protocol_version.h"
 #include "start_application.h"
 #include "start_systemd_unit.h"
@@ -382,6 +383,17 @@ void start_publishing()
 void stop_publishing()
 {
 	publisher.reset();
+}
+
+void configure_usb()
+{
+	auto config = configuration();
+	lvrr_usb::configure(config.usb_auto_connect,
+	                    {
+	                            .port = config.port,
+	                            .idle = [] { return listener != nullptr; },
+	                            .pin = [] { return pin; },
+	                    });
 }
 
 void update_fsm()
@@ -808,6 +820,7 @@ void on_json_configuration(WivrnServer * server, const GParamSpec * pspec, gpoin
 		std::cerr << "Failed to save configuration: " << ec.message() << std::endl;
 
 	wivrn_server_set_steam_command(dbus_server, steam_command().c_str());
+	configure_usb();
 }
 
 void expose_known_keys_on_dbus()
@@ -1037,6 +1050,7 @@ int inner_main(int argc, char * argv[], bool show_instructions)
 
 	// Initialize listener
 	start_listening();
+	configure_usb();
 
 	// Catch SIGINT & SIGTERM
 	g_unix_signal_add(SIGINT, &sigint, (void *)SIGINT);
@@ -1059,6 +1073,7 @@ int inner_main(int argc, char * argv[], bool show_instructions)
 	g_main_loop_run(main_loop);
 
 	// Cleanup
+	lvrr_usb::configure(false, {});
 	notify_uninit();
 	runtime_setter.reset();
 	stop_publishing();
