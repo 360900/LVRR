@@ -789,6 +789,8 @@ struct handshake
 {
 	// -1 if stream socket should not be used
 	int stream_port;
+	// LVRR: the PC's MAC address, for wake-on-LAN
+	std::optional<std::array<uint8_t, 6>> lvrr_mac;
 };
 
 struct server_message

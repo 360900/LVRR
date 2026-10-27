@@ -271,6 +271,9 @@ class lobby : public scene_impl<lobby>
 	std::chrono::steady_clock::time_point lvrr_retry_at{};
 	void lvrr_focused();
 	void lvrr_connected();
+	void lvrr_remember_mac(const std::optional<std::array<uint8_t, 6>> & mac);
+	void lvrr_wake(const configuration::server_data & server);
+	std::map<std::string, std::chrono::steady_clock::time_point> lvrr_woken; // cookie, when Wake was pressed
 	bool lvrr_connect_failed();
 	bool lvrr_stream_ended();
 	void lvrr_tick();

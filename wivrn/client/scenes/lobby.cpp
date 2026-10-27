@@ -876,6 +876,7 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 			auto session = async_session.get();
 			if (session)
 			{
+				lvrr_remember_mac(session->lvrr_mac);
 				next_scene = stream::create(std::move(session), 1'000'000'000.f / frame_state.predictedDisplayPeriod, server_name, *this);
 				lvrr_connected();
 			}

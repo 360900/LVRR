@@ -27,6 +27,10 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <chrono>
+#include <cstring>
+#include <ifaddrs.h>
+#include <linux/if_packet.h>
+#include <net/if.h>
 #include <poll.h>
 #include <regex>
 #include <sys/socket.h>
@@ -54,6 +58,38 @@ static std::string clean_key(std::string key)
 	key = std::regex_replace(key, whitespace, "");
 
 	return key;
+}
+
+// LVRR: the MAC of the interface the headset reached us through, for wake-on-LAN
+static std::optional<std::array<uint8_t, 6>> local_mac(const sockaddr_in6 & local)
+{
+	ifaddrs * addrs;
+	if (getifaddrs(&addrs) < 0)
+		return std::nullopt;
+
+	std::string name;
+	const bool v4 = IN6_IS_ADDR_V4MAPPED(&local.sin6_addr);
+	for (auto i = addrs; i and name.empty(); i = i->ifa_next)
+	{
+		if (not i->ifa_addr or i->ifa_flags & IFF_LOOPBACK)
+			continue;
+		if (v4 and i->ifa_addr->sa_family == AF_INET and memcmp(&((sockaddr_in *)i->ifa_addr)->sin_addr, local.sin6_addr.s6_addr + 12, 4) == 0)
+			name = i->ifa_name;
+		else if (not v4 and i->ifa_addr->sa_family == AF_INET6 and memcmp(&((sockaddr_in6 *)i->ifa_addr)->sin6_addr, &local.sin6_addr, 16) == 0)
+			name = i->ifa_name;
+	}
+
+	std::optional<std::array<uint8_t, 6>> mac;
+	for (auto i = addrs; i and not name.empty(); i = i->ifa_next)
+	{
+		if (not i->ifa_addr or i->ifa_addr->sa_family != AF_PACKET or name != i->ifa_name)
+			continue;
+		if (const auto ll = (sockaddr_ll *)i->ifa_addr; ll->sll_halen == 6)
+			std::copy_n(ll->sll_addr, 6, mac.emplace().begin());
+		break;
+	}
+	freeifaddrs(addrs);
+	return mac;
 }
 
 wivrn::incorrect_pin::incorrect_pin() :
@@ -252,7 +288,8 @@ void wivrn::wivrn_connection::init(std::stop_token stop_token, std::function<voi
 	if (not std::holds_alternative<from_headset::crypto_handshake>(receive().first))
 		throw std::runtime_error("No handshake received from client");
 
-	control.send(to_headset::handshake{.stream_port = port});
+	const auto mac = local_mac(server_address);
+	control.send(to_headset::handshake{.stream_port = port, .lvrr_mac = mac});
 
 	auto [stream_handshake, client_port] = receive(10s, true);
 
@@ -274,7 +311,7 @@ void wivrn::wivrn_connection::init(std::stop_token stop_token, std::function<voi
 		stream = decltype(stream)(-1);
 	}
 
-	control.send(to_headset::handshake{.stream_port = port});
+	control.send(to_headset::handshake{.stream_port = port, .lvrr_mac = mac});
 
 	info_packet = std::get<from_headset::headset_info_packet>(receive(10s).first);
 

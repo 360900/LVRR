@@ -23,6 +23,8 @@
 #include "utils/json_string.h"
 #include "wivrn_packets.h"
 
+#include <algorithm>
+#include <cstdio>
 #include <fstream>
 #include <functional>
 #include <magic_enum.hpp>
@@ -150,6 +152,24 @@ config_field scalar(const char * key, T configuration::* member)
 			        c.*member = *v; },
 	};
 }
+
+// LVRR: "aa:bb:cc:dd:ee:ff"
+std::string mac_string(const std::array<uint8_t, 6> & mac)
+{
+	char s[18];
+	snprintf(s, sizeof(s), "%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+	return s;
+}
+
+std::optional<std::array<uint8_t, 6>> parse_mac(std::string_view s)
+{
+	std::array<uint8_t, 6> mac;
+	unsigned int b[6];
+	if (s.size() != 17 or sscanf(std::string(s).c_str(), "%2x:%2x:%2x:%2x:%2x:%2x", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) != 6)
+		return std::nullopt;
+	std::ranges::copy(b, mac.begin());
+	return mac;
+}
 } // namespace
 
 bool configuration::check_feature(feature f) const
@@ -259,6 +279,8 @@ configuration::configuration(xr::system & system, xr::session & session, const s
 			                .txt = {{"cookie", (std::string)i["cookie"]}}
 
 			        }};
+			if (std::string_view mac; i["mac"].get(mac) == simdjson::SUCCESS)
+				data.mac = parse_mac(mac);
 			servers.emplace(data.service.txt["cookie"], data);
 		}
 
@@ -371,7 +393,7 @@ void configuration::save()
 
 	for (auto & [cookie, server_data]: servers)
 	{
-		if (server_data.autoconnect or server_data.manual)
+		if (server_data.autoconnect or server_data.manual or server_data.mac)
 		{
 			ss << "{";
 			ss << "\"autoconnect\":" << std::boolalpha << server_data.autoconnect << ",";
@@ -380,6 +402,8 @@ void configuration::save()
 			ss << "\"hostname\":" << json_string(server_data.service.hostname) << ",";
 			ss << "\"port\":" << server_data.service.port << ",";
 			ss << "\"tcp_only\":" << std::boolalpha << server_data.service.tcp_only << ",";
+			if (server_data.mac)
+				ss << "\"mac\":" << json_string(mac_string(*server_data.mac)) << ",";
 			ss << "\"cookie\":" << json_string(cookie);
 			ss << "},";
 		}

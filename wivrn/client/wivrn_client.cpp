@@ -125,6 +125,7 @@ void wivrn_session::handshake(T address, bool tcp_only, crypto::key & headset_ke
 			send_control(from_headset::crypto_handshake{});
 
 			to_headset::handshake h{std::get<to_headset::handshake>(receive(10s))};
+			lvrr_mac = h.lvrr_mac;
 			if (h.stream_port > 0 && !tcp_only)
 			{
 				stream = decltype(stream)();
@@ -177,6 +178,7 @@ void wivrn_session::handshake(T address, bool tcp_only, crypto::key & headset_ke
 			send_control(from_headset::crypto_handshake{});
 
 			to_headset::handshake h{std::get<to_headset::handshake>(receive(10s))};
+			lvrr_mac = h.lvrr_mac;
 			if (h.stream_port > 0 && !tcp_only)
 			{
 				stream = decltype(stream)();

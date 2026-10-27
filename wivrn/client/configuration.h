@@ -68,6 +68,9 @@ public:
 		bool compatible;
 
 		wivrn_discover::service service;
+
+		// LVRR: learnt when connecting, for wake-on-LAN
+		std::optional<std::array<uint8_t, 6>> mac;
 	};
 
 	std::map<std::string, server_data> servers;

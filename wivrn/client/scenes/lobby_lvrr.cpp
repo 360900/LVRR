@@ -29,15 +29,22 @@
 #include "utils/i18n.h"
 #include "version.h"
 #include <IconsFontAwesome7.h>
+#include <algorithm>
+#include <arpa/inet.h>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <ifaddrs.h>
 #include <imspinner.h>
+#include <net/if.h>
 #include <spdlog/fmt/fmt.h>
 #include <spdlog/spdlog.h>
 #include <string>
+#include <sys/socket.h>
+#include <unistd.h>
 
 // The lobby only finds and connects to a PC. Once connected, the WayVR dashboard on the PC
 // shows every setting, so the lobby waits for its video. When the server restarts the session
@@ -121,6 +128,65 @@ void scenes::lobby::lvrr_connected()
 	config.save();
 	std::ofstream{stamp};
 	spdlog::info("Autoconnect turned on for {}", server->second.service.name);
+}
+
+void scenes::lobby::lvrr_remember_mac(const std::optional<std::array<uint8_t, 6>> & mac)
+{
+	if (not mac or not lvrr_server)
+		return;
+
+	auto cookie = lvrr_server->service.txt.find("cookie");
+	if (cookie == lvrr_server->service.txt.end())
+		return;
+
+	auto & config = application::get_config();
+	auto server = config.servers.find(cookie->second);
+	if (server == config.servers.end() or server->second.mac == mac)
+		return;
+
+	server->second.mac = mac;
+	config.save();
+}
+
+void scenes::lobby::lvrr_wake(const configuration::server_data & server)
+{
+	if (not server.mac)
+		return;
+
+	// magic packet: 6 times 0xff, then the MAC 16 times
+	std::array<uint8_t, 102> packet;
+	std::fill_n(packet.begin(), 6, 0xff);
+	for (int i = 0; i < 16; i++)
+		std::ranges::copy(*server.mac, packet.begin() + 6 + i * 6);
+
+	const int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+	if (fd < 0)
+	{
+		spdlog::warn("Cannot wake {}: {}", server.service.name, strerror(errno));
+		return;
+	}
+	const int yes = 1;
+	setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &yes, sizeof(yes));
+
+	// the limited broadcast only leaves through the default route, also send to each network's own
+	std::vector<in_addr> targets{{htonl(INADDR_BROADCAST)}};
+	if (ifaddrs * addrs; getifaddrs(&addrs) == 0)
+	{
+		for (auto i = addrs; i; i = i->ifa_next)
+			if (i->ifa_broadaddr and i->ifa_addr and i->ifa_addr->sa_family == AF_INET and i->ifa_flags & IFF_BROADCAST and not(i->ifa_flags & IFF_LOOPBACK))
+				targets.push_back(((sockaddr_in *)i->ifa_broadaddr)->sin_addr);
+		freeifaddrs(addrs);
+	}
+
+	int sent = 0;
+	for (const auto & target: targets)
+	{
+		sockaddr_in to{.sin_family = AF_INET, .sin_port = htons(9), .sin_addr = target};
+		if (sendto(fd, packet.data(), packet.size(), 0, (sockaddr *)&to, sizeof(to)) == ssize_t(packet.size()))
+			sent++;
+	}
+	close(fd);
+	spdlog::info("Sent {} wake-on-LAN packets to {}", sent, server.service.name);
 }
 
 bool scenes::lobby::lvrr_connect_failed()

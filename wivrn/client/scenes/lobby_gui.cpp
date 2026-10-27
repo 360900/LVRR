@@ -395,6 +395,7 @@ void scenes::lobby::gui_server_list()
 	// open below at this scope so OpenPopup and begin_modal hash to the same id
 	bool open_add_edit = false;
 	bool open_delete = false;
+	std::optional<std::string> forget_cookie;
 
 	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ui::metrics::card_item_spacing);
 	ui::begin_list_card("##servers");
@@ -444,14 +445,31 @@ void scenes::lobby::gui_server_list()
 			// incompatible: discovered but protocol version differs, otherwise still searching
 			const bool reachable = (data.visible and data.compatible) or data.manual;
 			const bool incompatible = data.visible and data.service.txt.contains("protocol") and not data.compatible;
+			// LVRR: a remembered PC that is off can be woken up, then we wait for it to show up
+			const bool wakeable = not reachable and not incompatible and data.mac;
+			if (reachable)
+				lvrr_woken.erase(cookie);
+			const auto woken = lvrr_woken.find(cookie);
+			const bool waking = wakeable and woken != lvrr_woken.end() and std::chrono::steady_clock::now() - woken->second < std::chrono::minutes(2);
+			const bool wake_failed = wakeable and woken != lvrr_woken.end() and not waking;
 			const float gap = ImGui::GetStyle().ItemSpacing.x;
 			const float bh = ImGui::GetFrameHeight() * ui::metrics::control_height;
 			const std::string sub = fmt::format("{} : {}", data.service.hostname, data.service.port);
 
 			// trailing controls [Auto chip] [Connect] [menu], measured up front to exclude from the row click area
 			const char * c_icon = reachable ? ICON_FA_PLAY : (incompatible ? ICON_FA_TRIANGLE_EXCLAMATION : ICON_FA_MAGNIFYING_GLASS);
-			const std::string c_label = ui::icon_label(c_icon, reachable ? _("Connect") : (incompatible ? _C("button label when the server has an incompatible version", "Incompatible") : _C("button label when the server is known but not visible", "Searching…")));
-			const std::string c_tooltip = reachable ? std::string{} : (incompatible ? _("Incompatible server version") : _("Looking for this server on your network"));
+			std::string c_label = ui::icon_label(c_icon, reachable ? _("Connect") : (incompatible ? _C("button label when the server has an incompatible version", "Incompatible") : _C("button label when the server is known but not visible", "Searching…")));
+			std::string c_tooltip = reachable ? std::string{} : (incompatible ? _("Incompatible server version") : _("Looking for this server on your network"));
+			if (wakeable)
+			{
+				c_label = ui::icon_label(ICON_FA_POWER_OFF, waking ? _("Waking…") : _("Wake"));
+				if (waking)
+					c_tooltip = _("Waiting for the PC to start");
+				else if (wake_failed)
+					c_tooltip = _("The PC didn't respond. Check that wake-on-LAN is on in its BIOS and on its network card.");
+				else
+					c_tooltip = _("Not found on your network, turn it on with wake-on-LAN");
+			}
 			const float cw = ui::button_width(c_label);
 			const std::string chip_label = ui::icon_label(ICON_FA_BOLT, _C("chip displayed in server list when autoconnect is enabled", "Auto"));
 			const ImVec2 chip_sz = ui::chip_size(chip_label);
@@ -476,12 +494,16 @@ void scenes::lobby::gui_server_list()
 			const std::string auto_l = _("Autoconnect");
 			const std::string edit_l = _C("item in action menu", "Edit server");
 			const std::string del_l = _C("item in action menu", "Delete server");
+			const std::string wake_l = _C("item in action menu", "Wake PC");
+			const std::string forget_l = _C("item in action menu", "Forget server");
 			std::vector<ui::action_item> actions;
 			ImGui::SetCursorScreenPos(row.trailing(x, {bh, bh}));
 			if (data.manual)
 			{
 				actions.push_back({ICON_FA_PEN, edit_l.c_str(), false, false});
 				actions.push_back({ICON_FA_TRASH, del_l.c_str(), true, false});
+				if (data.mac)
+					actions.push_back({ICON_FA_POWER_OFF, wake_l.c_str(), false, false});
 				switch (ui::action_menu("##menu", ICON_FA_ELLIPSIS_VERTICAL, actions))
 				{
 					case 0:
@@ -496,16 +518,25 @@ void scenes::lobby::gui_server_list()
 						delete_server_cookie = cookie;
 						open_delete = true;
 						break;
+					case 2:
+						lvrr_wake(data);
+						break;
 				}
 			}
 			else
 			{
 				actions.push_back({ICON_FA_BOLT, auto_l.c_str(), false, data.autoconnect});
+				// LVRR: PCs with a known MAC are remembered, let them go
+				if (data.mac)
+					actions.push_back({ICON_FA_TRASH, forget_l.c_str(), true, false});
 				switch (ui::action_menu("##menu", ICON_FA_ELLIPSIS_VERTICAL, actions))
 				{
 					case 0:
 						data.autoconnect = not data.autoconnect;
 						config.save();
+						break;
+					case 1:
+						forget_cookie = cookie;
 						break;
 				}
 			}
@@ -513,10 +544,16 @@ void scenes::lobby::gui_server_list()
 
 			// connect / searching / incompatible
 			ImGui::SetCursorScreenPos(row.trailing(x, {cw, bh}));
-			ImGui::BeginDisabled(not reachable);
+			ImGui::BeginDisabled(not reachable and (not wakeable or waking));
 			if (ui::button(c_label, reachable ? ui::button_style::primary : ui::button_style::secondary, {cw, 0}))
 			{
-				connect(data);
+				if (wakeable)
+				{
+					lvrr_wake(data);
+					lvrr_woken[cookie] = std::chrono::steady_clock::now();
+				}
+				else
+					connect(data);
 				// popup opened at window scope below, outside begin_card's PushID so the id matches BeginPopupModal
 			}
 			if (not c_tooltip.empty() and ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -538,6 +575,12 @@ void scenes::lobby::gui_server_list()
 		ui::end_card();
 	}
 	ImGui::PopStyleVar();
+
+	if (forget_cookie)
+	{
+		config.servers.erase(*forget_cookie);
+		config.save();
+	}
 
 	if (open_add_edit)
 		ImGui::OpenPopup("add or edit server");

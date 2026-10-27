@@ -54,6 +54,8 @@ private:
 
 public:
 	std::variant<in_addr, in6_addr> address;
+	// LVRR: the PC's MAC address, for wake-on-LAN
+	std::optional<std::array<uint8_t, 6>> lvrr_mac;
 
 	wivrn_session(sockaddr_in6 address, bool tcp_only, crypto::key & headset_keypair, std::function<std::string(int fd)> pin_enter);
 	wivrn_session(sockaddr_in address, bool tcp_only, crypto::key & headset_keypair, std::function<std::string(int fd)> pin_enter);
