@@ -81,8 +81,37 @@ pub(super) fn apply(
     vibration: Vibration,
 ) -> xr::Result<()> {
     match vibration.to_xr() {
-        Some(vibration) => action.apply_feedback(session, hand, &vibration),
+        Some(vibration) => apply_vibration(session, action, hand, &vibration),
         None => Ok(()),
+    }
+}
+
+/// Like `xr::Action::apply_feedback`, but passes the runtime a pointer to the whole struct.
+/// `apply_feedback` takes `&HapticBase`, which only covers the header, so the runtime reading
+/// the vibration fields through it is undefined behavior.
+pub(super) fn apply_vibration<G>(
+    session: &xr::Session<G>,
+    action: &xr::Action<xr::Haptic>,
+    hand: xr::Path,
+    vibration: &xr::HapticVibration,
+) -> xr::Result<()> {
+    let info = xr::sys::HapticActionInfo {
+        ty: xr::sys::HapticActionInfo::TYPE,
+        next: std::ptr::null(),
+        action: action.as_raw(),
+        subaction_path: hand,
+    };
+    let result = unsafe {
+        (action.instance().fp().apply_haptic_feedback)(
+            session.as_raw(),
+            &info,
+            std::ptr::from_ref(vibration).cast(),
+        )
+    };
+    if result.into_raw() < 0 {
+        Err(result)
+    } else {
+        Ok(())
     }
 }
 

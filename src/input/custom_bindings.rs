@@ -808,9 +808,9 @@ impl DpadData {
                     .amplitude(0.25)
                     .duration(xr::Duration::MIN_HAPTIC)
                     .frequency(xr::FREQUENCY_UNSPECIFIED);
-                let _ = haptic
-                    .apply_feedback(session, subaction_path, &haptic_event)
-                    .inspect_err(|e| error!("Couldn't activate dpad haptic: {e}"));
+                let _ =
+                    super::haptics::apply_vibration(session, haptic, subaction_path, &haptic_event)
+                        .inspect_err(|e| error!("Couldn't activate dpad haptic: {e}"));
             }
         }
 
