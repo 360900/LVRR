@@ -1,3 +1,5 @@
+mod components;
+
 use std::{
     collections::{BTreeMap, HashMap},
     ffi::{CStr, CString},
@@ -14,7 +16,9 @@ use obj::{IndexTuple, ObjData};
 use openvr as vr;
 use openxr as xr;
 
-use crate::input::{BoundPoseType, ProfileData};
+use crate::clientcore::{Injected, Injector};
+use crate::compositor::Compositor;
+use crate::input::{BoundPoseType, ComponentInput, DynSubpath, Input, ProfileData};
 use crate::openxr_data::Hand;
 
 // all render models will use this color
@@ -53,9 +57,22 @@ fn has_model(render_model_name: &CStr) -> bool {
             .is_some()
 }
 
+/// SteamVR's component of the model, if its JSON lists it.
+fn steamvr_component(
+    render_model_name: &CStr,
+    component_name: &CStr,
+) -> Option<(std::sync::Arc<components::ModelInfo>, usize)> {
+    let info = steamvr::components(render_model_name)?;
+    let name = component_name.to_str().ok()?;
+    let index = info.components.iter().position(|(n, _)| n == name)?;
+    Some((info, index))
+}
+
 /// Whether GetComponentState and RenderModelHasComponent know this component.
 fn has_component(render_model_name: &CStr, component_name: &CStr) -> bool {
-    if component_name == DEFAULT_COMPONENT {
+    if steamvr_component(render_model_name, component_name).is_some() {
+        true
+    } else if component_name == DEFAULT_COMPONENT {
         has_model(render_model_name)
     } else {
         // Models without a mesh, like the hand tracking one, still have the pose components.
@@ -65,21 +82,45 @@ fn has_component(render_model_name: &CStr, component_name: &CStr) -> bool {
     }
 }
 
-/// The state of a render model's component, None if the model or component is unknown. Our
-/// meshes are static and have their offsets baked in, so only the pose components aren't at the
-/// device's raw pose.
+/// The state of a render model's component, None if the model or component is unknown.
+///
+/// SteamVR's components move with the controller's input, read through `read` for the
+/// component's hand (`hand`, or the one whose profile names the model). The bundled meshes are
+/// static with their offsets baked in, so only the pose components have a frame of their own.
 pub(crate) fn component_state(
     render_model_name: &CStr,
     component_name: &CStr,
+    hand: Option<Hand>,
+    read: &dyn Fn(Hand, DynSubpath) -> ComponentInput,
+    scroll: bool,
 ) -> Option<vr::RenderModel_ComponentState_t> {
+    if let Some((info, index)) = steamvr_component(render_model_name, component_name) {
+        let hand =
+            hand.or_else(|| profile_for_render_model(render_model_name).map(|(_, hand)| hand));
+        let read_input = |subpath: DynSubpath| {
+            let Some(hand) = hand else {
+                return ComponentInput::default();
+            };
+            let input = read(hand, subpath);
+            // SteamVR names the left Touch controller's menu button system, which OpenXR calls
+            // menu.
+            if !input.active && subpath == DynSubpath::System {
+                read(hand, DynSubpath::Menu)
+            } else {
+                input
+            }
+        };
+        return Some(info.components[index].1.state(&read_input, scroll));
+    }
     if !has_component(render_model_name, component_name) {
         return None;
     }
     let transform = pose_component(component_name)
         .and_then(|ty| pose_component_transform(render_model_name, ty))
         .map_or(xr::Posef::IDENTITY.into(), hmd_matrix);
+    // See components::Component::state for the two transforms.
     Some(vr::RenderModel_ComponentState_t {
-        mTrackingToComponentRenderModel: transform,
+        mTrackingToComponentRenderModel: xr::Posef::IDENTITY.into(),
         mTrackingToComponentLocal: transform,
         uProperties: (vr::EVRComponentProperty::IsVisible | vr::EVRComponentProperty::IsStatic).0,
     })
@@ -266,12 +307,38 @@ fn get_render_model_data(render_model_name: &CStr) -> Option<&RenderModelObjLz4>
         .or_else(|| RENDER_MODELS.get(fallback_model(name)?))
 }
 
-#[derive(Default, macros::InterfaceImpl)]
+#[derive(macros::InterfaceImpl)]
 #[interface = "IVRRenderModels"]
 #[versions(006, 005, 004, 002)]
 pub struct RenderModels {
     vtables: Vtables,
     data: Mutex<RenderModelData>,
+    input: Injected<Input<Compositor>>,
+}
+
+impl RenderModels {
+    pub fn new(injector: &Injector) -> Self {
+        Self {
+            vtables: Default::default(),
+            data: Default::default(),
+            input: injector.inject(),
+        }
+    }
+
+    /// Reads a component's input from the input interface, at rest without one.
+    fn read_input(&self) -> impl Fn(Hand, DynSubpath) -> ComponentInput + '_ {
+        move |hand, subpath| {
+            self.input.get().map_or(ComponentInput::default(), |input| {
+                input.component_input(hand, subpath)
+            })
+        }
+    }
+}
+
+impl Default for RenderModels {
+    fn default() -> Self {
+        Self::new(&Injector::default())
+    }
 }
 
 #[derive(Default)]
@@ -330,57 +397,30 @@ impl vr::IVRRenderModels006_Interface for RenderModels {
 
         has_component(render_model_name, component_name)
     }
+    /// The input is ours, so the controller state the app passes isn't read.
     fn GetComponentState(
         &self,
         render_model_name: *const std::ffi::c_char,
         component_name: *const std::ffi::c_char,
         _: *const vr::VRControllerState_t,
-        _: *const vr::RenderModel_ControllerMode_State_t,
+        mode_state: *const vr::RenderModel_ControllerMode_State_t,
         state: *mut vr::RenderModel_ComponentState_t,
     ) -> bool {
-        let Some(state) = (unsafe { state.as_mut() }) else {
-            return false;
-        };
-        // "If the pchRenderModelName or pchComponentName is invalid, this will return false (and
-        // transforms will be set to identity)."
-        state.mTrackingToComponentRenderModel = xr::Posef::IDENTITY.into();
-        state.mTrackingToComponentLocal = xr::Posef::IDENTITY.into();
-        state.uProperties = 0;
-
-        if render_model_name.is_null() || component_name.is_null() {
-            debug!(
-                "GetComponentState called with null ptr(s): rm={render_model_name:?} comp={component_name:?}"
-            );
-            return false;
-        }
-
-        let render_model_name = unsafe { CStr::from_ptr(render_model_name) };
-        let component_name = unsafe { CStr::from_ptr(component_name) };
-
-        match component_state(render_model_name, component_name) {
-            Some(component_state) => {
-                *state = component_state;
-                true
-            }
-            None => false,
-        }
+        self.component_state(render_model_name, component_name, None, mode_state, state)
     }
     fn GetComponentStateForDevicePath(
         &self,
         render_model_name: *const std::ffi::c_char,
         component_name: *const std::ffi::c_char,
-        _: vr::VRInputValueHandle_t,
-        _: *const vr::RenderModel_ControllerMode_State_t,
+        device_path: vr::VRInputValueHandle_t,
+        mode_state: *const vr::RenderModel_ControllerMode_State_t,
         state: *mut vr::RenderModel_ComponentState_t,
     ) -> bool {
-        // static models only, don't care about state
-        self.GetComponentState(
-            render_model_name,
-            component_name,
-            ptr::null(),
-            ptr::null(),
-            state,
-        )
+        let hand = self
+            .input
+            .get()
+            .and_then(|input| input.hand_for_input_handle(device_path));
+        self.component_state(render_model_name, component_name, hand, mode_state, state)
     }
     fn GetComponentRenderModelName(
         &self,
@@ -399,6 +439,22 @@ impl vr::IVRRenderModels006_Interface for RenderModels {
         let render_model_name = unsafe { CStr::from_ptr(render_model_name) };
         let component_name = unsafe { CStr::from_ptr(component_name) };
 
+        // SteamVR's parts are named after their files, under the model's name.
+        if let Some((info, index)) = steamvr_component(render_model_name, component_name) {
+            let Some(stem) = info.components[index].1.file_stem() else {
+                return 0;
+            };
+            let Ok(name) = CString::new(format!("{}/{stem}", render_model_name.to_string_lossy()))
+            else {
+                return 0;
+            };
+            return cstr_write_out(
+                &name,
+                component_render_model_name,
+                component_render_model_name_len,
+            );
+        }
+
         if component_name != DEFAULT_COMPONENT || !has_model(render_model_name) {
             // unsupported model or component
             return 0;
@@ -413,11 +469,18 @@ impl vr::IVRRenderModels006_Interface for RenderModels {
 
     fn GetComponentButtonMask(
         &self,
-        _: *const std::ffi::c_char,
-        _: *const std::ffi::c_char,
+        render_model_name: *const std::ffi::c_char,
+        component_name: *const std::ffi::c_char,
     ) -> u64 {
-        // Models only have the whole model and pose components here, none of which are buttons.
-        0
+        if render_model_name.is_null() || component_name.is_null() {
+            return 0;
+        }
+        let render_model_name = unsafe { CStr::from_ptr(render_model_name) };
+        let component_name = unsafe { CStr::from_ptr(component_name) };
+        // The bundled models only have the whole model and pose components, none of which are
+        // buttons.
+        steamvr_component(render_model_name, component_name)
+            .map_or(0, |(info, index)| info.components[index].1.button_mask())
     }
     fn GetComponentName(
         &self,
@@ -428,6 +491,16 @@ impl vr::IVRRenderModels006_Interface for RenderModels {
     ) -> u32 {
         if render_model_name.is_null() {
             return 0;
+        }
+
+        if let Some(info) = steamvr::components(unsafe { CStr::from_ptr(render_model_name) }) {
+            let Some((name, _)) = info.components.get(component_index as usize) else {
+                return 0;
+            };
+            let Ok(name) = CString::new(name.as_str()) else {
+                return 0;
+            };
+            return cstr_write_out(&name, component_name, component_name_len);
         }
 
         // even for unknown render models, always act as if there's a valid component
@@ -442,7 +515,9 @@ impl vr::IVRRenderModels006_Interface for RenderModels {
             return 0;
         }
         let render_model_name = unsafe { CStr::from_ptr(render_model_name) };
-        if render_model_name.count_bytes() == 0 {
+        if let Some(info) = steamvr::components(render_model_name) {
+            info.components.len() as u32
+        } else if render_model_name.count_bytes() == 0 {
             0
         } else {
             1 // DEFAULT_COMPONENT
@@ -531,11 +606,10 @@ impl vr::IVRRenderModels006_Interface for RenderModels {
         // decode gets the placeholder too, rather than a model the app won't draw.
         let tex = steamvr::texture_path(tex_id)
             .and_then(|path| {
-                steamvr::load_texture(&path)
-                    .or_else(|| {
-                        warn!("Couldn't load {}, using a plain texture", path.display());
-                        None
-                    })
+                steamvr::load_texture(&path).or_else(|| {
+                    warn!("Couldn't load {}, using a plain texture", path.display());
+                    None
+                })
             })
             .unwrap_or_else(OwnedTexture::new_dummy);
         let texture_map_t = tex.to_texture_map_t();
@@ -617,6 +691,52 @@ impl vr::IVRRenderModels006_Interface for RenderModels {
             *out_render_model = ptr;
         }
         vr::EVRRenderModelError::None
+    }
+}
+
+impl RenderModels {
+    /// GetComponentState with the hand known, if it is.
+    fn component_state(
+        &self,
+        render_model_name: *const std::ffi::c_char,
+        component_name: *const std::ffi::c_char,
+        hand: Option<Hand>,
+        mode_state: *const vr::RenderModel_ControllerMode_State_t,
+        state: *mut vr::RenderModel_ComponentState_t,
+    ) -> bool {
+        let Some(state) = (unsafe { state.as_mut() }) else {
+            return false;
+        };
+        // "If the pchRenderModelName or pchComponentName is invalid, this will return false (and
+        // transforms will be set to identity)."
+        state.mTrackingToComponentRenderModel = xr::Posef::IDENTITY.into();
+        state.mTrackingToComponentLocal = xr::Posef::IDENTITY.into();
+        state.uProperties = 0;
+
+        if render_model_name.is_null() || component_name.is_null() {
+            debug!(
+                "GetComponentState called with null ptr(s): rm={render_model_name:?} comp={component_name:?}"
+            );
+            return false;
+        }
+
+        let render_model_name = unsafe { CStr::from_ptr(render_model_name) };
+        let component_name = unsafe { CStr::from_ptr(component_name) };
+        let scroll = unsafe { mode_state.as_ref() }.is_some_and(|mode| mode.bScrollWheelVisible);
+
+        match component_state(
+            render_model_name,
+            component_name,
+            hand,
+            &self.read_input(),
+            scroll,
+        ) {
+            Some(component_state) => {
+                *state = component_state;
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -923,11 +1043,14 @@ fn cstr_write_out(cstr: &CStr, out_ptr: *mut std::ffi::c_char, out_len: u32) -> 
 /// apps ask for are its: `name`, `{driver}name` or `{driver}/rendermodels/name`, kept in
 /// `resources/rendermodels/<name>/` of SteamVR or of a driver.
 mod steamvr {
+    use super::components::ModelInfo;
     use super::{ObjData, OwnedRenderModel, OwnedTexture};
     use log::{info, warn};
     use openvr as vr;
+    use std::collections::HashMap;
+    use std::ffi::CStr;
     use std::path::{Path, PathBuf};
-    use std::sync::{LazyLock, Mutex};
+    use std::sync::{Arc, LazyLock, Mutex};
 
     fn find_install() -> Option<PathBuf> {
         let install = crate::input::steamvr_install(&crate::input::isolated_env_var);
@@ -950,24 +1073,55 @@ mod steamvr {
     }
 
     /// A model's directory and the stem of its files, or of one of its component's.
+    #[derive(Clone, Debug, PartialEq)]
     pub(super) struct Model {
         dir: PathBuf,
         stem: String,
     }
+
+    /// The parsed JSON of each model, by file; None where it's missing or broken.
+    static INFOS: LazyLock<Mutex<HashMap<PathBuf, Option<Arc<ModelInfo>>>>> =
+        LazyLock::new(Default::default);
 
     impl Model {
         pub fn obj(&self) -> PathBuf {
             self.dir.join(format!("{}.obj", self.stem))
         }
 
+        /// The model's JSON, read once.
+        pub fn info(&self) -> Option<Arc<ModelInfo>> {
+            let path = self
+                .dir
+                .join(format!("{}.json", self.dir.file_name()?.to_str()?));
+            INFOS
+                .lock()
+                .unwrap()
+                .entry(path.clone())
+                .or_insert_with(|| {
+                    let json = std::fs::read(&path).ok()?;
+                    match ModelInfo::parse(&json) {
+                        Ok(info) => Some(Arc::new(info)),
+                        Err(e) => {
+                            warn!("Couldn't parse {}: {e}", path.display());
+                            None
+                        }
+                    }
+                })
+                .clone()
+        }
+
         /// The thumbnail the model's JSON names.
         pub fn thumbnail(&self) -> Option<PathBuf> {
-            let json = std::fs::read(self.dir.join(format!("{}.json", self.stem))).ok()?;
-            let json: serde_json::Value = serde_json::from_slice(&json).ok()?;
-            let thumbnail = json.get("thumbnail")?.as_str()?;
-            let path = self.dir.join(thumbnail);
+            let path = self.dir.join(self.info()?.thumbnail.as_deref()?);
             path.is_file().then_some(path)
         }
+    }
+
+    /// The components of SteamVR's model named by the app, if its JSON lists any.
+    pub(super) fn components(render_model_name: &CStr) -> Option<Arc<ModelInfo>> {
+        let model = find(render_model_name.to_str().ok()?)?;
+        let info = model.info()?;
+        (!info.components.is_empty()).then_some(info)
     }
 
     /// Splits `render_model_name` into the driver, model and component it names.
@@ -992,17 +1146,27 @@ mod steamvr {
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
                 && !name.starts_with('.')
         };
-        if !plain(model)
-            || !driver.is_none_or(plain)
-            || !component.is_none_or(plain)
-        {
+        if !plain(model) || !driver.is_none_or(plain) || !component.is_none_or(plain) {
             return None;
         }
         Some((driver, model, component))
     }
 
+    /// What each name resolved to in each install, as apps ask every frame.
+    static FOUND: LazyLock<Mutex<FoundModels>> = LazyLock::new(Default::default);
+    type FoundModels = HashMap<(PathBuf, String), Option<Model>>;
+
     pub(super) fn find(render_model_name: &str) -> Option<Model> {
         let install = install()?;
+        FOUND
+            .lock()
+            .unwrap()
+            .entry((install.clone(), render_model_name.to_owned()))
+            .or_insert_with(|| find_in(&install, render_model_name))
+            .clone()
+    }
+
+    fn find_in(install: &Path, render_model_name: &str) -> Option<Model> {
         let (driver, model, component) = parse(render_model_name)?;
         let in_driver = |driver: PathBuf| driver.join("resources/rendermodels").join(model);
         let dirs: Vec<PathBuf> = match driver {
@@ -1586,9 +1750,10 @@ mod tests {
                 ptr::null(),
                 &mut state,
             ));
+            // Nothing to draw at the pose, so the render model transform stays identity.
             assert_eq!(
                 state.mTrackingToComponentRenderModel.m,
-                state.mTrackingToComponentLocal.m
+                vr::HmdMatrix34_t::from(xr::Posef::IDENTITY).m
             );
             state.mTrackingToComponentLocal.m
         };
@@ -1611,6 +1776,24 @@ mod tests {
         let index_handgrip = get_state(c"valve_controller_knu_1_0_left", c"handgrip");
         assert_eq!(handgrip, index_handgrip);
         assert_ne!(handgrip[2][3], 0.0);
+    }
+
+    /// The profiles' pose transforms apply SteamVR's `rotate_xyz` the way the component parser
+    /// does: Z, then Y, then X.
+    #[test]
+    fn profile_transforms_follow_steamvr_rotation_order() {
+        let (profile, hand) = profile_for_model("valve_controller_knu_1_0_left").unwrap();
+        let tip = profile
+            .pose_transformation(hand, BoundPoseType::Tip)
+            .unwrap();
+        // From valve_controller_knu_1_0_left.json.
+        let expected = Mat4::from_translation(Vec3::new(0.006, -0.015, 0.02))
+            * components::rotate_xyz([-40.0, -5.0, 0.0]);
+        assert!(tip.abs_diff_eq(expected, 1e-6), "{tip:?}\n{expected:?}");
+        let wrong = Mat4::from_translation(Vec3::new(0.006, -0.015, 0.02))
+            * Mat4::from_rotation_x((-40.0_f32).to_radians())
+            * Mat4::from_rotation_y((-5.0_f32).to_radians());
+        assert!(!tip.abs_diff_eq(wrong, 1e-4));
     }
 
     #[test]
@@ -1687,12 +1870,7 @@ mod tests {
     /// and from its drivers', by every spelling of the name, components included.
     #[test]
     fn steamvr_models_and_textures() {
-        crate::input::TEST_ENV.with_borrow_mut(|env| {
-            env.insert(
-                "STEAM_COMPAT_CLIENT_INSTALL_PATH",
-                concat!(env!("CARGO_MANIFEST_DIR"), "/tests/input_data/fake_steam").into(),
-            )
-        });
+        use_fake_steam();
         let rm = RenderModels::default();
         let load = |name: &CStr| {
             let mut out: *mut vr::RenderModel_t = ptr::null_mut();
@@ -1747,7 +1925,10 @@ mod tests {
         }
 
         // A component's mesh, and the model's files.
-        assert_eq!(load(c"test_controller/test_controller_body").unVertexCount, 4);
+        assert_eq!(
+            load(c"test_controller/test_controller_body").unVertexCount,
+            4
+        );
         let string = |thumbnail: bool| {
             let mut buf = [0 as std::ffi::c_char; 512];
             let mut err = vr::EVRRenderModelError::NotSupported;
@@ -1756,7 +1937,13 @@ mod tests {
             } else {
                 vr::IVRRenderModels006_Interface::GetRenderModelOriginalPath
             };
-            let len = get(&rm, c"test_controller".as_ptr(), buf.as_mut_ptr(), 512, &mut err);
+            let len = get(
+                &rm,
+                c"test_controller".as_ptr(),
+                buf.as_mut_ptr(),
+                512,
+                &mut err,
+            );
             assert!(len > 0);
             assert_eq!(err, vr::EVRRenderModelError::None);
             unsafe { CStr::from_ptr(buf.as_ptr()) }
@@ -1764,28 +1951,367 @@ mod tests {
                 .into_owned()
         };
         let path = string(false);
-        assert!(path.ends_with("/test_controller/test_controller.obj"), "{path}");
+        assert!(
+            path.ends_with("/test_controller/test_controller.obj"),
+            "{path}"
+        );
         let url = string(true);
         assert!(url.starts_with("file:///"), "{url}");
         assert!(url.ends_with("/test_controller_thumbnail.png"), "{url}");
-        assert!(rm.RenderModelHasComponent(
-            c"test_controller".as_ptr(),
-            DEFAULT_COMPONENT.as_ptr()
-        ));
+        assert!(
+            rm.RenderModelHasComponent(c"test_controller".as_ptr(), DEFAULT_COMPONENT.as_ptr())
+        );
 
         // Models SteamVR doesn't have fall back to the bundled ones, and paths aren't names.
         let bundled = load(c"{indexcontroller}valve_controller_knu_1_0_left");
         assert_eq!(bundled.diffuseTextureId, 0);
         let mut out: *mut vr::RenderModel_t = ptr::null_mut();
-        for name in [c"../../etc/passwd", c"{../x}drv_model", c"test_controller/../x"] {
+        for name in [
+            c"../../etc/passwd",
+            c"{../x}drv_model",
+            c"test_controller/../x",
+        ] {
             assert_eq!(
                 rm.LoadRenderModel_Async(name.as_ptr(), &mut out),
                 vr::EVRRenderModelError::InvalidArg,
                 "{name:?}"
             );
         }
+        forget_fake_steam();
+    }
+
+    /// Points the SteamVR lookup at the test install for the current thread.
+    fn use_fake_steam() {
+        crate::input::TEST_ENV.with_borrow_mut(|env| {
+            env.insert(
+                "STEAM_COMPAT_CLIENT_INSTALL_PATH",
+                concat!(env!("CARGO_MANIFEST_DIR"), "/tests/input_data/fake_steam").into(),
+            )
+        });
+    }
+
+    fn forget_fake_steam() {
         crate::input::TEST_ENV
             .with_borrow_mut(|env| env.remove("STEAM_COMPAT_CLIENT_INSTALL_PATH"));
+    }
+
+    #[test]
+    fn steamvr_components_move_with_input() {
+        use crate::input::{ComponentInput, DynSubpath};
+        use std::collections::HashMap;
+        use vr::EVRComponentProperty as Prop;
+
+        use_fake_steam();
+        let rm = RenderModels::default();
+        let model = c"test_controller";
+
+        // Every component the JSON lists, in name order, and each part's mesh under the model.
+        let names: Vec<String> = (0..rm.GetComponentCount(model.as_ptr()))
+            .map(|index| {
+                let mut buf = [0 as std::ffi::c_char; 64];
+                assert!(rm.GetComponentName(model.as_ptr(), index, buf.as_mut_ptr(), 64) > 0);
+                unsafe { CStr::from_ptr(buf.as_ptr()) }
+                    .to_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "body",
+                "button_a",
+                "button_enter",
+                "dpad",
+                "scroll_wheel",
+                "shuttle",
+                "thumbstick",
+                "tip",
+                "trackpad",
+                "trackpad_touch",
+                "trigger"
+            ]
+        );
+        let component_model = |component: &CStr| {
+            let mut buf = [0 as std::ffi::c_char; 128];
+            let len = rm.GetComponentRenderModelName(
+                model.as_ptr(),
+                component.as_ptr(),
+                buf.as_mut_ptr(),
+                128,
+            );
+            (len > 0).then(|| {
+                unsafe { CStr::from_ptr(buf.as_ptr()) }
+                    .to_str()
+                    .unwrap()
+                    .to_owned()
+            })
+        };
+        assert_eq!(
+            component_model(c"trigger").as_deref(),
+            Some("test_controller/test_controller_trigger")
+        );
+        assert_eq!(component_model(c"tip"), None);
+        let mut out: *mut vr::RenderModel_t = ptr::null_mut();
+        assert_eq!(
+            rm.LoadRenderModel_Async(
+                c"test_controller/test_controller_trigger".as_ptr(),
+                &mut out
+            ),
+            vr::EVRRenderModelError::None
+        );
+        rm.FreeRenderModel(out);
+        assert!(rm.RenderModelHasComponent(model.as_ptr(), c"trigger".as_ptr()));
+        assert!(rm.RenderModelHasComponent(model.as_ptr(), DEFAULT_COMPONENT.as_ptr()));
+        assert!(!rm.RenderModelHasComponent(model.as_ptr(), c"nope".as_ptr()));
+        assert_eq!(
+            rm.GetComponentButtonMask(model.as_ptr(), c"trigger".as_ptr()),
+            1 << vr::EVRButtonId::SteamVR_Trigger.0
+        );
+        assert_eq!(
+            rm.GetComponentButtonMask(model.as_ptr(), c"button_a".as_ptr()),
+            1 << vr::EVRButtonId::A.0
+        );
+        assert_eq!(
+            rm.GetComponentButtonMask(model.as_ptr(), c"thumbstick".as_ptr()),
+            1 << vr::EVRButtonId::Axis0.0
+        );
+        assert_eq!(
+            rm.GetComponentButtonMask(model.as_ptr(), c"tip".as_ptr()),
+            0
+        );
+
+        // The state for given inputs, through the free function with a fake reader.
+        type Matrix = [[f32; 4]; 3];
+        let state = |component: &CStr,
+                     inputs: &[(DynSubpath, ComponentInput)],
+                     scroll: bool|
+         -> (Matrix, Matrix, u32) {
+            let inputs: HashMap<DynSubpath, ComponentInput> = inputs.iter().copied().collect();
+            let read = |hand: Hand, subpath: DynSubpath| {
+                assert_eq!(hand, Hand::Left);
+                inputs.get(&subpath).copied().unwrap_or_default()
+            };
+            let state = component_state(model, component, Some(Hand::Left), &read, scroll)
+                .unwrap_or_else(|| panic!("no state for {component:?}"));
+            (
+                state.mTrackingToComponentRenderModel.m,
+                state.mTrackingToComponentLocal.m,
+                state.uProperties,
+            )
+        };
+        let identity = vr::HmdMatrix34_t::from(xr::Posef::IDENTITY).m;
+        let close = |a: Matrix, b: Matrix| {
+            a.iter()
+                .flatten()
+                .zip(b.iter().flatten())
+                .all(|(a, b)| (a - b).abs() < 1e-5)
+        };
+        let input = |value: f32, pressed: bool, touched: bool| ComponentInput {
+            active: true,
+            value,
+            xy: glam::Vec2::ZERO,
+            pressed,
+            touched,
+        };
+        let xy_input = |x: f32, y: f32, pressed: bool, touched: bool| ComponentInput {
+            active: true,
+            value: 0.0,
+            xy: glam::Vec2::new(x, y),
+            pressed,
+            touched,
+        };
+        let moved = |transform: Mat4| hmd_matrix(transform).m;
+
+        // Static parts, including a pose one and a motion we don't know.
+        let is_static = (Prop::IsVisible | Prop::IsStatic).0;
+        assert_eq!(state(c"body", &[], false), (identity, identity, is_static));
+        let (render, local, props) = state(c"tip", &[], false);
+        assert_eq!(render, identity);
+        assert_eq!([local[0][3], local[1][3], local[2][3]], [0.0, -0.01, 0.02]);
+        assert_eq!(props, is_static);
+        assert_eq!(state(c"shuttle", &[], false).2, is_static);
+
+        // rotate_xyz is applied Z, Y, X: the Vive trackpad's local frame has -Z along the pad's
+        // normal, which its motion frame tilts 6.55 degrees back from +Y.
+        let (_, local, _) = state(c"trackpad", &[], false);
+        let out = [-local[0][2], -local[1][2], -local[2][2]];
+        let (sin, cos) = 6.55_f32.to_radians().sin_cos();
+        assert!(
+            out[0].abs() < 1e-5 && (out[1] - cos).abs() < 1e-5 && (out[2] - sin).abs() < 1e-5,
+            "{out:?}"
+        );
+
+        // A trigger at rest, half pulled and clicked: rotation about X through the pivot.
+        let (render, local, props) = state(c"trigger", &[], false);
+        assert_eq!(render, identity);
+        assert_eq!(props, Prop::IsVisible.0);
+        assert_eq!([local[0][3], local[1][3], local[2][3]], [0.0, -0.04, 0.06]);
+        let rotated = |degrees: f32, pivot: Vec3| {
+            moved(
+                Mat4::from_translation(pivot)
+                    * Mat4::from_rotation_x(degrees.to_radians())
+                    * Mat4::from_translation(-pivot),
+            )
+        };
+        let pivot = Vec3::new(0.0, -0.02, 0.05);
+        let (render, local2, props) = state(
+            c"trigger",
+            &[(DynSubpath::Trigger, input(0.5, false, true))],
+            false,
+        );
+        assert!(close(render, rotated(-9.0, pivot)), "{render:?}");
+        assert_eq!(local2, local, "the local frame doesn't move with the part");
+        assert_eq!(props, (Prop::IsVisible | Prop::IsTouched).0);
+        let (render, _, props) = state(
+            c"trigger",
+            &[(DynSubpath::Trigger, input(0.95, true, true))],
+            false,
+        );
+        assert!(close(render, rotated(-20.0, pivot)), "{render:?}");
+        assert_eq!(
+            props,
+            (Prop::IsVisible | Prop::IsTouched | Prop::IsPressed).0
+        );
+
+        // A button sinks along its axis while pressed.
+        let (render, _, props) = state(
+            c"button_a",
+            &[(DynSubpath::A, input(1.0, true, true))],
+            false,
+        );
+        assert!(close(
+            render,
+            moved(Mat4::from_translation(Vec3::new(0.0, -0.002, 0.0)))
+        ));
+        assert_eq!(
+            props,
+            (Prop::IsVisible | Prop::IsTouched | Prop::IsPressed).0
+        );
+        assert_eq!(state(c"button_a", &[], false).0, identity);
+        // SteamVR's system button of the left Touch controller is OpenXR's menu.
+        let (render, _, _) = state(
+            c"button_enter",
+            &[(DynSubpath::Menu, input(1.0, true, true))],
+            false,
+        );
+        assert!(close(
+            render,
+            moved(Mat4::from_translation(Vec3::new(0.0, -0.001, 0.0)))
+        ));
+
+        // A stick pushed right tilts about its Z, pushed forward about its X, and sinks when
+        // clicked.
+        let tilt = |x: f32, y: f32, degrees: f32, center: Vec3, sink: f32| {
+            moved(
+                Mat4::from_translation(center + Vec3::new(0.0, sink, 0.0))
+                    * Mat4::from_rotation_x((-degrees * y).to_radians())
+                    * Mat4::from_rotation_z((-degrees * x).to_radians())
+                    * Mat4::from_translation(-center),
+            )
+        };
+        let center = Vec3::new(0.0, 0.0, 0.05);
+        let (render, _, _) = state(
+            c"thumbstick",
+            &[(DynSubpath::Thumbstick, xy_input(1.0, 0.0, false, true))],
+            false,
+        );
+        assert!(
+            close(render, tilt(1.0, 0.0, 20.0, center, 0.0)),
+            "{render:?}"
+        );
+        let (render, _, props) = state(
+            c"thumbstick",
+            &[(DynSubpath::Thumbstick, xy_input(0.0, 0.5, true, true))],
+            false,
+        );
+        assert!(
+            close(render, tilt(0.0, 0.5, 20.0, center, -0.001)),
+            "{render:?}"
+        );
+        assert_eq!(
+            props,
+            (Prop::IsVisible | Prop::IsTouched | Prop::IsPressed).0
+        );
+        // A pad only tilts under a press, toward the touch.
+        let touched_pad = [(DynSubpath::Trackpad, xy_input(1.0, 0.0, false, true))];
+        assert_eq!(state(c"trackpad", &touched_pad, false).0, identity);
+        let pressed_pad = [(DynSubpath::Trackpad, xy_input(1.0, 0.0, true, true))];
+        assert_ne!(state(c"trackpad", &pressed_pad, false).0, identity);
+        // The dpad is a stick driven by its four buttons.
+        let (render, _, props) = state(
+            c"dpad",
+            &[(DynSubpath::DpadLeft, input(1.0, true, true))],
+            false,
+        );
+        let center = Vec3::new(0.0, 0.0, 0.04);
+        assert!(
+            close(render, tilt(-1.0, 0.0, 7.0, center, -0.001)),
+            "{render:?}"
+        );
+        assert_eq!(
+            props,
+            (Prop::IsVisible | Prop::IsTouched | Prop::IsPressed).0
+        );
+
+        // The touch marker shows where the pad is touched, and the scroll wheel in scroll mode
+        // only, where the pad hides.
+        assert_eq!(state(c"trackpad_touch", &[], false).2, 0);
+        let (render, _, props) = state(
+            c"trackpad_touch",
+            &[(DynSubpath::Trackpad, xy_input(0.5, 1.0, false, true))],
+            false,
+        );
+        let marker = moved(Mat4::from_translation(Vec3::new(0.005, 0.0, -0.02)));
+        assert!(close(render, marker), "{render:?}");
+        assert_eq!(props, (Prop::IsVisible | Prop::IsTouched).0);
+        assert_eq!(state(c"trackpad", &[], false).2, Prop::IsVisible.0);
+        assert_eq!(state(c"trackpad", &[], true).2, 0);
+        assert_eq!(state(c"scroll_wheel", &[], false).2, 0);
+        let (render, _, props) = state(
+            c"scroll_wheel",
+            &[(DynSubpath::Trackpad, xy_input(0.0, 0.5, false, true))],
+            true,
+        );
+        assert_eq!(
+            props,
+            (Prop::IsVisible | Prop::IsTouched | Prop::IsScrolled).0
+        );
+        assert!(
+            close(render, rotated(-20.0, Vec3::new(0.0, 0.0, 0.05))),
+            "{render:?}"
+        );
+        // Untouched, the wheel doesn't follow the pad's resting value.
+        let (render, _, _) = state(
+            c"scroll_wheel",
+            &[(DynSubpath::Trackpad, xy_input(0.0, 0.5, false, false))],
+            true,
+        );
+        assert_eq!(render, identity);
+
+        // Through the interface, with no input interface the parts rest; the scroll mode comes
+        // from the app's state.
+        let mut out = vr::RenderModel_ComponentState_t::default();
+        assert!(rm.GetComponentState(
+            model.as_ptr(),
+            c"trigger".as_ptr(),
+            ptr::null(),
+            ptr::null(),
+            &mut out
+        ));
+        assert_eq!(out.mTrackingToComponentRenderModel.m, identity);
+        let mode = vr::RenderModel_ControllerMode_State_t {
+            bScrollWheelVisible: true,
+        };
+        assert!(rm.GetComponentStateForDevicePath(
+            model.as_ptr(),
+            c"scroll_wheel".as_ptr(),
+            0,
+            &mode,
+            &mut out
+        ));
+        assert_eq!(out.uProperties, (Prop::IsVisible | Prop::IsScrolled).0);
+        forget_fake_steam();
     }
 
     /// The models our profiles name, from a real SteamVR install:
@@ -1797,20 +2323,21 @@ mod tests {
         crate::input::TEST_ENV
             .with_borrow_mut(|env| env.insert("STEAM_COMPAT_CLIENT_INSTALL_PATH", steam.into()));
         let rm = RenderModels::default();
-        for name in [
-            c"{indexcontroller}valve_controller_knu_1_0_left",
-            c"{indexcontroller}valve_controller_knu_1_0_right",
-            c"oculus_quest2_controller_left",
-            c"oculus_quest_plus_controller_right",
-            c"oculus_quest_pro_controller_left",
-            c"vr_controller_vive_1_5",
-            c"generic_controller",
-            c"generic_hmd",
-            c"vr_tracker_vive_3_0",
-            c"{frame_controller}frame_controller_left",
-            c"{vrlink}/rendermodels/shuttlecock",
-            c"vive_focus3_controller_right",
-            c"pico_4_controller_left",
+        // With the components SteamVR's JSON lists, if it has one.
+        for (name, components) in [
+            (c"{indexcontroller}valve_controller_knu_1_0_left", 21),
+            (c"{indexcontroller}valve_controller_knu_1_0_right", 21),
+            (c"oculus_quest2_controller_left", 16),
+            (c"oculus_quest_plus_controller_right", 16),
+            (c"oculus_quest_pro_controller_left", 16),
+            (c"vr_controller_vive_1_5", 24),
+            (c"generic_controller", 1),
+            (c"generic_hmd", 1),
+            (c"vr_tracker_vive_3_0", 5),
+            (c"{frame_controller}frame_controller_left", 16),
+            (c"{vrlink}/rendermodels/shuttlecock", 1),
+            (c"vive_focus3_controller_right", 14),
+            (c"pico_4_controller_left", 15),
         ] {
             let mut out: *mut vr::RenderModel_t = ptr::null_mut();
             assert_eq!(
@@ -1819,7 +2346,11 @@ mod tests {
                 "{name:?}"
             );
             let model = unsafe { *out };
-            assert!(model.unTriangleCount > 100, "{name:?}: {}", model.unTriangleCount);
+            assert!(
+                model.unTriangleCount > 100,
+                "{name:?}: {}",
+                model.unTriangleCount
+            );
             let mut tex: *mut vr::RenderModel_TextureMap_t = ptr::null_mut();
             assert_eq!(
                 rm.LoadTexture_Async(model.diffuseTextureId, &mut tex),
@@ -1830,7 +2361,52 @@ mod tests {
                 "{name:?}: {} triangles, texture {} {}x{}",
                 model.unTriangleCount, model.diffuseTextureId, tex.unWidth, tex.unHeight
             );
-            assert!(model.diffuseTextureId > 0 && tex.unWidth > 1, "{name:?} has no texture");
+            assert!(
+                model.diffuseTextureId > 0 && tex.unWidth > 1,
+                "{name:?} has no texture"
+            );
+
+            // Every component has a state, and every part a mesh that loads.
+            let count = rm.GetComponentCount(name.as_ptr());
+            assert_eq!(count, components, "{name:?}");
+            for index in 0..count {
+                let mut buf = [0 as std::ffi::c_char; 128];
+                assert!(rm.GetComponentName(name.as_ptr(), index, buf.as_mut_ptr(), 128) > 0);
+                let component = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_owned();
+                let mut state = vr::RenderModel_ComponentState_t::default();
+                assert!(
+                    rm.GetComponentState(
+                        name.as_ptr(),
+                        component.as_ptr(),
+                        ptr::null(),
+                        ptr::null(),
+                        &mut state
+                    ),
+                    "{name:?}/{component:?}"
+                );
+                let mut part = [0 as std::ffi::c_char; 256];
+                let len = rm.GetComponentRenderModelName(
+                    name.as_ptr(),
+                    component.as_ptr(),
+                    part.as_mut_ptr(),
+                    256,
+                );
+                let part = (len > 0).then(|| unsafe { CStr::from_ptr(part.as_ptr()) }.to_owned());
+                if let Some(part) = &part {
+                    let mut out: *mut vr::RenderModel_t = ptr::null_mut();
+                    assert_eq!(
+                        rm.LoadRenderModel_Async(part.as_ptr(), &mut out),
+                        vr::EVRRenderModelError::None,
+                        "{part:?}"
+                    );
+                    rm.FreeRenderModel(out);
+                }
+                println!(
+                    "  {component:?}: mesh {part:?}, properties {:#x}, buttons {:#x}",
+                    state.uProperties,
+                    rm.GetComponentButtonMask(name.as_ptr(), component.as_ptr())
+                );
+            }
         }
     }
 

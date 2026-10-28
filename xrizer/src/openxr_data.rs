@@ -908,7 +908,7 @@ impl<C: Compositor> OpenXrData<C> {
     /// Sends the application VREvent_Quit, at most once. Like SteamVR, an app that doesn't quit
     /// when asked to is killed, but not when the connection was lost, as SteamVR's server can't
     /// kill apps once it's gone.
-    fn push_quit(&self, connection_lost: bool) {
+    pub(crate) fn push_quit(&self, connection_lost: bool) {
         if self.exiting.swap(true, Ordering::Relaxed) {
             return;
         }

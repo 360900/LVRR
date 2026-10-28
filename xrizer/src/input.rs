@@ -1,10 +1,11 @@
 mod action_manifest;
 mod binding_sources;
-pub(crate) use action_manifest::isolated_env_var;
-pub(crate) use binding_sources::xrizer_config_dir;
-pub(crate) use steamvr_bindings::{app_keys, steamvr_install};
 #[cfg(test)]
 pub(crate) use action_manifest::TEST_ENV;
+pub(crate) use action_manifest::isolated_env_var;
+pub(crate) use binding_sources::xrizer_config_dir;
+pub(crate) use steamvr_bindings::{app_keys, host_path, steam_config_dirs, steamvr_install};
+mod components;
 mod custom_bindings;
 mod devices;
 mod emulation;
@@ -35,6 +36,7 @@ use crate::{
     tracy_span,
 };
 use binding_sources::BindingChoices;
+pub(crate) use components::ComponentInput;
 use custom_bindings::{
     AnalogStates, BoolBindingData, ScalarConstantBinding, Vector2ActionData, unrestricted_analog,
 };
@@ -43,6 +45,7 @@ use legacy::{LegacyActionData, RemappedLegacy};
 use log::{debug, info, trace, warn};
 use openvr as vr;
 use openxr as xr;
+pub(crate) use profiles::paths::DynSubpath;
 use slotmap::{Key, KeyData, SecondaryMap, SlotMap, new_key_type};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{CStr, CString, c_char, c_void};
@@ -152,7 +155,10 @@ pub struct Input<C: openxr_data::Compositor> {
     /// Held while actions are set up, so legacy actions (set up from the frame thread) and an
     /// action manifest are never both attached to a session.
     action_setup: Mutex<()>,
-    left_handed: AtomicBool,
+    /// The hand the app set with SetDominantHand, if it did; else the settings decide.
+    dominant_hand_set: Mutex<Option<Hand>>,
+    /// Whether the loaded manifest has `supports_dominant_hand_setting`.
+    dominant_hand_supported: AtomicBool,
     /// The properties of the most recently seen controller interaction profile. The HMD's
     /// identity is derived from this, so it needs to survive session restarts (which reset the
     /// device list) and controllers going to sleep.
@@ -253,6 +259,13 @@ fn input_source_handle(
 
 /// For `action.state(..).unwrap_or_else(inactive_state)`: an action whose state can't be read,
 /// e.g. because the runtime lost the session, reads as inactive.
+fn dominant_hand_role(hand: Hand) -> vr::ETrackedControllerRole {
+    match hand {
+        Hand::Left => vr::ETrackedControllerRole::LeftHand,
+        Hand::Right => vr::ETrackedControllerRole::RightHand,
+    }
+}
+
 fn inactive_state<T: xr::ActionInput + Default>(error: xr::sys::Result) -> xr::ActionState<T> {
     crate::warn_once!("Failed to get action state: {}", error);
     xr::ActionState {
@@ -319,7 +332,8 @@ impl<C: openxr_data::Compositor> Input<C> {
             subaction_paths,
             events: Mutex::default(),
             action_setup: Mutex::default(),
-            left_handed: false.into(),
+            dominant_hand_set: Mutex::new(None),
+            dominant_hand_supported: false.into(),
             last_profile_properties: Mutex::new(probed_profile),
         }
     }
@@ -328,11 +342,74 @@ impl<C: openxr_data::Compositor> Input<C> {
         self.app_key.lock().unwrap().clone()
     }
 
+    /// The keys the app's settings may be under, see [steamvr_bindings::app_keys].
+    fn app_keys(&self) -> Vec<String> {
+        app_keys(&isolated_env_var, self.app_key())
+    }
+
+    /// The user's dominant hand for this app: what the app set, else the `DominantHand` setting
+    /// in xrizer's settings or the one chosen in SteamVR, else the right hand.
+    pub(super) fn dominant_hand(&self) -> Hand {
+        if let Some(hand) = *self.dominant_hand_set.lock().unwrap() {
+            return hand;
+        }
+        self.app_keys()
+            .iter()
+            .find_map(|key| match crate::settings::get_i32(key, "DominantHand") {
+                Some(1) => Some(Hand::Left),
+                Some(2) => Some(Hand::Right),
+                _ => None,
+            })
+            .or_else(|| binding_sources::steamvr_dominant_hand(self.app_key()))
+            .unwrap_or(Hand::Right)
+    }
+
+    /// Whether the bindings are loaded with their hands swapped: the app supports the dominant
+    /// hand setting and the user is left-handed.
+    fn mirrors_bindings(&self) -> bool {
+        self.dominant_hand_supported.load(Ordering::Relaxed) && self.dominant_hand() == Hand::Left
+    }
+
     fn get_subaction_path(&self, hand: Hand) -> xr::Path {
         match hand {
             Hand::Left => self.subaction_paths.left,
             Hand::Right => self.subaction_paths.right,
         }
+    }
+
+    /// The component actions, created on first use so every way of loading actions attaches them.
+    fn component_actions<'a>(
+        &self,
+        input_data: &'a InputSessionData,
+    ) -> &'a components::ComponentActionData {
+        input_data.component_actions.get_or_init(|| {
+            components::ComponentActionData::new(
+                &self.openxr.instance,
+                self.subaction_paths.left,
+                self.subaction_paths.right,
+            )
+        })
+    }
+
+    /// What a render model component's input reads on the hand's controller, see
+    /// [components::ComponentActionData::read].
+    pub(crate) fn component_input(&self, hand: Hand, subpath: DynSubpath) -> ComponentInput {
+        if self.openxr.is_lost() {
+            return ComponentInput::default();
+        }
+        let data = self.openxr.session_data.get();
+        match data.input_data.component_actions.get() {
+            Some(actions) => actions.read(&data.session, self.get_subaction_path(hand), subpath),
+            None => ComponentInput::default(),
+        }
+    }
+
+    /// The hand of an input value handle, for a hand or an input of one.
+    pub(crate) fn hand_for_input_handle(&self, handle: vr::VRInputValueHandle_t) -> Option<Hand> {
+        if handle == vr::k_ulInvalidInputValueHandle {
+            return None;
+        }
+        self.hand_from_key(InputSourceKey::from(KeyData::from_ffi(handle)))
     }
 
     fn subaction_path_from_handle(&self, handle: vr::VRInputValueHandle_t) -> Option<xr::Path> {
@@ -1112,6 +1189,8 @@ fn binding_rank(state: &xr::ActionState<bool>) -> (bool, bool, i64) {
 pub struct InputSessionData {
     actions: OnceLock<LoadedActions>,
     estimated_skeleton_actions: OnceLock<SkeletalInputActionData>,
+    /// The raw input of render model components, see [components].
+    component_actions: OnceLock<components::ComponentActionData>,
     pose_data: PoseData,
     devices: RwLock<TrackedDeviceList>,
     action_sources: OnceLock<ActionSources>,
@@ -1156,6 +1235,7 @@ impl InputSessionData {
         Self {
             actions: OnceLock::new(),
             estimated_skeleton_actions: OnceLock::new(),
+            component_actions: OnceLock::new(),
             pose_data: PoseData::new(instance, paths.left, paths.right),
             devices: RwLock::new(TrackedDeviceList::new(session, hand_tracking)),
             action_sources: OnceLock::new(),
@@ -1579,8 +1659,14 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         }
         let render_model_name = unsafe { CStr::from_ptr(render_model_name) };
         let component_name = unsafe { CStr::from_ptr(component_name) };
-        // Our models are static, so the bindings don't change how the component shows.
-        match crate::rendermodels::component_state(render_model_name, component_name) {
+        // The bindings don't change how the component shows: it moves with its own input.
+        match crate::rendermodels::component_state(
+            render_model_name,
+            component_name,
+            None,
+            &|hand, subpath| self.component_input(hand, subpath),
+            false,
+        ) {
             Some(component_state) => {
                 unsafe { state.write(component_state) };
                 vr::EVRInputError::None
@@ -2306,25 +2392,48 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
 
         vr::EVRInputError::None
     }
+    /// Kept like SteamVR keeps it, as the app's `DominantHand` setting, and applied to the
+    /// bindings by loading them again if the app supports the setting.
     fn SetDominantHand(&self, hand: vr::ETrackedControllerRole) -> vr::EVRInputError {
-        let left = match hand {
-            vr::ETrackedControllerRole::LeftHand => true,
-            vr::ETrackedControllerRole::RightHand => false,
+        let hand = match hand {
+            vr::ETrackedControllerRole::LeftHand => Hand::Left,
+            vr::ETrackedControllerRole::RightHand => Hand::Right,
             _ => return vr::EVRInputError::InvalidParam,
         };
-        self.left_handed.store(left, Ordering::Relaxed);
+        let before = self.dominant_hand();
+        *self.dominant_hand_set.lock().unwrap() = Some(hand);
+        if let Some(key) = self.app_keys().first() {
+            crate::settings::set_i32(key, "DominantHand", dominant_hand_role(hand).0 as i32);
+        }
+        if hand != before && self.dominant_hand_supported.load(Ordering::Relaxed) {
+            if self.openxr.is_lost() {
+                return vr::EVRInputError::None;
+            }
+            let loaded = self
+                .openxr
+                .session_data
+                .get()
+                .input_data
+                .actions
+                .get()
+                .is_some();
+            if loaded {
+                info!("The dominant hand is now the {hand:?}, reloading the bindings");
+                self.reload_bindings(true);
+            }
+        }
         vr::EVRInputError::None
     }
+    /// "This function will only return success for applications which include
+    /// supports_dominant_hand_setting: true in their action manifests."
     fn GetDominantHand(&self, hand: *mut vr::ETrackedControllerRole) -> vr::EVRInputError {
         if hand.is_null() {
             return vr::EVRInputError::InvalidParam;
         }
-        let role = if self.left_handed.load(Ordering::Relaxed) {
-            vr::ETrackedControllerRole::LeftHand
-        } else {
-            vr::ETrackedControllerRole::RightHand
-        };
-        unsafe { hand.write(role) };
+        if !self.dominant_hand_supported.load(Ordering::Relaxed) {
+            return vr::EVRInputError::PermissionDenied;
+        }
+        unsafe { hand.write(dominant_hand_role(self.dominant_hand())) };
         vr::EVRInputError::None
     }
     fn GetSkeletalActionData(
@@ -2788,6 +2897,9 @@ impl<C: openxr_data::Compositor> Input<C> {
             sync_sets.push(xr::ActiveActionSet::new(&data.input_data.pose_data.set));
             sync_sets.push(xr::ActiveActionSet::new(&skeletal_input.set));
             sync_sets.push(xr::ActiveActionSet::new(&actions.haptic_set));
+            if let Some(components) = data.input_data.component_actions.get() {
+                sync_sets.push(xr::ActiveActionSet::new(&components.set));
+            }
             if let Some(legacy) = &actions.legacy {
                 sync_sets.push(xr::ActiveActionSet::new(legacy.fixed_set()));
             }
@@ -2993,7 +3105,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             else {
                 return;
             };
-            if !choices.changed_for(key) {
+            if !choices.changed_for(key) && choices.mirrored == self.mirrors_bindings() {
                 debug!("The bindings chosen for {key} are loaded already");
                 return;
             }
@@ -3888,10 +4000,14 @@ impl<C: openxr_data::Compositor> Input<C> {
 
         match input_data.get_legacy_actions() {
             Some(actions) => {
-                let result = data.session.sync_actions(&[
+                let mut sets = vec![
                     xr::ActiveActionSet::new(&actions.set),
                     xr::ActiveActionSet::new(&input_data.pose_data.set),
-                ]);
+                ];
+                if let Some(components) = input_data.component_actions.get() {
+                    sets.push(xr::ActiveActionSet::new(&components.set));
+                }
+                let result = data.session.sync_actions(&sets);
                 if self.openxr.check("xrSyncActions", result).is_some() {
                     self.legacy_state.on_action_sync();
                     self.update_legacy_state(&data.session, &devices, actions);

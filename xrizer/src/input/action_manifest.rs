@@ -85,6 +85,10 @@ impl<C: openxr_data::Compositor> Input<C> {
             vr::EVRInputError::InvalidParam
         })?;
 
+        self.dominant_hand_supported.store(
+            manifest.supports_dominant_hand_setting,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let default_bindings = std::mem::take(&mut manifest.default_bindings);
         let loaded = self.create_manifest_actions(
             session_data,
@@ -214,6 +218,8 @@ impl<C: openxr_data::Compositor> Input<C> {
             )
             .unwrap();
 
+        let component_actions = self.component_actions(&session_data.input_data);
+
         let mut binding_context = context::BindingsLoadContext::new(
             &sets,
             actions,
@@ -223,6 +229,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             &haptic_action,
             &gamepad_presence,
             skeletal_input,
+            component_actions,
         );
 
         let (binding_variants, binding_choices) = load_bindings(&mut binding_context);
@@ -251,6 +258,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                 &info_set,
                 &haptic_set,
                 &skeletal_input.set,
+                &component_actions.set,
             ])
             .chain(extra_sets.iter().copied())
             .collect();
@@ -424,9 +432,11 @@ impl<C: openxr_data::Compositor> Input<C> {
     }
 }
 
+/// Reads a bindings file, with its hands swapped when `mirror`.
 fn read_bindings(
     path: &Path,
     controller_type: &actions::ControllerType,
+    mirror: bool,
 ) -> Option<bindings::Bindings> {
     debug!(
         "Reading bindings for {controller_type} (at {})",
@@ -435,9 +445,47 @@ fn read_bindings(
     let data = std::fs::read(path)
         .inspect_err(|e| error!("Couldn't load bindings for {controller_type}: {e}"))
         .ok()?;
-    serde_json::from_slice(&data)
+    let mut json: serde_json::Value = serde_json::from_slice(&data)
+        .inspect_err(|e| error!("Failed to parse bindings for {controller_type}: {e}"))
+        .ok()?;
+    if mirror {
+        mirror_hands(&mut json, false);
+    }
+    serde_json::from_value(json)
         .inspect_err(|e| error!("Failed to parse bindings for {controller_type}: {e}"))
         .ok()
+}
+
+/// Swaps the hands of every input, pose and haptic path, which is what SteamVR does with the
+/// bindings of an app that supports its dominant hand setting for a left-handed user. Skeleton
+/// bindings stay: each hand's skeleton is its own.
+fn mirror_hands(value: &mut serde_json::Value, in_skeleton: bool) {
+    match value {
+        serde_json::Value::String(path) if !in_skeleton => {
+            for (from, to) in [
+                ("/user/hand/left", "/user/hand/right"),
+                ("/user/hand/right", "/user/hand/left"),
+            ] {
+                if let Some(rest) = path.strip_prefix(from)
+                    && (rest.is_empty() || rest.starts_with('/'))
+                {
+                    *path = format!("{to}{rest}");
+                    break;
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                mirror_hands(item, in_skeleton);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, item) in map {
+                mirror_hands(item, in_skeleton || key == "skeleton");
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The path to bind for `path` on `P`: the path itself, or what the profile translates it to.
@@ -573,6 +621,10 @@ impl<C: openxr_data::Compositor> Input<C> {
         // Custom bindings, then the ones chosen in SteamVR, then the game's.
         let sources = BindingSources::new(self.app_key(), Category::SteamVrInput);
         let mut variants = HashMap::new();
+        let mirror = self.mirrors_bindings();
+        if mirror {
+            info!("Mirroring the bindings for the left hand");
+        }
 
         let mut bindings = bindings;
         if let Some(additional_bindings) =
@@ -611,8 +663,10 @@ impl<C: openxr_data::Compositor> Input<C> {
             // Like SteamVR, the default is used if the chosen bindings don't load.
             let bindings = sources
                 .file_for(&controller_type)
-                .and_then(|path| read_bindings(&path, &controller_type))
-                .or_else(|| read_bindings(&parent_path.join(binding_url), &controller_type));
+                .and_then(|path| read_bindings(&path, &controller_type, mirror))
+                .or_else(|| {
+                    read_bindings(&parent_path.join(binding_url), &controller_type, mirror)
+                });
             let Some(bindings) = bindings else {
                 self.binding_load_event(vr::EVREventType::Input_BindingLoadFailed);
                 continue;
@@ -660,6 +714,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             loaded: &loaded,
             emulated,
             sources: &sources,
+            mirror,
             variants: &mut variants,
         };
         super::profiles::run_for_all_profiles(&mut runner);
@@ -683,6 +738,8 @@ impl<C: openxr_data::Compositor> Input<C> {
             /// The controller every other is converted from, see [super::emulation].
             emulated: Option<&'a (actions::ControllerType, bindings::Bindings)>,
             sources: &'a BindingSources,
+            /// The bindings are loaded with their hands swapped, see [Input::mirrors_bindings].
+            mirror: bool,
             variants: &'a mut HashMap<xr::Path, String>,
         }
         impl<C: openxr_data::Compositor> RunWithProfile for FallbackRunner<'_, '_, '_, C> {
@@ -722,7 +779,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                     .then(|| self.sources.file_for(&native))
                     .flatten();
                 let bindings = if let Some((path, own)) = own_path.and_then(|path| {
-                    let bindings = read_bindings(&path, &native)?;
+                    let bindings = read_bindings(&path, &native, self.mirror)?;
                     Some((path, bindings))
                 }) {
                     info!("Using {} for {profile}", path.display());
@@ -769,6 +826,7 @@ impl<C: openxr_data::Compositor> Input<C> {
 
         let mut choices = sources.into_choices();
         choices.emulated = requested;
+        choices.mirrored = mirror;
         (variants, choices)
     }
 
@@ -916,6 +974,11 @@ impl<C: openxr_data::Compositor> Input<C> {
                     .map(|path| xr::Binding::new(context.haptic_action, path)),
             )
             .chain(skeletal_bindings.binding_iter(&context.skeletal_input.actions))
+            .chain(
+                context
+                    .component_actions
+                    .bindings::<P>(&self.openxr.instance),
+            )
             .chain(P::GAMEPAD.then(|| {
                 let input = self
                     .openxr

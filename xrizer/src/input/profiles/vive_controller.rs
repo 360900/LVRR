@@ -152,19 +152,19 @@ impl InteractionProfile for ViveWands {
             BoundPoseType::Tip => Some(PoseTransformations {
                 left_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
                         1.282_f32.to_radians(),
-                        0.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
                     ),
                     Vec3::new(0.0, -0.01, -0.007),
                 ),
                 right_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
                         1.282_f32.to_radians(),
-                        0.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
                     ),
                     Vec3::new(0.0, -0.01, -0.007),
                 ),
@@ -172,19 +172,19 @@ impl InteractionProfile for ViveWands {
             BoundPoseType::Base => Some(PoseTransformations {
                 left_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
-                        -0.821_f32.to_radians(),
-                        -180.0_f32.to_radians(),
+                        EulerRot::ZYX,
                         0.0_f32.to_radians(),
+                        -180.0_f32.to_radians(),
+                        -0.821_f32.to_radians(),
                     ),
                     Vec3::new(0.0, -0.014, 0.174),
                 ),
                 right_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
-                        -0.821_f32.to_radians(),
-                        -180.0_f32.to_radians(),
+                        EulerRot::ZYX,
                         0.0_f32.to_radians(),
+                        -180.0_f32.to_radians(),
+                        -0.821_f32.to_radians(),
                     ),
                     Vec3::new(0.0, -0.014, 0.174),
                 ),
@@ -192,7 +192,7 @@ impl InteractionProfile for ViveWands {
             BoundPoseType::Gdc2015 => Some(PoseTransformations {
                 left_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
                         0.0_f32.to_radians(),
                         0.0_f32.to_radians(),
                         0.0_f32.to_radians(),
@@ -201,7 +201,7 @@ impl InteractionProfile for ViveWands {
                 ),
                 right_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
                         0.0_f32.to_radians(),
                         0.0_f32.to_radians(),
                         0.0_f32.to_radians(),
@@ -212,19 +212,19 @@ impl InteractionProfile for ViveWands {
             BoundPoseType::Handgrip => Some(PoseTransformations {
                 left_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
                         5.037_f32.to_radians(),
-                        0.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
                     ),
                     Vec3::new(0.0, 0.003, 0.097),
                 ),
                 right_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
                         5.037_f32.to_radians(),
-                        0.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
                     ),
                     Vec3::new(0.0, 0.003, 0.097),
                 ),
@@ -232,19 +232,19 @@ impl InteractionProfile for ViveWands {
             BoundPoseType::Grip => Some(PoseTransformations {
                 left_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
                         5.037_f32.to_radians(),
-                        0.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
                     ),
                     Vec3::new(0.0, -0.015, 0.097),
                 ),
                 right_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
                         5.037_f32.to_radians(),
-                        0.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
                     ),
                     Vec3::new(0.0, -0.015, 0.097),
                 ),
@@ -253,19 +253,19 @@ impl InteractionProfile for ViveWands {
             BoundPoseType::OpenxrHandmodel => Some(PoseTransformations {
                 left_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
                         1.282_f32.to_radians(),
-                        0.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
                     ),
                     Vec3::new(-0.02, -0.0285, 0.097),
                 ),
                 right_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
                         1.282_f32.to_radians(),
-                        0.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
                     ),
                     Vec3::new(0.02, -0.0285, 0.097),
                 ),
@@ -273,19 +273,19 @@ impl InteractionProfile for ViveWands {
             BoundPoseType::OpenxrPinch => Some(PoseTransformations {
                 left_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
                         45.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
                     ),
                     Vec3::new(0.01, 0.0125, 0.07),
                 ),
                 right_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
                         45.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
                     ),
                     Vec3::new(-0.01, 0.0125, 0.07),
                 ),
@@ -293,19 +293,19 @@ impl InteractionProfile for ViveWands {
             BoundPoseType::OpenxrPoke => Some(PoseTransformations {
                 left_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
                         45.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
                     ),
                     Vec3::new(-0.038, -0.058, 0.005),
                 ),
                 right_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
                         45.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
                     ),
                     Vec3::new(0.038, -0.058, 0.005),
                 ),

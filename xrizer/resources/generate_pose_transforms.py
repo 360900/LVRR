@@ -9,6 +9,9 @@ profile's `pose_transformation` method:
 Errors & warnings will get printed to stderr, you may wish to redirect one
 output.
 
+SteamVR applies `rotate_xyz` as Z, then Y, then X: a trackpad's `component_local`
+only has -Z along the pad that way.
+
 
     ./generate_pose_transforms.py <left-rendermodels>.json <right-rendermodels>.json
 
@@ -52,19 +55,19 @@ def main():
             BoundPoseType::{xrizer_pose} => Some(PoseTransformations {{
                 left_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
-                        {left_pose['rotate_xyz'][0]}_f32.to_radians(),
-                        {left_pose['rotate_xyz'][1]}_f32.to_radians(),
+                        EulerRot::ZYX,
                         {left_pose['rotate_xyz'][2]}_f32.to_radians(),
+                        {left_pose['rotate_xyz'][1]}_f32.to_radians(),
+                        {left_pose['rotate_xyz'][0]}_f32.to_radians(),
                     ),
                     Vec3::new({left_pose['origin'][0]}, {left_pose['origin'][1]}, {left_pose['origin'][2]}),
                 ),
                 right_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
-                        {right_pose['rotate_xyz'][0]}_f32.to_radians(),
-                        {right_pose['rotate_xyz'][1]}_f32.to_radians(),
+                        EulerRot::ZYX,
                         {right_pose['rotate_xyz'][2]}_f32.to_radians(),
+                        {right_pose['rotate_xyz'][1]}_f32.to_radians(),
+                        {right_pose['rotate_xyz'][0]}_f32.to_radians(),
                     ),
                     Vec3::new({right_pose['origin'][0]}, {right_pose['origin'][1]}, {right_pose['origin'][2]}),
                 ),

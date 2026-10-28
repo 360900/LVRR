@@ -1006,8 +1006,7 @@ pub(super) mod compressed {
             return Err(invalid);
         }
         let mask = word(8);
-        if mask & !3 != 0 || data.len() != HEADER_SIZE + mask.count_ones() as usize * SPACE_SIZE
-        {
+        if mask & !3 != 0 || data.len() != HEADER_SIZE + mask.count_ones() as usize * SPACE_SIZE {
             return Err(invalid);
         }
         Ok(mask)
@@ -1032,7 +1031,12 @@ pub(super) mod compressed {
             return Err(vr::EVRInputError::InvalidCompressedData);
         }
         // Model space, when held, comes first.
-        let start = HEADER_SIZE + if bit == 2 && mask & 1 != 0 { SPACE_SIZE } else { 0 };
+        let start = HEADER_SIZE
+            + if bit == 2 && mask & 1 != 0 {
+                SPACE_SIZE
+            } else {
+                0
+            };
         let mut floats = data[start..start + SPACE_SIZE]
             .as_chunks::<4>()
             .0
@@ -1112,8 +1116,17 @@ mod tests {
         let same = |a: &[vr::VRBoneTransform_t], b: &[vr::VRBoneTransform_t]| {
             a.iter().zip(b).all(|(a, b)| {
                 a.position.v == b.position.v
-                    && (a.orientation.w, a.orientation.x, a.orientation.y, a.orientation.z)
-                        == (b.orientation.w, b.orientation.x, b.orientation.y, b.orientation.z)
+                    && (
+                        a.orientation.w,
+                        a.orientation.x,
+                        a.orientation.y,
+                        a.orientation.z,
+                    ) == (
+                        b.orientation.w,
+                        b.orientation.x,
+                        b.orientation.y,
+                        b.orientation.z,
+                    )
             })
         };
 

@@ -285,18 +285,24 @@ pub const GAMEPAD_HAPTICS: [&str; 2] = [
 
 pub trait LegalPathsT {
     fn is_legal(path: DynInputPath) -> bool;
+    /// Appends every legal path.
+    fn collect(paths: &mut Vec<DynInputPath>);
 }
 
 impl LegalPathsT for () {
     fn is_legal(_: DynInputPath) -> bool {
         false
     }
+    fn collect(_: &mut Vec<DynInputPath>) {}
 }
 
 impl<T: InputPath> LegalPathsT for (T,) {
     #[inline]
     fn is_legal(path: DynInputPath) -> bool {
         path == T::DYN
+    }
+    fn collect(paths: &mut Vec<DynInputPath>) {
+        paths.push(T::DYN);
     }
 }
 impl<T: InputPath, Tail> LegalPathsT for (T, Tail)
@@ -306,6 +312,10 @@ where
     #[inline]
     fn is_legal(path: DynInputPath) -> bool {
         path == T::DYN || Tail::is_legal(path)
+    }
+    fn collect(paths: &mut Vec<DynInputPath>) {
+        paths.push(T::DYN);
+        Tail::collect(paths);
     }
 }
 
@@ -684,7 +694,7 @@ pub mod paths {
 
             /// Represents the final component of an input path.
             /// The "click" in "/user/hand/input/a/click"
-            #[derive(Copy, Clone, PartialEq, Eq)]
+            #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
             pub enum $enum {
                 $($name,)+
             }
@@ -752,7 +762,7 @@ pub mod paths {
 
             /// Represents a specific input on an input path
             /// The "a" in "/user/hand/input/a/click"
-            #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+            #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
             pub enum $enum {
                 $($name,)+
             }

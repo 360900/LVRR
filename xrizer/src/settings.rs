@@ -301,11 +301,12 @@ fn load_file(path: &Path) -> Values {
         for (key, value) in keys {
             let value = match value {
                 serde_json::Value::Bool(b) => Bool(*b),
-                serde_json::Value::Number(n) => match n.as_i64().and_then(|i| i32::try_from(i).ok())
-                {
-                    Some(i) => Int32(i),
-                    None => Float(n.as_f64().unwrap_or(0.0) as f32),
-                },
+                serde_json::Value::Number(n) => {
+                    match n.as_i64().and_then(|i| i32::try_from(i).ok()) {
+                        Some(i) => Int32(i),
+                        None => Float(n.as_f64().unwrap_or(0.0) as f32),
+                    }
+                }
                 serde_json::Value::String(s) => match CString::new(s.as_str()) {
                     Ok(s) => Str(s.into()),
                     Err(_) => continue,
@@ -396,6 +397,38 @@ fn render_scale_of(global: Option<f32>, per_app_percent: Option<f32>) -> f32 {
 
 pub(crate) fn get_bool(section: &str, key: &str) -> Option<bool> {
     lookup(section, key, Value::to_bool)
+}
+
+pub(crate) fn get_i32(section: &str, key: &str) -> Option<i32> {
+    lookup(section, key, Value::to_i32)
+}
+
+/// Sets and saves a value, as an app writing it would.
+pub(crate) fn set_i32(section: &str, key: &str, value: i32) {
+    set_value(section, key, Int32(value));
+}
+
+pub(crate) fn set_bool(section: &str, key: &str, value: bool) {
+    set_value(section, key, Bool(value));
+}
+
+pub(crate) fn get_str(section: &str, key: &str) -> Option<String> {
+    lookup(section, key, |value| {
+        Some(value.to_str()?.to_string_lossy().into_owned())
+    })
+}
+
+/// Strings with a NUL in them can't be kept.
+pub(crate) fn set_str(section: &str, key: &str, value: &str) {
+    if let Ok(value) = CString::new(value) {
+        set_value(section, key, Str(Cow::Owned(value)));
+    }
+}
+
+fn set_value(section: &str, key: &str, value: Value) {
+    let mut values = VALUES.lock().unwrap();
+    values.insert((section.to_owned(), key.to_owned()), value);
+    persist(&values);
 }
 
 pub(crate) fn get_f32(section: &str, key: &str) -> Option<f32> {
@@ -791,7 +824,13 @@ mod tests {
                 .and_then(Value::to_f32)
         };
 
-        IVRSettings003_Interface::SetFloat(&settings, section.as_ptr(), key.as_ptr(), 1.5, &mut err);
+        IVRSettings003_Interface::SetFloat(
+            &settings,
+            section.as_ptr(),
+            key.as_ptr(),
+            1.5,
+            &mut err,
+        );
         assert_eq!(err, EVRSettingsError::None);
         let file = dir.join("xrizer/settings.json");
         assert_eq!(lookup(&load_file(&file)), Some(1.5));
@@ -799,7 +838,12 @@ mod tests {
         assert!(!settings.Sync(false, &mut err));
         assert!(settings.Sync(true, &mut err));
 
-        IVRSettings003_Interface::RemoveKeyInSection(&settings, section.as_ptr(), key.as_ptr(), &mut err);
+        IVRSettings003_Interface::RemoveKeyInSection(
+            &settings,
+            section.as_ptr(),
+            key.as_ptr(),
+            &mut err,
+        );
         assert_eq!(lookup(&load_file(&file)), None);
         assert!(settings.Sync(false, &mut err));
 

@@ -19,6 +19,10 @@ use std::path::PathBuf;
 
 #[derive(Deserialize)]
 pub struct ActionManifest {
+    /// The app treats one hand as dominant, so SteamVR offers to mirror the bindings for
+    /// left-handed users.
+    #[serde(default)]
+    pub supports_dominant_hand_setting: bool,
     #[serde(default, deserialize_with = "lenient_vec")]
     pub default_bindings: Vec<DefaultBindings>,
     #[serde(default, deserialize_with = "lenient_vec")]

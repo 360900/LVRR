@@ -132,7 +132,8 @@ fn manifest() -> actions::ActionManifest {
 /// Reads legacy bindings, keeping the action set their mirror_actions option allows, like
 /// SteamVR.
 fn read_legacy_bindings(path: &Path, controller_type: &ControllerType) -> Option<Bindings> {
-    let mut bindings = read_bindings(path, controller_type)?;
+    // Legacy bindings mirror through their own option, not the dominant hand.
+    let mut bindings = read_bindings(path, controller_type, false)?;
     let (set, other) = if bindings.options.mirror_actions {
         (MIRRORED_SET, LEGACY_SET)
     } else {

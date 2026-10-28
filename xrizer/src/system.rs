@@ -2779,17 +2779,20 @@ mod tests {
     #[test]
     fn binding_load_events() {
         let (_xr, system, _input) = system_with_input();
-        let events: Vec<u32> = std::iter::from_fn(|| next_event(&system).map(|e| e.eventType))
-            .collect();
+        let events: Vec<u32> =
+            std::iter::from_fn(|| next_event(&system).map(|e| e.eventType)).collect();
         let position = |ty: vr::EVREventType| events.iter().rposition(|&e| e == ty.0);
-        let loaded = position(vr::EVREventType::Input_BindingLoadSuccessful)
-            .expect("no bindings loaded");
+        let loaded =
+            position(vr::EVREventType::Input_BindingLoadSuccessful).expect("no bindings loaded");
         let failed = position(vr::EVREventType::Input_BindingLoadFailed).unwrap_or(0);
         let reloaded =
             position(vr::EVREventType::ActionBindingReloaded).expect("bindings not reloaded");
         let manifest = position(vr::EVREventType::Input_ActionManifestReloaded)
             .expect("manifest not reloaded");
-        assert!(loaded < reloaded && failed < reloaded && reloaded < manifest, "{events:?}");
+        assert!(
+            loaded < reloaded && failed < reloaded && reloaded < manifest,
+            "{events:?}"
+        );
         assert_eq!(
             events
                 .iter()

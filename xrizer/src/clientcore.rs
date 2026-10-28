@@ -373,7 +373,7 @@ impl IVRClientCore003_Interface for ClientCore {
                 })
             })
             .or_else(|| self.try_interface(interface, |_| Input::new(openxr.clone())))
-            .or_else(|| self.try_interface(interface, |_| RenderModels::default()))
+            .or_else(|| self.try_interface(interface, RenderModels::new))
             .or_else(|| {
                 self.try_interface(interface, |injector| {
                     OverlayMan::new(openxr.clone(), injector)

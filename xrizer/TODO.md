@@ -69,7 +69,8 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
 
 18. Render models (M)
     - without a SteamVR install, the bundled meshes have a 1x1 grey texture and there are no HMD, base station, Pico, Quest Pro or native WMR meshes; with one, its models and textures are used
-    - components never animate; one fake component per model (the whole mesh) even where SteamVR's JSON lists them; button masks 0
+    - components only from SteamVR's JSON; the bundled meshes stay one fake component with no moving parts
+    - a stick's or pad's tilt direction per axis, and whether `mTrackingToComponentLocal` moves with its part, are read from SteamVR's files and the Unity plugin, not verified on a headset
     - `XR_EXT_render_model`, `XR_EXT_interaction_render_model`, `XR_FB_render_model`, `XR_MSFT_controller_model`
     - WiVRn: none of these; bundled assets needed there
 19. Resolution and refresh (S-M)
@@ -100,8 +101,9 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
     - fixed mappings match SteamVR's per-controller legacy files (no DPad there, the system button is the runtime's); Focus 3 bumper (`Axis3`) isn't in its OpenXR profile
     - WMR legacy mapping unverified: SteamVR's WMR driver isn't shipped on Linux
     - `vive_tracker_handed` legacy bindings (trackers: 21)
-24. Dominant hand (S-M)
-    - stored, bindings never mirrored; `supports_dominant_hand_setting` not parsed. SteamVR's shipped settings have no dominant hand key, only `SetDominantHand` drives it
+24. Dominant hand (S)
+    - a change through `SetDominantHand` restarts the session to load the bindings again, where SteamVR applies it at the next `UpdateActionState`
+    - skeleton bindings aren't mirrored, each hand's is its own; unverified against SteamVR
 25. Compositor (S-M)
     - `CanRenderScene` always true, `GetCurrentSceneFocusProcess` always our pid
     - partial `GetCumulativeStats`
@@ -119,9 +121,10 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
     - `AreBoundsVisible` only knows what the app forced; `GetBoundsColor` ignores the fade distance; ChaperoneSetup writes ignored, the runtime owns its bounds
 29. Settings (S)
     - the user's `steamvr.vrsettings` values (e.g. `supersampleScale`) aren't read, only bindings choices are
-30. IVRApplications (M)
-    - no installed app list; vrmanifest fields other than `app_key` dropped
-    - launch, MIME, auto launch and transition calls unimplemented
+30. IVRApplications (S)
+    - nothing auto launches dashboard overlays at start, the flag is only kept
+    - `LaunchTemplateApplication` unimplemented; URL launches go through `xdg-open` or `steam`
+    - no transition states: launches happen at once, `GetStartingApplication` has nothing
 31. Screenshots (M)
     - no capture, files or `Screenshot*` events
 32. Input paths and identity (S-M)

@@ -6,6 +6,7 @@
 //! item of SteamVR's (app 250820), which Steam keeps as a JSON `<n>_legacy.bin` in
 //! `<library>/steamapps/workshop/content/250820/<item id>/`. Choosing the default removes the key.
 
+use crate::openxr_data::Hand;
 use log::debug;
 use serde_json::{Map, Value};
 use std::ffi::OsString;
@@ -130,6 +131,15 @@ impl SavedBindings {
             section,
             steam_roots,
         })
+    }
+
+    /// The dominant hand chosen for the app, SteamVR's `DominantHand` controller role.
+    pub fn dominant_hand(&self) -> Option<Hand> {
+        match self.section.get("DominantHand")?.as_i64()? {
+            1 => Some(Hand::Left),
+            2 => Some(Hand::Right),
+            _ => None,
+        }
     }
 
     /// The bindings file chosen for `controller_type`, if the user chose one that can be loaded.
@@ -303,6 +313,14 @@ fn config_dirs(env: Env, home: Option<&Path>, steam_roots: &[PathBuf]) -> Vec<Pa
     dirs
 }
 
+/// The config directories SteamVR may use, for the files it keeps there (app manifests), see
+/// [config_dirs].
+pub(crate) fn steam_config_dirs(env: Env) -> Vec<PathBuf> {
+    let home = env("HOME").map(PathBuf::from);
+    let roots = steam_roots(env, home.as_deref());
+    config_dirs(env, home.as_deref(), &roots)
+}
+
 /// The SteamVR install in the Steam libraries, for the files it ships (render models).
 pub(crate) fn steamvr_install(env: Env) -> Option<PathBuf> {
     let home = env("HOME").map(PathBuf::from);
@@ -348,7 +366,7 @@ fn push_dir(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
 
 /// `path`, or where the pressure-vessel container has it if only the host does (Steam libraries
 /// outside the home directory).
-fn host_path(path: &Path) -> PathBuf {
+pub(crate) fn host_path(path: &Path) -> PathBuf {
     if !path.exists()
         && let Ok(relative) = path.strip_prefix("/")
     {
@@ -661,7 +679,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             config.join("steamvr.vrsettings"),
-            r#"{"Steam.App.42": {"oculus_touch_250820_CurrentURL_steamvrinput": "vr-input-workshop://99"}}"#,
+            r#"{"Steam.App.42": {"oculus_touch_250820_CurrentURL_steamvrinput": "vr-input-workshop://99", "DominantHand": 1}}"#,
         )
         .unwrap();
         let item = steam.join("steamapps/workshop/content/250820/99");
@@ -696,11 +714,13 @@ mod tests {
         let knuckles = saved
             .as_ref()
             .and_then(|saved| saved.file_for("knuckles", Category::SteamVrInput));
+        let dominant_hand = saved.as_ref().and_then(SavedBindings::dominant_hand);
         let other_app = SavedBindings::load(&env, &["steam.app.43".into()]).is_some();
         let newest = newest.canonicalize().unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(touch, Some(newest));
         assert_eq!(knuckles, None);
+        assert_eq!(dominant_hand, Some(Hand::Left));
         assert!(!other_app);
     }
 }

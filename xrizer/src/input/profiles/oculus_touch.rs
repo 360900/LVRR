@@ -156,19 +156,19 @@ impl InteractionProfile for OculusTouch {
             BoundPoseType::Tip => Some(PoseTransformations {
                 left_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
                         -37.4_f32.to_radians(),
-                        0.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
                     ),
                     Vec3::new(0.016694, -0.02522, 0.024687),
                 ),
                 right_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
                         -37.4_f32.to_radians(),
-                        0.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
                     ),
                     Vec3::new(-0.016694, -0.02522, 0.024687),
                 ),
@@ -176,19 +176,19 @@ impl InteractionProfile for OculusTouch {
             BoundPoseType::Base => Some(PoseTransformations {
                 left_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
-                        -0.4_f32.to_radians(),
-                        180.0_f32.to_radians(),
+                        EulerRot::ZYX,
                         0.0_f32.to_radians(),
+                        180.0_f32.to_radians(),
+                        -0.4_f32.to_radians(),
                     ),
                     Vec3::new(-0.0034, -0.0034, 0.1491),
                 ),
                 right_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
-                        -0.4_f32.to_radians(),
-                        180.0_f32.to_radians(),
+                        EulerRot::ZYX,
                         0.0_f32.to_radians(),
+                        180.0_f32.to_radians(),
+                        -0.4_f32.to_radians(),
                     ),
                     Vec3::new(0.0034, -0.0034, 0.1491),
                 ),
@@ -196,19 +196,19 @@ impl InteractionProfile for OculusTouch {
             BoundPoseType::Handgrip => Some(PoseTransformations {
                 left_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
                         5.037_f32.to_radians(),
-                        0.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
                     ),
                     Vec3::new(0.0, 0.003, 0.097),
                 ),
                 right_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
                         5.037_f32.to_radians(),
-                        0.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
                     ),
                     Vec3::new(0.0, 0.003, 0.097),
                 ),
@@ -216,19 +216,19 @@ impl InteractionProfile for OculusTouch {
             BoundPoseType::Grip => Some(PoseTransformations {
                 left_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
                         5.037_f32.to_radians(),
-                        0.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
                     ),
                     Vec3::new(0.0, 0.003, 0.097),
                 ),
                 right_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
                         5.037_f32.to_radians(),
-                        0.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
                     ),
                     Vec3::new(0.0, 0.003, 0.097),
                 ),
@@ -236,19 +236,19 @@ impl InteractionProfile for OculusTouch {
             BoundPoseType::OpenxrHandmodel => Some(PoseTransformations {
                 left_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
                         -39.4_f32.to_radians(),
-                        0.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
                     ),
                     Vec3::new(-0.01125, -0.00182941, 0.1019482),
                 ),
                 right_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
                         -39.4_f32.to_radians(),
-                        0.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
                     ),
                     Vec3::new(0.01125, -0.00182941, 0.1019482),
                 ),
@@ -256,7 +256,7 @@ impl InteractionProfile for OculusTouch {
             BoundPoseType::OpenxrPinch => Some(PoseTransformations {
                 left_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
                         -90.0_f32.to_radians(),
                         -39.4_f32.to_radians(),
                         -90.0_f32.to_radians(),
@@ -265,7 +265,7 @@ impl InteractionProfile for OculusTouch {
                 ),
                 right_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
                         -90.0_f32.to_radians(),
                         -39.4_f32.to_radians(),
                         -90.0_f32.to_radians(),
@@ -276,19 +276,19 @@ impl InteractionProfile for OculusTouch {
             BoundPoseType::OpenxrPoke => Some(PoseTransformations {
                 left_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
-                        -6.3_f32.to_radians(),
-                        -45.1_f32.to_radians(),
+                        EulerRot::ZYX,
                         -89.2_f32.to_radians(),
+                        -45.1_f32.to_radians(),
+                        -6.3_f32.to_radians(),
                     ),
                     Vec3::new(-0.0225, -0.066903, 0.015636),
                 ),
                 right_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
-                        -6.3_f32.to_radians(),
-                        -45.1_f32.to_radians(),
+                        EulerRot::ZYX,
                         -89.2_f32.to_radians(),
+                        -45.1_f32.to_radians(),
+                        -6.3_f32.to_radians(),
                     ),
                     Vec3::new(0.0225, -0.066903, 0.015637),
                 ),
@@ -296,19 +296,19 @@ impl InteractionProfile for OculusTouch {
             BoundPoseType::OpenxrAim => Some(PoseTransformations {
                 left_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
                         -39.4_f32.to_radians(),
-                        0.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
                     ),
                     Vec3::new(0.007, -0.03894766, 0.00949694),
                 ),
                 right_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
                         -39.4_f32.to_radians(),
-                        0.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
                     ),
                     Vec3::new(-0.007, -0.03894766, 0.00949694),
                 ),
@@ -316,19 +316,19 @@ impl InteractionProfile for OculusTouch {
             BoundPoseType::OpenxrGrip => Some(PoseTransformations {
                 left_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
                         20.6_f32.to_radians(),
-                        0.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
                     ),
                     Vec3::new(0.007, -0.00182941, 0.1019482),
                 ),
                 right_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
+                        0.0_f32.to_radians(),
+                        0.0_f32.to_radians(),
                         20.6_f32.to_radians(),
-                        0.0_f32.to_radians(),
-                        0.0_f32.to_radians(),
                     ),
                     Vec3::new(-0.007, -0.00182941, 0.1019482),
                 ),

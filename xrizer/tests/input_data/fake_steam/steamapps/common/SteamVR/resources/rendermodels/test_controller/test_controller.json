@@ -1,1 +1,121 @@
-{"thumbnail": "test_controller_thumbnail.png", "components": {"body": {"filename": "test_controller_body.obj"}, "tip": {"component_local": {"origin": [0,0,0], "rotate_xyz": [0,0,0]}}}}
+{
+    "thumbnail": "test_controller_thumbnail.png",
+    "components": {
+        "body": {
+            "filename": "test_controller_body.obj",
+            "component_local": {"origin": [0, 0, 0], "rotate_xyz": [0, 0, 0]}
+        },
+        "trigger": {
+            "filename": "test_controller_trigger.obj",
+            "motion": {
+                "type": "rotate",
+                "controller_axis": 1,
+                "controller_axis_component": 0,
+                "trigger_path": "/input/trigger",
+                "value_mapping": [0.0, -18.0],
+                "pivot": [0.0, -0.02, 0.05],
+                "axis": [1.0, 0.0, 0.0],
+                "pressed_value_override": -20.0
+            },
+            "component_local": {"origin": [0.0, -0.04, 0.06], "rotate_xyz": [-80.0, 0.0, 0.0]}
+        },
+        "button_a": {
+            "filename": "test_controller_trigger.obj",
+            "motion": {
+                "type": "translate",
+                "pressed_path": "/input/a/click",
+                "controller_button": 2,
+                "value_mapping": [0.0, 0.002],
+                "axis": [0.0, -1.0, 0.0]
+            },
+            "component_local": {"origin": [0.02, 0.01, 0.05], "rotate_xyz": [66.0, 0.0, 0.0]}
+        },
+        "button_enter": {
+            "filename": "test_controller_trigger.obj",
+            "motion": {
+                "type": "translate",
+                "pressed_path": "/input/system/click",
+                "controller_button": 0,
+                "value_mapping": [0.0, 0.001],
+                "axis": [0.0, -1.0, 0.0]
+            }
+        },
+        "thumbstick": {
+            "filename": "test_controller_trigger.obj",
+            "motion": {
+                "type": "joystick",
+                "controller_axis": 0,
+                "center": [0.0, 0.0, 0.05],
+                "rotate_xyz": [0.0, 0.0, 0.0],
+                "joystick_rotation_x": [20, -20],
+                "joystick_rotation_y": [20, -20],
+                "component_path": "/input/thumbstick",
+                "press_translate": [0.0, -0.001, 0.0]
+            }
+        },
+        "trackpad": {
+            "filename": "test_controller_trigger.obj",
+            "motion": {
+                "type": "trackpad",
+                "controller_axis": 0,
+                "component_path": "/input/trackpad",
+                "center": [0.0, 0.002, 0.049],
+                "rotate_xyz": [6.55, 0.0, 0.0],
+                "press_rotation_x": [7, -7],
+                "press_rotation_y": [4, -4],
+                "press_translate": [0.0, -0.001, 0.0]
+            },
+            "component_local": {"origin": [0.0, 0.002, 0.049], "rotate_xyz": [0.0, 96.55, -90.0]},
+            "visibility": {"default": true, "scroll": false}
+        },
+        "trackpad_touch": {
+            "filename": "test_controller_trigger.obj",
+            "motion": {
+                "type": "trackpad",
+                "controller_axis": 0,
+                "component_path": "/input/trackpad",
+                "center": [0.0, 0.002, 0.049],
+                "rotate_xyz": [0.0, 0.0, 0.0],
+                "touch_translate_x": [-0.01, 0.01],
+                "touch_translate_y": [0.02, -0.02]
+            },
+            "visibility": {"default": false, "touch": true, "press": true, "scroll": false}
+        },
+        "scroll_wheel": {
+            "filename": "test_controller_trigger.obj",
+            "motion": {
+                "type": "rotate",
+                "touched_path": "/input/trackpad/touch",
+                "x_path": "/input/trackpad/y",
+                "controller_axis": 0,
+                "controller_axis_component": 1,
+                "value_mapping": [0.0, -40.0],
+                "pivot": [0.0, 0.0, 0.05],
+                "axis": [1.0, 0.0, 0.0]
+            },
+            "visibility": {"default": false, "scroll": true}
+        },
+        "dpad": {
+            "filename": "test_controller_trigger.obj",
+            "motion": {
+                "type": "dpad",
+                "center": [0.0, 0.0, 0.04],
+                "rotate_xyz": [0.0, 0.0, 0.0],
+                "joystick_rotation_x": [7, -7],
+                "joystick_rotation_y": [7, -7],
+                "press_translate": [0.0, -0.001, 0.0],
+                "dpad_up_path": "/input/dpad_up/click",
+                "dpad_down_path": "/input/dpad_down/click",
+                "dpad_left_path": "/input/dpad_left/click",
+                "dpad_right_path": "/input/dpad_right/click"
+            }
+        },
+        "shuttle": {
+            "filename": "test_controller_trigger.obj",
+            "motion": {"type": "pose", "pose_path": "/pose/raw"}
+        },
+        "tip": {
+            "component_local": {"origin": [0.0, -0.01, 0.02], "rotate_xyz": [-37.4, 0.0, 0.0]}
+        }
+    }
+}

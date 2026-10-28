@@ -207,20 +207,20 @@ impl InteractionProfile for FrameController {
         match hand {
             Hand::Left => Mat4::from_rotation_translation(
                 Quat::from_euler(
-                    EulerRot::XYZ,
-                    15.392_f32.to_radians(),
-                    -2.071_f32.to_radians(),
+                    EulerRot::ZYX,
                     0.303_f32.to_radians(),
+                    -2.071_f32.to_radians(),
+                    15.392_f32.to_radians(),
                 ),
                 Vec3::new(0.0, -0.015, 0.13),
             )
             .inverse(),
             Hand::Right => Mat4::from_rotation_translation(
                 Quat::from_euler(
-                    EulerRot::XYZ,
-                    15.392_f32.to_radians(),
-                    2.071_f32.to_radians(),
+                    EulerRot::ZYX,
                     -0.303_f32.to_radians(),
+                    2.071_f32.to_radians(),
+                    15.392_f32.to_radians(),
                 ),
                 Vec3::new(0.0, -0.015, 0.13),
             )
