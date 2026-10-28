@@ -234,6 +234,10 @@ mod tests {
 	#[test]
 	fn default_profiles_parse() {
 		let profiles: Vec<OpenXrInputProfile> = serde_json5::from_str(DEFAULT_XR_INPUT_PROFILES).unwrap();
-		assert!(profiles.iter().any(|p| p.profile == "/interaction_profiles/ext/hand_interaction_ext"));
+		assert!(
+			profiles
+				.iter()
+				.any(|p| p.profile == "/interaction_profiles/ext/hand_interaction_ext")
+		);
 	}
 }

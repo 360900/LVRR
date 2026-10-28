@@ -54,6 +54,7 @@ jobs:
       - name: Lint
         run: |
           cargo fmt --check
+          cargo fmt --check --all --manifest-path wayvr/Cargo.toml
           cargo clippy --locked -p lvrr -p xtask --all-targets -- -D warnings
           cargo xtask rebrand --check
       - name: Build
