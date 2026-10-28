@@ -738,7 +738,9 @@ impl<C: openxr_data::Compositor> Input<C> {
                     }
                     let mut bindings = bindings.clone();
                     fallback::convert(&mut bindings, source, has_input::<P>);
-                    if emulated.is_some() {
+                    // A game sees the controller its bindings came from: chosen, or by
+                    // itself when the game has none for this one.
+                    if emulated.is_some() || (source.can_be_emulated() && !P::SIMULATE_CONVERTED) {
                         self.context
                             .emulated_profiles
                             .insert(profile_path, source.clone());
