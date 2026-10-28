@@ -93,15 +93,15 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
     - body tracking extensions unused
     - WiVRn: body tracking parts are xdevs named `WiVRn generic tracker (<part>)` (Chest, Hip, Left/Right Elbow, Knee, Foot); device list fixed at connect, no hot-plug
 22. Skeletal (S-M)
-    - compressed bone data calls unimplemented
+    - compressed bone data is our own format, not SteamVR's (undocumented; apps only hand it back)
     - tracked bones ignore motion range (`XR_EXT_hand_joints_motion_range`)
     - finger splay constant, summary type ignored
     - Steam Frame thumb curl from joints unverified
     - without `XR_EXT_hand_tracking_data_source`, joints derived from a controller count as optical
 23. Legacy input without chosen bindings (S)
-    - only six buttons; no DPad or System
-    - only the main axis on controllers with a stick and a trackpad (Index, WMR)
-    - fixed mappings instead of SteamVR's per-controller default files (they match); tracker, `generic`, `simulate_rendermodel` and `simulate_hmd` legacy bindings ignored
+    - fixed mappings match SteamVR's per-controller legacy files (no DPad there, the system button is the runtime's); Focus 3 bumper (`Axis3`) isn't in its OpenXR profile
+    - WMR legacy mapping unverified: SteamVR's WMR driver isn't shipped on Linux
+    - `vive_tracker_handed` legacy bindings (trackers: 21)
 24. Dominant hand (S-M)
     - stored, bindings never mirrored; `supports_dominant_hand_setting` not parsed
 25. Compositor (S-M)
@@ -118,11 +118,10 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
     - IVRHeadsetView only stores values; size defaults to 0x0
     - `GetMirrorTextureGL`, `GetMirrorTextureD3D11` unimplemented
 28. Chaperone (S)
-    - calibration state always OK; unknown play area becomes 1x1 m
-    - bounds visibility and color calls do nothing; ChaperoneSetup writes ignored
+    - calibration state always OK; unknown play area becomes 1x1 m (an error state would stop games on runtimes without bounds)
+    - `AreBoundsVisible` only knows what the app forced; `GetBoundsColor` ignores the fade distance; ChaperoneSetup writes ignored, the runtime owns its bounds
 29. Settings (S)
-    - nothing persists, `Sync` does nothing
-    - `motionSmoothing` true while `IsMotionSmoothingEnabled` false; `preferredRefreshRate` fixed at 90
+    - the user's `steamvr.vrsettings` values (e.g. `supersampleScale`) aren't read, only bindings choices are
 30. IVRApplications (M)
     - no installed app list; vrmanifest fields other than `app_key` dropped
     - launch, MIME, auto launch and transition calls unimplemented

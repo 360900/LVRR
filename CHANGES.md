@@ -190,4 +190,8 @@ Accuracy and polish.
 
 | Area | Change | Commits |
 |------|--------|---------|
+| skeletal | `GetSkeletalBoneDataCompressed`/`DecompressSkeletalBoneData` and IVRInput_004's variants, in a format of our own holding both transform spaces | `d26b910` |
+| legacy input | SteamVR's legacy bindings for the Pico, Focus 3 and Frame controllers simulate Touch controllers, so legacy apps see those | `6de9a8d` |
+| chaperone | `ForceBoundsVisible`/`AreBoundsVisible` recorded; `GetBoundsColor` from the `collisionBounds` settings; `SetSceneColor` and `ReloadInfo` quiet | `d26b910` |
+| settings | values apps set persist in `~/.config/xrizer/settings.json`, `Sync` reports changes; `preferredRefreshRate` is the runtime's rate; `IsMotionSmoothingEnabled` follows `motionSmoothing` | `d26b910` |
 | events | `eventAgeSeconds` is the event's age; `PollNextEventWithPose` gives the event's device pose; `TrackedDeviceRoleChanged` with controller activations; `IpdChanged` when the headset's IPD moves by 0.5 mm; `HideRenderModels`/`ShowRenderModels` with the input focus; `EnterStandbyMode`/`LeaveStandbyMode` after 5 s without the user, activity level `Standby`; `Input_BindingLoadSuccessful`/`Failed`, `ActionBindingReloaded` and `Input_ActionManifestReloaded` on manifest loads; `SceneApplicationChanged` and `SceneApplicationStateChanged` for scene apps, whose `GetSceneApplicationState` is Starting, Running or Quitting | `305fd4a` `5e13f8f` |
