@@ -162,6 +162,15 @@ private:
 	std::optional<input_profile> input;
 	static inline const uint32_t layer_controllers = 1 << 0;
 	static inline const uint32_t layer_rays = 1 << 1;
+	static inline const uint32_t layer_hands = 1 << 2; // LVRR
+
+	// LVRR: hands drawn over the stream, render thread only; the tracking thread has its own trackers
+	std::optional<xr::hand_tracker> lvrr_left_hand;
+	std::optional<xr::hand_tracker> lvrr_right_hand;
+	std::atomic<bool> lvrr_hands_requested = true; // until the server says otherwise
+	void lvrr_setup_hands();
+	bool lvrr_locate_hands(XrTime predicted_display_time);
+	void lvrr_render_hands(XrTime predicted_display_time);
 
 	// Size of the composition layer used for the controllers
 	uint32_t width;
@@ -302,6 +311,7 @@ public:
 	void operator()(lvrr::set_headset_settings &&);
 	void operator()(lvrr::expect_reconnect &&);
 	void operator()(lvrr::server_stopping &&);
+	void operator()(lvrr::show_hands &&);
 
 	// Applies settings sent by the LVRR dashboard, on the render thread
 	void lvrr_update();

@@ -991,7 +991,8 @@ using packets = std::variant<
         running_applications,
         lvrr::set_headset_settings,
         lvrr::expect_reconnect,
-        lvrr::server_stopping>;
+        lvrr::server_stopping,
+        lvrr::show_hands>;
 } // namespace to_headset
 } // namespace wivrn
 

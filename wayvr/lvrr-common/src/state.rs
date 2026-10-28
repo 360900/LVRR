@@ -211,6 +211,8 @@ pub enum LvrrRequest {
 	StartApplication(String),
 	/// A Monado client id
 	StopApplication(u32),
+	/// The headset draws the hands over games while the dashboard is open
+	SetDashboardVisible(bool),
 }
 
 impl LvrrRequest {
@@ -228,6 +230,7 @@ impl LvrrRequest {
 			LvrrRequest::RefreshApplications => "ListApplications",
 			LvrrRequest::StartApplication(_) => "StartApplication",
 			LvrrRequest::StopApplication(_) => "StopApplication",
+			LvrrRequest::SetDashboardVisible(_) => "SetDashboardVisible",
 		}
 	}
 }

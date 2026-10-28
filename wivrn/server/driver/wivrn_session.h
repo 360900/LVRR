@@ -106,6 +106,9 @@ class wivrn_session : public xrt_system_devices
 	std::optional<wivrn_uinput> uinput_handler;
 	bool gamepad_connected = false; // network thread only
 	int64_t lvrr_stats_ns = 0;      // LVRR: last headset statistics, network thread only
+	std::mutex lvrr_hands_mutex;    // LVRR: for the two below
+	bool lvrr_dashboard_open = false;
+	std::optional<bool> lvrr_hands_shown; // last lvrr::show_hands sent
 
 	clock_offset_estimator offset_est;
 	std::atomic<XrDuration> tracking_latency; // production to reception time
@@ -204,6 +207,8 @@ public:
 	void operator()(to_headset::stream_tab_change &&);
 	void operator()(lvrr::set_headset_settings &&);
 	void operator()(to_monado::restart_session &&);
+	void operator()(to_monado::dashboard_visible &&);
+	void lvrr_update_hands();
 
 	bool has_stream()
 	{

@@ -203,6 +203,7 @@ impl LvrrBackend for LvrrEmulator {
 			}
 			LvrrRequest::StartApplication(id) => self.message(&format!("Starting {id}")),
 			LvrrRequest::StopApplication(id) => self.message(&format!("Stopping client {id}")),
+			LvrrRequest::SetDashboardVisible(_) => {}
 		}
 		Ok(())
 	}

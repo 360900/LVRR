@@ -581,6 +581,8 @@ void scenes::stream::on_focused()
 
 	// LVRR: clocks start low and follow the load, unless the setting pins them high
 	application::get_power().set_pinned_high(application::get_config().high_power_mode);
+
+	lvrr_setup_hands();
 }
 
 void scenes::stream::on_unfocused()
@@ -590,6 +592,8 @@ void scenes::stream::on_unfocused()
 	input.reset();
 	left_hand.reset();
 	right_hand.reset();
+	lvrr_left_hand.reset();
+	lvrr_right_hand.reset();
 	apps.reset();
 
 	imgui_ctx.reset();
@@ -1036,10 +1040,13 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		}
 	}
 
+	// LVRR: hands move between video frames
+	const bool hands = lvrr_locate_hands(frame_state.predictedDisplayTime);
+
 	// Allow the headset to time warp if we are redisplaying a frame
 	if ((not application::get_hmd_traits().discard_frame) or
 	    std::ranges::any_of(current_blit_handles, [](const auto & h) { return h and h->feedback.times_displayed < 2; }) or
-	    is_gui_interactable())
+	    is_gui_interactable() or hands)
 	{
 		assert(swapchain);
 
@@ -1207,6 +1214,9 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		if (const configuration::openxr_post_processing_settings openxr_post_processing = application::get_config().openxr_post_processing;
 		    (openxr_post_processing.sharpening | openxr_post_processing.super_sampling) > 0)
 			set_layer_settings(openxr_post_processing.sharpening | openxr_post_processing.super_sampling);
+
+		if (hands)
+			lvrr_render_hands(frame_state.predictedDisplayTime);
 
 		accumulate_metrics(frame_state.predictedDisplayTime, current_blit_handles, timestamps);
 		lvrr_stats(frame_state.predictedDisplayTime);

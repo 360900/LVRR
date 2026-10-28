@@ -73,6 +73,7 @@ When that headset connects, the server sends the pending changes. Once the heads
 
 - `RestartSession()`: ends the session, so restart settings apply. All XR applications close, including the dashboard. The headset reconnects without showing an error, and the server starts the dashboard again.
 - `StopSession()`: ends the session and the headset returns to its server list. Use it before `EnablePairing`, which is refused while a session runs.
+- `SetDashboardVisible(b visible)`: the dashboard opened or closed. The headset draws the hands over the stream while no game runs, or while the dashboard is open.
 
 ## Applications
 

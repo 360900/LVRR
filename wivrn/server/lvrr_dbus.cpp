@@ -319,6 +319,14 @@ gboolean on_stop_session(WivrnServer * skeleton, GDBusMethodInvocation * invocat
 	return TRUE;
 }
 
+gboolean on_set_dashboard_visible(WivrnServer * skeleton, GDBusMethodInvocation * invocation, gboolean visible, gpointer)
+{
+	if (session.session_running())
+		session.send_to_session(to_monado::dashboard_visible{.visible = bool(visible)});
+	wivrn_server_complete_set_dashboard_visible(skeleton, invocation);
+	return TRUE;
+}
+
 gboolean on_list_applications(WivrnServer * skeleton, GDBusMethodInvocation * invocation, gpointer)
 {
 	std::vector<std::tuple<std::string, std::string, std::string>> list;
@@ -481,6 +489,7 @@ void setup(WivrnServer * server, hooks h)
 	g_signal_connect(server, "handle-set-headset-settings", G_CALLBACK(on_set_headset_settings), nullptr);
 	g_signal_connect(server, "handle-restart-session", G_CALLBACK(on_restart_session), nullptr);
 	g_signal_connect(server, "handle-stop-session", G_CALLBACK(on_stop_session), nullptr);
+	g_signal_connect(server, "handle-set-dashboard-visible", G_CALLBACK(on_set_dashboard_visible), nullptr);
 	g_signal_connect(server, "handle-list-applications", G_CALLBACK(on_list_applications), nullptr);
 	g_signal_connect(server, "handle-get-application-icon", G_CALLBACK(on_get_application_icon), nullptr);
 	g_signal_connect(server, "handle-start-application", G_CALLBACK(on_start_application), nullptr);

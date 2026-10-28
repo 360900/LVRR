@@ -53,6 +53,13 @@ public:
 		uint32_t repeated;
 	};
 	game_frames take_game_frames();
+	// LVRR: which kinds of applications have a session
+	struct running_apps
+	{
+		bool game;
+		bool overlay;
+	};
+	running_apps running();
 };
 
 } // namespace wivrn

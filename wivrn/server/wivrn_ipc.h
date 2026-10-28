@@ -78,13 +78,20 @@ struct set_bitrate
 struct restart_session
 {};
 
+// LVRR: the dashboard opened or closed, see lvrr::show_hands
+struct dashboard_visible
+{
+	bool visible;
+};
+
 using packets = std::variant<stop,
                              disconnect,
                              set_bitrate,
                              wivrn::to_headset::stream_tab_change,
                              wivrn::lvrr::set_headset_settings,
                              wivrn::from_headset::stop_application,
-                             restart_session>;
+                             restart_session,
+                             dashboard_visible>;
 } // namespace to_monado
 
 extern std::optional<wivrn::typed_socket<wivrn::UnixDatagram, to_monado::packets, from_monado::packets>> wivrn_ipc_socket_monado;

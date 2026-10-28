@@ -21,6 +21,7 @@
 #include "battery.h"
 #include "configuration.h"
 #include "decoder/decoder.h"
+#include "hand_model.h"
 #include "utils/i18n.h"
 #include <algorithm>
 #include <cmath>
@@ -521,6 +522,60 @@ void scenes::stream::operator()(lvrr::set_headset_settings && request)
 {
 	// configuration is not thread safe, apply on the render thread
 	lvrr_requests.lock()->push_back(std::move(request));
+}
+
+void scenes::stream::operator()(lvrr::show_hands && packet)
+{
+	lvrr_hands_requested = packet.show;
+}
+
+// The same hands as the lobby's
+void scenes::stream::lvrr_setup_hands()
+{
+	if (not system.hand_tracking_supported() or not application::get_config().check_feature(feature::hand_tracking))
+		return;
+
+	lvrr_left_hand = session.create_hand_tracker(XR_HAND_LEFT_EXT);
+	lvrr_right_hand = session.create_hand_tracker(XR_HAND_RIGHT_EXT);
+
+	if (system.hand_mesh_fb_supported())
+	{
+		const auto * left_mesh = lvrr_left_hand->mesh();
+		const auto * right_mesh = lvrr_right_hand->mesh();
+		if (left_mesh and right_mesh)
+		{
+			hand_model::add_hand(*this, XR_HAND_LEFT_EXT, *left_mesh, layer_hands);
+			hand_model::add_hand(*this, XR_HAND_RIGHT_EXT, *right_mesh, layer_hands);
+			return;
+		}
+	}
+	hand_model::add_hand(*this, XR_HAND_LEFT_EXT, "assets://left-hand.glb", layer_hands);
+	hand_model::add_hand(*this, XR_HAND_RIGHT_EXT, "assets://right-hand.glb", layer_hands);
+}
+
+// Places the hands; true when one should be drawn
+bool scenes::stream::lvrr_locate_hands(XrTime predicted_display_time)
+{
+	if (not lvrr_left_hand or not lvrr_right_hand)
+		return false;
+
+	std::optional<xr::hand_tracker::joint_array> left;
+	std::optional<xr::hand_tracker::joint_array> right;
+	if (lvrr_hands_requested)
+	{
+		XrSpace world_space = application::space(xr::spaces::world);
+		left = lvrr_left_hand->locate(world_space, predicted_display_time).joints;
+		right = lvrr_right_hand->locate(world_space, predicted_display_time).joints;
+	}
+	hand_model::apply(world, left ? &*left : nullptr, right ? &*right : nullptr);
+	return left or right;
+}
+
+void scenes::stream::lvrr_render_hands(XrTime predicted_display_time)
+{
+	XrSpace world_space = application::space(xr::spaces::world);
+	auto views = session.locate_views(viewconfig, predicted_display_time, world_space).second;
+	render_world(XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT, world_space, views, width, height, false, layer_hands, {});
 }
 
 void scenes::stream::operator()(lvrr::expect_reconnect &&)

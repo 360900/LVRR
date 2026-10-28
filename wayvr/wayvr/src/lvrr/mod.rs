@@ -10,7 +10,10 @@ use std::{
 
 use lvrr_common::{
     link::LvrrLink,
-    state::{Battery, BatteryDevice, LvrrBackend, MAX_VIRTUAL_MONITORS, MessageKind, Notice},
+    state::{
+        Battery, BatteryDevice, Link, LvrrBackend, LvrrRequest, MAX_VIRTUAL_MONITORS, MessageKind,
+        Notice,
+    },
 };
 use serde::{Deserialize, Serialize};
 use wgui::i18n::Translation;
@@ -44,6 +47,8 @@ pub struct LvrrApp {
     virtual_method: std::cell::OnceCell<Option<virtual_monitor::Method>>,
     /// The mouse's area changes once a removed output is gone
     extent_refresh_at: Option<Instant>,
+    /// What the server last heard about the dashboard
+    dashboard_reported: Option<bool>,
 }
 
 pub struct VirtualMonitor {
@@ -236,6 +241,23 @@ pub fn set_virtual_monitor_output(app: &mut AppState, name: &str, output: Arc<st
     {
         m.output = Some(output);
     }
+}
+
+/// Tells the server whether the dashboard is open, so the headset draws the hands over games
+pub fn set_dashboard_visible(app: &mut AppState, visible: bool) {
+    let Some(link) = app.lvrr.link.as_mut() else {
+        return;
+    };
+    if link.state().link != Link::Online || !link.state().session_running {
+        // told again once the session is back
+        app.lvrr.dashboard_reported = None;
+        return;
+    }
+    if app.lvrr.dashboard_reported == Some(visible) {
+        return;
+    }
+    app.lvrr.dashboard_reported = Some(visible);
+    let _ = link.request(LvrrRequest::SetDashboardVisible(visible));
 }
 
 /// Shows the server's messages, and failed requests, as toasts

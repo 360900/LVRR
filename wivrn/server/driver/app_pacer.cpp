@@ -270,6 +270,15 @@ pacing_app_factory::game_frames pacing_app_factory::take_game_frames()
 	return result;
 }
 
+pacing_app_factory::running_apps pacing_app_factory::running()
+{
+	std::lock_guard lock(mutex);
+	running_apps result{};
+	for (app_pacer * pacer: app_pacers)
+		(pacer->is_overlay ? result.overlay : result.game) = true;
+	return result;
+}
+
 void pacing_app_factory::destroy()
 {
 }

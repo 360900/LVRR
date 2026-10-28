@@ -948,6 +948,13 @@ impl<T> OverlayWindowManager<T> {
             app.tasks
                 .enqueue(TaskType::Overlay(OverlayTask::DropExpired(id)));
         }
+
+        // LVRR
+        let dashboard = self
+            .overlays
+            .values()
+            .any(|o| o.config.active_state.is_some() && o.config.name.as_ref() == DASH_NAME);
+        crate::lvrr::set_dashboard_visible(app, dashboard);
     }
 
     pub fn lookup(&self, name: &str) -> Option<OverlayID> {

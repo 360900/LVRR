@@ -305,6 +305,7 @@ fn call(connection: &Connection, request: LvrrRequest, events: &Sender<Event>) {
 		}
 		LvrrRequest::StartApplication(id) => proxy.method_call(INTERFACE, name, (id,)),
 		LvrrRequest::StopApplication(id) => proxy.method_call(INTERFACE, name, (id,)),
+		LvrrRequest::SetDashboardVisible(visible) => proxy.method_call(INTERFACE, name, (visible,)),
 	};
 
 	if let Err(e) = result {

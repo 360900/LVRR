@@ -167,6 +167,13 @@ struct server_stopping
 	reason_t reason;
 };
 
+// Sent by the server when the headset should start or stop drawing the hands over the
+// stream: while no game runs, or while the dashboard is open.
+struct show_hands
+{
+	bool show;
+};
+
 // Sent by the headset about once per second while streaming.
 struct headset_stats
 {

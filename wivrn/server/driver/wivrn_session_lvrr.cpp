@@ -49,6 +49,39 @@ void wivrn_session::operator()(lvrr::headset_stats && stats)
 		pc.encoder_skipped_fps = skipped / seconds;
 	}
 	send_to_main(lvrr::stats{.headset = std::move(stats), .pc = pc});
+
+	// games start and stop without telling the session, this catches them within a second
+	lvrr_update_hands();
+}
+
+void wivrn_session::operator()(to_monado::dashboard_visible && packet)
+{
+	{
+		std::lock_guard lock(lvrr_hands_mutex);
+		lvrr_dashboard_open = packet.visible;
+	}
+	lvrr_update_hands();
+}
+
+// The headset draws the hands while no game draws its own, or while the dashboard is open.
+// A dashboard that quit with its window open counts as closed.
+void wivrn_session::lvrr_update_hands()
+{
+	std::lock_guard lock(lvrr_hands_mutex);
+	const auto apps = app_pacers.running();
+	const bool show = not apps.game or (lvrr_dashboard_open and apps.overlay);
+	if (lvrr_hands_shown == show)
+		return;
+
+	try
+	{
+		send_control(lvrr::show_hands{.show = show});
+		lvrr_hands_shown = show;
+	}
+	catch (std::exception & e)
+	{
+		U_LOG_D("Could not tell the headset to show the hands: %s", e.what());
+	}
 }
 
 // Lets the headset tell a deliberate stop from a crash.
