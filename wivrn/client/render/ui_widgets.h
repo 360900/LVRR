@@ -203,7 +203,7 @@ void shell_dividers(float top_bar_h, float tab_width);
 // Rounded rectangle whose fill goes from top to bottom, with the vertex alpha kept for AA
 void gradient_rect(ImDrawList * draw, const ImVec2 & min, const ImVec2 & max, float rounding, const ImVec4 & top, const ImVec4 & bottom);
 
-// Side pill of height h holding buttons round buttons and separators separators, centered vertically
+// Column of height h with a pill around buttons round buttons and separators separators, centered vertically
 void shell_side_begin(float height, int buttons, int separators);
 bool shell_side_button(const char * icon, const std::string & tooltip, bool selected);
 void shell_side_separator();

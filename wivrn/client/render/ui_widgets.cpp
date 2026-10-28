@@ -1568,13 +1568,15 @@ void shell_side_begin(float height, int buttons, int separators)
 	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {0, gap});
 	ImGui::BeginChild("Side", {w, height}, 0, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
-	ImGuiWindow * window = ImGui::GetCurrentWindow();
-	const ImVec2 p = window->Pos;
-	window->DrawList->AddRectFilled(p, p + ImVec2{w, height}, t.col(t.background_contrast), w * 0.5f);
-
-	// the buttons sit in the middle of the pill
+	// the pill wraps the buttons, in the middle of the column
 	side_items_height = buttons * w + separators * (metrics::card_title_rule + gap * 2) + (buttons + separators - 1) * gap;
-	ImGui::SetCursorPosY(std::max(0.f, (height - side_items_height) * 0.5f));
+	const float top = std::max(0.f, (height - side_items_height) * 0.5f);
+
+	ImGuiWindow * window = ImGui::GetCurrentWindow();
+	const ImVec2 p = window->Pos + ImVec2{0, top};
+	window->DrawList->AddRectFilled(p, p + ImVec2{w, side_items_height}, t.col(t.background_contrast), w * 0.5f);
+
+	ImGui::SetCursorPosY(top);
 }
 
 bool shell_side_button(const char * icon, const std::string & tooltip, bool selected)
