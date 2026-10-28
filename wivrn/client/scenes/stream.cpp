@@ -37,6 +37,7 @@
 #include "inplace_vector.hpp"
 #include "lvrr.h"
 #include "spdlog/spdlog.h"
+#include "utils/i18n.h"
 #include "utils/named_thread.h"
 #include "utils/ranges.h"
 #include "wivrn_packets.h"
@@ -565,8 +566,10 @@ void scenes::stream::on_focused()
 		}
 	}
 
-	plots_toggle_1 = get_action("plots_toggle_1").first;
-	plots_toggle_2 = get_action("plots_toggle_2").first;
+	menu_chord.a = get_action("menu_toggle_1").first;
+	menu_chord.b = get_action("menu_toggle_2").first;
+	gamepad_chord.a = get_action("gamepad_mode_1").first;
+	gamepad_chord.b = get_action("gamepad_mode_2").first;
 	recenter_left = get_action("recenter_left").first;
 	recenter_right = get_action("recenter_right").first;
 	gui_distance_left = get_action("gui_distance_left").first;
@@ -926,6 +929,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 	command_buffer.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, *query_pool, 0);
 
 	bool use_alpha = false;
+	auto now = instance.now();
 
 	std::array<stream_defoveator::input, view_count> images;
 	for (size_t i = 0; i < view_count + use_alpha; ++i)
@@ -938,7 +942,7 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			continue;
 		}
 
-		blit_handle->feedback.blitted = instance.now();
+		blit_handle->feedback.blitted = now;
 		if (blit_handle->feedback.blitted - blit_handle->feedback.received_from_decoder > 1'000'000'000)
 			set_state(state::stalled);
 		++blit_handle->feedback.times_displayed;
@@ -1260,32 +1264,49 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		}
 	}
 
+	auto show_gamepad_toast = [this, now](bool enabled) {
+		{
+			auto toast = gui_toast.lock();
+			toast->emplace(enabled
+			                       ? _("Now emulating a gamepad. Double-click both grips to go back to using VR controllers.")
+			                       : _("No longer emulating a gamepad."),
+			               false);
+		}
+		gui_status_last_change = now;
+	};
+
+	if (not application::get_config().emulated_gamepad)
+	{
+		if (gamepad_mode.exchange(false))
+		{
+			scheduled_derived_pose = now;
+			show_gamepad_toast(false);
+			spdlog::info("Controller gamepad emulation disabled due to setting change");
+		}
+		gamepad_chord.reset();
+	}
+	else if (gamepad_chord.check(now))
+	{
+		const bool enabled = not gamepad_mode.load();
+		gamepad_mode = enabled;
+		if (not enabled)
+			scheduled_derived_pose = now;
+		show_gamepad_toast(enabled);
+		spdlog::info("Controller gamepad mode {}", enabled ? "enabled" : "disabled");
+	}
+
 	read_actions();
 
-	if (lvrr::stock_ui and application::get_config().enable_stream_gui)
+	if (lvrr::stock_ui and application::get_config().enable_stream_gui and menu_chord.check(now))
 	{
-		XrActionStateGetInfo get_info{
-		        .type = XR_TYPE_ACTION_STATE_GET_INFO,
-		        .action = plots_toggle_1,
-		};
-
-		XrActionStateBoolean state_1{XR_TYPE_ACTION_STATE_BOOLEAN};
-		CHECK_XR(xrGetActionStateBoolean(session, &get_info, &state_1));
-		get_info.action = plots_toggle_2;
-		XrActionStateBoolean state_2{XR_TYPE_ACTION_STATE_BOOLEAN};
-		CHECK_XR(xrGetActionStateBoolean(session, &get_info, &state_2));
-
-		if (state_1.currentState and state_2.currentState and (state_1.changedSinceLastSync or state_2.changedSinceLastSync))
-		{
-			// Arbitrary transitions can happen from network commands
-			// Ensure we can't have a set of 2 non interactable states
-			if (is_gui_interactable())
-				next_gui_status = stream_tab::hidden;
-			else if (is_interactable(stored_gui_status))
-				next_gui_status = stored_gui_status;
-			else
-				next_gui_status = stream_tab::applications;
-		}
+		// Arbitrary transitions can happen from network commands
+		// Ensure we can't have a set of 2 non interactable states
+		if (is_gui_interactable())
+			next_gui_status = stream_tab::hidden;
+		else if (is_interactable(stored_gui_status))
+			next_gui_status = stored_gui_status;
+		else
+			next_gui_status = stream_tab::applications;
 	}
 
 	query_pool_filled = true;
@@ -1402,8 +1423,10 @@ scene::meta & scenes::stream::get_meta_scene()
 	                {"right_scroll", XR_ACTION_TYPE_VECTOR2F_INPUT},
 	                {"right_haptic", XR_ACTION_TYPE_VIBRATION_OUTPUT},
 
-	                {"plots_toggle_1", XR_ACTION_TYPE_BOOLEAN_INPUT},
-	                {"plots_toggle_2", XR_ACTION_TYPE_BOOLEAN_INPUT},
+	                {"menu_toggle_1", XR_ACTION_TYPE_BOOLEAN_INPUT},
+	                {"menu_toggle_2", XR_ACTION_TYPE_BOOLEAN_INPUT},
+	                {"gamepad_mode_1", XR_ACTION_TYPE_BOOLEAN_INPUT},
+	                {"gamepad_mode_2", XR_ACTION_TYPE_BOOLEAN_INPUT},
 
 	                {"recenter_left", XR_ACTION_TYPE_BOOLEAN_INPUT},
 	                {"recenter_right", XR_ACTION_TYPE_BOOLEAN_INPUT},
@@ -1451,8 +1474,17 @@ scene::meta & scenes::stream::get_meta_scene()
 	                                {"foveation_ok", "/user/hand/right/input/a/click"},
 	                                {"foveation_cancel", "/user/hand/right/input/b/click"},
 
-	                                {"plots_toggle_1", "/user/hand/left/input/thumbstick/click"},
-	                                {"plots_toggle_2", "/user/hand/right/input/thumbstick/click"},
+	                                {"menu_toggle_1", "/user/hand/left/input/thumbstick/click"},
+	                                {"menu_toggle_2", "/user/hand/right/input/thumbstick/click"},
+	                        },
+	                },
+	                suggested_binding{
+	                        {
+	                                "/interaction_profiles/valve/frame_controller_valve",
+	                        },
+	                        {
+	                                {"gamepad_mode_1", "/user/hand/left/input/squeeze/click"},
+	                                {"gamepad_mode_2", "/user/hand/right/input/squeeze/click"},
 	                        },
 	                },
 	                suggested_binding{

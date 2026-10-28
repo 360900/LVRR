@@ -105,7 +105,7 @@ xr::space xr::session::create_action_space(XrAction action, const XrPosef & pose
 	return s;
 }
 
-xr::hand_tracker xr::session::create_hand_tracker(XrHandEXT hand, XrHandJointSetEXT hand_joint_set)
+xr::hand_tracker xr::session::create_hand_tracker(XrHandEXT hand, std::span<XrHandTrackingDataSourceEXT> sources, XrHandJointSetEXT hand_joint_set)
 {
 	return {
 	        *inst,
@@ -115,7 +115,9 @@ xr::hand_tracker xr::session::create_hand_tracker(XrHandEXT hand, XrHandJointSet
 	                .next = nullptr,
 	                .hand = hand,
 	                .handJointSet = hand_joint_set,
-	        }};
+	        },
+	        sources,
+	};
 }
 
 std::vector<vk::Format> xr::session::get_swapchain_formats() const
