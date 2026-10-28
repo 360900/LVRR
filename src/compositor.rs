@@ -96,6 +96,8 @@ pub struct Compositor {
     focused: Once,
     /// The scene and background fades.
     fades: Mutex<[Fade; 2]>,
+    /// FadeGrid's progress, for GetCurrentGridAlpha. Only the alpha is used.
+    grid_fade: Mutex<Fade>,
     overlay_frames: Mutex<Option<OverlayFrames>>,
 }
 
@@ -181,6 +183,7 @@ impl Compositor {
             submitted: false.into(),
             focused: Once::new(),
             fades: Mutex::default(),
+            grid_fade: Mutex::default(),
             overlay_frames: Mutex::default(),
         }
     }
@@ -970,9 +973,23 @@ impl vr::IVRCompositor029_Interface for Compositor {
         }
     }
     fn GetCurrentGridAlpha(&self) -> f32 {
-        0.0
+        self.grid_fade.lock().unwrap().color(Instant::now()).a
     }
-    fn FadeGrid(&self, _fSeconds: f32, bFadeGridIn: bool) {
+    fn FadeGrid(&self, fSeconds: f32, bFadeGridIn: bool) {
+        {
+            let now = Instant::now();
+            let mut fade = self.grid_fade.lock().unwrap();
+            let from = fade.color(now);
+            *fade = Fade {
+                from,
+                to: vr::HmdColor_t {
+                    a: if bFadeGridIn { 1.0 } else { 0.0 },
+                    ..from
+                },
+                start: now,
+                seconds: if fSeconds.is_finite() { fSeconds.max(0.0) } else { 0.0 },
+            };
+        }
         #[macros::any_graphics(DynFrameController)]
         fn set_fade_grid<G: GraphicsBackend + 'static>(
             ctrl: &mut FrameController<G>,
@@ -2851,6 +2868,23 @@ mod tests {
             vr::EVREventType::SceneApplicationStateChanged.0
         );
         assert_eq!(xr.scene_application_state(), State::Quitting);
+    }
+
+    /// FadeGrid takes its time, which GetCurrentGridAlpha reports.
+    #[test]
+    fn grid_fade_alpha() {
+        let f = Fixture::new();
+        let c = &*f.comp;
+        assert_eq!(c.GetCurrentGridAlpha(), 0.0);
+        c.FadeGrid(0.0, true);
+        assert_eq!(c.GetCurrentGridAlpha(), 1.0);
+        c.FadeGrid(100.0, false);
+        let alpha = c.GetCurrentGridAlpha();
+        assert!(alpha > 0.9 && alpha <= 1.0, "{alpha}");
+        c.FadeGrid(0.0, false);
+        assert_eq!(c.GetCurrentGridAlpha(), 0.0);
+        c.FadeGrid(f32::NAN, true);
+        assert_eq!(c.GetCurrentGridAlpha(), 1.0);
     }
 
     #[test]

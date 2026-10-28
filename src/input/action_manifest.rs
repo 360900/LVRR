@@ -494,12 +494,12 @@ thread_local! {
 /// Like [env_var], but tests only see what [TEST_ENV] sets, so the machine's own SteamVR config
 /// stays out of them.
 #[cfg(not(test))]
-pub(super) fn isolated_env_var(name: &str) -> Option<OsString> {
+pub(crate) fn isolated_env_var(name: &str) -> Option<OsString> {
     std::env::var_os(name)
 }
 
 #[cfg(test)]
-pub(super) fn isolated_env_var(name: &str) -> Option<OsString> {
+pub(crate) fn isolated_env_var(name: &str) -> Option<OsString> {
     TEST_ENV.with_borrow(|env| env.get(name).cloned())
 }
 

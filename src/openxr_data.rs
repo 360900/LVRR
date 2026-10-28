@@ -1283,10 +1283,22 @@ impl<C: Compositor> OpenXrData<C> {
             .check("xrEnumerateViewConfigurationViews", views)
             .as_deref()
         {
-            Some([view, ..]) => (
-                view.recommended_image_rect_width,
-                view.recommended_image_rect_height,
-            ),
+            Some([view, ..]) => {
+                let scale = crate::settings::render_scale();
+                if scale != 1.0 {
+                    crate::log_unique!(
+                        log::Level::Info,
+                        "Render size scaled by {scale:.3} per axis from the resolution settings"
+                    );
+                }
+                scale_eye_size(
+                    (
+                        view.recommended_image_rect_width,
+                        view.recommended_image_rect_height,
+                    ),
+                    scale,
+                )
+            }
             other => {
                 if other.is_some() {
                     crate::warn_once!("The runtime reported no views");
@@ -1303,6 +1315,18 @@ impl<C: Compositor> OpenXrData<C> {
             seconds,
         )
     }
+}
+
+/// `size` scaled per axis, kept even like the sizes SteamVR reports.
+pub(crate) fn scale_eye_size((width, height): (u32, u32), scale: f32) -> (u32, u32) {
+    if scale == 1.0 {
+        return (width, height);
+    }
+    let scaled = |size: u32| {
+        let scaled = (size as f32 * scale).round().max(2.0) as u32;
+        scaled.div_ceil(2) * 2
+    };
+    (scaled(width), scaled(height))
 }
 
 /// How long the headset is off before standby, SteamVR's `turnOffScreensTimeout` default.
@@ -1974,6 +1998,17 @@ pub use tests::FakeCompositor;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn eye_size_scaling() {
+        use super::scale_eye_size;
+        assert_eq!(scale_eye_size((2000, 1000), 1.0), (2000, 1000));
+        assert_eq!(scale_eye_size((1001, 999), 1.0), (1001, 999));
+        assert_eq!(scale_eye_size((2000, 1000), 1.5), (3000, 1500));
+        assert_eq!(scale_eye_size((2000, 1000), 0.5), (1000, 500));
+        assert_eq!(scale_eye_size((1001, 999), 1.1), (1102, 1100));
+        assert_eq!(scale_eye_size((1, 1), 0.1), (2, 2));
+    }
+
     use super::{
         FrameStream, GraphicsBackend, OpenXrData, SessionCreateInfo, offset_time, vsync_phase,
     };

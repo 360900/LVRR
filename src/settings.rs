@@ -370,6 +370,30 @@ fn lookup<T>(section: &str, key: &str, convert: impl FnOnce(&Value) -> Option<T>
         .and_then(convert)
 }
 
+/// The per axis render size multiplier of SteamVR's resolution settings: the global
+/// `supersampleScale`, an area factor (1.5 is 150 %), and the app's `resolutionScale` percentage.
+pub(crate) fn render_scale() -> f32 {
+    let global = get_f32("steamvr", "supersampleScale");
+    let identified = crate::applications::identified_app_key();
+    let keys = crate::input::app_keys(&crate::input::isolated_env_var, identified);
+    let per_app = {
+        let values = VALUES.lock().unwrap();
+        keys.iter().find_map(|key| {
+            values
+                .get(&(key.clone(), "resolutionScale".to_owned()))
+                .and_then(Value::to_f32)
+        })
+    };
+    render_scale_of(global, per_app)
+}
+
+fn render_scale_of(global: Option<f32>, per_app_percent: Option<f32>) -> f32 {
+    let valid = |scale: &f32| scale.is_finite() && *scale > 0.0;
+    let global = global.filter(valid).unwrap_or(1.0);
+    let per_app = per_app_percent.filter(valid).unwrap_or(100.0);
+    (global * per_app / 100.0).sqrt()
+}
+
 pub(crate) fn get_bool(section: &str, key: &str) -> Option<bool> {
     lookup(section, key, Value::to_bool)
 }
@@ -781,6 +805,17 @@ mod tests {
 
         crate::input::TEST_ENV.with_borrow_mut(|env| env.remove("XDG_CONFIG_HOME"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Both scales are area factors, applied per axis.
+    #[test]
+    fn render_scale_arithmetic() {
+        assert_eq!(render_scale_of(None, None), 1.0);
+        assert_eq!(render_scale_of(Some(2.25), None), 1.5);
+        assert_eq!(render_scale_of(None, Some(25.0)), 0.5);
+        assert_eq!(render_scale_of(Some(4.0), Some(25.0)), 1.0);
+        assert_eq!(render_scale_of(Some(0.0), Some(f32::NAN)), 1.0);
+        assert_eq!(render_scale_of(Some(-1.0), Some(-5.0)), 1.0);
     }
 
     /// Every value type survives the file.
