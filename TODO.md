@@ -121,9 +121,10 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
     - `AreBoundsVisible` only knows what the app forced; `GetBoundsColor` ignores the fade distance; ChaperoneSetup writes ignored, the runtime owns its bounds
 29. Settings (S)
     - the user's `steamvr.vrsettings` values (e.g. `supersampleScale`) aren't read, only bindings choices are
-30. IVRApplications (M)
-    - no installed app list; vrmanifest fields other than `app_key` dropped
-    - launch, MIME, auto launch and transition calls unimplemented
+30. IVRApplications (S)
+    - nothing auto launches dashboard overlays at start, the flag is only kept
+    - `LaunchTemplateApplication` unimplemented; URL launches go through `xdg-open` or `steam`
+    - no transition states: launches happen at once, `GetStartingApplication` has nothing
 31. Screenshots (M)
     - no capture, files or `Screenshot*` events
 32. Input paths and identity (S-M)
