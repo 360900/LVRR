@@ -80,6 +80,13 @@
     </Button>
   </template>
 
+  <!-- id, icon, tooltip -->
+  <template name="IconButton">
+    <Button id="${id}" width="32" height="32" padding="4" color="background_contrast" tooltip="${tooltip}" align_items="center" justify_content="center">
+      <sprite src_builtin="${icon}" height="24" width="24" />
+    </Button>
+  </template>
+
   <!-- id, translation, icon -->
   <template name="ActionButton">
     <Button id="${id}" width="150" height="96" padding="8" gap="8" flex_direction="column" align_items="center" justify_content="center">

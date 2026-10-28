@@ -251,6 +251,29 @@ impl<'a> Ui<'a> {
 		Ok(button)
 	}
 
+	/// A button with only an icon that opens a menu where it was clicked
+	pub fn menu_button(
+		&mut self,
+		parent: WidgetID,
+		icon: &str,
+		tooltip: &str,
+		cells: Vec<context_menu::Cell>,
+		on_open: impl Fn(context_menu::Position, Vec<context_menu::Cell>) + 'static,
+	) -> anyhow::Result<()> {
+		let id = self.id();
+		let mut params = TemplateParams::new();
+		params.insert("id", &id);
+		params.insert("icon", icon);
+		params.insert("tooltip", tooltip);
+		self.instantiate("IconButton", parent, params)?;
+		let button = self.state.fetch_component_as::<ComponentButton>(&id)?;
+		button.on_click(Rc::new(move |_common, e| {
+			on_open(e.mouse_pos_absolute.into(), cells.clone());
+			Ok(())
+		}));
+		Ok(())
+	}
+
 	/// A text field; only the desktop window has a keyboard for it
 	pub fn editbox(&mut self, parent: WidgetID, text: &str) -> anyhow::Result<Rc<ComponentEditBox>> {
 		let id = self.id();

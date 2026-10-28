@@ -57,6 +57,8 @@ const STARTING_TIMEOUT_MS: u32 = 180_000;
 const CONTROLLER_ACTION_PREFIX: &str = "lvrr-controllers;";
 /// Followed by the index in `Sort::ALL`
 const SORT_ACTION_PREFIX: &str = "lvrr-sort;";
+/// Followed by the app id
+const REMOVE_ACTION_PREFIX: &str = "lvrr-remove;";
 /// Apps that can be added, shown at most; the search finds the others
 const MAX_CANDIDATES: usize = 30;
 
@@ -206,7 +208,9 @@ impl<T: 'static> Tab<T> for TabLvrrLibrary<T> {
 			}
 		}
 		if let TickResult::Action(name) = self.context_menu.tick(&mut frontend.layout, &mut self.state)?
-			&& let Some(task) = parse_controllers_action(&name).or_else(|| parse_sort_action(&name))
+			&& let Some(task) = parse_controllers_action(&name)
+				.or_else(|| parse_sort_action(&name))
+				.or_else(|| parse_remove_action(&name))
 		{
 			self.tasks.push(task);
 		}
@@ -489,22 +493,6 @@ impl<T: 'static> TabLvrrLibrary<T> {
 		Ok(())
 	}
 
-	fn mount_remove(&self, ui: &mut Ui, parent: WidgetID, id: &str) -> anyhow::Result<()> {
-		if !self.added.contains(id) {
-			return Ok(());
-		}
-		let (tasks, id) = (self.tasks.clone(), id.to_owned());
-		ui.danger_button(
-			parent,
-			Text::Key("LVRR.LIBRARY.REMOVE"),
-			"@/dashboard/trash.svg",
-			move || {
-				tasks.push(Task::Remove(id.clone()));
-			},
-		)?;
-		Ok(())
-	}
-
 	fn mount_apps(
 		&mut self,
 		executor: &AsyncExecutor,
@@ -550,10 +538,7 @@ impl<T: 'static> TabLvrrLibrary<T> {
 					Ok(())
 				}));
 				self.covers.entry(app.id.clone()).or_default().push(view);
-				if let Some(app_id) = app.steam_app_id() {
-					self.mount_controllers(ui, stack, app_id)?;
-				}
-				self.mount_remove(ui, stack, &app.id)?;
+				self.mount_options(ui, stack, app)?;
 			}
 		}
 
@@ -578,47 +563,78 @@ impl<T: 'static> TabLvrrLibrary<T> {
 				log::warn!("Could not show the icon of {}: {e:?}", app.id);
 			}
 			ui.bold(row, Text::Raw(&app.name), 16)?;
-			self.mount_remove(ui, row, &app.id)?;
+			self.mount_options(ui, row, app)?;
 		}
 		Ok(())
 	}
 
-	/// The controllers the game sees, through xrizer
-	fn mount_controllers(&self, ui: &mut Ui, parent: WidgetID, app_id: u64) -> anyhow::Result<()> {
-		let cells = ControllerType::ALL
-			.iter()
-			.enumerate()
-			.map(|(i, ty)| {
-				ui::menu_cell(
+	/// A menu with the controllers the game sees through xrizer, and Remove for added apps.
+	/// A game that doesn't see the real controllers says so.
+	fn mount_options(&self, ui: &mut Ui, parent: WidgetID, app: &VrApplication) -> anyhow::Result<()> {
+		let mut cells = Vec::new();
+		let mut controllers = ControllerType::Auto;
+		if let Some(app_id) = app.steam_app_id() {
+			controllers = xrizer_apps::controller_type(app_id);
+			cells.extend(ControllerType::ALL.iter().enumerate().map(|(i, ty)| {
+				let mut cell = ui::menu_cell(
 					format!("{CONTROLLER_ACTION_PREFIX}{app_id};{i}"),
-					controllers_label(*ty),
-				)
-			})
-			.collect();
+					Translation::from_translation_key(controllers_key(*ty)),
+				);
+				if let context_menu::Cell::Button(button) = &mut cell
+					&& *ty == controllers
+				{
+					button.sprite_src_builtin = Some("@/dashboard/check.svg".into());
+				}
+				cell
+			}));
+		}
+		if self.added.contains(&app.id) {
+			if !cells.is_empty() {
+				cells.push(context_menu::Cell::Separator);
+			}
+			let mut cell = ui::menu_cell(
+				format!("{REMOVE_ACTION_PREFIX}{}", app.id),
+				Translation::from_translation_key("LVRR.LIBRARY.REMOVE"),
+			);
+			if let context_menu::Cell::Button(button) = &mut cell {
+				button.sprite_src_builtin = Some("@/dashboard/trash.svg".into());
+			}
+			cells.push(cell);
+		}
+		if cells.is_empty() {
+			return Ok(());
+		}
+		let line = ui.line(parent)?;
+		if controllers != ControllerType::Auto {
+			ui.badge(line, controllers_key(controllers), "secondary")?;
+		}
 		let tasks = self.tasks.clone();
-		ui.dropdown_sized(
-			parent,
-			"LVRR.LIBRARY.CONTROLLERS",
-			controllers_label(xrizer_apps::controller_type(app_id)),
+		ui.menu_button(
+			line,
+			"@/dashboard/options.svg",
+			"LVRR.LIBRARY.OPTIONS",
 			cells,
-			60,
 			move |position, cells| tasks.push(Task::OpenMenu(position, cells)),
 		)
 	}
 }
 
-fn controllers_label(ty: ControllerType) -> Translation {
-	Translation::from_translation_key(match ty {
+const fn controllers_key(ty: ControllerType) -> &'static str {
+	match ty {
 		ControllerType::Auto => "LVRR.LIBRARY.CONTROLLERS_AUTO",
 		ControllerType::Touch => "LVRR.LIBRARY.CONTROLLERS_TOUCH",
 		ControllerType::Index => "LVRR.LIBRARY.CONTROLLERS_INDEX",
-	})
+	}
 }
 
 fn parse_controllers_action(name: &str) -> Option<Task> {
 	let (app_id, index) = name.strip_prefix(CONTROLLER_ACTION_PREFIX)?.split_once(';')?;
 	let ty = *ControllerType::ALL.get(index.parse::<usize>().ok()?)?;
 	Some(Task::SetControllers(app_id.parse().ok()?, ty))
+}
+
+fn parse_remove_action(name: &str) -> Option<Task> {
+	Some(Task::Remove(name.strip_prefix(REMOVE_ACTION_PREFIX)?.to_owned()))
 }
 
 fn sort_label(sort: Sort) -> Translation {
