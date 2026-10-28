@@ -190,6 +190,8 @@ Accuracy and polish.
 
 | Area | Change | Commits |
 |------|--------|---------|
+| resolution | `supersampleScale` and the app's `resolutionScale` scale the render size like SteamVR's resolution settings, from xrizer's settings file | `762fa3f` |
+| compositor | `FadeGrid` fades over its time, which `GetCurrentGridAlpha` reports | `762fa3f` |
 | skeletal | `GetSkeletalBoneDataCompressed`/`DecompressSkeletalBoneData` and IVRInput_004's variants, in a format of our own holding both transform spaces | `d26b910` |
 | legacy input | SteamVR's legacy bindings for the Pico, Focus 3 and Frame controllers simulate Touch controllers, so legacy apps see those | `6de9a8d` |
 | chaperone | `ForceBoundsVisible`/`AreBoundsVisible` recorded; `GetBoundsColor` from the `collisionBounds` settings; `SetSceneColor` and `ReloadInfo` quiet | `d26b910` |

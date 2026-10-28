@@ -75,7 +75,7 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
     - `XR_EXT_render_model`, `XR_EXT_interaction_render_model`, `XR_FB_render_model`, `XR_MSFT_controller_model`
     - WiVRn: none of these; bundled assets needed there
 19. Resolution and refresh (S-M)
-    - `supersampleScale` and per-app `resolutionScale` don't affect the render size
+    - render scale only from xrizer's settings file; the user's `steamvr.vrsettings` values aren't read (29)
     - `XR_EXT_view_configuration_views_change` enabled (upstream PR #453), but no event tells apps to query the size again; SteamVR has none either
     - `xrRequestDisplayRefreshRateFB` never called
     - WiVRn: no `views_change`; `xrRequestDisplayRefreshRateFB` works and disables its automatic rate
@@ -106,7 +106,6 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
     - stored, bindings never mirrored; `supports_dominant_hand_setting` not parsed
 25. Compositor (S-M)
     - `CanRenderScene` always true, `GetCurrentSceneFocusProcess` always our pid
-    - `FadeGrid` ignores its fade time, `GetCurrentGridAlpha` always 0
     - partial `GetCumulativeStats`
     - depth submissions dropped (`XR_KHR_composition_layer_depth`, not on WiVRn)
     - `TextureWithMotion`, `LensDistortionAlreadyApplied` ignored
