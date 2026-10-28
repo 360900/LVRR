@@ -987,7 +987,11 @@ impl vr::IVRCompositor029_Interface for Compositor {
                     ..from
                 },
                 start: now,
-                seconds: if fSeconds.is_finite() { fSeconds.max(0.0) } else { 0.0 },
+                seconds: if fSeconds.is_finite() {
+                    fSeconds.max(0.0)
+                } else {
+                    0.0
+                },
             };
         }
         #[macros::any_graphics(DynFrameController)]

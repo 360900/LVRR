@@ -583,7 +583,9 @@ impl OverlayMan {
             else {
                 return vr::EVROverlayError::UnknownOverlay;
             };
-            overlay.events.extend(events.iter().copied().map(QueuedEvent::new));
+            overlay
+                .events
+                .extend(events.iter().copied().map(QueuedEvent::new));
         } else {
             let system = self.system.force(|i| System::new(self.openxr.clone(), i));
             events.iter().for_each(|e| system.push_event(*e));

@@ -103,7 +103,9 @@ impl vr::IVRChaperone004_Interface for Chaperone {
 
     fn ForceBoundsVisible(&self, force: bool) {
         if self.bounds_forced.swap(force, Ordering::Relaxed) != force {
-            crate::warn_once!("The runtime draws its own bounds, ForceBoundsVisible is only recorded");
+            crate::warn_once!(
+                "The runtime draws its own bounds, ForceBoundsVisible is only recorded"
+            );
         }
     }
     fn AreBoundsVisible(&self) -> bool {

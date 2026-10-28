@@ -301,11 +301,12 @@ fn load_file(path: &Path) -> Values {
         for (key, value) in keys {
             let value = match value {
                 serde_json::Value::Bool(b) => Bool(*b),
-                serde_json::Value::Number(n) => match n.as_i64().and_then(|i| i32::try_from(i).ok())
-                {
-                    Some(i) => Int32(i),
-                    None => Float(n.as_f64().unwrap_or(0.0) as f32),
-                },
+                serde_json::Value::Number(n) => {
+                    match n.as_i64().and_then(|i| i32::try_from(i).ok()) {
+                        Some(i) => Int32(i),
+                        None => Float(n.as_f64().unwrap_or(0.0) as f32),
+                    }
+                }
                 serde_json::Value::String(s) => match CString::new(s.as_str()) {
                     Ok(s) => Str(s.into()),
                     Err(_) => continue,
@@ -791,7 +792,13 @@ mod tests {
                 .and_then(Value::to_f32)
         };
 
-        IVRSettings003_Interface::SetFloat(&settings, section.as_ptr(), key.as_ptr(), 1.5, &mut err);
+        IVRSettings003_Interface::SetFloat(
+            &settings,
+            section.as_ptr(),
+            key.as_ptr(),
+            1.5,
+            &mut err,
+        );
         assert_eq!(err, EVRSettingsError::None);
         let file = dir.join("xrizer/settings.json");
         assert_eq!(lookup(&load_file(&file)), Some(1.5));
@@ -799,7 +806,12 @@ mod tests {
         assert!(!settings.Sync(false, &mut err));
         assert!(settings.Sync(true, &mut err));
 
-        IVRSettings003_Interface::RemoveKeyInSection(&settings, section.as_ptr(), key.as_ptr(), &mut err);
+        IVRSettings003_Interface::RemoveKeyInSection(
+            &settings,
+            section.as_ptr(),
+            key.as_ptr(),
+            &mut err,
+        );
         assert_eq!(lookup(&load_file(&file)), None);
         assert!(settings.Sync(false, &mut err));
 
