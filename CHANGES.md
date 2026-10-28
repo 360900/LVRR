@@ -190,6 +190,7 @@ Accuracy and polish.
 
 | Area | Change | Commits |
 |------|--------|---------|
+| render models | with a SteamVR install in a Steam library, its models load with their textures (PNG and TGA) by every name spelling, drivers' models included; `GetRenderModelOriginalPath` and `GetRenderModelThumbnailURL` answer for them; the bundled meshes stay the fallback | `2ed64a0` |
 | resolution | `supersampleScale` and the app's `resolutionScale` scale the render size like SteamVR's resolution settings, from xrizer's settings file | `762fa3f` |
 | compositor | `FadeGrid` fades over its time, which `GetCurrentGridAlpha` reports | `762fa3f` |
 | skeletal | `GetSkeletalBoneDataCompressed`/`DecompressSkeletalBoneData` and IVRInput_004's variants, in a format of our own holding both transform spaces | `d26b910` |
