@@ -313,6 +313,14 @@ fn config_dirs(env: Env, home: Option<&Path>, steam_roots: &[PathBuf]) -> Vec<Pa
     dirs
 }
 
+/// The config directories SteamVR may use, for the files it keeps there (app manifests), see
+/// [config_dirs].
+pub(crate) fn steam_config_dirs(env: Env) -> Vec<PathBuf> {
+    let home = env("HOME").map(PathBuf::from);
+    let roots = steam_roots(env, home.as_deref());
+    config_dirs(env, home.as_deref(), &roots)
+}
+
 /// The SteamVR install in the Steam libraries, for the files it ships (render models).
 pub(crate) fn steamvr_install(env: Env) -> Option<PathBuf> {
     let home = env("HOME").map(PathBuf::from);
@@ -358,7 +366,7 @@ fn push_dir(dirs: &mut Vec<PathBuf>, dir: PathBuf) {
 
 /// `path`, or where the pressure-vessel container has it if only the host does (Steam libraries
 /// outside the home directory).
-fn host_path(path: &Path) -> PathBuf {
+pub(crate) fn host_path(path: &Path) -> PathBuf {
     if !path.exists()
         && let Ok(relative) = path.strip_prefix("/")
     {

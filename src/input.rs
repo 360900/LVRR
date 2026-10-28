@@ -4,7 +4,7 @@ mod binding_sources;
 pub(crate) use action_manifest::TEST_ENV;
 pub(crate) use action_manifest::isolated_env_var;
 pub(crate) use binding_sources::xrizer_config_dir;
-pub(crate) use steamvr_bindings::{app_keys, steamvr_install};
+pub(crate) use steamvr_bindings::{app_keys, host_path, steam_config_dirs, steamvr_install};
 mod components;
 mod custom_bindings;
 mod devices;

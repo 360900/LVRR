@@ -405,8 +405,29 @@ pub(crate) fn get_i32(section: &str, key: &str) -> Option<i32> {
 
 /// Sets and saves a value, as an app writing it would.
 pub(crate) fn set_i32(section: &str, key: &str, value: i32) {
+    set_value(section, key, Int32(value));
+}
+
+pub(crate) fn set_bool(section: &str, key: &str, value: bool) {
+    set_value(section, key, Bool(value));
+}
+
+pub(crate) fn get_str(section: &str, key: &str) -> Option<String> {
+    lookup(section, key, |value| {
+        Some(value.to_str()?.to_string_lossy().into_owned())
+    })
+}
+
+/// Strings with a NUL in them can't be kept.
+pub(crate) fn set_str(section: &str, key: &str, value: &str) {
+    if let Ok(value) = CString::new(value) {
+        set_value(section, key, Str(Cow::Owned(value)));
+    }
+}
+
+fn set_value(section: &str, key: &str, value: Value) {
     let mut values = VALUES.lock().unwrap();
-    values.insert((section.to_owned(), key.to_owned()), Int32(value));
+    values.insert((section.to_owned(), key.to_owned()), value);
     persist(&values);
 }
 
