@@ -79,13 +79,12 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
     - `XR_EXT_view_configuration_views_change` enabled (upstream PR #453), but no event tells apps to query the size again; SteamVR has none either
     - `xrRequestDisplayRefreshRateFB` never called
     - WiVRn: no `views_change`; `xrRequestDisplayRefreshRateFB` works and disables its automatic rate
-20. Events (S-M)
-    - `TrackedDeviceUpdated`, `PropertyChanged` (only sent for refresh rate changes), `TrackedDeviceRoleChanged`, `IpdChanged`
-    - `EnterStandbyMode`/`LeaveStandbyMode`
-    - `SceneApplicationChanged`, `ProcessQuit`
-    - `Input_BindingLoadSuccessful`/`Failed`, `ActionBindingReloaded`, `Input_ActionManifestReloaded`
-    - `Compositor_*`, `ShowRenderModels`/`HideRenderModels`, `WirelessDisconnect`/`Reconnect`
-    - `eventAgeSeconds` always 0; `PollNextEventWithPose` gives no pose
+20. Events (S)
+    - `PropertyChanged` only for refresh rate changes; SteamVR sends one per driver property write (battery level, IPD)
+    - `TrackedDeviceUpdated` is the old driver API's "properties changed", current drivers use `PropertyChanged`
+    - `ProcessQuit`, `Compositor_ApplicationNotResponding`/`Resumed`, `Compositor_DisplayDisconnected`/`Reconnected`, `WirelessDisconnect`/`Reconnect` are about other processes or SteamVR's display handling; a lost headset is `Quit` here
+    - `Compositor_ChaperoneBoundsShown`/`Hidden`: runtimes don't report when they draw their bounds
+    - standby follows `XR_EXT_user_presence` only, not the headset lying still
 21. Trackers (M)
     - only through `XR_MNDX_xdev_space`; add `XR_HTCX_vive_tracker_interaction`
     - no tracker roles in IVRInput (`/user/foot/*`, `/user/waist`, `/user/chest`)

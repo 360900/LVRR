@@ -1437,6 +1437,36 @@ mod tests {
         expect_button_event(&f, vr::EVREventType::ButtonTouch, 2, vr::EVRButtonId::A);
         expect_button_event(&f, vr::EVREventType::ButtonPress, 2, vr::EVRButtonId::A);
         expect_no_event(&f);
+
+        // SteamVR's legacy bindings for the Pico show it as a Touch controller.
+        let data = f.input.openxr.session_data.get();
+        let devices = data.input_data.devices.read().unwrap();
+        let properties = devices
+            .get_controller(Hand::Right)
+            .and_then(|controller| controller.profile_data.as_ref())
+            .unwrap()
+            .properties;
+        assert!(std::ptr::eq(properties, OculusTouch::properties()));
+    }
+
+    /// A manifest's bindings for the Pico are its own, so it shows as itself.
+    #[test]
+    fn pico_shows_as_itself_with_a_manifest() {
+        use crate::input::profiles::pico::Pico4;
+        use fakexr::UserPath::*;
+        let mut f = Fixture::new();
+        f.load_actions(c"actions.json");
+        f.set_interaction_profile::<Pico4>(RightHand);
+        f.input.frame_start_update();
+        f.input.openxr.poll_events();
+        let data = f.input.openxr.session_data.get();
+        let devices = data.input_data.devices.read().unwrap();
+        let properties = devices
+            .get_controller(Hand::Right)
+            .and_then(|controller| controller.profile_data.as_ref())
+            .unwrap()
+            .properties;
+        assert!(std::ptr::eq(properties, Pico4::properties()));
     }
 
     #[test]

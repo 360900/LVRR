@@ -60,6 +60,11 @@ pub trait InteractionProfile: SupportedProfile + Sized + 'static {
     const SIMULATE_CONVERTED: bool = false;
     /// Whether this is the gamepad's profile (`/user/gamepad`) rather than a hand controller's.
     const GAMEPAD: bool = false;
+    /// The controller apps without an action manifest see instead of this one, the
+    /// `simulated_controller_type` of SteamVR's legacy bindings for it.
+    fn legacy_simulated_properties() -> Option<&'static ProfileProperties> {
+        None
+    }
     /// Whether SteamVR's profile of this controller names its left menu button `/input/system`,
     /// which OpenXR calls `menu` (`system` is the runtime's reserved button there, if any).
     const LEFT_MENU_IS_SYSTEM: bool = false;

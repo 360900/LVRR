@@ -183,3 +183,11 @@ Overlay apps and overlay rendering.
 | overlay apps | Overlay apps get an `XR_EXTX_overlay` session (create info chained by wrapping `xrCreateSession`) instead of a headless one when the runtime has it; a frame thread draws their overlays; their GL textures go through the GL bridge; scene `Submit` still rejected | `5518260` |
 | overlay rendering | `SetOverlayColor` tints layers (`XR_KHR_composition_layer_color_scale_bias`); `SetOverlayTexelAspect` applied; side-by-side overlays show one half to each eye (parallel and crossed); overlay relative transforms (old interfaces) follow their parent | `5b655e9` `66d3097` `46abd17` `f61f308` |
 | tests | fakexr accepts and records the overlay session create info | `5518260` |
+
+## TODO section 4 (2026-10-28, `305fd4a`..)
+
+Accuracy and polish.
+
+| Area | Change | Commits |
+|------|--------|---------|
+| events | `eventAgeSeconds` is the event's age; `PollNextEventWithPose` gives the event's device pose; `TrackedDeviceRoleChanged` with controller activations; `IpdChanged` when the headset's IPD moves by 0.5 mm; `HideRenderModels`/`ShowRenderModels` with the input focus; `EnterStandbyMode`/`LeaveStandbyMode` after 5 s without the user, activity level `Standby`; `Input_BindingLoadSuccessful`/`Failed`, `ActionBindingReloaded` and `Input_ActionManifestReloaded` on manifest loads; `SceneApplicationChanged` and `SceneApplicationStateChanged` for scene apps, whose `GetSceneApplicationState` is Starting, Running or Quitting | `305fd4a` `5e13f8f` |

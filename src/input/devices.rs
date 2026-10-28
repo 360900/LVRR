@@ -164,6 +164,8 @@ pub struct ProfileData {
     pub legacy_trigger_click: Option<(f32, f32)>,
     /// See [`InteractionProfile::LEGACY_GRIP_CLICK`].
     pub legacy_grip_click: Option<(f32, f32)>,
+    /// See [`InteractionProfile::legacy_simulated_properties`].
+    pub legacy_simulated: Option<&'static ProfileProperties>,
 }
 
 impl ProfileData {
@@ -178,6 +180,7 @@ impl ProfileData {
             senses_fingers: P::SENSES_FINGERS,
             legacy_trigger_click: P::LEGACY_TRIGGER_CLICK,
             legacy_grip_click: P::LEGACY_GRIP_CLICK,
+            legacy_simulated: P::legacy_simulated_properties(),
         }
     }
 

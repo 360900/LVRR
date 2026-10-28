@@ -3608,9 +3608,16 @@ impl<C: openxr_data::Compositor> Input<C> {
 
             if let Some(mut data) = ProfileData::for_profile_name(&profile_name) {
                 let loaded = session_data.input_data.get_loaded_actions();
+                // Legacy bindings, fixed or chosen, with the others on the fixed ones.
+                let legacy = session_data.input_data.get_legacy_actions().is_some()
+                    || loaded.is_some_and(|loaded| loaded.legacy.is_some());
                 if let Some(properties) =
                     loaded.and_then(|loaded| loaded.simulated_properties.get(&profile_path))
                 {
+                    data.properties = properties;
+                    data.headset = properties;
+                } else if let Some(properties) = data.legacy_simulated.filter(|_| legacy) {
+                    // SteamVR's legacy bindings for the controller show apps another one.
                     data.properties = properties;
                     data.headset = properties;
                 }

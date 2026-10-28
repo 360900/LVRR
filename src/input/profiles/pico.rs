@@ -67,6 +67,11 @@ const PICO4_PROPERTIES: ProfileProperties = ProfileProperties {
 pub struct Pico4;
 
 impl InteractionProfile for Pico4 {
+    /// SteamVR's legacy bindings for it simulate the Touch controllers.
+    fn legacy_simulated_properties() -> Option<&'static ProfileProperties> {
+        Some(super::oculus_touch::OculusTouch::properties())
+    }
+
     const SIMULATE_CONVERTED: bool = true;
     const LEFT_MENU_IS_SYSTEM: bool = true;
     type LegalPaths = legal_paths![
@@ -170,6 +175,11 @@ impl InteractionProfile for Pico4 {
 pub struct PicoNeo3;
 
 impl InteractionProfile for PicoNeo3 {
+    /// SteamVR's legacy bindings for it simulate the Touch controllers.
+    fn legacy_simulated_properties() -> Option<&'static ProfileProperties> {
+        Some(super::oculus_touch::OculusTouch::properties())
+    }
+
     const SIMULATE_CONVERTED: bool = true;
     const LEFT_MENU_IS_SYSTEM: bool = true;
     type LegalPaths = legal_paths![
