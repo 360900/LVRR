@@ -214,6 +214,8 @@ impl<C: openxr_data::Compositor> Input<C> {
             )
             .unwrap();
 
+        let component_actions = self.component_actions(&session_data.input_data);
+
         let mut binding_context = context::BindingsLoadContext::new(
             &sets,
             actions,
@@ -223,6 +225,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             &haptic_action,
             &gamepad_presence,
             skeletal_input,
+            component_actions,
         );
 
         let (binding_variants, binding_choices) = load_bindings(&mut binding_context);
@@ -251,6 +254,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                 &info_set,
                 &haptic_set,
                 &skeletal_input.set,
+                &component_actions.set,
             ])
             .chain(extra_sets.iter().copied())
             .collect();
@@ -916,6 +920,11 @@ impl<C: openxr_data::Compositor> Input<C> {
                     .map(|path| xr::Binding::new(context.haptic_action, path)),
             )
             .chain(skeletal_bindings.binding_iter(&context.skeletal_input.actions))
+            .chain(
+                context
+                    .component_actions
+                    .bindings::<P>(&self.openxr.instance),
+            )
             .chain(P::GAMEPAD.then(|| {
                 let input = self
                     .openxr

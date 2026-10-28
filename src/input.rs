@@ -1,10 +1,11 @@
 mod action_manifest;
 mod binding_sources;
+#[cfg(test)]
+pub(crate) use action_manifest::TEST_ENV;
 pub(crate) use action_manifest::isolated_env_var;
 pub(crate) use binding_sources::xrizer_config_dir;
 pub(crate) use steamvr_bindings::{app_keys, steamvr_install};
-#[cfg(test)]
-pub(crate) use action_manifest::TEST_ENV;
+mod components;
 mod custom_bindings;
 mod devices;
 mod emulation;
@@ -35,6 +36,7 @@ use crate::{
     tracy_span,
 };
 use binding_sources::BindingChoices;
+pub(crate) use components::ComponentInput;
 use custom_bindings::{
     AnalogStates, BoolBindingData, ScalarConstantBinding, Vector2ActionData, unrestricted_analog,
 };
@@ -43,6 +45,7 @@ use legacy::{LegacyActionData, RemappedLegacy};
 use log::{debug, info, trace, warn};
 use openvr as vr;
 use openxr as xr;
+pub(crate) use profiles::paths::DynSubpath;
 use slotmap::{Key, KeyData, SecondaryMap, SlotMap, new_key_type};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{CStr, CString, c_char, c_void};
@@ -333,6 +336,41 @@ impl<C: openxr_data::Compositor> Input<C> {
             Hand::Left => self.subaction_paths.left,
             Hand::Right => self.subaction_paths.right,
         }
+    }
+
+    /// The component actions, created on first use so every way of loading actions attaches them.
+    fn component_actions<'a>(
+        &self,
+        input_data: &'a InputSessionData,
+    ) -> &'a components::ComponentActionData {
+        input_data.component_actions.get_or_init(|| {
+            components::ComponentActionData::new(
+                &self.openxr.instance,
+                self.subaction_paths.left,
+                self.subaction_paths.right,
+            )
+        })
+    }
+
+    /// What a render model component's input reads on the hand's controller, see
+    /// [components::ComponentActionData::read].
+    pub(crate) fn component_input(&self, hand: Hand, subpath: DynSubpath) -> ComponentInput {
+        if self.openxr.is_lost() {
+            return ComponentInput::default();
+        }
+        let data = self.openxr.session_data.get();
+        match data.input_data.component_actions.get() {
+            Some(actions) => actions.read(&data.session, self.get_subaction_path(hand), subpath),
+            None => ComponentInput::default(),
+        }
+    }
+
+    /// The hand of an input value handle, for a hand or an input of one.
+    pub(crate) fn hand_for_input_handle(&self, handle: vr::VRInputValueHandle_t) -> Option<Hand> {
+        if handle == vr::k_ulInvalidInputValueHandle {
+            return None;
+        }
+        self.hand_from_key(InputSourceKey::from(KeyData::from_ffi(handle)))
     }
 
     fn subaction_path_from_handle(&self, handle: vr::VRInputValueHandle_t) -> Option<xr::Path> {
@@ -1112,6 +1150,8 @@ fn binding_rank(state: &xr::ActionState<bool>) -> (bool, bool, i64) {
 pub struct InputSessionData {
     actions: OnceLock<LoadedActions>,
     estimated_skeleton_actions: OnceLock<SkeletalInputActionData>,
+    /// The raw input of render model components, see [components].
+    component_actions: OnceLock<components::ComponentActionData>,
     pose_data: PoseData,
     devices: RwLock<TrackedDeviceList>,
     action_sources: OnceLock<ActionSources>,
@@ -1156,6 +1196,7 @@ impl InputSessionData {
         Self {
             actions: OnceLock::new(),
             estimated_skeleton_actions: OnceLock::new(),
+            component_actions: OnceLock::new(),
             pose_data: PoseData::new(instance, paths.left, paths.right),
             devices: RwLock::new(TrackedDeviceList::new(session, hand_tracking)),
             action_sources: OnceLock::new(),
@@ -1579,8 +1620,14 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         }
         let render_model_name = unsafe { CStr::from_ptr(render_model_name) };
         let component_name = unsafe { CStr::from_ptr(component_name) };
-        // Our models are static, so the bindings don't change how the component shows.
-        match crate::rendermodels::component_state(render_model_name, component_name) {
+        // The bindings don't change how the component shows: it moves with its own input.
+        match crate::rendermodels::component_state(
+            render_model_name,
+            component_name,
+            None,
+            &|hand, subpath| self.component_input(hand, subpath),
+            false,
+        ) {
             Some(component_state) => {
                 unsafe { state.write(component_state) };
                 vr::EVRInputError::None
@@ -2788,6 +2835,9 @@ impl<C: openxr_data::Compositor> Input<C> {
             sync_sets.push(xr::ActiveActionSet::new(&data.input_data.pose_data.set));
             sync_sets.push(xr::ActiveActionSet::new(&skeletal_input.set));
             sync_sets.push(xr::ActiveActionSet::new(&actions.haptic_set));
+            if let Some(components) = data.input_data.component_actions.get() {
+                sync_sets.push(xr::ActiveActionSet::new(&components.set));
+            }
             if let Some(legacy) = &actions.legacy {
                 sync_sets.push(xr::ActiveActionSet::new(legacy.fixed_set()));
             }
@@ -3888,10 +3938,14 @@ impl<C: openxr_data::Compositor> Input<C> {
 
         match input_data.get_legacy_actions() {
             Some(actions) => {
-                let result = data.session.sync_actions(&[
+                let mut sets = vec![
                     xr::ActiveActionSet::new(&actions.set),
                     xr::ActiveActionSet::new(&input_data.pose_data.set),
-                ]);
+                ];
+                if let Some(components) = input_data.component_actions.get() {
+                    sets.push(xr::ActiveActionSet::new(&components.set));
+                }
+                let result = data.session.sync_actions(&sets);
                 if self.openxr.check("xrSyncActions", result).is_some() {
                     self.legacy_state.on_action_sync();
                     self.update_legacy_state(&data.session, &devices, actions);

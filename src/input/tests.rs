@@ -5537,6 +5537,150 @@ fn left_system_binds_the_menu_button() {
     check::<PicoNeo3>(&f);
 }
 
+/// The render model component actions follow the raw inputs of each profile, through the legacy
+/// sync and the app's UpdateActionState alike.
+#[test]
+fn render_model_components_read_raw_input() {
+    use super::profiles::paths::DynComponent;
+    use crate::input::DynSubpath;
+    use fakexr::InputValue::{Bool, Float, Vector2};
+    use glam::Vec2;
+
+    fakexr::set_binding_activity(true);
+    let mut f = Fixture::new();
+    f.input.openxr.restart_session().unwrap();
+    f.set_interaction_profile::<Knuckles>(LeftHand);
+    f.set_interaction_profile::<Knuckles>(RightHand);
+    f.input.frame_start_update();
+    f.input.openxr.poll_events();
+
+    // One action per input any profile has, bound to the profile's inputs.
+    let data = f.input.openxr.session_data.get();
+    let components = data.input_data.component_actions.get().unwrap();
+    let trigger = components
+        .raw_action(DynSubpath::Trigger, Some(DynComponent::Value))
+        .unwrap();
+    let profile = f
+        .input
+        .openxr
+        .instance
+        .string_to_path(Knuckles::profile_path())
+        .unwrap();
+    let mut bindings = fakexr::get_suggested_bindings(trigger, profile);
+    bindings.sort();
+    assert_eq!(
+        bindings,
+        [
+            "/user/hand/left/input/trigger/value",
+            "/user/hand/right/input/trigger/value"
+        ]
+    );
+    let x_click = components
+        .raw_action(DynSubpath::X, Some(DynComponent::Click))
+        .unwrap();
+    assert!(fakexr::check_no_suggested_bindings(x_click, profile));
+    drop(data);
+
+    let session = f.raw_session();
+    let left = |input: &str, value| {
+        fakexr::set_input(session, &format!("/user/hand/left/input/{input}"), value);
+    };
+    left("trigger/value", Float(0.75));
+    left("trackpad", Vector2(0.5, -0.5));
+    left("trackpad/touch", Bool(true));
+    left("trackpad/force", Float(0.8));
+    left("squeeze/value", Float(0.9));
+    left("squeeze/force", Float(0.3));
+    left("a/click", Bool(true));
+    f.input.frame_start_update();
+
+    let read = |hand, subpath| f.input.component_input(hand, subpath);
+    let trigger = read(Hand::Left, DynSubpath::Trigger);
+    assert!(trigger.active);
+    assert_eq!(trigger.value, 0.75);
+    assert!(!trigger.pressed);
+    // The Index trackpad clicks through its force sensor.
+    let pad = read(Hand::Left, DynSubpath::Trackpad);
+    assert_eq!(pad.xy, Vec2::new(0.5, -0.5));
+    assert!(pad.pressed && pad.touched);
+    // And its grip reads it, where SteamVR's grip value is the force.
+    let squeeze = read(Hand::Left, DynSubpath::Squeeze);
+    assert_eq!(squeeze.value, 0.3);
+    let a = read(Hand::Left, DynSubpath::A);
+    assert!(a.pressed && a.touched);
+    assert_eq!(a.value, 1.0);
+    // The other hand rests, and inputs the controller lacks aren't active.
+    let right = read(Hand::Right, DynSubpath::Trigger);
+    assert!(right.active);
+    assert_eq!(right.value, 0.0);
+    assert!(!read(Hand::Left, DynSubpath::X).active);
+    assert!(!read(Hand::Left, DynSubpath::DpadUp).active);
+
+    // The hand of a device path, for the components of a device.
+    let handle = |name: &CStr| f.get_input_source_handle(name);
+    assert_eq!(
+        f.input.hand_for_input_handle(handle(c"/user/hand/right")),
+        Some(Hand::Right)
+    );
+    assert_eq!(
+        f.input
+            .hand_for_input_handle(handle(c"/user/hand/left/input/trigger")),
+        Some(Hand::Left)
+    );
+    assert_eq!(
+        f.input
+            .hand_for_input_handle(vr::k_ulInvalidInputValueHandle),
+        None
+    );
+
+    // With a manifest, the set is synced with the app's.
+    let mut f = Fixture::new();
+    f.load_actions(c"actions.json");
+    f.set_interaction_profile::<Knuckles>(LeftHand);
+    f.set_interaction_profile::<Knuckles>(RightHand);
+    let set1 = f.get_action_set_handle(c"/actions/set1");
+    let active = vr::VRActiveActionSet_t {
+        ulActionSet: set1,
+        ..Default::default()
+    };
+    f.sync(active);
+    assert_eq!(
+        f.input
+            .component_input(Hand::Right, DynSubpath::Trigger)
+            .value,
+        0.0
+    );
+    fakexr::set_input(
+        f.raw_session(),
+        "/user/hand/right/input/trigger/value",
+        Float(0.5),
+    );
+    fakexr::set_input(
+        f.raw_session(),
+        "/user/hand/right/input/thumbstick",
+        Vector2(0.0, 1.0),
+    );
+    f.sync(active);
+    assert_eq!(
+        f.input
+            .component_input(Hand::Right, DynSubpath::Trigger)
+            .value,
+        0.5
+    );
+    assert_eq!(
+        f.input
+            .component_input(Hand::Right, DynSubpath::Thumbstick)
+            .xy,
+        Vec2::new(0.0, 1.0)
+    );
+    assert_eq!(
+        f.input
+            .component_input(Hand::Left, DynSubpath::Trigger)
+            .value,
+        0.0
+    );
+}
+
 #[test]
 fn component_state_for_binding() {
     use vr::IVRInput011_Interface as Input;
@@ -5558,7 +5702,7 @@ fn component_state_for_binding() {
     };
     let model = c"oculus_quest2_controller_right".as_ptr();
 
-    // Our models are static, so the state is the component's transform and nothing else.
+    // A pose component has no mesh to move, only a frame of its own.
     let (result, tip) = state(model, c"tip".as_ptr(), 0, 0);
     assert_eq!(result, vr::EVRInputError::None);
     assert_eq!(
@@ -5566,8 +5710,8 @@ fn component_state_for_binding() {
         (vr::EVRComponentProperty::IsVisible | vr::EVRComponentProperty::IsStatic).0
     );
     assert_eq!(
-        tip.mTrackingToComponentLocal.m,
-        tip.mTrackingToComponentRenderModel.m
+        tip.mTrackingToComponentRenderModel.m,
+        vr::HmdMatrix34_t::from(openxr::Posef::IDENTITY).m
     );
     assert_ne!(tip.mTrackingToComponentLocal.m[1][3], 0.0);
 

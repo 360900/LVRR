@@ -1,5 +1,6 @@
 use super::actions::{ControllerType, LoadedActionDataMap, XrNames};
 use super::bindings::{ActionPath, DpadParameters, DpadSubMode};
+use crate::input::components::ComponentActionData;
 use crate::input::custom_bindings::{
     BoolBindingData, BoolBindingType, DpadActions, HandSpeeds, ScalarConstantBinding,
     Vector2ActionData, Vector2BindingData, Vector2Transform,
@@ -58,6 +59,7 @@ pub(super) struct BindingsLoadContext<'a> {
     pub haptic_action: &'a xr::Action<xr::Haptic>,
     pub gamepad_presence: &'a xr::Action<bool>,
     pub skeletal_input: &'a SkeletalInputActionData,
+    pub component_actions: &'a ComponentActionData,
 }
 
 impl<'a> BindingsLoadContext<'a> {
@@ -71,6 +73,7 @@ impl<'a> BindingsLoadContext<'a> {
         haptic_action: &'a xr::Action<xr::Haptic>,
         gamepad_presence: &'a xr::Action<bool>,
         skeletal_input: &'a SkeletalInputActionData,
+        component_actions: &'a ComponentActionData,
     ) -> Self {
         BindingsLoadContext {
             action_sets,
@@ -94,6 +97,7 @@ impl<'a> BindingsLoadContext<'a> {
             haptic_action,
             gamepad_presence,
             skeletal_input,
+            component_actions,
         }
     }
 }
@@ -172,6 +176,7 @@ impl BindingsLoadContext<'_> {
             haptic_action: self.haptic_action,
             gamepad_presence: self.gamepad_presence,
             skeletal_input: self.skeletal_input,
+            component_actions: self.component_actions,
             instance,
             subaction_paths: input.subaction_paths,
             gamepad: P::GAMEPAD,
@@ -211,6 +216,7 @@ pub(super) struct BindingsProfileLoadContext<'a> {
     pub haptic_action: &'a xr::Action<xr::Haptic>,
     pub gamepad_presence: &'a xr::Action<bool>,
     pub skeletal_input: &'a SkeletalInputActionData,
+    pub component_actions: &'a ComponentActionData,
     pub instance: &'a xr::Instance,
     subaction_paths: SubactionPaths,
     /// The profile is the gamepad's, see [InteractionProfile::GAMEPAD].

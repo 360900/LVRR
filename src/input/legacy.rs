@@ -95,8 +95,9 @@ impl<C: openxr_data::Compositor> Input<C> {
         self.suggest_fixed_legacy_bindings(&legacy, input_data, &HashSet::new());
 
         let pose_set = &input_data.pose_data.set;
+        let components = self.component_actions(input_data);
 
-        let attached = session.attach_action_sets(&[&legacy.set, pose_set]);
+        let attached = session.attach_action_sets(&[&legacy.set, pose_set, &components.set]);
         if self
             .openxr
             .check("xrAttachSessionActionSets", attached)
@@ -107,6 +108,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         let synced = session.sync_actions(&[
             xr::ActiveActionSet::new(&legacy.set),
             xr::ActiveActionSet::new(pose_set),
+            xr::ActiveActionSet::new(&components.set),
         ]);
         self.openxr.check("xrSyncActions", synced);
 
@@ -127,6 +129,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             openxr: &self.openxr,
             input_data,
             legacy,
+            components: self.component_actions(input_data),
             skip,
         });
 
@@ -134,6 +137,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             openxr: &'a super::OpenXrData<C>,
             input_data: &'a super::InputSessionData,
             legacy: &'a LegacyActionData,
+            components: &'a super::components::ComponentActionData,
             skip: &'a HashSet<xr::Path>,
         }
 
@@ -153,6 +157,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                 let conv = super::profiles::InputToXrPath::new(instance);
                 let bindings = P::legacy_bindings(&conv)
                     .into_iter(&self.legacy.actions, &self.input_data.pose_data)
+                    .chain(self.components.bindings::<P>(instance))
                     .collect::<Vec<_>>();
                 // A runtime rejecting one profile shouldn't take down the others.
                 if let Err(e) = instance.suggest_interaction_profile_bindings(profile, &bindings) {
