@@ -155,7 +155,10 @@ pub struct Input<C: openxr_data::Compositor> {
     /// Held while actions are set up, so legacy actions (set up from the frame thread) and an
     /// action manifest are never both attached to a session.
     action_setup: Mutex<()>,
-    left_handed: AtomicBool,
+    /// The hand the app set with SetDominantHand, if it did; else the settings decide.
+    dominant_hand_set: Mutex<Option<Hand>>,
+    /// Whether the loaded manifest has `supports_dominant_hand_setting`.
+    dominant_hand_supported: AtomicBool,
     /// The properties of the most recently seen controller interaction profile. The HMD's
     /// identity is derived from this, so it needs to survive session restarts (which reset the
     /// device list) and controllers going to sleep.
@@ -256,6 +259,13 @@ fn input_source_handle(
 
 /// For `action.state(..).unwrap_or_else(inactive_state)`: an action whose state can't be read,
 /// e.g. because the runtime lost the session, reads as inactive.
+fn dominant_hand_role(hand: Hand) -> vr::ETrackedControllerRole {
+    match hand {
+        Hand::Left => vr::ETrackedControllerRole::LeftHand,
+        Hand::Right => vr::ETrackedControllerRole::RightHand,
+    }
+}
+
 fn inactive_state<T: xr::ActionInput + Default>(error: xr::sys::Result) -> xr::ActionState<T> {
     crate::warn_once!("Failed to get action state: {}", error);
     xr::ActionState {
@@ -322,13 +332,42 @@ impl<C: openxr_data::Compositor> Input<C> {
             subaction_paths,
             events: Mutex::default(),
             action_setup: Mutex::default(),
-            left_handed: false.into(),
+            dominant_hand_set: Mutex::new(None),
+            dominant_hand_supported: false.into(),
             last_profile_properties: Mutex::new(probed_profile),
         }
     }
 
     fn app_key(&self) -> Option<String> {
         self.app_key.lock().unwrap().clone()
+    }
+
+    /// The keys the app's settings may be under, see [steamvr_bindings::app_keys].
+    fn app_keys(&self) -> Vec<String> {
+        app_keys(&isolated_env_var, self.app_key())
+    }
+
+    /// The user's dominant hand for this app: what the app set, else the `DominantHand` setting
+    /// in xrizer's settings or the one chosen in SteamVR, else the right hand.
+    pub(super) fn dominant_hand(&self) -> Hand {
+        if let Some(hand) = *self.dominant_hand_set.lock().unwrap() {
+            return hand;
+        }
+        self.app_keys()
+            .iter()
+            .find_map(|key| match crate::settings::get_i32(key, "DominantHand") {
+                Some(1) => Some(Hand::Left),
+                Some(2) => Some(Hand::Right),
+                _ => None,
+            })
+            .or_else(|| binding_sources::steamvr_dominant_hand(self.app_key()))
+            .unwrap_or(Hand::Right)
+    }
+
+    /// Whether the bindings are loaded with their hands swapped: the app supports the dominant
+    /// hand setting and the user is left-handed.
+    fn mirrors_bindings(&self) -> bool {
+        self.dominant_hand_supported.load(Ordering::Relaxed) && self.dominant_hand() == Hand::Left
     }
 
     fn get_subaction_path(&self, hand: Hand) -> xr::Path {
@@ -2353,25 +2392,48 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
 
         vr::EVRInputError::None
     }
+    /// Kept like SteamVR keeps it, as the app's `DominantHand` setting, and applied to the
+    /// bindings by loading them again if the app supports the setting.
     fn SetDominantHand(&self, hand: vr::ETrackedControllerRole) -> vr::EVRInputError {
-        let left = match hand {
-            vr::ETrackedControllerRole::LeftHand => true,
-            vr::ETrackedControllerRole::RightHand => false,
+        let hand = match hand {
+            vr::ETrackedControllerRole::LeftHand => Hand::Left,
+            vr::ETrackedControllerRole::RightHand => Hand::Right,
             _ => return vr::EVRInputError::InvalidParam,
         };
-        self.left_handed.store(left, Ordering::Relaxed);
+        let before = self.dominant_hand();
+        *self.dominant_hand_set.lock().unwrap() = Some(hand);
+        if let Some(key) = self.app_keys().first() {
+            crate::settings::set_i32(key, "DominantHand", dominant_hand_role(hand).0 as i32);
+        }
+        if hand != before && self.dominant_hand_supported.load(Ordering::Relaxed) {
+            if self.openxr.is_lost() {
+                return vr::EVRInputError::None;
+            }
+            let loaded = self
+                .openxr
+                .session_data
+                .get()
+                .input_data
+                .actions
+                .get()
+                .is_some();
+            if loaded {
+                info!("The dominant hand is now the {hand:?}, reloading the bindings");
+                self.reload_bindings(true);
+            }
+        }
         vr::EVRInputError::None
     }
+    /// "This function will only return success for applications which include
+    /// supports_dominant_hand_setting: true in their action manifests."
     fn GetDominantHand(&self, hand: *mut vr::ETrackedControllerRole) -> vr::EVRInputError {
         if hand.is_null() {
             return vr::EVRInputError::InvalidParam;
         }
-        let role = if self.left_handed.load(Ordering::Relaxed) {
-            vr::ETrackedControllerRole::LeftHand
-        } else {
-            vr::ETrackedControllerRole::RightHand
-        };
-        unsafe { hand.write(role) };
+        if !self.dominant_hand_supported.load(Ordering::Relaxed) {
+            return vr::EVRInputError::PermissionDenied;
+        }
+        unsafe { hand.write(dominant_hand_role(self.dominant_hand())) };
         vr::EVRInputError::None
     }
     fn GetSkeletalActionData(
@@ -3043,7 +3105,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             else {
                 return;
             };
-            if !choices.changed_for(key) {
+            if !choices.changed_for(key) && choices.mirrored == self.mirrors_bindings() {
                 debug!("The bindings chosen for {key} are loaded already");
                 return;
             }

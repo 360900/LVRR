@@ -472,6 +472,19 @@ fn dominant_hand() {
         hand
     };
 
+    // Only apps that declare support for the setting may read it.
+    let plain = Fixture::new();
+    let mut hand = Role::Invalid;
+    assert_eq!(
+        plain.input.GetDominantHand(&mut hand),
+        vr::EVRInputError::PermissionDenied
+    );
+    plain.load_actions(c"actions.json");
+    assert_eq!(
+        plain.input.GetDominantHand(&mut hand),
+        vr::EVRInputError::PermissionDenied
+    );
+    f.load_actions(c"actions_dominant_hand.json");
     assert_eq!(get(), Role::RightHand);
     assert_eq!(
         f.input.SetDominantHand(Role::LeftHand),
@@ -491,6 +504,95 @@ fn dominant_hand() {
         f.input.GetDominantHand(std::ptr::null_mut()),
         vr::EVRInputError::InvalidParam
     );
+}
+
+/// For a left-handed user, an app that supports the dominant hand setting gets its bindings
+/// with the hands swapped, like SteamVR mirrors them. The setting is the app's, kept in the
+/// settings file, and the bindings follow a change.
+#[test]
+fn dominant_hand_mirrors_bindings() {
+    use vr::ETrackedControllerRole as Role;
+    let dir = std::env::temp_dir().join(format!("xrizer-dominant-hand-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    set_test_env("XDG_CONFIG_HOME", dir.to_str().unwrap());
+    set_test_env("SteamAppId", "424242");
+    crate::settings::set_i32("steam.app.424242", "DominantHand", Role::LeftHand.0 as i32);
+
+    let profile = Knuckles::profile_path();
+    let mut f = Fixture::new();
+    f.load_actions(c"actions_dominant_hand.json");
+    let mut hand = Role::Invalid;
+    assert_eq!(f.input.GetDominantHand(&mut hand), vr::EVRInputError::None);
+    assert_eq!(hand, Role::LeftHand);
+    f.verify_bindings::<bool>(
+        profile,
+        c"/actions/set1/in/BoolAct",
+        ["/user/hand/right/input/a/click".into()],
+    );
+    f.verify_bindings::<xr::Vector2f>(
+        profile,
+        c"/actions/set1/in/Vec2Act",
+        ["/user/hand/left/input/thumbstick".into()],
+    );
+    f.verify_bindings::<xr::Haptic>(
+        profile,
+        c"/actions/set1/out/VibAct",
+        ["/user/hand/left/output/haptic".into()],
+    );
+    // Chords follow too, skeletons don't: each hand's is its own.
+    f.set_interaction_profile::<Knuckles>(LeftHand);
+    f.set_interaction_profile::<Knuckles>(RightHand);
+    let set1 = f.get_action_set_handle(c"/actions/set1");
+    let active = vr::VRActiveActionSet_t {
+        ulActionSet: set1,
+        ..Default::default()
+    };
+    f.sync(active);
+    let session = f.raw_session();
+    for (input, value) in [
+        ("b/click", fakexr::InputValue::Bool(true)),
+        ("trigger/value", fakexr::InputValue::Float(1.0)),
+    ] {
+        fakexr::set_input(session, &format!("/user/hand/right/input/{input}"), value);
+    }
+    f.sync(active);
+    let chord = f.get_action_handle(c"/actions/set1/in/Chord");
+    assert!(f.get_bool_state(chord).unwrap().bState);
+    let skeleton = f.get_action_handle(c"/actions/set1/in/SkelL");
+    let mut level = vr::EVRSkeletalTrackingLevel::Estimated;
+    assert_eq!(
+        f.input.GetSkeletalTrackingLevel(skeleton, &mut level),
+        vr::EVRInputError::None
+    );
+
+    // Switching hands reloads the bindings and saves the choice for the app.
+    assert_eq!(
+        f.input.SetDominantHand(Role::RightHand),
+        vr::EVRInputError::None
+    );
+    f.input.load_pending_manifest();
+    f.verify_bindings::<bool>(
+        profile,
+        c"/actions/set1/in/BoolAct",
+        ["/user/hand/left/input/a/click".into()],
+    );
+    assert_eq!(
+        crate::settings::get_i32("steam.app.424242", "DominantHand"),
+        Some(Role::RightHand.0 as i32)
+    );
+    assert_eq!(f.input.GetDominantHand(&mut hand), vr::EVRInputError::None);
+    assert_eq!(hand, Role::RightHand);
+
+    // Apps without the flag keep their bindings as they are.
+    crate::settings::set_i32("steam.app.424242", "DominantHand", Role::LeftHand.0 as i32);
+    let f = Fixture::new();
+    f.load_actions(c"actions_dominant_hand_unsupported.json");
+    f.verify_bindings::<bool>(
+        profile,
+        c"/actions/set1/in/BoolAct",
+        ["/user/hand/left/input/a/click".into()],
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

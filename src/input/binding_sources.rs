@@ -85,6 +85,7 @@ impl BindingSources {
             category: self.category,
             files: self.chosen.into_inner(),
             emulated: None,
+            mirrored: false,
         }
     }
 }
@@ -96,6 +97,8 @@ pub(super) struct BindingChoices {
     files: Vec<(ControllerType, Option<PathBuf>)>,
     /// The controller chosen for the game to see, see [super::emulation].
     pub emulated: Option<ControllerType>,
+    /// The bindings were loaded with their hands swapped, see [super::Input::dominant_hand].
+    pub mirrored: bool,
 }
 
 impl BindingChoices {
@@ -130,6 +133,12 @@ fn has_legacy_sets(path: &Path) -> bool {
                     || set.eq_ignore_ascii_case("/actions/legacy_mirrored")
             })
         })
+}
+
+/// The dominant hand chosen for the app in SteamVR, if any.
+pub(super) fn steamvr_dominant_hand(app_key: Option<String>) -> Option<crate::openxr_data::Hand> {
+    let keys = steamvr_bindings::app_keys(&isolated_env_var, app_key);
+    steamvr_saved_bindings(&keys)?.dominant_hand()
 }
 
 /// The bindings the user chose for this app in SteamVR, unless XRIZER_STEAMVR_BINDINGS=0.

@@ -1,0 +1,54 @@
+{
+	"bindings": {
+		"/actions/set1": {
+			"poses": [
+				{
+					"output": "/actions/set1/in/Pose",
+					"path": "/user/hand/left/pose/raw"
+				}
+			],
+			"haptics": [
+				{
+					"output": "/actions/set1/out/VibAct",
+					"path": "/user/hand/right/output/haptic"
+				}
+			],
+			"skeleton": [
+				{
+					"output": "/actions/set1/in/SkelL",
+					"path": "/user/hand/left/input/skeleton/left"
+				}
+			],
+			"chords": [
+				{
+					"output": "/actions/set1/in/Chord",
+					"inputs": [
+						["/user/hand/left/input/b", "click"],
+						["/user/hand/left/input/trigger", "click"]
+					]
+				}
+			],
+			"sources": [
+				{
+					"inputs": {
+						"click": {
+							"output": "/actions/set1/in/BoolAct"
+						}
+					},
+					"mode": "button",
+					"path": "/user/hand/left/input/a"
+				},
+				{
+					"inputs": {
+						"position": {
+							"output": "/actions/set1/in/Vec2Act"
+						}
+					},
+					"mode": "joystick",
+					"path": "/user/hand/right/input/thumbstick"
+				}
+			]
+		}
+	},
+	"controller_type": "knuckles"
+}

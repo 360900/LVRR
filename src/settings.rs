@@ -399,6 +399,17 @@ pub(crate) fn get_bool(section: &str, key: &str) -> Option<bool> {
     lookup(section, key, Value::to_bool)
 }
 
+pub(crate) fn get_i32(section: &str, key: &str) -> Option<i32> {
+    lookup(section, key, Value::to_i32)
+}
+
+/// Sets and saves a value, as an app writing it would.
+pub(crate) fn set_i32(section: &str, key: &str, value: i32) {
+    let mut values = VALUES.lock().unwrap();
+    values.insert((section.to_owned(), key.to_owned()), Int32(value));
+    persist(&values);
+}
+
 pub(crate) fn get_f32(section: &str, key: &str) -> Option<f32> {
     lookup(section, key, Value::to_f32)
 }

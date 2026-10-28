@@ -1,0 +1,42 @@
+{
+	"supports_dominant_hand_setting": true,
+	"action_sets": [
+		{
+			"name": "/actions/set1",
+			"usage": "leftright"
+		}
+	],
+	"actions": [
+		{
+			"name": "/actions/set1/in/BoolAct",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/set1/in/Vec2Act",
+			"type": "vector2"
+		},
+		{
+			"name": "/actions/set1/in/Chord",
+			"type": "boolean"
+		},
+		{
+			"name": "/actions/set1/in/Pose",
+			"type": "pose"
+		},
+		{
+			"name": "/actions/set1/out/VibAct",
+			"type": "vibration"
+		},
+		{
+			"name": "/actions/set1/in/SkelL",
+			"type": "skeleton",
+			"skeleton": "/skeleton/hand/left"
+		}
+	],
+	"default_bindings": [
+		{
+			"controller_type": "knuckles",
+			"binding_url": "knuckles_dominant_hand.json"
+		}
+	]
+}
