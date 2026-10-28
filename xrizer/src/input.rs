@@ -1,5 +1,10 @@
 mod action_manifest;
 mod binding_sources;
+pub(crate) use action_manifest::isolated_env_var;
+pub(crate) use binding_sources::xrizer_config_dir;
+pub(crate) use steamvr_bindings::app_keys;
+#[cfg(test)]
+pub(crate) use action_manifest::TEST_ENV;
 mod custom_bindings;
 mod devices;
 mod emulation;
@@ -158,6 +163,23 @@ struct InputEvent {
     ty: vr::EVREventType,
     index: vr::TrackedDeviceIndex_t,
     data: vr::VREvent_Controller_t,
+    /// When it happened, for `eventAgeSeconds`.
+    at: std::time::Instant,
+}
+
+impl InputEvent {
+    fn new(
+        ty: vr::EVREventType,
+        index: vr::TrackedDeviceIndex_t,
+        data: vr::VREvent_Controller_t,
+    ) -> Self {
+        Self {
+            ty,
+            index,
+            data,
+            at: std::time::Instant::now(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -2093,25 +2115,48 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
     }
     fn DecompressSkeletalBoneData(
         &self,
-        _: *const c_void,
-        _: u32,
-        _: vr::EVRSkeletalTransformSpace,
-        _: *mut vr::VRBoneTransform_t,
-        _: u32,
+        compressed: *const c_void,
+        compressed_size: u32,
+        transform_space: vr::EVRSkeletalTransformSpace,
+        transform_array: *mut vr::VRBoneTransform_t,
+        transform_array_count: u32,
     ) -> vr::EVRInputError {
-        crate::warn_unimplemented!("DecompressSkeletalBoneData");
-        vr::EVRInputError::None
+        let data = match unsafe { compressed_slice(compressed, compressed_size) } {
+            Ok(data) => data,
+            Err(e) => return e,
+        };
+        let out_transforms = match unsafe { bone_array(transform_array, transform_array_count) } {
+            Ok(array) => array,
+            Err(e) => return e,
+        };
+        match skeletal::compressed::decompress(data, transform_space) {
+            Ok(bones) => {
+                *out_transforms = bones;
+                vr::EVRInputError::None
+            }
+            Err(e) => e,
+        }
     }
+    /// Both transform spaces, so DecompressSkeletalBoneData can give either.
     fn GetSkeletalBoneDataCompressed(
         &self,
-        _: vr::VRActionHandle_t,
-        _: vr::EVRSkeletalMotionRange,
-        _: *mut c_void,
-        _: u32,
-        _: *mut u32,
+        handle: vr::VRActionHandle_t,
+        motion_range: vr::EVRSkeletalMotionRange,
+        compressed: *mut c_void,
+        compressed_size: u32,
+        required_size: *mut u32,
     ) -> vr::EVRInputError {
-        crate::warn_unimplemented!("GetSkeletalBoneDataCompressed");
-        vr::EVRInputError::None
+        self.get_compressed_bones(
+            handle,
+            &[
+                vr::EVRSkeletalTransformSpace::Model,
+                vr::EVRSkeletalTransformSpace::Parent,
+            ],
+            motion_range,
+            compressed,
+            compressed_size,
+            required_size,
+        )
     }
     fn GetSkeletalSummaryData(
         &self,
@@ -3368,32 +3413,38 @@ impl<C: openxr_data::Compositor> vr::IVRInput003On004 for Input<C> {
 
     fn GetSkeletalActionDataCompressed(
         &self,
-        _: vr::VRActionHandle_t,
-        _: vr::EVRSkeletalTransformSpace,
-        _: f32,
-        _: *mut c_void,
-        _: u32,
+        handle: vr::VRActionHandle_t,
+        transform_space: vr::EVRSkeletalTransformSpace,
+        _prediction_seconds: f32,
+        compressed: *mut c_void,
+        compressed_size: u32,
         required_size: *mut u32,
     ) -> vr::EVRInputError {
-        crate::warn_unimplemented!("GetSkeletalActionDataCompressed");
-        // An error, so the app doesn't size or uncompress a buffer we never filled.
-        if let Some(required_size) = unsafe { required_size.as_mut() } {
-            *required_size = 0;
-        }
-        vr::EVRInputError::InvalidParam
+        self.get_compressed_bones(
+            handle,
+            &[transform_space],
+            vr::EVRSkeletalMotionRange::WithController,
+            compressed,
+            compressed_size,
+            required_size,
+        )
     }
 
     fn UncompressSkeletalActionData(
         &self,
-        _: *mut c_void,
-        _: u32,
-        _: *mut vr::EVRSkeletalTransformSpace,
-        _: *mut vr::VRBoneTransform_t,
-        _: u32,
+        compressed: *mut c_void,
+        compressed_size: u32,
+        transform_space: *mut vr::EVRSkeletalTransformSpace,
+        transform_array: *mut vr::VRBoneTransform_t,
+        transform_array_count: u32,
     ) -> vr::EVRInputError {
-        crate::warn_unimplemented!("UncompressSkeletalActionData");
-        // We never hand out compressed data.
-        vr::EVRInputError::InvalidCompressedData
+        self.decompress_bones_into_space(
+            compressed,
+            compressed_size,
+            transform_space,
+            transform_array,
+            transform_array_count,
+        )
     }
 
     fn TriggerHapticVibrationAction(
@@ -3428,17 +3479,21 @@ impl<C: openxr_data::Compositor> vr::IVRInput003On004 for Input<C> {
 }
 
 impl<C: openxr_data::Compositor> vr::IVRInput004On005 for Input<C> {
-    #[inline]
     fn DecompressSkeletalBoneData(
         &self,
-        _compressed_buffer: *mut c_void,
-        _compressed_buffer_size: u32,
-        _transform_space: *mut vr::EVRSkeletalTransformSpace,
-        _transform_array: *mut vr::VRBoneTransform_t,
-        _transform_array_count: u32,
+        compressed: *mut c_void,
+        compressed_size: u32,
+        transform_space: *mut vr::EVRSkeletalTransformSpace,
+        transform_array: *mut vr::VRBoneTransform_t,
+        transform_array_count: u32,
     ) -> vr::EVRInputError {
-        crate::warn_unimplemented!("DecompressSkeletalBoneData");
-        vr::EVRInputError::None
+        self.decompress_bones_into_space(
+            compressed,
+            compressed_size,
+            transform_space,
+            transform_array,
+            transform_array_count,
+        )
     }
 
     #[inline]
@@ -3512,20 +3567,117 @@ impl<C: openxr_data::Compositor> vr::IVRInput004On005 for Input<C> {
         )
     }
 
-    #[inline]
     fn GetSkeletalBoneDataCompressed(
         &self,
-        _action: vr::VRActionHandle_t,
-        _transform_space: vr::EVRSkeletalTransformSpace,
-        _motion_range: vr::EVRSkeletalMotionRange,
-        _compressed_data: *mut c_void,
-        _compressed_size: u32,
-        _required_compressed_size: *mut u32,
-        _restrict_to_device: vr::VRInputValueHandle_t,
+        handle: vr::VRActionHandle_t,
+        transform_space: vr::EVRSkeletalTransformSpace,
+        motion_range: vr::EVRSkeletalMotionRange,
+        compressed: *mut c_void,
+        compressed_size: u32,
+        required_size: *mut u32,
+        restrict_to_device: vr::VRInputValueHandle_t,
     ) -> vr::EVRInputError {
-        crate::warn_unimplemented!("GetSkeletalBoneDataCompressed");
+        // restrict_to_device not supported for skeletal actions
+        if restrict_to_device != vr::k_ulInvalidInputValueHandle {
+            return vr::EVRInputError::NoData;
+        }
+        self.get_compressed_bones(
+            handle,
+            &[transform_space],
+            motion_range,
+            compressed,
+            compressed_size,
+            required_size,
+        )
+    }
+}
+
+impl<C: openxr_data::Compositor> Input<C> {
+    /// The bones of `spaces`, compressed into the app's buffer. Like other OpenVR calls, a
+    /// buffer that's too small, or none, gets the required size and BufferTooSmall.
+    fn get_compressed_bones(
+        &self,
+        handle: vr::VRActionHandle_t,
+        spaces: &[vr::EVRSkeletalTransformSpace],
+        motion_range: vr::EVRSkeletalMotionRange,
+        compressed: *mut c_void,
+        compressed_size: u32,
+        required_size: *mut u32,
+    ) -> vr::EVRInputError {
+        // Nothing to size a buffer for unless this succeeds.
+        if let Some(required_size) = unsafe { required_size.as_mut() } {
+            *required_size = 0;
+        }
+        get_action_from_handle!(self, handle, session_data, action);
+        let ActionData::Skeleton(hand) = action else {
+            return vr::EVRInputError::WrongType;
+        };
+        let mut bones = Vec::with_capacity(spaces.len());
+        for &space in spaces {
+            let Some(transforms) =
+                self.get_bones_from_hand_tracking(&session_data, space, *hand, motion_range)
+            else {
+                return vr::EVRInputError::NoData;
+            };
+            bones.push((space, transforms));
+        }
+        let data = skeletal::compressed::compress(&bones);
+        if let Some(required_size) = unsafe { required_size.as_mut() } {
+            *required_size = data.len() as u32;
+        }
+        if compressed.is_null() || (compressed_size as usize) < data.len() {
+            return vr::EVRInputError::BufferTooSmall;
+        }
+        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), compressed.cast(), data.len()) };
         vr::EVRInputError::None
     }
+
+    /// IVRInput_004's decompression, which reports the space it decompressed into.
+    fn decompress_bones_into_space(
+        &self,
+        compressed: *mut c_void,
+        compressed_size: u32,
+        transform_space: *mut vr::EVRSkeletalTransformSpace,
+        transform_array: *mut vr::VRBoneTransform_t,
+        transform_array_count: u32,
+    ) -> vr::EVRInputError {
+        let data = match unsafe { compressed_slice(compressed, compressed_size) } {
+            Ok(data) => data,
+            Err(e) => return e,
+        };
+        let out_transforms = match unsafe { bone_array(transform_array, transform_array_count) } {
+            Ok(array) => array,
+            Err(e) => return e,
+        };
+        let space = match skeletal::compressed::default_space(data) {
+            Ok(space) => space,
+            Err(e) => return e,
+        };
+        match skeletal::compressed::decompress(data, space) {
+            Ok(bones) => {
+                *out_transforms = bones;
+                if let Some(transform_space) = unsafe { transform_space.as_mut() } {
+                    *transform_space = space;
+                }
+                vr::EVRInputError::None
+            }
+            Err(e) => e,
+        }
+    }
+}
+
+/// The app's compressed bone data.
+///
+/// # Safety
+/// `data`, unless null, must point to `size` readable bytes.
+unsafe fn compressed_slice<'a>(
+    data: *const c_void,
+    size: u32,
+) -> Result<&'a [u8], vr::EVRInputError> {
+    if data.is_null() {
+        return Err(vr::EVRInputError::InvalidParam);
+    }
+    Ok(unsafe { std::slice::from_raw_parts(data.cast::<u8>(), size as usize) })
 }
 
 impl<C: openxr_data::Compositor> Input<C> {
@@ -3591,9 +3743,16 @@ impl<C: openxr_data::Compositor> Input<C> {
 
             if let Some(mut data) = ProfileData::for_profile_name(&profile_name) {
                 let loaded = session_data.input_data.get_loaded_actions();
+                // Legacy bindings, fixed or chosen, with the others on the fixed ones.
+                let legacy = session_data.input_data.get_legacy_actions().is_some()
+                    || loaded.is_some_and(|loaded| loaded.legacy.is_some());
                 if let Some(properties) =
                     loaded.and_then(|loaded| loaded.simulated_properties.get(&profile_path))
                 {
+                    data.properties = properties;
+                    data.headset = properties;
+                } else if let Some(properties) = data.legacy_simulated.filter(|_| legacy) {
+                    // SteamVR's legacy bindings for the controller show apps another one.
                     data.properties = properties;
                     data.headset = properties;
                 }
@@ -3816,6 +3975,17 @@ impl<C: openxr_data::Compositor> Input<C> {
         // the releases queued for it.
         let mut activations = 0;
         for (i, (device, current)) in devices.iter().zip(connected).enumerate() {
+            let index = i as vr::TrackedDeviceIndex_t;
+            // SteamVR assigns the hand roles when a controller comes or goes, and tells the app
+            // with TrackedDeviceRoleChanged after its activation or deactivation.
+            let role_changed = matches!(device.get_type(), TrackedDeviceType::Controller { .. })
+                .then(|| {
+                    InputEvent::new(
+                        vr::EVREventType::TrackedDeviceRoleChanged,
+                        index,
+                        Default::default(),
+                    )
+                });
             let replaced = device.take_replaced();
             if !device.has_connected_changed(current) {
                 // The app saw the old device, which goes, and the new one comes, like in SteamVR.
@@ -3825,12 +3995,9 @@ impl<C: openxr_data::Compositor> Input<C> {
                         vr::EVREventType::TrackedDeviceDeactivated,
                         vr::EVREventType::TrackedDeviceActivated,
                     ] {
-                        events.push_back(InputEvent {
-                            ty,
-                            index: i as vr::TrackedDeviceIndex_t,
-                            data: Default::default(),
-                        });
+                        events.push_back(InputEvent::new(ty, index, Default::default()));
                     }
+                    events.extend(role_changed);
                 }
             } else {
                 debug!(
@@ -3839,20 +4006,23 @@ impl<C: openxr_data::Compositor> Input<C> {
                     if current { "" } else { "not " }
                 );
 
-                let event = InputEvent {
-                    ty: if current {
+                let event = InputEvent::new(
+                    if current {
                         vr::EVREventType::TrackedDeviceActivated
                     } else {
                         vr::EVREventType::TrackedDeviceDeactivated
                     },
-                    index: i as vr::TrackedDeviceIndex_t,
-                    data: Default::default(),
-                };
+                    index,
+                    Default::default(),
+                );
                 if current {
-                    events.insert(activations, event);
-                    activations += 1;
+                    for event in std::iter::once(event).chain(role_changed) {
+                        events.insert(activations, event);
+                        activations += 1;
+                    }
                 } else {
                     events.push_back(event);
+                    events.extend(role_changed);
                 }
             }
         }
@@ -3872,7 +4042,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             unsafe {
                 (&raw mut (*out).eventType).write(event.ty.0);
                 (&raw mut (*out).trackedDeviceIndex).write(event.index);
-                (&raw mut (*out).eventAgeSeconds).write(0.0);
+                (&raw mut (*out).eventAgeSeconds).write(event.at.elapsed().as_secs_f32());
                 (&raw mut (*out).data.controller).write(event.data);
             }
             true

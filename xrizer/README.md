@@ -77,6 +77,8 @@ If a launcher strips `RUST_LOG`, put the same filter string in a file named `log
 
 `XRIZER_ADDITIONAL_BINDINGS` - `;` separated list of controller types to load bindings for in addition to the ones the game lists, e.g. `knuckles;oculus_touch`. Each is read from the custom bindings directory, or `bindings_<controller_type>.json` next to the game's action manifest.
 
+Settings games write through `IVRSettings` are kept in `~/.config/xrizer/settings.json` (under `$XDG_CONFIG_HOME` if set), like SteamVR keeps them in `steamvr.vrsettings`. `supersampleScale` in its `steamvr` section (an area factor, `1.5` is 150 %) and `resolutionScale` (a percentage) in a game's `steam.app.<id>` section scale the render size like SteamVR's resolution settings.
+
 `XRIZER_CONTROLLER_TYPE` - `knuckles` or `oculus_touch` shows the controllers to the game as Index or Touch controllers: they report that controller's identity and poses, and get the game's bindings for it converted, if it has any. The headset keeps its identity. Without the variable, `controller_type` in `~/.config/xrizer/apps/<app key>.json` (same key as above) chooses it per game. `auto` or no choice shows the real controllers. Games without an action manifest always see the real controllers.
 
 `XRIZER_LINEAR_UNORM` - `1` shows 8-bit UNORM textures submitted with `ColorSpace_Auto` as linear instead of sRGB encoded, `0` forces sRGB. Try `1` if a game looks much too dark. Enabled automatically for games known to need it.

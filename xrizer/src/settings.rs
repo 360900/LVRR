@@ -1,12 +1,14 @@
 use crate::clientcore::{Injected, Injector};
 use crate::system::System;
-use log::debug;
+use log::{debug, warn};
 use openvr as vr;
 use openvr::EVRSettingsError;
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
 
 #[derive(Debug)]
@@ -250,7 +252,155 @@ fn default_value(section: &str, key: &str) -> Option<&'static Value> {
 }
 
 /// Values set by the app. Like SteamVR's, they outlive the session, but they aren't saved.
-static VALUES: LazyLock<Mutex<HashMap<(String, String), Value>>> = LazyLock::new(Default::default);
+/// The values apps set, kept in xrizer's config directory like SteamVR keeps them in
+/// steamvr.vrsettings, so they're there on the next run.
+static VALUES: LazyLock<Mutex<HashMap<(String, String), Value>>> = LazyLock::new(|| {
+    Mutex::new(
+        settings_file()
+            .filter(|path| path.exists())
+            .map(|path| load_file(&path))
+            .unwrap_or_default(),
+    )
+});
+/// Whether a value changed since the last Sync.
+static DIRTY: AtomicBool = AtomicBool::new(false);
+
+type Values = HashMap<(String, String), Value>;
+
+/// `$XDG_CONFIG_HOME/xrizer/settings.json`.
+fn settings_file() -> Option<PathBuf> {
+    Some(crate::input::xrizer_config_dir()?.join("settings.json"))
+}
+
+/// Reads `{"section": {"key": value}}`. Anything that isn't a bool, number or string is left
+/// out, like a file that doesn't parse.
+fn load_file(path: &Path) -> Values {
+    let data = match std::fs::read(path) {
+        Ok(data) => data,
+        Err(e) => {
+            warn!("Couldn't read the settings in {}: {e}", path.display());
+            return Values::new();
+        }
+    };
+    let sections: serde_json::Value = match serde_json::from_slice(&data) {
+        Ok(value) => value,
+        Err(e) => {
+            warn!("Ignoring the settings in {}: {e}", path.display());
+            return Values::new();
+        }
+    };
+    let Some(sections) = sections.as_object() else {
+        warn!("Ignoring the settings in {}: not an object", path.display());
+        return Values::new();
+    };
+    let mut values = Values::new();
+    for (section, keys) in sections {
+        let Some(keys) = keys.as_object() else {
+            continue;
+        };
+        for (key, value) in keys {
+            let value = match value {
+                serde_json::Value::Bool(b) => Bool(*b),
+                serde_json::Value::Number(n) => match n.as_i64().and_then(|i| i32::try_from(i).ok())
+                {
+                    Some(i) => Int32(i),
+                    None => Float(n.as_f64().unwrap_or(0.0) as f32),
+                },
+                serde_json::Value::String(s) => match CString::new(s.as_str()) {
+                    Ok(s) => Str(s.into()),
+                    Err(_) => continue,
+                },
+                _ => continue,
+            };
+            values.insert((section.clone(), key.clone()), value);
+        }
+    }
+    values
+}
+
+fn save_file(path: &Path, values: &Values) {
+    let mut sections = serde_json::Map::new();
+    let mut sorted: Vec<_> = values.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(b.0));
+    for ((section, key), value) in sorted {
+        let json = match value {
+            Bool(b) => serde_json::Value::Bool(*b),
+            Int32(i) => (*i).into(),
+            Float(f) => match serde_json::Number::from_f64(*f as f64) {
+                Some(n) => serde_json::Value::Number(n),
+                None => continue,
+            },
+            Str(s) => serde_json::Value::String(s.to_string_lossy().into_owned()),
+        };
+        sections
+            .entry(section.clone())
+            .or_insert_with(|| serde_json::Value::Object(Default::default()))
+            .as_object_mut()
+            .unwrap()
+            .insert(key.clone(), json);
+    }
+    let text = serde_json::to_string_pretty(&serde_json::Value::Object(sections)).unwrap();
+    let write = || {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(path, text)
+    };
+    if let Err(e) = write() {
+        warn!("Couldn't save the settings to {}: {e}", path.display());
+    }
+}
+
+/// Saves the values after a change: SteamVR writes steamvr.vrsettings on every write too, Sync
+/// only reports whether anything changed.
+fn persist(values: &Values) {
+    DIRTY.store(true, Ordering::Relaxed);
+    if let Some(path) = settings_file() {
+        save_file(&path, values);
+    }
+}
+
+/// A setting for the rest of xrizer: the value the app set, else SteamVR's default.
+fn lookup<T>(section: &str, key: &str, convert: impl FnOnce(&Value) -> Option<T>) -> Option<T> {
+    let key = (section.to_owned(), key.to_owned());
+    let values = VALUES.lock().unwrap();
+    values
+        .get(&key)
+        .or_else(|| default_value(&key.0, &key.1))
+        .and_then(convert)
+}
+
+/// The per axis render size multiplier of SteamVR's resolution settings: the global
+/// `supersampleScale`, an area factor (1.5 is 150 %), and the app's `resolutionScale` percentage.
+pub(crate) fn render_scale() -> f32 {
+    let global = get_f32("steamvr", "supersampleScale");
+    let identified = crate::applications::identified_app_key();
+    let keys = crate::input::app_keys(&crate::input::isolated_env_var, identified);
+    let per_app = {
+        let values = VALUES.lock().unwrap();
+        keys.iter().find_map(|key| {
+            values
+                .get(&(key.clone(), "resolutionScale".to_owned()))
+                .and_then(Value::to_f32)
+        })
+    };
+    render_scale_of(global, per_app)
+}
+
+fn render_scale_of(global: Option<f32>, per_app_percent: Option<f32>) -> f32 {
+    let valid = |scale: &f32| scale.is_finite() && *scale > 0.0;
+    let global = global.filter(valid).unwrap_or(1.0);
+    let per_app = per_app_percent.filter(valid).unwrap_or(100.0);
+    (global * per_app / 100.0).sqrt()
+}
+
+pub(crate) fn get_bool(section: &str, key: &str) -> Option<bool> {
+    lookup(section, key, Value::to_bool)
+}
+
+pub(crate) fn get_f32(section: &str, key: &str) -> Option<f32> {
+    lookup(section, key, Value::to_f32)
+}
 
 #[derive(macros::InterfaceImpl)]
 #[interface = "IVRSettings"]
@@ -322,6 +472,15 @@ impl Settings {
                 // Before the headset is tracked there's no IPD, so use SteamVR's default.
                 (ipd > 0.0).then_some(Float(ipd))
             }
+            // The runtime's rate: SteamVR drives the display at this, and users set it there.
+            ("steamvr", "preferredRefreshRate") => {
+                let rate = system.GetFloatTrackedDeviceProperty(
+                    HMD,
+                    vr::ETrackedDeviceProperty::DisplayFrequency_Float,
+                    std::ptr::null_mut(),
+                );
+                (rate > 0.0).then_some(Float(rate))
+            }
             ("LastKnown", "HMDManufacturer") => {
                 string(vr::ETrackedDeviceProperty::ManufacturerName_String)
             }
@@ -342,7 +501,9 @@ impl Settings {
             return;
         };
         debug!("Setting {}/{} to {value:?}", key.0, key.1);
-        VALUES.lock().unwrap().insert(key, value);
+        let mut values = VALUES.lock().unwrap();
+        values.insert(key, value);
+        persist(&values);
         set_error(error, EVRSettingsError::None);
     }
 
@@ -384,7 +545,12 @@ impl Settings {
     }
 
     fn remove(&self, mut matches: impl FnMut(&(String, String)) -> bool) {
-        VALUES.lock().unwrap().retain(|key, _| !matches(key));
+        let mut values = VALUES.lock().unwrap();
+        let before = values.len();
+        values.retain(|key, _| !matches(key));
+        if values.len() != before {
+            persist(&values);
+        }
     }
 }
 
@@ -514,9 +680,10 @@ impl vr::IVRSettings003_Interface for Settings {
 }
 
 impl vr::IVRSettings002On003 for Settings {
-    fn Sync(&self, _force: bool, error: *mut EVRSettingsError) -> bool {
+    /// The values are saved as they're set, so this only reports whether any changed.
+    fn Sync(&self, force: bool, error: *mut EVRSettingsError) -> bool {
         set_error(error, EVRSettingsError::None);
-        false
+        DIRTY.swap(false, Ordering::Relaxed) || force
     }
 }
 
@@ -604,6 +771,78 @@ mod tests {
             &mut err,
         );
         (unsafe { CStr::from_ptr(buf.as_ptr()) }.into(), err)
+    }
+
+    /// Values apps set are kept in xrizer's config directory, like SteamVR keeps them in
+    /// steamvr.vrsettings, and Sync reports whether any changed.
+    #[test]
+    fn values_persist() {
+        use vr::IVRSettings002On003;
+        let dir = std::env::temp_dir().join(format!("xrizer-settings-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::input::TEST_ENV
+            .with_borrow_mut(|env| env.insert("XDG_CONFIG_HOME", dir.clone().into()));
+        let settings = Settings::new(&Injector::default());
+        let mut err = EVRSettingsError::IPCFailed;
+        let (section, key) = (c"xrizer_persist_test", c"value");
+        let lookup = |values: &Values| {
+            values
+                .get(&("xrizer_persist_test".to_owned(), "value".to_owned()))
+                .and_then(Value::to_f32)
+        };
+
+        IVRSettings003_Interface::SetFloat(&settings, section.as_ptr(), key.as_ptr(), 1.5, &mut err);
+        assert_eq!(err, EVRSettingsError::None);
+        let file = dir.join("xrizer/settings.json");
+        assert_eq!(lookup(&load_file(&file)), Some(1.5));
+        assert!(settings.Sync(false, &mut err));
+        assert!(!settings.Sync(false, &mut err));
+        assert!(settings.Sync(true, &mut err));
+
+        IVRSettings003_Interface::RemoveKeyInSection(&settings, section.as_ptr(), key.as_ptr(), &mut err);
+        assert_eq!(lookup(&load_file(&file)), None);
+        assert!(settings.Sync(false, &mut err));
+
+        crate::input::TEST_ENV.with_borrow_mut(|env| env.remove("XDG_CONFIG_HOME"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Both scales are area factors, applied per axis.
+    #[test]
+    fn render_scale_arithmetic() {
+        assert_eq!(render_scale_of(None, None), 1.0);
+        assert_eq!(render_scale_of(Some(2.25), None), 1.5);
+        assert_eq!(render_scale_of(None, Some(25.0)), 0.5);
+        assert_eq!(render_scale_of(Some(4.0), Some(25.0)), 1.0);
+        assert_eq!(render_scale_of(Some(0.0), Some(f32::NAN)), 1.0);
+        assert_eq!(render_scale_of(Some(-1.0), Some(-5.0)), 1.0);
+    }
+
+    /// Every value type survives the file.
+    #[test]
+    fn settings_file_round_trip() {
+        let dir = std::env::temp_dir().join(format!("xrizer-settings-file-{}", std::process::id()));
+        let path = dir.join("settings.json");
+        let mut values = Values::new();
+        let key = |k: &str| ("section".to_owned(), k.to_owned());
+        values.insert(key("bool"), Bool(true));
+        values.insert(key("int"), Int32(-7));
+        values.insert(key("float"), Float(2.5));
+        values.insert(key("string"), Str(Cow::Borrowed(c"text")));
+        save_file(&path, &values);
+
+        let loaded = load_file(&path);
+        assert_eq!(loaded.len(), 4);
+        assert_eq!(loaded[&key("bool")].to_bool(), Some(true));
+        assert_eq!(loaded[&key("int")].to_i32(), Some(-7));
+        assert!(matches!(loaded[&key("int")], Int32(-7)));
+        assert_eq!(loaded[&key("float")].to_f32(), Some(2.5));
+        assert!(matches!(loaded[&key("float")], Float(_)));
+        assert_eq!(loaded[&key("string")].to_str(), Some(c"text"));
+
+        std::fs::write(&path, "not json").unwrap();
+        assert!(load_file(&path).is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

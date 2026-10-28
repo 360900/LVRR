@@ -1259,7 +1259,7 @@ fn steamvr_chosen_bindings() {
     // A file the user picked, at a path SteamVR escapes in the URL.
     let picked = steam.home.join("my bindings/vive.json");
     std::fs::create_dir_all(picked.parent().unwrap()).unwrap();
-    std::fs::copy(input_data("vive_only_single.json"), &picked).unwrap();
+    copy_input_data("vive_only_single.json", &picked);
     let url = format!("file://{}", picked.display()).replace(' ', "%20");
     steam.add_workshop_item(
         "3822741892",
@@ -1378,7 +1378,12 @@ fn unusable_steamvr_choice_uses_the_default() {
 pub(super) fn add_app_bindings(config: &std::path::Path, key: &str, file: &str, from: &str) {
     let dir = config.join("xrizer/bindings").join(key);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::copy(input_data(from), dir.join(file)).unwrap();
+    copy_input_data(from, &dir.join(file));
+}
+
+/// Not fs::copy, Miri doesn't support copy_file_range.
+fn copy_input_data(file: &str, to: &std::path::Path) {
+    std::fs::write(to, std::fs::read(input_data(file)).unwrap()).unwrap();
 }
 
 #[test]

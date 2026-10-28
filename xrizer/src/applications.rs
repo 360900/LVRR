@@ -1,10 +1,11 @@
 use crate::clientcore::{Injected, Injector};
 use crate::compositor::Compositor;
 use crate::input::Input;
+use crate::openxr_data::OpenXrData;
 use openvr as vr;
 use std::ffi::{CStr, CString, c_char};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use log::{info, warn};
 use std::process::Command;
@@ -20,6 +21,7 @@ pub struct Applications {
     /// The app key this process identified as.
     identity: Mutex<Option<CString>>,
     input: Injected<Input<Compositor>>,
+    openxr: Arc<OpenXrData<Compositor>>,
 }
 
 /// The app key this process last identified as, for code without a handle to the interface.
@@ -31,12 +33,13 @@ pub fn identified_app_key() -> Option<String> {
 }
 
 impl Applications {
-    pub fn new(injector: &Injector) -> Self {
+    pub fn new(openxr: Arc<OpenXrData<Compositor>>, injector: &Injector) -> Self {
         Self {
             vtables: Default::default(),
             apps: Default::default(),
             identity: Default::default(),
             input: injector.inject(),
+            openxr,
         }
     }
 
@@ -151,8 +154,7 @@ impl vr::IVRApplications008_Interface for Applications {
         vr::EVRApplicationError::None
     }
     fn GetSceneApplicationState(&self) -> vr::EVRSceneApplicationState {
-        // xrizer runs in the scene application itself
-        vr::EVRSceneApplicationState::Running
+        self.openxr.scene_application_state()
     }
     fn GetStartingApplication(&self, buffer: *mut c_char, size: u32) -> vr::EVRApplicationError {
         crate::warn_unimplemented!("GetStartingApplication");
@@ -433,10 +435,14 @@ mod tests {
     use super::*;
     use vr::{IVRApplications006On007, IVRApplications008_Interface};
 
+    fn test_openxr() -> Arc<OpenXrData<Compositor>> {
+        Arc::new(OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap())
+    }
+
     /// Vivecraft adds its manifest, checks it's installed and identifies as its app.
     #[test]
     fn manifests_and_identity() {
-        let apps = Applications::new(&Injector::default());
+        let apps = Applications::new(test_openxr(), &Injector::default());
         let dir = std::env::temp_dir().join(format!("xrizer-manifest-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let manifest = dir.join("app.vrmanifest");
@@ -504,7 +510,7 @@ mod tests {
 
     #[test]
     fn unknown_enum_names() {
-        let apps = Applications::new(&Injector::default());
+        let apps = Applications::new(test_openxr(), &Injector::default());
         let name = |ptr| unsafe { CStr::from_ptr(ptr) };
 
         let error = |e| name(apps.GetApplicationsErrorNameFromEnum(vr::EVRApplicationError(e)));

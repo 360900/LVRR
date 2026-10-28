@@ -94,6 +94,13 @@ pub struct OpenXrData<C: Compositor> {
     /// Whether the runtime tells us when the user puts on or takes off the headset.
     pub supports_user_presence: bool,
     user_present: AtomicBool,
+    /// Since when the user hasn't been present, for [STANDBY_TIMEOUT].
+    absent_since: parking_lot::Mutex<Option<Instant>>,
+    /// Whether the headset is in standby, see [Self::update_standby].
+    standby: AtomicBool,
+    /// Whether the app has been told it's the scene application, see
+    /// [Self::scene_application_started].
+    scene_started: AtomicBool,
     /// Set while the runtime holds the input focus it took from us (e.g. its system menu).
     input_focus_captured: AtomicBool,
     /// Change time of a runtime recenter of LOCAL that hasn't taken effect yet.
@@ -345,6 +352,8 @@ impl<C: Compositor> OpenXrData<C> {
             supported_exts.htc_vive_cosmos_controller_interaction;
         exts.fb_display_refresh_rate = supported_exts.fb_display_refresh_rate;
         exts.ext_user_presence = supported_exts.ext_user_presence;
+        exts.ext_view_configuration_views_change =
+            supported_exts.ext_view_configuration_views_change;
 
         if supported_exts
             .other
@@ -432,6 +441,9 @@ impl<C: Compositor> OpenXrData<C> {
             logged_errors: Mutex::default(),
             supports_user_presence,
             user_present: true.into(),
+            absent_since: parking_lot::Mutex::new(None),
+            standby: false.into(),
+            scene_started: false.into(),
             input_focus_captured: false.into(),
             pending_recenter: parking_lot::Mutex::new(None),
             stage_moved: false.into(),
@@ -505,6 +517,7 @@ impl<C: Compositor> OpenXrData<C> {
         if self.is_lost() {
             return;
         }
+        self.update_standby();
         if self.stage_moved.swap(false, Ordering::Relaxed) {
             // The runtime moved the stage, which replaces any standing zero pose the app set.
             self.move_origin(
@@ -602,6 +615,11 @@ impl<C: Compositor> OpenXrData<C> {
                             },
                             Default::default(),
                         );
+                        *self.absent_since.lock() = (!present).then(Instant::now);
+                        if present && self.standby.swap(false, Ordering::Relaxed) {
+                            info!("Leaving standby");
+                            self.push_event(vr::EVREventType::LeaveStandbyMode, Default::default());
+                        }
                     }
                 }
                 xr::Event::DisplayRefreshRateChangedFB(event) => {
@@ -629,6 +647,12 @@ impl<C: Compositor> OpenXrData<C> {
                 }
                 // Hidden area meshes are fetched from the runtime whenever the app asks.
                 xr::Event::VisibilityMaskChangedKHR(_) => debug!("visibility mask changed"),
+                // The recommended eye size is queried whenever the app asks, so apps that
+                // query it again (or restart VR) pick the new size up.
+                xr::Event::ViewConfigurationViewsChangedEXT(_) => {
+                    let (width, height) = self.recommended_eye_size();
+                    info!("Recommended eye size changed to {width}x{height}");
+                }
                 xr::Event::EventsLost(event) => {
                     warn!("The runtime dropped {} events", event.lost_event_count())
                 }
@@ -695,6 +719,16 @@ impl<C: Compositor> OpenXrData<C> {
             vr::EVREventType::InputFocusReleased
         };
         self.push_event(ty, data);
+        // SteamVR draws the controllers itself while its dashboard is up, and has the app hide
+        // its own meanwhile. Runtimes draw theirs in their system menus too.
+        self.push_event(
+            if captured {
+                vr::EVREventType::HideRenderModels
+            } else {
+                vr::EVREventType::ShowRenderModels
+            },
+            Default::default(),
+        );
     }
 
     /// Whether the runtime holds the input focus, i.e. the app shouldn't expect input.
@@ -707,8 +741,80 @@ impl<C: Compositor> OpenXrData<C> {
         self.user_present.load(Ordering::Relaxed)
     }
 
+    /// Whether the headset is in standby: taken off for [STANDBY_TIMEOUT].
+    pub fn in_standby(&self) -> bool {
+        self.standby.load(Ordering::Relaxed)
+    }
+
+    /// SteamVR turns the displays off once the headset has been idle for its standby timeout,
+    /// and tells the app with EnterStandbyMode. Runtimes handle their displays themselves, so the
+    /// app is told at the same point, and LeaveStandbyMode once the headset is put on again.
+    fn update_standby(&self) {
+        if self.user_present() || self.in_standby() {
+            return;
+        }
+        let timed_out = self
+            .absent_since
+            .lock()
+            .is_some_and(|since| since.elapsed() >= STANDBY_TIMEOUT);
+        if timed_out && !self.standby.swap(true, Ordering::Relaxed) {
+            info!("Entering standby, the headset has been off for {STANDBY_TIMEOUT:?}");
+            self.push_event(vr::EVREventType::EnterStandbyMode, Default::default());
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expire_standby_timeout(&self) {
+        if let Some(since) = self.absent_since.lock().as_mut() {
+            *since = Instant::now()
+                .checked_sub(STANDBY_TIMEOUT)
+                .unwrap_or_else(Instant::now);
+        }
+    }
+
+    /// Where the app is in its life as SteamVR's scene application: starting until it submits
+    /// frames, running, and quitting once asked to. Other application types run alongside a
+    /// scene application xrizer knows nothing about, so they get Running.
+    pub fn scene_application_state(&self) -> vr::EVRSceneApplicationState {
+        if self.application_type != vr::EVRApplicationType::Scene {
+            return vr::EVRSceneApplicationState::Running;
+        }
+        if self.exiting.load(Ordering::Relaxed) {
+            vr::EVRSceneApplicationState::Quitting
+        } else if self.scene_started.load(Ordering::Relaxed) {
+            vr::EVRSceneApplicationState::Running
+        } else {
+            vr::EVRSceneApplicationState::Starting
+        }
+    }
+
+    /// The app started submitting frames, so it's the scene application now, which SteamVR
+    /// tells every app, this one included.
+    pub fn scene_application_started(&self) {
+        if self.application_type != vr::EVRApplicationType::Scene
+            || self.scene_started.swap(true, Ordering::Relaxed)
+        {
+            return;
+        }
+        self.push_event(
+            vr::EVREventType::SceneApplicationChanged,
+            vr::VREvent_Data_t {
+                process: vr::VREvent_Process_t {
+                    pid: std::process::id(),
+                    oldPid: 0,
+                    bForced: false,
+                    bConnectionLost: false,
+                },
+            },
+        );
+        self.push_event(
+            vr::EVREventType::SceneApplicationStateChanged,
+            Default::default(),
+        );
+    }
+
     /// Pushes a system event that isn't about a particular device.
-    fn push_event(&self, ty: vr::EVREventType, data: vr::VREvent_Data_t) {
+    pub(crate) fn push_event(&self, ty: vr::EVREventType, data: vr::VREvent_Data_t) {
         if let Some(system) = self.system.get() {
             system.push_event(vr::VREvent_t {
                 eventType: ty.0,
@@ -823,6 +929,12 @@ impl<C: Compositor> OpenXrData<C> {
                 },
             },
         });
+        if self.application_type == vr::EVRApplicationType::Scene {
+            self.push_event(
+                vr::EVREventType::SceneApplicationStateChanged,
+                Default::default(),
+            );
+        }
         if !connection_lost {
             self.quit_watchdog.start();
         }
@@ -1171,10 +1283,22 @@ impl<C: Compositor> OpenXrData<C> {
             .check("xrEnumerateViewConfigurationViews", views)
             .as_deref()
         {
-            Some([view, ..]) => (
-                view.recommended_image_rect_width,
-                view.recommended_image_rect_height,
-            ),
+            Some([view, ..]) => {
+                let scale = crate::settings::render_scale();
+                if scale != 1.0 {
+                    crate::log_unique!(
+                        log::Level::Info,
+                        "Render size scaled by {scale:.3} per axis from the resolution settings"
+                    );
+                }
+                scale_eye_size(
+                    (
+                        view.recommended_image_rect_width,
+                        view.recommended_image_rect_height,
+                    ),
+                    scale,
+                )
+            }
             other => {
                 if other.is_some() {
                     crate::warn_once!("The runtime reported no views");
@@ -1192,6 +1316,21 @@ impl<C: Compositor> OpenXrData<C> {
         )
     }
 }
+
+/// `size` scaled per axis, kept even like the sizes SteamVR reports.
+pub(crate) fn scale_eye_size((width, height): (u32, u32), scale: f32) -> (u32, u32) {
+    if scale == 1.0 {
+        return (width, height);
+    }
+    let scaled = |size: u32| {
+        let scaled = (size as f32 * scale).round().max(2.0) as u32;
+        scaled.div_ceil(2) * 2
+    };
+    (scaled(width), scaled(height))
+}
+
+/// How long the headset is off before standby, SteamVR's `turnOffScreensTimeout` default.
+const STANDBY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Opt-in: a runtime recenter (e.g. a long press of the Quest system button) also recenters the
 /// standing universe, like SteamVR does for Quest headsets through Virtual Desktop. Off by
@@ -1859,6 +1998,17 @@ pub use tests::FakeCompositor;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn eye_size_scaling() {
+        use super::scale_eye_size;
+        assert_eq!(scale_eye_size((2000, 1000), 1.0), (2000, 1000));
+        assert_eq!(scale_eye_size((1001, 999), 1.0), (1001, 999));
+        assert_eq!(scale_eye_size((2000, 1000), 1.5), (3000, 1500));
+        assert_eq!(scale_eye_size((2000, 1000), 0.5), (1000, 500));
+        assert_eq!(scale_eye_size((1001, 999), 1.1), (1102, 1100));
+        assert_eq!(scale_eye_size((1, 1), 0.1), (2, 2));
+    }
+
     use super::{
         FrameStream, GraphicsBackend, OpenXrData, SessionCreateInfo, offset_time, vsync_phase,
     };

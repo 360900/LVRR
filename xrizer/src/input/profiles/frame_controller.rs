@@ -12,6 +12,11 @@ use openvr::EVRButtonId;
 pub struct FrameController;
 
 impl InteractionProfile for FrameController {
+    /// SteamVR's legacy bindings for it simulate the Touch controllers.
+    fn legacy_simulated_properties() -> Option<&'static ProfileProperties> {
+        Some(super::oculus_touch::OculusTouch::properties())
+    }
+
     const SENSES_FINGERS: bool = true;
     // From legacy_bindings_frame_controller.json
     const LEGACY_TRIGGER_CLICK: Option<(f32, f32)> = Some((0.55, 0.5));

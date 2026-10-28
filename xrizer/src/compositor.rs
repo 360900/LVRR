@@ -96,6 +96,8 @@ pub struct Compositor {
     focused: Once,
     /// The scene and background fades.
     fades: Mutex<[Fade; 2]>,
+    /// FadeGrid's progress, for GetCurrentGridAlpha. Only the alpha is used.
+    grid_fade: Mutex<Fade>,
     overlay_frames: Mutex<Option<OverlayFrames>>,
 }
 
@@ -181,6 +183,7 @@ impl Compositor {
             submitted: false.into(),
             focused: Once::new(),
             fades: Mutex::default(),
+            grid_fade: Mutex::default(),
             overlay_frames: Mutex::default(),
         }
     }
@@ -439,11 +442,15 @@ impl Compositor {
                 result = self.openxr.restart_session();
             }
         }
-        result.map_err(|e| {
+        let result = result.map_err(|e| {
             // No session will be created with it anymore.
             self.tmp_backend.lock().unwrap().take();
             restart_error(e)
-        })
+        });
+        if result.is_ok() {
+            self.openxr.scene_application_started();
+        }
+        result
     }
 
     /// Submit, with the layer of an array texture to show for SubmitWithArrayIndex.
@@ -764,8 +771,9 @@ impl vr::IVRCompositor029_Interface for Compositor {
     fn IsMotionSmoothingSupported(&self) -> bool {
         false
     }
+    /// What the setting says, like SteamVR. Runtimes reproject on their own terms.
     fn IsMotionSmoothingEnabled(&self) -> bool {
-        false
+        crate::settings::get_bool("steamvr", "motionSmoothing").unwrap_or(false)
     }
     fn SubmitExplicitTimingData(&self) -> vr::EVRCompositorError {
         if *self.timing_mode.lock().unwrap() == vr::EVRCompositorTimingMode::Implicit {
@@ -965,9 +973,23 @@ impl vr::IVRCompositor029_Interface for Compositor {
         }
     }
     fn GetCurrentGridAlpha(&self) -> f32 {
-        0.0
+        self.grid_fade.lock().unwrap().color(Instant::now()).a
     }
-    fn FadeGrid(&self, _fSeconds: f32, bFadeGridIn: bool) {
+    fn FadeGrid(&self, fSeconds: f32, bFadeGridIn: bool) {
+        {
+            let now = Instant::now();
+            let mut fade = self.grid_fade.lock().unwrap();
+            let from = fade.color(now);
+            *fade = Fade {
+                from,
+                to: vr::HmdColor_t {
+                    a: if bFadeGridIn { 1.0 } else { 0.0 },
+                    ..from
+                },
+                start: now,
+                seconds: if fSeconds.is_finite() { fSeconds.max(0.0) } else { 0.0 },
+            };
+        }
         #[macros::any_graphics(DynFrameController)]
         fn set_fade_grid<G: GraphicsBackend + 'static>(
             ctrl: &mut FrameController<G>,
@@ -2616,9 +2638,11 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let xr = Arc::new(
-                OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap(),
-            );
+            Self::with_type(vr::EVRApplicationType::Other)
+        }
+
+        fn with_type(ty: vr::EVRApplicationType) -> Self {
+            let xr = Arc::new(OpenXrData::new(&Injector::default(), ty).unwrap());
             let vk = Arc::new(VulkanData::new_temporary(&xr.instance, xr.system_id));
             let comp = Arc::new(Compositor::new(xr.clone(), &Injector::default()));
             xr.compositor.set(Arc::downgrade(&comp));
@@ -2790,6 +2814,77 @@ mod tests {
             panic!("Init succeeded without the extensions");
         };
         assert!(format!("{e:?}").contains("VK_bar"), "{e:?}");
+    }
+
+    /// A scene app starts, runs once it submits frames and quits when asked. SteamVR reports
+    /// that as its scene application state, and the app becoming the scene application as a
+    /// change of it.
+    #[test]
+    fn scene_application_state() {
+        use crate::system::System;
+        use vr::EVRSceneApplicationState as State;
+        use vr::IVRSystem022_Interface;
+
+        let f = Fixture::with_type(vr::EVRApplicationType::Scene);
+        let xr = &f.comp.openxr;
+        let system = Arc::new(System::new(xr.clone(), &Injector::default()));
+        xr.system.set(Arc::downgrade(&system));
+        let next_event = || {
+            let mut event = vr::VREvent_t::default();
+            system
+                .PollNextEvent(&mut event, std::mem::size_of_val(&event) as u32)
+                .then_some(event)
+        };
+        let next_event_of = |ty: vr::EVREventType| {
+            std::iter::from_fn(next_event)
+                .find(|e| e.eventType == ty.0)
+                .unwrap_or_else(|| panic!("no {ty:?} event"))
+        };
+
+        assert_eq!(xr.scene_application_state(), State::Starting);
+        f.ensure_real_session(false);
+        assert_eq!(xr.scene_application_state(), State::Running);
+        let event = next_event_of(vr::EVREventType::SceneApplicationChanged);
+        assert_eq!(unsafe { event.data.process.pid }, std::process::id());
+        assert_eq!(unsafe { event.data.process.oldPid }, 0);
+        let event = next_event().expect("no event");
+        assert_eq!(
+            event.eventType,
+            vr::EVREventType::SceneApplicationStateChanged.0
+        );
+        // Only once.
+        xr.scene_application_started();
+        assert!(
+            std::iter::from_fn(next_event)
+                .all(|e| e.eventType != vr::EVREventType::SceneApplicationChanged.0)
+        );
+
+        xr.session_data.get().session.request_exit().unwrap();
+        xr.poll_events();
+        next_event_of(vr::EVREventType::Quit);
+        let event = next_event().expect("no event");
+        assert_eq!(
+            event.eventType,
+            vr::EVREventType::SceneApplicationStateChanged.0
+        );
+        assert_eq!(xr.scene_application_state(), State::Quitting);
+    }
+
+    /// FadeGrid takes its time, which GetCurrentGridAlpha reports.
+    #[test]
+    fn grid_fade_alpha() {
+        let f = Fixture::new();
+        let c = &*f.comp;
+        assert_eq!(c.GetCurrentGridAlpha(), 0.0);
+        c.FadeGrid(0.0, true);
+        assert_eq!(c.GetCurrentGridAlpha(), 1.0);
+        c.FadeGrid(100.0, false);
+        let alpha = c.GetCurrentGridAlpha();
+        assert!(alpha > 0.9 && alpha <= 1.0, "{alpha}");
+        c.FadeGrid(0.0, false);
+        assert_eq!(c.GetCurrentGridAlpha(), 0.0);
+        c.FadeGrid(f32::NAN, true);
+        assert_eq!(c.GetCurrentGridAlpha(), 1.0);
     }
 
     #[test]
@@ -4238,7 +4333,8 @@ mod tests {
         let c = &*f.comp;
 
         assert!(!C29::IsMotionSmoothingSupported(c));
-        assert!(!C29::IsMotionSmoothingEnabled(c));
+        // SteamVR's motionSmoothing setting, on by default.
+        assert!(C29::IsMotionSmoothingEnabled(c));
         assert!(!C29::IsMirrorWindowVisible(c));
         assert_eq!(C29::GetLastFrameRenderer(c), std::process::id());
         assert_eq!(C29::GetCurrentSceneFocusProcess(c), std::process::id());

@@ -435,11 +435,11 @@ impl<C: openxr_data::Compositor> Input<C> {
     ) {
         let mut events = self.events.lock().unwrap();
         let mut push = |ty, id: vr::EVRButtonId| {
-            events.push_back(super::InputEvent {
+            events.push_back(super::InputEvent::new(
                 ty,
-                index: device_index,
-                data: vr::VREvent_Controller_t { button: id.0 },
-            });
+                device_index,
+                vr::VREvent_Controller_t { button: id.0 },
+            ));
         };
         for &id in buttons {
             let mask = button_mask_from_id(id);
@@ -1079,9 +1079,19 @@ mod tests {
         f.input.openxr.poll_events();
         let action = legacy_action(&f, get_action);
         while let Some(event) = next_event(&f) {
-            assert_eq!(event.ty, vr::EVREventType::TrackedDeviceActivated.0);
+            assert!(is_connection_event(event.ty), "{}", event.ty);
         }
         (f, action)
+    }
+
+    /// A device coming, with the role SteamVR assigns it.
+    fn is_connection_event(ty: u32) -> bool {
+        [
+            vr::EVREventType::TrackedDeviceActivated,
+            vr::EVREventType::TrackedDeviceRoleChanged,
+        ]
+        .iter()
+        .any(|e| e.0 == ty)
     }
 
     fn get_state(f: &Fixture, device_index: vr::TrackedDeviceIndex_t) -> vr::VRControllerState_t {
@@ -1427,6 +1437,36 @@ mod tests {
         expect_button_event(&f, vr::EVREventType::ButtonTouch, 2, vr::EVRButtonId::A);
         expect_button_event(&f, vr::EVREventType::ButtonPress, 2, vr::EVRButtonId::A);
         expect_no_event(&f);
+
+        // SteamVR's legacy bindings for the Pico show it as a Touch controller.
+        let data = f.input.openxr.session_data.get();
+        let devices = data.input_data.devices.read().unwrap();
+        let properties = devices
+            .get_controller(Hand::Right)
+            .and_then(|controller| controller.profile_data.as_ref())
+            .unwrap()
+            .properties;
+        assert!(std::ptr::eq(properties, OculusTouch::properties()));
+    }
+
+    /// A manifest's bindings for the Pico are its own, so it shows as itself.
+    #[test]
+    fn pico_shows_as_itself_with_a_manifest() {
+        use crate::input::profiles::pico::Pico4;
+        use fakexr::UserPath::*;
+        let mut f = Fixture::new();
+        f.load_actions(c"actions.json");
+        f.set_interaction_profile::<Pico4>(RightHand);
+        f.input.frame_start_update();
+        f.input.openxr.poll_events();
+        let data = f.input.openxr.session_data.get();
+        let devices = data.input_data.devices.read().unwrap();
+        let properties = devices
+            .get_controller(Hand::Right)
+            .and_then(|controller| controller.profile_data.as_ref())
+            .unwrap()
+            .properties;
+        assert!(std::ptr::eq(properties, Pico4::properties()));
     }
 
     #[test]
@@ -1720,6 +1760,7 @@ mod tests {
         f.input.frame_start_update();
         expect_device_event(&f, Ev::TrackedDeviceActivated, 0);
         expect_device_event(&f, Ev::TrackedDeviceActivated, 1);
+        expect_device_event(&f, Ev::TrackedDeviceRoleChanged, 1);
         expect_button_event(&f, Ev::ButtonTouch, 1, vr::EVRButtonId::SteamVR_Trigger);
         expect_button_event(&f, Ev::ButtonPress, 1, vr::EVRButtonId::SteamVR_Trigger);
         expect_no_event(&f);
@@ -1735,6 +1776,7 @@ mod tests {
         expect_no_event(&f);
         f.input.expire_connection_grace();
         expect_device_event(&f, Ev::TrackedDeviceDeactivated, 1);
+        expect_device_event(&f, Ev::TrackedDeviceRoleChanged, 1);
         expect_no_event(&f);
     }
 
@@ -2077,7 +2119,7 @@ mod tests {
         f.input.frame_start_update();
         f.input.openxr.poll_events();
         while let Some(event) = next_event(&f) {
-            assert_eq!(event.ty, vr::EVREventType::TrackedDeviceActivated.0);
+            assert!(is_connection_event(event.ty), "{}", event.ty);
         }
         f
     }

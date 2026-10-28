@@ -74,6 +74,7 @@ Status: `pending` | `merged` | `superseded-by-<n>` | `blocked` | `dropped` | `re
 | 444 | clientcore: don't panic in Cleanup | merged | #423, #439; graceful cleanup with outstanding refs |
 | 445 | compositor: replace todo!() with warnings | merged | fixes #283; GetLastFrameRenderer conflict resolved to std::process::id(); GetFrameTimings implemented by 446, SubmitWithArrayIndex fixed in sweep |
 | 446 | compositor: implement GetFrameTimings | merged | real timing from last presented frame |
+| 453 | openxr_data: enable XR_EXT_view_configuration_views_change | merged | eye size is queried per call, so apps that query again get the new size; change logged; not on WiVRn |
 
 ## Fork fixes (not upstream PRs)
 
@@ -182,3 +183,17 @@ Overlay apps and overlay rendering.
 | overlay apps | Overlay apps get an `XR_EXTX_overlay` session (create info chained by wrapping `xrCreateSession`) instead of a headless one when the runtime has it; a frame thread draws their overlays; their GL textures go through the GL bridge; scene `Submit` still rejected | `5518260` |
 | overlay rendering | `SetOverlayColor` tints layers (`XR_KHR_composition_layer_color_scale_bias`); `SetOverlayTexelAspect` applied; side-by-side overlays show one half to each eye (parallel and crossed); overlay relative transforms (old interfaces) follow their parent | `5b655e9` `66d3097` `46abd17` `f61f308` |
 | tests | fakexr accepts and records the overlay session create info | `5518260` |
+
+## TODO section 4 (2026-10-28, `305fd4a`..)
+
+Accuracy and polish.
+
+| Area | Change | Commits |
+|------|--------|---------|
+| resolution | `supersampleScale` and the app's `resolutionScale` scale the render size like SteamVR's resolution settings, from xrizer's settings file | `762fa3f` |
+| compositor | `FadeGrid` fades over its time, which `GetCurrentGridAlpha` reports | `762fa3f` |
+| skeletal | `GetSkeletalBoneDataCompressed`/`DecompressSkeletalBoneData` and IVRInput_004's variants, in a format of our own holding both transform spaces | `d26b910` |
+| legacy input | SteamVR's legacy bindings for the Pico, Focus 3 and Frame controllers simulate Touch controllers, so legacy apps see those | `6de9a8d` |
+| chaperone | `ForceBoundsVisible`/`AreBoundsVisible` recorded; `GetBoundsColor` from the `collisionBounds` settings; `SetSceneColor` and `ReloadInfo` quiet | `d26b910` |
+| settings | values apps set persist in `~/.config/xrizer/settings.json`, `Sync` reports changes; `preferredRefreshRate` is the runtime's rate; `IsMotionSmoothingEnabled` follows `motionSmoothing` | `d26b910` |
+| events | `eventAgeSeconds` is the event's age; `PollNextEventWithPose` gives the event's device pose; `TrackedDeviceRoleChanged` with controller activations; `IpdChanged` when the headset's IPD moves by 0.5 mm; `HideRenderModels`/`ShowRenderModels` with the input focus; `EnterStandbyMode`/`LeaveStandbyMode` after 5 s without the user, activity level `Standby`; `Input_BindingLoadSuccessful`/`Failed`, `ActionBindingReloaded` and `Input_ActionManifestReloaded` on manifest loads; `SceneApplicationChanged` and `SceneApplicationStateChanged` for scene apps, whose `GetSceneApplicationState` is Starting, Running or Quitting | `305fd4a` `5e13f8f` |

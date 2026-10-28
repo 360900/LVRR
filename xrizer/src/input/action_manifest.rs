@@ -103,7 +103,27 @@ impl<C: openxr_data::Compositor> Input<C> {
         // Only remember the path once it loaded, so a failed attempt doesn't block a retry with
         // the right path.
         let _ = self.loaded_actions_path.set(manifest_path.to_path_buf());
+        self.openxr.push_event(
+            vr::EVREventType::Input_ActionManifestReloaded,
+            Default::default(),
+        );
         Ok(())
+    }
+
+    /// How loading a bindings file went. SteamVR's event names the file and controller type as
+    /// path handles of its own, which apps can't resolve, so none are given.
+    fn binding_load_event(&self, ty: vr::EVREventType) {
+        self.openxr.push_event(
+            ty,
+            vr::VREvent_Data_t {
+                inputBinding: vr::VREvent_InputBindingLoad_t {
+                    ulAppContainer: vr::k_ulInvalidPropertyContainer,
+                    pathMessage: 0,
+                    pathUrl: 0,
+                    pathControllerType: 0,
+                },
+            },
+        );
     }
 
     /// Creates the actions of `manifest` and attaches them, with `extra_sets`, after
@@ -467,19 +487,19 @@ pub(super) fn env_var(name: &str) -> Option<OsString> {
 
 #[cfg(test)]
 thread_local! {
-    pub(super) static TEST_ENV: std::cell::RefCell<HashMap<&'static str, OsString>> =
+    pub(crate) static TEST_ENV: std::cell::RefCell<HashMap<&'static str, OsString>> =
         Default::default();
 }
 
 /// Like [env_var], but tests only see what [TEST_ENV] sets, so the machine's own SteamVR config
 /// stays out of them.
 #[cfg(not(test))]
-pub(super) fn isolated_env_var(name: &str) -> Option<OsString> {
+pub(crate) fn isolated_env_var(name: &str) -> Option<OsString> {
     std::env::var_os(name)
 }
 
 #[cfg(test)]
-pub(super) fn isolated_env_var(name: &str) -> Option<OsString> {
+pub(crate) fn isolated_env_var(name: &str) -> Option<OsString> {
     TEST_ENV.with_borrow(|env| env.get(name).cloned())
 }
 
@@ -594,8 +614,10 @@ impl<C: openxr_data::Compositor> Input<C> {
                 .and_then(|path| read_bindings(&path, &controller_type))
                 .or_else(|| read_bindings(&parent_path.join(binding_url), &controller_type));
             let Some(bindings) = bindings else {
+                self.binding_load_event(vr::EVREventType::Input_BindingLoadFailed);
                 continue;
             };
+            self.binding_load_event(vr::EVREventType::Input_BindingLoadSuccessful);
 
             if controller_type == actions::ControllerType::GenericHmd {
                 if self.openxr.supports_user_presence {
@@ -641,6 +663,18 @@ impl<C: openxr_data::Compositor> Input<C> {
             variants: &mut variants,
         };
         super::profiles::run_for_all_profiles(&mut runner);
+        // The bindings are in place: SteamVR says so after every load.
+        self.openxr.push_event(
+            vr::EVREventType::ActionBindingReloaded,
+            vr::VREvent_Data_t {
+                process: vr::VREvent_Process_t {
+                    pid: std::process::id(),
+                    oldPid: 0,
+                    bForced: false,
+                    bConnectionLost: false,
+                },
+            },
+        );
 
         struct FallbackRunner<'a, 'b, 'c, C: openxr_data::Compositor> {
             input: &'a Input<C>,

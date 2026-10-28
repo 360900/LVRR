@@ -285,9 +285,45 @@ struct Views {
     failing: bool,
     /// The last usable FOV the runtime reported for each view.
     last_valid_fovs: [Option<xr::Fovf>; 2],
+    /// The IPD the app last got, see [Self::report_ipd].
+    reported_ipd: Option<f32>,
 }
 
+/// An IPD change under this isn't reported: it's below what a headset's slider reports, so noise
+/// in the located view positions doesn't flood the app with events.
+const IPD_CHANGE_THRESHOLD: f32 = 0.0005;
+
 impl Views {
+    /// Sends the app IpdChanged when the headset's IPD changes, like SteamVR when the slider
+    /// moves. The first IPD located is the one the app starts with.
+    fn report_ipd(&mut self, openxr: &RealOpenXrData, data: &ViewData) {
+        if !data.flags.contains(xr::ViewStateFlags::POSITION_VALID) {
+            return;
+        }
+        let ipd = data.views[1].pose.position.x - data.views[0].pose.position.x;
+        if !ipd.is_finite() || ipd <= 0.0 {
+            return;
+        }
+        match self.reported_ipd {
+            None => self.reported_ipd = Some(ipd),
+            Some(last) if (ipd - last).abs() >= IPD_CHANGE_THRESHOLD => {
+                info!(
+                    "IPD changed from {:.1} mm to {:.1} mm",
+                    last * 1000.0,
+                    ipd * 1000.0
+                );
+                self.reported_ipd = Some(ipd);
+                openxr.push_event(
+                    vr::EVREventType::IpdChanged,
+                    vr::VREvent_Data_t {
+                        ipd: vr::VREvent_Ipd_t { ipdMeters: ipd },
+                    },
+                );
+            }
+            Some(_) => {}
+        }
+    }
+
     /// The rotation removed from each view to make the views parallel, none if the runtime never
     /// located them.
     fn canting(&mut self, session: &SessionData, openxr: &RealOpenXrData) -> [Quat; 2] {
@@ -321,6 +357,9 @@ impl Views {
             Ok(data) => {
                 if std::mem::take(&mut self.failing) {
                     info!("Locating views works again");
+                }
+                if let Some(view) = self.frame.view {
+                    self.report_ipd(openxr, &view.data);
                 }
                 let (frame, last) = (self.frame, self.last);
                 self.last = ViewCache {
@@ -421,7 +460,7 @@ fn parallel_fov(fov: xr::Fovf, canting: Quat) -> xr::Fovf {
 #[versions(026, 023, 022, 021, 020, 019, 017, 016, 015, 014, 012, 011, 010, 009)]
 pub struct System {
     openxr: Arc<RealOpenXrData>, // We don't need to test session restarting.
-    events: Mutex<VecDeque<vr::VREvent_t>>,
+    events: Mutex<VecDeque<QueuedEvent>>,
     input: Injected<Input<crate::compositor::Compositor>>,
     overlay: Injected<OverlayMan>,
     vtables: Vtables,
@@ -589,7 +628,7 @@ impl System {
 
     pub fn push_event(&self, event: vr::VREvent_t) {
         let mut events = self.events.lock().unwrap();
-        events.push_back(event);
+        events.push_back(QueuedEvent::new(event));
     }
 
     #[cfg(feature = "monado")]
@@ -601,6 +640,29 @@ impl System {
             .as_ref()?
             .get_device_from_vr_index(device_index)
             .and_then(|device| device.battery_status().ok())
+    }
+}
+
+/// An event waiting for the app to poll it, with when it happened for `eventAgeSeconds`.
+pub struct QueuedEvent {
+    at: std::time::Instant,
+    event: vr::VREvent_t,
+}
+
+impl QueuedEvent {
+    pub fn new(event: vr::VREvent_t) -> Self {
+        Self {
+            at: std::time::Instant::now(),
+            event,
+        }
+    }
+
+    /// The event with its age filled in.
+    pub fn take(self) -> vr::VREvent_t {
+        vr::VREvent_t {
+            eventAgeSeconds: self.at.elapsed().as_secs_f32(),
+            ..self.event
+        }
     }
 }
 
@@ -1029,29 +1091,26 @@ impl vr::IVRSystem026_Interface for System {
         pose: *mut vr::TrackedDevicePose_t,
     ) -> bool {
         self.pump();
-        if let Some(queued) = self.events.lock().unwrap().pop_front() {
-            // Truncated to the app's size, so older event structs only get what they have room for.
-            Self::copy_event(&queued, event, size);
-            if !pose.is_null() {
-                unsafe { pose.write(Default::default()) };
+        let queued = self.events.lock().unwrap().pop_front();
+        let got_event = match queued {
+            Some(queued) => {
+                // Truncated to the app's size, so older event structs only get what they have
+                // room for.
+                Self::copy_event(&queued.take(), event, size);
+                true
             }
-            return true;
-        }
-
-        let Some(input) = self.input.get() else {
-            return false;
+            None => match self.input.get() {
+                Some(input) => input.get_next_event(size, event),
+                None => false,
+            },
         };
-
-        let got_event = input.get_next_event(size, event);
         if got_event && !pose.is_null() {
-            unsafe {
-                let index = (&raw const (*event).trackedDeviceIndex).read();
-                pose.write(
-                    input
-                        .get_device_pose(index, Some(origin), self.openxr.get_display_time(), None)
-                        .unwrap_or_default(),
-                );
-            }
+            // The event's device where it's tracked, like SteamVR; the identity pose otherwise.
+            let index = unsafe { (&raw const (*event).trackedDeviceIndex).read() };
+            let device_pose = self.input.get().and_then(|input| {
+                input.get_device_pose(index, Some(origin), self.openxr.get_display_time(), None)
+            });
+            unsafe { pose.write(device_pose.unwrap_or_default()) };
         }
         got_event
     }
@@ -1587,6 +1646,9 @@ impl vr::IVRSystem026_Interface for System {
         device_index: vr::TrackedDeviceIndex_t,
     ) -> vr::EDeviceActivityLevel {
         match device_index {
+            vr::k_unTrackedDeviceIndex_Hmd if self.openxr.in_standby() => {
+                vr::EDeviceActivityLevel::Standby
+            }
             vr::k_unTrackedDeviceIndex_Hmd if !self.openxr.user_present() => {
                 vr::EDeviceActivityLevel::Idle
             }
@@ -2618,6 +2680,52 @@ mod tests {
             .then_some(event)
     }
 
+    /// The app is told when the headset's IPD changes, like SteamVR when the slider moves.
+    #[test]
+    fn ipd_change_event() {
+        let (xr, system) = system_with_events();
+        let session = session(&xr);
+        let views = |ipd: f32| {
+            [-0.5f32, 0.5].map(|side| {
+                let pose = xr::Posef {
+                    orientation: xr::Quaternionf::IDENTITY,
+                    position: xr::Vector3f {
+                        x: side * ipd,
+                        y: 0.0,
+                        z: 0.0,
+                    },
+                };
+                (pose, FALLBACK_FOV)
+            })
+        };
+        let ipd = |system: &System| {
+            let mut err = vr::ETrackedPropertyError::Success;
+            system.GetFloatTrackedDeviceProperty(
+                vr::k_unTrackedDeviceIndex_Hmd,
+                vr::ETrackedDeviceProperty::UserIpdMeters_Float,
+                &mut err,
+            )
+        };
+
+        // The first IPD is what the app starts with.
+        fakexr::set_views(session, views(0.063));
+        system.reset_views();
+        assert!((ipd(&system) - 0.063).abs() < 1e-6);
+        assert!(next_event(&system).is_none());
+
+        // Noise in the located positions isn't a change.
+        fakexr::set_views(session, views(0.0631));
+        system.reset_views();
+        assert!(next_event(&system).is_none());
+
+        fakexr::set_views(session, views(0.065));
+        system.reset_views();
+        let event = next_event(&system).expect("no event");
+        assert_eq!(event.eventType, vr::EVREventType::IpdChanged.0);
+        assert!((unsafe { event.data.ipd.ipdMeters } - 0.065).abs() < 1e-6);
+        assert!(next_event(&system).is_none());
+    }
+
     /// A refresh rate change is a change of the headset's display frequency property.
     #[test]
     fn refresh_rate_change_event() {
@@ -2664,6 +2772,31 @@ mod tests {
             vr::EVRInputError::None
         );
         (xr, system, input)
+    }
+
+    /// SteamVR reports every bindings file it loads, then that the bindings and the manifest
+    /// are in place.
+    #[test]
+    fn binding_load_events() {
+        let (_xr, system, _input) = system_with_input();
+        let events: Vec<u32> = std::iter::from_fn(|| next_event(&system).map(|e| e.eventType))
+            .collect();
+        let position = |ty: vr::EVREventType| events.iter().rposition(|&e| e == ty.0);
+        let loaded = position(vr::EVREventType::Input_BindingLoadSuccessful)
+            .expect("no bindings loaded");
+        let failed = position(vr::EVREventType::Input_BindingLoadFailed).unwrap_or(0);
+        let reloaded =
+            position(vr::EVREventType::ActionBindingReloaded).expect("bindings not reloaded");
+        let manifest = position(vr::EVREventType::Input_ActionManifestReloaded)
+            .expect("manifest not reloaded");
+        assert!(loaded < reloaded && failed < reloaded && reloaded < manifest, "{events:?}");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|&&e| e == vr::EVREventType::ActionBindingReloaded.0)
+                .count(),
+            1
+        );
     }
 
     /// Syncs the test manifest's first action set and applies pending profile changes.
@@ -3107,6 +3240,9 @@ mod tests {
         let event = next_event(&system).expect("no event");
         assert_eq!(event.eventType, vr::EVREventType::InputFocusCaptured.0);
         assert_eq!(unsafe { event.data.process.oldPid }, 0);
+        // The runtime draws the controllers in its menu, like SteamVR in its dashboard.
+        let event = next_event(&system).expect("no event");
+        assert_eq!(event.eventType, vr::EVREventType::HideRenderModels.0);
         assert!(!system.IsInputAvailable());
         assert!(system.ShouldApplicationPause());
         assert!(overlays.IsDashboardVisible());
@@ -3119,6 +3255,8 @@ mod tests {
         let event = next_event(&system).expect("no event");
         assert_eq!(event.eventType, vr::EVREventType::InputFocusReleased.0);
         assert_eq!(unsafe { event.data.process.pid }, 0);
+        let event = next_event(&system).expect("no event");
+        assert_eq!(event.eventType, vr::EVREventType::ShowRenderModels.0);
         assert!(system.IsInputAvailable());
         assert!(!system.ShouldApplicationPause());
         assert!(!overlays.IsDashboardVisible());
@@ -3153,6 +3291,17 @@ mod tests {
         assert_eq!(event.trackedDeviceIndex, vr::k_unTrackedDeviceIndex_Hmd);
         assert_eq!(activity(), vr::EDeviceActivityLevel::Idle);
 
+        // Off for SteamVR's standby timeout: the headset is in standby.
+        xr.poll_events();
+        assert!(next_event(&system).is_none());
+        xr.expire_standby_timeout();
+        xr.poll_events();
+        let event = next_event(&system).expect("no event");
+        assert_eq!(event.eventType, vr::EVREventType::EnterStandbyMode.0);
+        assert_eq!(activity(), vr::EDeviceActivityLevel::Standby);
+        xr.poll_events();
+        assert!(next_event(&system).is_none());
+
         fakexr::set_user_presence(session(&xr), true);
         xr.poll_events();
         let event = next_event(&system).expect("no event");
@@ -3160,7 +3309,19 @@ mod tests {
             event.eventType,
             vr::EVREventType::TrackedDeviceUserInteractionStarted.0
         );
+        let event = next_event(&system).expect("no event");
+        assert_eq!(event.eventType, vr::EVREventType::LeaveStandbyMode.0);
         assert_eq!(activity(), vr::EDeviceActivityLevel::UserInteraction);
+
+        // Taking it off again starts the timeout over.
+        fakexr::set_user_presence(session(&xr), false);
+        xr.poll_events();
+        assert_eq!(
+            next_event(&system).expect("no event").eventType,
+            vr::EVREventType::TrackedDeviceUserInteractionEnded.0
+        );
+        assert!(next_event(&system).is_none());
+        assert_eq!(activity(), vr::EDeviceActivityLevel::Idle);
     }
 
     #[test]
@@ -3221,8 +3382,25 @@ mod tests {
         assert_eq!(event.event_type, vr::EVREventType::TrackedDeviceActivated.0);
         assert_eq!(event.device, vr::k_unTrackedDeviceIndex_Hmd);
         assert_eq!(event.data, [0; 4]);
-        assert_eq!(event.age, 0.0);
+        assert!((0.0..1.0).contains(&event.age));
         assert_eq!(event.canary, 0xdeadbeef);
+    }
+
+    /// eventAgeSeconds is how long ago the event happened, like in SteamVR.
+    #[test]
+    #[cfg_attr(miri, ignore = "timing")]
+    fn queued_event_reports_its_age() {
+        let (_xr, system) = system_with_events();
+        system.push_event(vr::VREvent_t {
+            eventType: vr::EVREventType::IpdChanged.0,
+            ..Default::default()
+        });
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let mut event = vr::VREvent_t::default();
+        assert!(system.PollNextEvent(&mut event, std::mem::size_of_val(&event) as u32));
+        assert_eq!(event.eventType, vr::EVREventType::IpdChanged.0);
+        assert!(event.eventAgeSeconds >= 0.02, "{}", event.eventAgeSeconds);
+        assert!(event.eventAgeSeconds < 1.0, "{}", event.eventAgeSeconds);
     }
 
     #[test]

@@ -3,6 +3,7 @@ use glam::{Quat, Vec3};
 use openvr as vr;
 use openxr as xr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(macros::InterfaceImpl)]
 #[interface = "IVRChaperone"]
@@ -10,6 +11,9 @@ use std::sync::Arc;
 pub struct Chaperone {
     vtables: Vtables,
     openxr: Arc<RealOpenXrData>,
+    /// Whether the app forced the bounds visible. The runtime draws its own bounds as it sees
+    /// fit, so this is all AreBoundsVisible can report.
+    bounds_forced: AtomicBool,
 }
 
 impl Chaperone {
@@ -17,7 +21,19 @@ impl Chaperone {
         Self {
             vtables: Default::default(),
             openxr,
+            bounds_forced: false.into(),
         }
+    }
+}
+
+/// The bounds color from SteamVR's collisionBounds settings, for apps that draw their own.
+fn bounds_color() -> vr::HmdColor_t {
+    let channel = |key| crate::settings::get_f32("collisionBounds", key).unwrap_or(0.0) / 255.0;
+    vr::HmdColor_t {
+        r: channel("CollisionBoundsColorGammaR"),
+        g: channel("CollisionBoundsColorGammaG"),
+        b: channel("CollisionBoundsColorGammaB"),
+        a: channel("CollisionBoundsColorGammaA"),
     }
 }
 
@@ -85,13 +101,16 @@ impl vr::IVRChaperone004_Interface for Chaperone {
         self.openxr.reset_tracking_space(origin);
     }
 
-    fn ForceBoundsVisible(&self, _: bool) {
-        crate::warn_unimplemented!("ForceBoundsVisible");
+    fn ForceBoundsVisible(&self, force: bool) {
+        if self.bounds_forced.swap(force, Ordering::Relaxed) != force {
+            crate::warn_once!("The runtime draws its own bounds, ForceBoundsVisible is only recorded");
+        }
     }
     fn AreBoundsVisible(&self) -> bool {
-        crate::warn_unimplemented!("AreBoundsVisible");
-        false
+        self.bounds_forced.load(Ordering::Relaxed)
     }
+    /// The color SteamVR's settings give the bounds, at every fade distance: the runtime's
+    /// bounds fade on their own terms.
     fn GetBoundsColor(
         &self,
         color_array: *mut vr::HmdColor_t,
@@ -99,22 +118,20 @@ impl vr::IVRChaperone004_Interface for Chaperone {
         _collision_bounds_fade_distance: f32,
         camera_color: *mut vr::HmdColor_t,
     ) {
-        crate::warn_unimplemented!("GetBoundsColor");
-        if color_array.is_null() || camera_color.is_null() || count <= 0 {
-            return;
+        let color = bounds_color();
+        if !color_array.is_null() && count > 0 {
+            let color_array =
+                unsafe { std::slice::from_raw_parts_mut(color_array, count as usize) };
+            color_array.fill(color);
         }
-        let color_array = unsafe { std::slice::from_raw_parts_mut(color_array, count as usize) };
-        color_array.fill(vr::HmdColor_t::default());
-        unsafe {
-            camera_color.write(vr::HmdColor_t::default());
+        if !camera_color.is_null() {
+            unsafe { camera_color.write(color) };
         }
     }
-    fn SetSceneColor(&self, _: vr::HmdColor_t) {
-        crate::warn_unimplemented!("SetSceneColor");
-    }
-    fn ReloadInfo(&self) {
-        crate::warn_unimplemented!("ReloadInfo");
-    }
+    /// SteamVR tints its grid with this between scenes; the runtime shows its own.
+    fn SetSceneColor(&self, _: vr::HmdColor_t) {}
+    /// The bounds come from the runtime whenever asked, nothing is cached.
+    fn ReloadInfo(&self) {}
     fn GetPlayAreaRect(&self, rect: *mut vr::HmdQuad_t) -> bool {
         if rect.is_null() {
             return false;
@@ -154,6 +171,28 @@ mod tests {
     fn set_bounds(chaperone: &Chaperone, bounds: Option<xr::Extent2Df>) {
         let session = chaperone.openxr.session_data.get().session.as_raw();
         fakexr::set_stage_bounds(session, bounds);
+    }
+
+    /// Forcing the bounds visible is recorded, and the bounds color is SteamVR's setting.
+    #[test]
+    fn bounds_visibility_and_color() {
+        let chaperone = chaperone();
+        assert!(!chaperone.AreBoundsVisible());
+        chaperone.ForceBoundsVisible(true);
+        assert!(chaperone.AreBoundsVisible());
+        chaperone.ForceBoundsVisible(false);
+        assert!(!chaperone.AreBoundsVisible());
+
+        let mut colors = [vr::HmdColor_t::default(); 3];
+        let mut camera = vr::HmdColor_t::default();
+        chaperone.GetBoundsColor(colors.as_mut_ptr(), colors.len() as i32, 1.0, &mut camera);
+        // SteamVR's default: cyan at 60 %.
+        for color in colors.iter().chain([&camera]) {
+            assert_eq!((color.r, color.g, color.b), (0.0, 1.0, 1.0));
+            assert!((color.a - 0.6).abs() < 0.01, "{}", color.a);
+        }
+        // Null outputs are fine.
+        chaperone.GetBoundsColor(std::ptr::null_mut(), 0, 1.0, std::ptr::null_mut());
     }
 
     #[test]

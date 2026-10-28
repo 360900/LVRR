@@ -146,7 +146,7 @@ fn config_dir() -> Option<PathBuf> {
 }
 
 /// `$XDG_CONFIG_HOME/xrizer`.
-pub(super) fn xrizer_config_dir() -> Option<PathBuf> {
+pub(crate) fn xrizer_config_dir() -> Option<PathBuf> {
     let non_empty = |name| isolated_env_var(name).filter(|value| !value.is_empty());
     let config = non_empty("XDG_CONFIG_HOME")
         .map(PathBuf::from)
