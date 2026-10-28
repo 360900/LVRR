@@ -345,6 +345,8 @@ impl<C: Compositor> OpenXrData<C> {
             supported_exts.htc_vive_cosmos_controller_interaction;
         exts.fb_display_refresh_rate = supported_exts.fb_display_refresh_rate;
         exts.ext_user_presence = supported_exts.ext_user_presence;
+        exts.ext_view_configuration_views_change =
+            supported_exts.ext_view_configuration_views_change;
 
         if supported_exts
             .other
