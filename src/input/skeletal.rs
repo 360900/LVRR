@@ -943,6 +943,115 @@ impl SkeletalInputActionData {
     }
 }
 
+/// Compressed bone data, for GetSkeletalBoneDataCompressed. SteamVR's format is undocumented,
+/// and apps only hand the data back to DecompressSkeletalBoneData, so it's our own: a header,
+/// then the bones of each transform space it holds, so it decompresses into either.
+pub(super) mod compressed {
+    use super::{Count, vr};
+
+    const MAGIC: [u8; 4] = *b"XRSB";
+    const VERSION: u32 = 1;
+    /// Magic, version and the mask of the transform spaces held.
+    const HEADER_SIZE: usize = 12;
+    const BONE_COUNT: usize = Count as usize;
+    /// A bone is eight floats: the position, then the orientation.
+    const BONE_SIZE: usize = 8 * 4;
+    const SPACE_SIZE: usize = BONE_COUNT * BONE_SIZE;
+
+    pub type Bones = [vr::VRBoneTransform_t; BONE_COUNT];
+
+    /// The bit of `space` in the header's mask. Model space comes first in the data.
+    fn space_bit(space: vr::EVRSkeletalTransformSpace) -> Option<u32> {
+        match space {
+            vr::EVRSkeletalTransformSpace::Model => Some(1),
+            vr::EVRSkeletalTransformSpace::Parent => Some(2),
+            _ => None,
+        }
+    }
+
+    pub fn compress(spaces: &[(vr::EVRSkeletalTransformSpace, Bones)]) -> Vec<u8> {
+        let mut data = Vec::with_capacity(HEADER_SIZE + spaces.len() * SPACE_SIZE);
+        data.extend_from_slice(&MAGIC);
+        data.extend_from_slice(&VERSION.to_le_bytes());
+        let mask = spaces
+            .iter()
+            .filter_map(|(space, _)| space_bit(*space))
+            .fold(0, |mask, bit| mask | bit);
+        data.extend_from_slice(&mask.to_le_bytes());
+        for bit in [1, 2] {
+            let Some((_, bones)) = spaces
+                .iter()
+                .find(|(space, _)| space_bit(*space) == Some(bit))
+            else {
+                continue;
+            };
+            for bone in bones {
+                let q = &bone.orientation;
+                for value in bone.position.v.iter().chain([q.w, q.x, q.y, q.z].iter()) {
+                    data.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+        }
+        data
+    }
+
+    /// The transform spaces `data` holds, as a mask of their bits, if it's ours.
+    fn spaces(data: &[u8]) -> Result<u32, vr::EVRInputError> {
+        let invalid = vr::EVRInputError::InvalidCompressedData;
+        if data.len() < HEADER_SIZE || data[..4] != MAGIC {
+            return Err(invalid);
+        }
+        let word = |at: usize| u32::from_le_bytes(data[at..at + 4].try_into().unwrap());
+        if word(4) != VERSION {
+            return Err(invalid);
+        }
+        let mask = word(8);
+        if mask & !3 != 0 || data.len() != HEADER_SIZE + mask.count_ones() as usize * SPACE_SIZE
+        {
+            return Err(invalid);
+        }
+        Ok(mask)
+    }
+
+    /// The space to decompress into when the caller doesn't say: the only one held, or parent
+    /// space, SteamVR's usual.
+    pub fn default_space(data: &[u8]) -> Result<vr::EVRSkeletalTransformSpace, vr::EVRInputError> {
+        Ok(match spaces(data)? {
+            1 => vr::EVRSkeletalTransformSpace::Model,
+            _ => vr::EVRSkeletalTransformSpace::Parent,
+        })
+    }
+
+    pub fn decompress(
+        data: &[u8],
+        space: vr::EVRSkeletalTransformSpace,
+    ) -> Result<Bones, vr::EVRInputError> {
+        let mask = spaces(data)?;
+        let bit = space_bit(space).ok_or(vr::EVRInputError::InvalidParam)?;
+        if mask & bit == 0 {
+            return Err(vr::EVRInputError::InvalidCompressedData);
+        }
+        // Model space, when held, comes first.
+        let start = HEADER_SIZE + if bit == 2 && mask & 1 != 0 { SPACE_SIZE } else { 0 };
+        let mut floats = data[start..start + SPACE_SIZE]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| f32::from_le_bytes(*bytes));
+        let mut bones = [vr::VRBoneTransform_t::default(); BONE_COUNT];
+        for bone in &mut bones {
+            for value in &mut bone.position.v {
+                *value = floats.next().unwrap();
+            }
+            let q = &mut bone.orientation;
+            for value in [&mut q.w, &mut q.x, &mut q.y, &mut q.z] {
+                *value = floats.next().unwrap();
+            }
+        }
+        Ok(bones)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::HandSkeletonBone::{self, *};
@@ -970,6 +1079,223 @@ mod tests {
 
     fn is_sentinel(bone: &vr::VRBoneTransform_t) -> bool {
         bone.position.v == SENTINEL.position.v && bone.orientation.w == SENTINEL.orientation.w
+    }
+
+    /// Compressed bone data decompresses into either space, through every interface version.
+    #[test]
+    fn compressed_bone_data() {
+        use vr::EVRInputError::{BufferTooSmall, InvalidCompressedData, InvalidParam};
+        let (model, parent) = (
+            vr::EVRSkeletalTransformSpace::Model,
+            vr::EVRSkeletalTransformSpace::Parent,
+        );
+        let f = Fixture::new();
+        f.load_actions(c"actions.json");
+        let skeleton = f.get_action_handle(c"/actions/set1/in/skellyl");
+        f.input.openxr.poll_events();
+        f.input.frame_start_update();
+        let range = vr::EVRSkeletalMotionRange::WithoutController;
+        let bones = |space: vr::EVRSkeletalTransformSpace, range| {
+            let mut bones = [SENTINEL; Count as usize];
+            assert_eq!(
+                f.input.GetSkeletalBoneData(
+                    skeleton,
+                    space,
+                    range,
+                    bones.as_mut_ptr(),
+                    bones.len() as u32
+                ),
+                vr::EVRInputError::None
+            );
+            bones
+        };
+        let same = |a: &[vr::VRBoneTransform_t], b: &[vr::VRBoneTransform_t]| {
+            a.iter().zip(b).all(|(a, b)| {
+                a.position.v == b.position.v
+                    && (a.orientation.w, a.orientation.x, a.orientation.y, a.orientation.z)
+                        == (b.orientation.w, b.orientation.x, b.orientation.y, b.orientation.z)
+            })
+        };
+
+        // Too small a buffer, or none, gets the size.
+        let mut required = 0;
+        assert_eq!(
+            f.input.GetSkeletalBoneDataCompressed(
+                skeleton,
+                range,
+                std::ptr::null_mut(),
+                0,
+                &mut required
+            ),
+            BufferTooSmall
+        );
+        assert!(required > 0);
+        let mut data = vec![0u8; required as usize];
+        assert_eq!(
+            f.input.GetSkeletalBoneDataCompressed(
+                skeleton,
+                range,
+                data.as_mut_ptr().cast(),
+                required - 1,
+                &mut required
+            ),
+            BufferTooSmall
+        );
+        assert_eq!(
+            f.input.GetSkeletalBoneDataCompressed(
+                skeleton,
+                range,
+                data.as_mut_ptr().cast(),
+                required,
+                &mut required
+            ),
+            vr::EVRInputError::None
+        );
+        for space in [parent, model] {
+            let mut out = [SENTINEL; Count as usize];
+            assert_eq!(
+                f.input.DecompressSkeletalBoneData(
+                    data.as_ptr().cast(),
+                    required,
+                    space,
+                    out.as_mut_ptr(),
+                    out.len() as u32
+                ),
+                vr::EVRInputError::None
+            );
+            assert!(same(&out, &bones(space, range)));
+        }
+        let mut out = [SENTINEL; Count as usize];
+        assert_eq!(
+            f.input.DecompressSkeletalBoneData(
+                data.as_ptr().cast(),
+                required,
+                parent,
+                out.as_mut_ptr(),
+                1
+            ),
+            BufferTooSmall
+        );
+        assert_eq!(
+            f.input.DecompressSkeletalBoneData(
+                std::ptr::null(),
+                0,
+                parent,
+                out.as_mut_ptr(),
+                out.len() as u32
+            ),
+            InvalidParam
+        );
+
+        // Data that isn't ours.
+        let mut garbage = data.clone();
+        garbage[0] = b'?';
+        assert_eq!(
+            f.input.DecompressSkeletalBoneData(
+                garbage.as_ptr().cast(),
+                required,
+                parent,
+                out.as_mut_ptr(),
+                out.len() as u32
+            ),
+            InvalidCompressedData
+        );
+        assert_eq!(
+            f.input.DecompressSkeletalBoneData(
+                data.as_ptr().cast(),
+                required - 1,
+                parent,
+                out.as_mut_ptr(),
+                out.len() as u32
+            ),
+            InvalidCompressedData
+        );
+
+        // IVRInput_004 compresses one space, and its decompression reports which.
+        let mut required = 0;
+        assert_eq!(
+            vr::IVRInput003On004::GetSkeletalActionDataCompressed(
+                &*f.input,
+                skeleton,
+                model,
+                0.0,
+                std::ptr::null_mut(),
+                0,
+                &mut required
+            ),
+            BufferTooSmall
+        );
+        let mut data = vec![0u8; required as usize];
+        assert_eq!(
+            vr::IVRInput003On004::GetSkeletalActionDataCompressed(
+                &*f.input,
+                skeleton,
+                model,
+                0.0,
+                data.as_mut_ptr().cast(),
+                required,
+                &mut required
+            ),
+            vr::EVRInputError::None
+        );
+        let mut space = parent;
+        assert_eq!(
+            vr::IVRInput003On004::UncompressSkeletalActionData(
+                &*f.input,
+                data.as_mut_ptr().cast(),
+                required,
+                &mut space,
+                out.as_mut_ptr(),
+                out.len() as u32
+            ),
+            vr::EVRInputError::None
+        );
+        assert_eq!(space, model);
+        // IVRInput_004 predates motion ranges: the bones are with the controller.
+        assert!(same(
+            &out,
+            &bones(model, vr::EVRSkeletalMotionRange::WithController)
+        ));
+        // It holds no parent space bones.
+        assert_eq!(
+            f.input.DecompressSkeletalBoneData(
+                data.as_ptr().cast(),
+                required,
+                parent,
+                out.as_mut_ptr(),
+                out.len() as u32
+            ),
+            InvalidCompressedData
+        );
+
+        // IVRInput_005's variant takes the space and a device restriction.
+        assert_eq!(
+            vr::IVRInput004On005::GetSkeletalBoneDataCompressed(
+                &*f.input,
+                skeleton,
+                parent,
+                range,
+                data.as_mut_ptr().cast(),
+                required,
+                &mut required,
+                vr::k_ulInvalidInputValueHandle
+            ),
+            vr::EVRInputError::None
+        );
+        let mut space = model;
+        assert_eq!(
+            vr::IVRInput004On005::DecompressSkeletalBoneData(
+                &*f.input,
+                data.as_mut_ptr().cast(),
+                required,
+                &mut space,
+                out.as_mut_ptr(),
+                out.len() as u32
+            ),
+            vr::EVRInputError::None
+        );
+        assert_eq!(space, parent);
+        assert!(same(&out, &bones(parent, range)));
     }
 
     #[test]

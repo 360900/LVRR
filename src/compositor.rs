@@ -768,8 +768,9 @@ impl vr::IVRCompositor029_Interface for Compositor {
     fn IsMotionSmoothingSupported(&self) -> bool {
         false
     }
+    /// What the setting says, like SteamVR. Runtimes reproject on their own terms.
     fn IsMotionSmoothingEnabled(&self) -> bool {
-        false
+        crate::settings::get_bool("steamvr", "motionSmoothing").unwrap_or(false)
     }
     fn SubmitExplicitTimingData(&self) -> vr::EVRCompositorError {
         if *self.timing_mode.lock().unwrap() == vr::EVRCompositorTimingMode::Implicit {
@@ -4298,7 +4299,8 @@ mod tests {
         let c = &*f.comp;
 
         assert!(!C29::IsMotionSmoothingSupported(c));
-        assert!(!C29::IsMotionSmoothingEnabled(c));
+        // SteamVR's motionSmoothing setting, on by default.
+        assert!(C29::IsMotionSmoothingEnabled(c));
         assert!(!C29::IsMirrorWindowVisible(c));
         assert_eq!(C29::GetLastFrameRenderer(c), std::process::id());
         assert_eq!(C29::GetCurrentSceneFocusProcess(c), std::process::id());

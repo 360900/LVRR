@@ -487,7 +487,7 @@ pub(super) fn env_var(name: &str) -> Option<OsString> {
 
 #[cfg(test)]
 thread_local! {
-    pub(super) static TEST_ENV: std::cell::RefCell<HashMap<&'static str, OsString>> =
+    pub(crate) static TEST_ENV: std::cell::RefCell<HashMap<&'static str, OsString>> =
         Default::default();
 }
 
