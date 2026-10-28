@@ -101,8 +101,9 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
     - fixed mappings match SteamVR's per-controller legacy files (no DPad there, the system button is the runtime's); Focus 3 bumper (`Axis3`) isn't in its OpenXR profile
     - WMR legacy mapping unverified: SteamVR's WMR driver isn't shipped on Linux
     - `vive_tracker_handed` legacy bindings (trackers: 21)
-24. Dominant hand (S-M)
-    - stored, bindings never mirrored; `supports_dominant_hand_setting` not parsed. SteamVR's shipped settings have no dominant hand key, only `SetDominantHand` drives it
+24. Dominant hand (S)
+    - a change through `SetDominantHand` restarts the session to load the bindings again, where SteamVR applies it at the next `UpdateActionState`
+    - skeleton bindings aren't mirrored, each hand's is its own; unverified against SteamVR
 25. Compositor (S-M)
     - `CanRenderScene` always true, `GetCurrentSceneFocusProcess` always our pid
     - partial `GetCumulativeStats`
