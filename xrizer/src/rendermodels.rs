@@ -43,14 +43,24 @@ fn pose_component(component_name: &CStr) -> Option<BoundPoseType> {
         .map(|(_, ty)| *ty)
 }
 
+/// Whether a mesh can be loaded for the model: SteamVR's, if it's installed, or a bundled one.
+fn has_model(render_model_name: &CStr) -> bool {
+    get_render_model_data(render_model_name).is_some()
+        || render_model_name
+            .to_str()
+            .ok()
+            .and_then(steamvr::find)
+            .is_some()
+}
+
 /// Whether GetComponentState and RenderModelHasComponent know this component.
 fn has_component(render_model_name: &CStr, component_name: &CStr) -> bool {
     if component_name == DEFAULT_COMPONENT {
-        get_render_model_data(render_model_name).is_some()
+        has_model(render_model_name)
     } else {
         // Models without a mesh, like the hand tracking one, still have the pose components.
         pose_component(component_name).is_some()
-            && (get_render_model_data(render_model_name).is_some()
+            && (has_model(render_model_name)
                 || profile_for_render_model(render_model_name).is_some())
     }
 }
@@ -278,37 +288,30 @@ impl vr::IVRRenderModels006_Interface for RenderModels {
     ) -> *const std::ffi::c_char {
         crate::enum_name("VRRenderModelError_", error)
     }
+    /// The OBJ file of SteamVR's model. The bundled models have no path.
     fn GetRenderModelOriginalPath(
         &self,
-        _: *const std::ffi::c_char,
+        render_model_name: *const std::ffi::c_char,
         buffer: *mut std::ffi::c_char,
         buffer_size: u32,
         error: *mut vr::EVRRenderModelError,
     ) -> u32 {
-        crate::warn_unimplemented!("GetRenderModelOriginalPath");
-        if !buffer.is_null() && buffer_size > 0 {
-            unsafe { *buffer = 0 };
-        }
-        if let Some(error) = unsafe { error.as_mut() } {
-            *error = vr::EVRRenderModelError::NotSupported;
-        }
-        0
+        let path = steamvr_model(render_model_name)
+            .and_then(|model| CString::new(model.obj().to_string_lossy().into_owned()).ok());
+        write_string_result(path, buffer, buffer_size, error)
     }
+    /// A file URL of the thumbnail SteamVR's model names.
     fn GetRenderModelThumbnailURL(
         &self,
-        _: *const std::ffi::c_char,
+        render_model_name: *const std::ffi::c_char,
         buffer: *mut std::ffi::c_char,
         buffer_size: u32,
         error: *mut vr::EVRRenderModelError,
     ) -> u32 {
-        crate::warn_unimplemented!("GetRenderModelThumbnailURL");
-        if !buffer.is_null() && buffer_size > 0 {
-            unsafe { *buffer = 0 };
-        }
-        if let Some(error) = unsafe { error.as_mut() } {
-            *error = vr::EVRRenderModelError::NotSupported;
-        }
-        0
+        let url = steamvr_model(render_model_name)
+            .and_then(|model| model.thumbnail())
+            .and_then(|path| CString::new(format!("file://{}", path.to_string_lossy())).ok());
+        write_string_result(url, buffer, buffer_size, error)
     }
     fn RenderModelHasComponent(
         &self,
@@ -396,8 +399,7 @@ impl vr::IVRRenderModels006_Interface for RenderModels {
         let render_model_name = unsafe { CStr::from_ptr(render_model_name) };
         let component_name = unsafe { CStr::from_ptr(component_name) };
 
-        if component_name != DEFAULT_COMPONENT || get_render_model_data(render_model_name).is_none()
-        {
+        if component_name != DEFAULT_COMPONENT || !has_model(render_model_name) {
             // unsupported model or component
             return 0;
         }
@@ -525,7 +527,17 @@ impl vr::IVRRenderModels006_Interface for RenderModels {
             return vr::EVRRenderModelError::InvalidTexture;
         }
 
-        let tex = OwnedTexture::new_dummy();
+        // SteamVR's textures; 0 is the bundled models' placeholder. A texture that doesn't
+        // decode gets the placeholder too, rather than a model the app won't draw.
+        let tex = steamvr::texture_path(tex_id)
+            .and_then(|path| {
+                steamvr::load_texture(&path)
+                    .or_else(|| {
+                        warn!("Couldn't load {}, using a plain texture", path.display());
+                        None
+                    })
+            })
+            .unwrap_or_else(OwnedTexture::new_dummy);
         let texture_map_t = tex.to_texture_map_t();
         let ptr = Box::into_raw(texture_map_t);
 
@@ -579,21 +591,19 @@ impl vr::IVRRenderModels006_Interface for RenderModels {
         }
 
         let render_model_name = unsafe { CStr::from_ptr(render_model_name) };
-        let Some(bytes) = get_render_model_data(render_model_name) else {
-            warn!("render model name {render_model_name:?} did not resolve to a valid resource");
-            return vr::EVRRenderModelError::InvalidArg;
+        // SteamVR's model with its texture when it's installed, else a bundled mesh.
+        let steamvr = steamvr_model(render_model_name.as_ptr()).and_then(|model| {
+            steamvr::load(&model)
+                .inspect_err(|e| warn!("Couldn't load SteamVR's {render_model_name:?}: {e:?}"))
+                .ok()
+        });
+        let model_data = match steamvr {
+            Some(model) => model,
+            None => match load_bundled_model(render_model_name) {
+                Ok(model) => model,
+                Err(e) => return e,
+            },
         };
-
-        let mut model_data = match OwnedRenderModel::load(render_model_name, bytes) {
-            Ok(m) => m,
-            Err(e) => {
-                warn!("failed to load rendermodel {render_model_name:?}: {e:?}");
-                return e;
-            }
-        };
-        if let Some(transform) = fallback_mesh_transform(render_model_name) {
-            model_data.transform(transform);
-        }
 
         let render_model_box = model_data.to_render_model_t();
         let ptr = Box::into_raw(render_model_box);
@@ -608,6 +618,53 @@ impl vr::IVRRenderModels006_Interface for RenderModels {
         }
         vr::EVRRenderModelError::None
     }
+}
+
+/// A bundled mesh, with the fallback meshes moved to the device they stand in for.
+fn load_bundled_model(
+    render_model_name: &CStr,
+) -> Result<OwnedRenderModel, vr::EVRRenderModelError> {
+    let Some(bytes) = get_render_model_data(render_model_name) else {
+        warn!("render model name {render_model_name:?} did not resolve to a valid resource");
+        return Err(vr::EVRRenderModelError::InvalidArg);
+    };
+    let mut model_data = OwnedRenderModel::load(render_model_name, bytes)
+        .inspect_err(|e| warn!("failed to load rendermodel {render_model_name:?}: {e:?}"))?;
+    if let Some(transform) = fallback_mesh_transform(render_model_name) {
+        model_data.transform(transform);
+    }
+    Ok(model_data)
+}
+
+/// SteamVR's files for the model named by the app, if it's installed and has it.
+fn steamvr_model(render_model_name: *const std::ffi::c_char) -> Option<steamvr::Model> {
+    if render_model_name.is_null() {
+        return None;
+    }
+    let name = unsafe { CStr::from_ptr(render_model_name) }.to_str().ok()?;
+    steamvr::find(name)
+}
+
+/// Writes `value` for the string getters, or an empty string and NotSupported without one.
+fn write_string_result(
+    value: Option<CString>,
+    buffer: *mut std::ffi::c_char,
+    buffer_size: u32,
+    error: *mut vr::EVRRenderModelError,
+) -> u32 {
+    let Some(value) = value else {
+        if !buffer.is_null() && buffer_size > 0 {
+            unsafe { *buffer = 0 };
+        }
+        if let Some(error) = unsafe { error.as_mut() } {
+            *error = vr::EVRRenderModelError::NotSupported;
+        }
+        return 0;
+    };
+    if let Some(error) = unsafe { error.as_mut() } {
+        *error = vr::EVRRenderModelError::None;
+    }
+    cstr_write_out(&value, buffer, buffer_size)
 }
 
 // Pre-async interface. Our loads complete immediately, so these just wrap the async versions.
@@ -684,6 +741,8 @@ struct OwnedRenderModel {
     // Vecs for the same reason as OwnedTexture::data.
     verts: Vec<vr::RenderModel_Vertex_t>,
     indices: Vec<u16>,
+    /// The diffuse texture for LoadTexture_Async, 0 for the placeholder.
+    texture: vr::TextureID_t,
 }
 
 impl OwnedRenderModel {
@@ -726,8 +785,12 @@ impl OwnedRenderModel {
                 position[0] *= -1.0;
             }
 
-            // not needed as we don't use textures
-            let texcoord = [0.; 2];
+            // OBJ texture coordinates start at the bottom of the image, OpenVR's at the top row
+            // of the texture data.
+            let texcoord = idx
+                .1
+                .and_then(|i| obj.texture.get(i))
+                .map_or([0.0; 2], |[u, v]| [*u, 1.0 - v]);
 
             // will generate normals later
             let normal = [0.0, 0.0, 0.0];
@@ -812,7 +875,11 @@ impl OwnedRenderModel {
             v.vNormal = vr::HmdVector3_t { v: n.to_array() };
         }
 
-        Ok(Self { verts, indices })
+        Ok(Self {
+            verts,
+            indices,
+            texture: 0,
+        })
     }
 
     fn transform(&mut self, transform: Mat4) {
@@ -830,7 +897,7 @@ impl OwnedRenderModel {
             unVertexCount: self.verts.len() as _,
             rIndexData: self.indices.as_ptr(),
             unTriangleCount: (self.indices.len() / 3) as _,
-            diffuseTextureId: 0, // dummy texture
+            diffuseTextureId: self.texture,
         })
     }
 }
@@ -850,6 +917,275 @@ fn cstr_write_out(cstr: &CStr, out_ptr: *mut std::ffi::c_char, out_len: u32) -> 
     }
 
     bytes.len() as u32
+}
+
+/// SteamVR's own render models and textures, used when a SteamVR install is found. The names
+/// apps ask for are its: `name`, `{driver}name` or `{driver}/rendermodels/name`, kept in
+/// `resources/rendermodels/<name>/` of SteamVR or of a driver.
+mod steamvr {
+    use super::{ObjData, OwnedRenderModel, OwnedTexture};
+    use log::{info, warn};
+    use openvr as vr;
+    use std::path::{Path, PathBuf};
+    use std::sync::{LazyLock, Mutex};
+
+    fn find_install() -> Option<PathBuf> {
+        let install = crate::input::steamvr_install(&crate::input::isolated_env_var);
+        match &install {
+            Some(dir) => info!("Using SteamVR's render models in {}", dir.display()),
+            None => info!("No SteamVR install found, using the bundled render models"),
+        }
+        install
+    }
+
+    /// The install, looked for once. Tests set up their own.
+    fn install() -> Option<PathBuf> {
+        #[cfg(not(test))]
+        {
+            static INSTALL: LazyLock<Option<PathBuf>> = LazyLock::new(find_install);
+            INSTALL.clone()
+        }
+        #[cfg(test)]
+        find_install()
+    }
+
+    /// A model's directory and the stem of its files, or of one of its component's.
+    pub(super) struct Model {
+        dir: PathBuf,
+        stem: String,
+    }
+
+    impl Model {
+        pub fn obj(&self) -> PathBuf {
+            self.dir.join(format!("{}.obj", self.stem))
+        }
+
+        /// The thumbnail the model's JSON names.
+        pub fn thumbnail(&self) -> Option<PathBuf> {
+            let json = std::fs::read(self.dir.join(format!("{}.json", self.stem))).ok()?;
+            let json: serde_json::Value = serde_json::from_slice(&json).ok()?;
+            let thumbnail = json.get("thumbnail")?.as_str()?;
+            let path = self.dir.join(thumbnail);
+            path.is_file().then_some(path)
+        }
+    }
+
+    /// Splits `render_model_name` into the driver, model and component it names.
+    fn parse(render_model_name: &str) -> Option<(Option<&str>, &str, Option<&str>)> {
+        let (driver, rest) = match render_model_name.strip_prefix('{') {
+            Some(rest) => {
+                let (driver, rest) = rest.split_once('}')?;
+                (Some(driver), rest)
+            }
+            None => (None, render_model_name),
+        };
+        let rest = rest.strip_prefix("/rendermodels/").unwrap_or(rest);
+        let (model, component) = match rest.split_once('/') {
+            Some((model, component)) => (model, Some(component)),
+            None => (rest, None),
+        };
+        // Names, not paths.
+        let plain = |name: &str| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+                && !name.starts_with('.')
+        };
+        if !plain(model)
+            || !driver.is_none_or(plain)
+            || !component.is_none_or(plain)
+        {
+            return None;
+        }
+        Some((driver, model, component))
+    }
+
+    pub(super) fn find(render_model_name: &str) -> Option<Model> {
+        let install = install()?;
+        let (driver, model, component) = parse(render_model_name)?;
+        let in_driver = |driver: PathBuf| driver.join("resources/rendermodels").join(model);
+        let dirs: Vec<PathBuf> = match driver {
+            Some(driver) => vec![in_driver(install.join("drivers").join(driver))],
+            None => std::iter::once(install.join("resources/rendermodels").join(model))
+                .chain(
+                    std::fs::read_dir(install.join("drivers"))
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .map(|driver| in_driver(driver.path())),
+                )
+                .collect(),
+        };
+        let dir = dirs
+            .into_iter()
+            .find(|dir| dir.join(format!("{model}.obj")).is_file())?;
+        let found = Model {
+            dir,
+            stem: component.unwrap_or(model).to_owned(),
+        };
+        found.obj().is_file().then_some(found)
+    }
+
+    /// The model's mesh, with its diffuse texture registered for LoadTexture_Async.
+    pub(super) fn load(model: &Model) -> Result<OwnedRenderModel, vr::EVRRenderModelError> {
+        let path = model.obj();
+        let bytes = std::fs::read(&path).map_err(|e| {
+            warn!("Couldn't read {}: {e}", path.display());
+            vr::EVRRenderModelError::InvalidModel
+        })?;
+        let obj = ObjData::load_buf(bytes.as_slice()).map_err(|e| {
+            warn!("Couldn't parse {}: {e:?}", path.display());
+            vr::EVRRenderModelError::InvalidModel
+        })?;
+        let mut mesh = OwnedRenderModel::new_from_obj(&obj, false)?;
+        // The diffuse map of the first material library naming one.
+        let texture = obj.material_libs.iter().find_map(|lib| {
+            let mtl = std::fs::read_to_string(model.dir.join(&lib.filename)).ok()?;
+            mtl.lines().find_map(|line| {
+                let file = line.trim().strip_prefix("map_Kd")?.trim();
+                (!file.is_empty()).then(|| model.dir.join(file))
+            })
+        });
+        if let Some(texture) = texture {
+            mesh.texture = texture_id(texture);
+        }
+        Ok(mesh)
+    }
+
+    /// The textures handed out so far, by id minus one; 0 is the placeholder.
+    static TEXTURES: LazyLock<Mutex<Vec<PathBuf>>> = LazyLock::new(Default::default);
+
+    fn texture_id(path: PathBuf) -> vr::TextureID_t {
+        let mut textures = TEXTURES.lock().unwrap();
+        let index = textures
+            .iter()
+            .position(|known| *known == path)
+            .unwrap_or_else(|| {
+                textures.push(path);
+                textures.len() - 1
+            });
+        (index + 1) as vr::TextureID_t
+    }
+
+    pub(super) fn texture_path(id: vr::TextureID_t) -> Option<PathBuf> {
+        let index = usize::try_from(id).ok()?.checked_sub(1)?;
+        TEXTURES.lock().unwrap().get(index).cloned()
+    }
+
+    /// The texture as RGBA8, top row first.
+    pub(super) fn load_texture(path: &Path) -> Option<OwnedTexture> {
+        let bytes = std::fs::read(path)
+            .inspect_err(|e| warn!("Couldn't read {}: {e}", path.display()))
+            .ok()?;
+        let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+        let (width, height, data) = match extension.as_str() {
+            "png" => decode_png(&bytes)?,
+            "tga" => decode_tga(&bytes)?,
+            other => {
+                warn!("Unsupported texture format {other} of {}", path.display());
+                return None;
+            }
+        };
+        Some(OwnedTexture {
+            width: u16::try_from(width).ok()?,
+            height: u16::try_from(height).ok()?,
+            data,
+        })
+    }
+
+    fn decode_png(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+        let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+        decoder.set_transformations(png::Transformations::normalize_to_color8());
+        let mut reader = decoder
+            .read_info()
+            .inspect_err(|e| warn!("Couldn't decode PNG: {e}"))
+            .ok()?;
+        let mut buf = vec![0; reader.output_buffer_size()?];
+        let info = reader
+            .next_frame(&mut buf)
+            .inspect_err(|e| warn!("Couldn't decode PNG: {e}"))
+            .ok()?;
+        let pixels = &buf[..info.buffer_size()];
+        let rgba = match info.color_type {
+            png::ColorType::Rgba => pixels.to_vec(),
+            png::ColorType::Rgb => pixels
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .flat_map(|p| [p[0], p[1], p[2], 255])
+                .collect(),
+            png::ColorType::Grayscale => pixels.iter().flat_map(|&g| [g, g, g, 255]).collect(),
+            png::ColorType::GrayscaleAlpha => pixels
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .flat_map(|p| [p[0], p[0], p[0], p[1]])
+                .collect(),
+            png::ColorType::Indexed => {
+                warn!("Palette PNG wasn't expanded");
+                return None;
+            }
+        };
+        Some((info.width, info.height, rgba))
+    }
+
+    /// Uncompressed and run length encoded true color TGA, which SteamVR's models use.
+    fn decode_tga(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+        let header = bytes.get(..18)?;
+        let id_length = header[0] as usize;
+        let (color_map_type, image_type) = (header[1], header[2]);
+        let width = u16::from_le_bytes([header[12], header[13]]) as usize;
+        let height = u16::from_le_bytes([header[14], header[15]]) as usize;
+        let (depth, descriptor) = (header[16], header[17]);
+        if color_map_type != 0 || !matches!(image_type, 2 | 10) || !matches!(depth, 24 | 32) {
+            warn!("Unsupported TGA: type {image_type}, {depth} bits, color map {color_map_type}");
+            return None;
+        }
+        let channels = depth as usize / 8;
+        let total = width * height;
+        let data = bytes.get(18 + id_length..)?;
+        let mut pixels = Vec::with_capacity(total * 4);
+        let push = |pixels: &mut Vec<u8>, px: &[u8]| {
+            pixels.extend([px[2], px[1], px[0], if channels == 4 { px[3] } else { 255 }]);
+        };
+        if image_type == 2 {
+            for px in data.get(..total * channels)?.chunks_exact(channels) {
+                push(&mut pixels, px);
+            }
+        } else {
+            let (mut at, mut count) = (0, 0);
+            while count < total {
+                let packet = *data.get(at)?;
+                at += 1;
+                let run = (packet & 0x7f) as usize + 1;
+                if packet & 0x80 != 0 {
+                    let px = data.get(at..at + channels)?;
+                    at += channels;
+                    for _ in 0..run {
+                        push(&mut pixels, px);
+                    }
+                } else {
+                    for _ in 0..run {
+                        push(&mut pixels, data.get(at..at + channels)?);
+                        at += channels;
+                    }
+                }
+                count += run;
+            }
+            pixels.truncate(total * 4);
+        }
+        // Rows start at the bottom unless the descriptor says top.
+        if descriptor & 0x20 == 0 {
+            let row = width * 4;
+            let mut flipped = Vec::with_capacity(pixels.len());
+            for r in (0..height).rev() {
+                flipped.extend_from_slice(&pixels[r * row..(r + 1) * row]);
+            }
+            pixels = flipped;
+        }
+        Some((width as u32, height as u32, pixels))
+    }
 }
 
 #[cfg(test)]
@@ -1344,6 +1680,157 @@ mod tests {
         for (generic, at_raw) in generic.iter().zip(at_wmr_raw) {
             let at_grip = profile.hand_offset(hand).transform_point3(at_raw);
             assert!(at_grip.abs_diff_eq(*generic, 1e-5), "{at_grip} {generic}");
+        }
+    }
+
+    /// With SteamVR installed, its models load with their textures: from its own directory
+    /// and from its drivers', by every spelling of the name, components included.
+    #[test]
+    fn steamvr_models_and_textures() {
+        crate::input::TEST_ENV.with_borrow_mut(|env| {
+            env.insert(
+                "STEAM_COMPAT_CLIENT_INSTALL_PATH",
+                concat!(env!("CARGO_MANIFEST_DIR"), "/tests/input_data/fake_steam").into(),
+            )
+        });
+        let rm = RenderModels::default();
+        let load = |name: &CStr| {
+            let mut out: *mut vr::RenderModel_t = ptr::null_mut();
+            assert_eq!(
+                rm.LoadRenderModel_Async(name.as_ptr(), &mut out),
+                vr::EVRRenderModelError::None,
+                "{name:?}"
+            );
+            unsafe { *out }
+        };
+        let texture = |id: vr::TextureID_t| {
+            let mut out: *mut vr::RenderModel_TextureMap_t = ptr::null_mut();
+            assert_eq!(
+                rm.LoadTexture_Async(id, &mut out),
+                vr::EVRRenderModelError::None
+            );
+            let map = unsafe { *out };
+            let pixels = unsafe {
+                std::slice::from_raw_parts(
+                    map.rubTextureMapData,
+                    map.unWidth as usize * map.unHeight as usize * 4,
+                )
+            };
+            ((map.unWidth, map.unHeight), pixels.to_vec())
+        };
+        // Red, green over blue, white; the PNG and the TGA hold the same image.
+        let image = (
+            (2, 2),
+            vec![
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+            ],
+        );
+
+        let model = load(c"test_controller");
+        assert_eq!((model.unVertexCount, model.unTriangleCount), (4, 2));
+        assert!(model.diffuseTextureId > 0);
+        let verts = unsafe { std::slice::from_raw_parts(model.rVertexData, 4) };
+        // OBJ texture coordinates count from the bottom, OpenVR's from the top.
+        assert_eq!(verts[0].rfTextureCoord, [0.0, 1.0]);
+        assert_eq!(verts[2].rfTextureCoord, [1.0, 0.0]);
+        assert_eq!(texture(model.diffuseTextureId), image);
+
+        // A driver's model, with a TGA texture, by every spelling.
+        for name in [
+            c"{testdrv}drv_model",
+            c"{testdrv}/rendermodels/drv_model",
+            c"drv_model",
+        ] {
+            let model = load(name);
+            assert_eq!(model.unVertexCount, 4, "{name:?}");
+            assert_eq!(texture(model.diffuseTextureId), image, "{name:?}");
+        }
+
+        // A component's mesh, and the model's files.
+        assert_eq!(load(c"test_controller/test_controller_body").unVertexCount, 4);
+        let string = |thumbnail: bool| {
+            let mut buf = [0 as std::ffi::c_char; 512];
+            let mut err = vr::EVRRenderModelError::NotSupported;
+            let get = if thumbnail {
+                vr::IVRRenderModels006_Interface::GetRenderModelThumbnailURL
+            } else {
+                vr::IVRRenderModels006_Interface::GetRenderModelOriginalPath
+            };
+            let len = get(&rm, c"test_controller".as_ptr(), buf.as_mut_ptr(), 512, &mut err);
+            assert!(len > 0);
+            assert_eq!(err, vr::EVRRenderModelError::None);
+            unsafe { CStr::from_ptr(buf.as_ptr()) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        let path = string(false);
+        assert!(path.ends_with("/test_controller/test_controller.obj"), "{path}");
+        let url = string(true);
+        assert!(url.starts_with("file:///"), "{url}");
+        assert!(url.ends_with("/test_controller_thumbnail.png"), "{url}");
+        assert!(rm.RenderModelHasComponent(
+            c"test_controller".as_ptr(),
+            DEFAULT_COMPONENT.as_ptr()
+        ));
+
+        // Models SteamVR doesn't have fall back to the bundled ones, and paths aren't names.
+        let bundled = load(c"{indexcontroller}valve_controller_knu_1_0_left");
+        assert_eq!(bundled.diffuseTextureId, 0);
+        let mut out: *mut vr::RenderModel_t = ptr::null_mut();
+        for name in [c"../../etc/passwd", c"{../x}drv_model", c"test_controller/../x"] {
+            assert_eq!(
+                rm.LoadRenderModel_Async(name.as_ptr(), &mut out),
+                vr::EVRRenderModelError::InvalidArg,
+                "{name:?}"
+            );
+        }
+        crate::input::TEST_ENV
+            .with_borrow_mut(|env| env.remove("STEAM_COMPAT_CLIENT_INSTALL_PATH"));
+    }
+
+    /// The models our profiles name, from a real SteamVR install:
+    /// `STEAM_COMPAT_CLIENT_INSTALL_PATH=~/.steam/steam cargo test -- --ignored real_steamvr`.
+    #[test]
+    #[ignore = "needs a SteamVR install"]
+    fn real_steamvr_models() {
+        let steam = std::env::var("STEAM_COMPAT_CLIENT_INSTALL_PATH").expect("no Steam path");
+        crate::input::TEST_ENV
+            .with_borrow_mut(|env| env.insert("STEAM_COMPAT_CLIENT_INSTALL_PATH", steam.into()));
+        let rm = RenderModels::default();
+        for name in [
+            c"{indexcontroller}valve_controller_knu_1_0_left",
+            c"{indexcontroller}valve_controller_knu_1_0_right",
+            c"oculus_quest2_controller_left",
+            c"oculus_quest_plus_controller_right",
+            c"oculus_quest_pro_controller_left",
+            c"vr_controller_vive_1_5",
+            c"generic_controller",
+            c"generic_hmd",
+            c"vr_tracker_vive_3_0",
+            c"{frame_controller}frame_controller_left",
+            c"{vrlink}/rendermodels/shuttlecock",
+            c"vive_focus3_controller_right",
+            c"pico_4_controller_left",
+        ] {
+            let mut out: *mut vr::RenderModel_t = ptr::null_mut();
+            assert_eq!(
+                rm.LoadRenderModel_Async(name.as_ptr(), &mut out),
+                vr::EVRRenderModelError::None,
+                "{name:?}"
+            );
+            let model = unsafe { *out };
+            assert!(model.unTriangleCount > 100, "{name:?}: {}", model.unTriangleCount);
+            let mut tex: *mut vr::RenderModel_TextureMap_t = ptr::null_mut();
+            assert_eq!(
+                rm.LoadTexture_Async(model.diffuseTextureId, &mut tex),
+                vr::EVRRenderModelError::None
+            );
+            let tex = unsafe { *tex };
+            println!(
+                "{name:?}: {} triangles, texture {} {}x{}",
+                model.unTriangleCount, model.diffuseTextureId, tex.unWidth, tex.unHeight
+            );
+            assert!(model.diffuseTextureId > 0 && tex.unWidth > 1, "{name:?} has no texture");
         }
     }
 

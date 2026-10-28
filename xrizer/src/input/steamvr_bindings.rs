@@ -303,6 +303,24 @@ fn config_dirs(env: Env, home: Option<&Path>, steam_roots: &[PathBuf]) -> Vec<Pa
     dirs
 }
 
+/// The SteamVR install in the Steam libraries, for the files it ships (render models).
+pub(crate) fn steamvr_install(env: Env) -> Option<PathBuf> {
+    let home = env("HOME").map(PathBuf::from);
+    let mut libraries = Vec::new();
+    for root in steam_roots(env, home.as_deref()) {
+        if let Ok(vdf) = std::fs::read_to_string(root.join("steamapps/libraryfolders.vdf")) {
+            for library in library_folders(&vdf) {
+                push_dir(&mut libraries, library);
+            }
+        }
+        push_dir(&mut libraries, root);
+    }
+    libraries
+        .into_iter()
+        .map(|library| host_path(&library.join("steamapps/common/SteamVR")))
+        .find(|dir| dir.is_dir())
+}
+
 /// The Steam installs: the one running the game, then the usual places.
 fn steam_roots(env: Env, home: Option<&Path>) -> Vec<PathBuf> {
     let mut roots = Vec::new();

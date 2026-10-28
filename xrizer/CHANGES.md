@@ -100,6 +100,7 @@ Status: `pending` | `merged` | `superseded-by-<n>` | `blocked` | `dropped` | `re
 | `176f51f` | applications: added manifests and the app's identity kept for the process |
 | `9714aab` | apps that don't quit 5 s after the runtime asks (30 s if acknowledged) are killed, like SteamVR; `XRIZER_KILL_ON_QUIT=0` opts out |
 | `d9d3e55` | games can be shown Index or Touch controllers whatever the real ones are (`XRIZER_CONTROLLER_TYPE`, or `controller_type` in `~/.config/xrizer/apps/<app key>.json`): bindings converted, that controller's identity and poses, the headset keeps its own |
+| `704a419` | without a chosen controller type, controllers a game has no bindings for show as the Index or Touch controllers their bindings are converted from |
 
 ## Audit fixes (2026-10-22, 335 commits `9a6d924`..`3323c56`)
 
@@ -190,6 +191,7 @@ Accuracy and polish.
 
 | Area | Change | Commits |
 |------|--------|---------|
+| render models | with a SteamVR install in a Steam library, its models load with their textures (PNG and TGA) by every name spelling, drivers' models included; `GetRenderModelOriginalPath` and `GetRenderModelThumbnailURL` answer for them; the bundled meshes stay the fallback | `2ed64a0` |
 | resolution | `supersampleScale` and the app's `resolutionScale` scale the render size like SteamVR's resolution settings, from xrizer's settings file | `762fa3f` |
 | compositor | `FadeGrid` fades over its time, which `GetCurrentGridAlpha` reports | `762fa3f` |
 | skeletal | `GetSkeletalBoneDataCompressed`/`DecompressSkeletalBoneData` and IVRInput_004's variants, in a format of our own holding both transform spaces | `d26b910` |

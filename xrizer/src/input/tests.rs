@@ -1162,6 +1162,19 @@ fn chosen_controller_type_is_emulated() {
     f.load_actions(c"actions_vive_only.json");
     connect::<OculusTouch>(&mut f, c"/actions/main");
     assert_eq!(identity(&f), ["oculus_touch", "rift"]);
+
+    // Without a choice, controllers the game has no bindings for show as the ones their bindings
+    // are converted from.
+    set_test_env("XRIZER_CONTROLLER_TYPE", "auto");
+    let mut f = Fixture::new();
+    f.load_actions(c"actions_toggle.json");
+    connect::<OculusTouch>(&mut f, c"/actions/set1");
+    assert_eq!(identity(&f), ["knuckles", "rift"]);
+    // Unless they can't be shown as those.
+    let mut f = Fixture::new();
+    f.load_actions(c"actions_vive_only.json");
+    connect::<OculusTouch>(&mut f, c"/actions/main");
+    assert_eq!(identity(&f), ["oculus_touch", "rift"]);
 }
 
 #[test]
