@@ -1079,9 +1079,19 @@ mod tests {
         f.input.openxr.poll_events();
         let action = legacy_action(&f, get_action);
         while let Some(event) = next_event(&f) {
-            assert_eq!(event.ty, vr::EVREventType::TrackedDeviceActivated.0);
+            assert!(is_connection_event(event.ty), "{}", event.ty);
         }
         (f, action)
+    }
+
+    /// A device coming, with the role SteamVR assigns it.
+    fn is_connection_event(ty: u32) -> bool {
+        [
+            vr::EVREventType::TrackedDeviceActivated,
+            vr::EVREventType::TrackedDeviceRoleChanged,
+        ]
+        .iter()
+        .any(|e| e.0 == ty)
     }
 
     fn get_state(f: &Fixture, device_index: vr::TrackedDeviceIndex_t) -> vr::VRControllerState_t {
@@ -1720,6 +1730,7 @@ mod tests {
         f.input.frame_start_update();
         expect_device_event(&f, Ev::TrackedDeviceActivated, 0);
         expect_device_event(&f, Ev::TrackedDeviceActivated, 1);
+        expect_device_event(&f, Ev::TrackedDeviceRoleChanged, 1);
         expect_button_event(&f, Ev::ButtonTouch, 1, vr::EVRButtonId::SteamVR_Trigger);
         expect_button_event(&f, Ev::ButtonPress, 1, vr::EVRButtonId::SteamVR_Trigger);
         expect_no_event(&f);
@@ -1735,6 +1746,7 @@ mod tests {
         expect_no_event(&f);
         f.input.expire_connection_grace();
         expect_device_event(&f, Ev::TrackedDeviceDeactivated, 1);
+        expect_device_event(&f, Ev::TrackedDeviceRoleChanged, 1);
         expect_no_event(&f);
     }
 
@@ -2077,7 +2089,7 @@ mod tests {
         f.input.frame_start_update();
         f.input.openxr.poll_events();
         while let Some(event) = next_event(&f) {
-            assert_eq!(event.ty, vr::EVREventType::TrackedDeviceActivated.0);
+            assert!(is_connection_event(event.ty), "{}", event.ty);
         }
         f
     }

@@ -3833,6 +3833,17 @@ impl<C: openxr_data::Compositor> Input<C> {
         // the releases queued for it.
         let mut activations = 0;
         for (i, (device, current)) in devices.iter().zip(connected).enumerate() {
+            let index = i as vr::TrackedDeviceIndex_t;
+            // SteamVR assigns the hand roles when a controller comes or goes, and tells the app
+            // with TrackedDeviceRoleChanged after its activation or deactivation.
+            let role_changed = matches!(device.get_type(), TrackedDeviceType::Controller { .. })
+                .then(|| {
+                    InputEvent::new(
+                        vr::EVREventType::TrackedDeviceRoleChanged,
+                        index,
+                        Default::default(),
+                    )
+                });
             let replaced = device.take_replaced();
             if !device.has_connected_changed(current) {
                 // The app saw the old device, which goes, and the new one comes, like in SteamVR.
@@ -3842,12 +3853,9 @@ impl<C: openxr_data::Compositor> Input<C> {
                         vr::EVREventType::TrackedDeviceDeactivated,
                         vr::EVREventType::TrackedDeviceActivated,
                     ] {
-                        events.push_back(InputEvent::new(
-                            ty,
-                            i as vr::TrackedDeviceIndex_t,
-                            Default::default(),
-                        ));
+                        events.push_back(InputEvent::new(ty, index, Default::default()));
                     }
+                    events.extend(role_changed);
                 }
             } else {
                 debug!(
@@ -3862,14 +3870,17 @@ impl<C: openxr_data::Compositor> Input<C> {
                     } else {
                         vr::EVREventType::TrackedDeviceDeactivated
                     },
-                    i as vr::TrackedDeviceIndex_t,
+                    index,
                     Default::default(),
                 );
                 if current {
-                    events.insert(activations, event);
-                    activations += 1;
+                    for event in std::iter::once(event).chain(role_changed) {
+                        events.insert(activations, event);
+                        activations += 1;
+                    }
                 } else {
                     events.push_back(event);
+                    events.extend(role_changed);
                 }
             }
         }

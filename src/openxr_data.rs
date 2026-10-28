@@ -703,6 +703,16 @@ impl<C: Compositor> OpenXrData<C> {
             vr::EVREventType::InputFocusReleased
         };
         self.push_event(ty, data);
+        // SteamVR draws the controllers itself while its dashboard is up, and has the app hide
+        // its own meanwhile. Runtimes draw theirs in their system menus too.
+        self.push_event(
+            if captured {
+                vr::EVREventType::HideRenderModels
+            } else {
+                vr::EVREventType::ShowRenderModels
+            },
+            Default::default(),
+        );
     }
 
     /// Whether the runtime holds the input focus, i.e. the app shouldn't expect input.
@@ -716,7 +726,7 @@ impl<C: Compositor> OpenXrData<C> {
     }
 
     /// Pushes a system event that isn't about a particular device.
-    fn push_event(&self, ty: vr::EVREventType, data: vr::VREvent_Data_t) {
+    pub(crate) fn push_event(&self, ty: vr::EVREventType, data: vr::VREvent_Data_t) {
         if let Some(system) = self.system.get() {
             system.push_event(vr::VREvent_t {
                 eventType: ty.0,

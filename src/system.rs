@@ -285,9 +285,45 @@ struct Views {
     failing: bool,
     /// The last usable FOV the runtime reported for each view.
     last_valid_fovs: [Option<xr::Fovf>; 2],
+    /// The IPD the app last got, see [Self::report_ipd].
+    reported_ipd: Option<f32>,
 }
 
+/// An IPD change under this isn't reported: it's below what a headset's slider reports, so noise
+/// in the located view positions doesn't flood the app with events.
+const IPD_CHANGE_THRESHOLD: f32 = 0.0005;
+
 impl Views {
+    /// Sends the app IpdChanged when the headset's IPD changes, like SteamVR when the slider
+    /// moves. The first IPD located is the one the app starts with.
+    fn report_ipd(&mut self, openxr: &RealOpenXrData, data: &ViewData) {
+        if !data.flags.contains(xr::ViewStateFlags::POSITION_VALID) {
+            return;
+        }
+        let ipd = data.views[1].pose.position.x - data.views[0].pose.position.x;
+        if !ipd.is_finite() || ipd <= 0.0 {
+            return;
+        }
+        match self.reported_ipd {
+            None => self.reported_ipd = Some(ipd),
+            Some(last) if (ipd - last).abs() >= IPD_CHANGE_THRESHOLD => {
+                info!(
+                    "IPD changed from {:.1} mm to {:.1} mm",
+                    last * 1000.0,
+                    ipd * 1000.0
+                );
+                self.reported_ipd = Some(ipd);
+                openxr.push_event(
+                    vr::EVREventType::IpdChanged,
+                    vr::VREvent_Data_t {
+                        ipd: vr::VREvent_Ipd_t { ipdMeters: ipd },
+                    },
+                );
+            }
+            Some(_) => {}
+        }
+    }
+
     /// The rotation removed from each view to make the views parallel, none if the runtime never
     /// located them.
     fn canting(&mut self, session: &SessionData, openxr: &RealOpenXrData) -> [Quat; 2] {
@@ -321,6 +357,9 @@ impl Views {
             Ok(data) => {
                 if std::mem::take(&mut self.failing) {
                     info!("Locating views works again");
+                }
+                if let Some(view) = self.frame.view {
+                    self.report_ipd(openxr, &view.data);
                 }
                 let (frame, last) = (self.frame, self.last);
                 self.last = ViewCache {
@@ -2638,6 +2677,52 @@ mod tests {
             .then_some(event)
     }
 
+    /// The app is told when the headset's IPD changes, like SteamVR when the slider moves.
+    #[test]
+    fn ipd_change_event() {
+        let (xr, system) = system_with_events();
+        let session = session(&xr);
+        let views = |ipd: f32| {
+            [-0.5f32, 0.5].map(|side| {
+                let pose = xr::Posef {
+                    orientation: xr::Quaternionf::IDENTITY,
+                    position: xr::Vector3f {
+                        x: side * ipd,
+                        y: 0.0,
+                        z: 0.0,
+                    },
+                };
+                (pose, FALLBACK_FOV)
+            })
+        };
+        let ipd = |system: &System| {
+            let mut err = vr::ETrackedPropertyError::Success;
+            system.GetFloatTrackedDeviceProperty(
+                vr::k_unTrackedDeviceIndex_Hmd,
+                vr::ETrackedDeviceProperty::UserIpdMeters_Float,
+                &mut err,
+            )
+        };
+
+        // The first IPD is what the app starts with.
+        fakexr::set_views(session, views(0.063));
+        system.reset_views();
+        assert!((ipd(&system) - 0.063).abs() < 1e-6);
+        assert!(next_event(&system).is_none());
+
+        // Noise in the located positions isn't a change.
+        fakexr::set_views(session, views(0.0631));
+        system.reset_views();
+        assert!(next_event(&system).is_none());
+
+        fakexr::set_views(session, views(0.065));
+        system.reset_views();
+        let event = next_event(&system).expect("no event");
+        assert_eq!(event.eventType, vr::EVREventType::IpdChanged.0);
+        assert!((unsafe { event.data.ipd.ipdMeters } - 0.065).abs() < 1e-6);
+        assert!(next_event(&system).is_none());
+    }
+
     /// A refresh rate change is a change of the headset's display frequency property.
     #[test]
     fn refresh_rate_change_event() {
@@ -3127,6 +3212,9 @@ mod tests {
         let event = next_event(&system).expect("no event");
         assert_eq!(event.eventType, vr::EVREventType::InputFocusCaptured.0);
         assert_eq!(unsafe { event.data.process.oldPid }, 0);
+        // The runtime draws the controllers in its menu, like SteamVR in its dashboard.
+        let event = next_event(&system).expect("no event");
+        assert_eq!(event.eventType, vr::EVREventType::HideRenderModels.0);
         assert!(!system.IsInputAvailable());
         assert!(system.ShouldApplicationPause());
         assert!(overlays.IsDashboardVisible());
@@ -3139,6 +3227,8 @@ mod tests {
         let event = next_event(&system).expect("no event");
         assert_eq!(event.eventType, vr::EVREventType::InputFocusReleased.0);
         assert_eq!(unsafe { event.data.process.pid }, 0);
+        let event = next_event(&system).expect("no event");
+        assert_eq!(event.eventType, vr::EVREventType::ShowRenderModels.0);
         assert!(system.IsInputAvailable());
         assert!(!system.ShouldApplicationPause());
         assert!(!overlays.IsDashboardVisible());

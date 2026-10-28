@@ -173,7 +173,9 @@ fn profile_blip_keeps_controllers() {
         [
             (Ev::TrackedDeviceActivated, 0),
             (Ev::TrackedDeviceActivated, 1),
+            (Ev::TrackedDeviceRoleChanged, 1),
             (Ev::TrackedDeviceActivated, 2),
+            (Ev::TrackedDeviceRoleChanged, 2),
         ]
     );
     b.assert_controllers("knuckles");
@@ -229,7 +231,9 @@ fn profile_loss_disconnects_after_grace() {
         b.events(),
         [
             (Ev::TrackedDeviceDeactivated, 1),
+            (Ev::TrackedDeviceRoleChanged, 1),
             (Ev::TrackedDeviceDeactivated, 2),
+            (Ev::TrackedDeviceRoleChanged, 2),
         ]
     );
     // A disconnected device keeps its index and identity, like in SteamVR.
@@ -251,7 +255,9 @@ fn profile_loss_disconnects_after_grace() {
         b.events(),
         [
             (Ev::TrackedDeviceActivated, 1),
+            (Ev::TrackedDeviceRoleChanged, 1),
             (Ev::TrackedDeviceActivated, 2),
+            (Ev::TrackedDeviceRoleChanged, 2),
         ]
     );
     assert!(b.connected(1) && b.connected(2));
@@ -275,9 +281,11 @@ fn profile_blip_with_another_controller_replaces_the_device() {
         b.events(),
         [
             (Ev::TrackedDeviceDeactivated, 1),
-            (Ev::TrackedDeviceActivated, 1),
+                        (Ev::TrackedDeviceActivated, 1),
+            (Ev::TrackedDeviceRoleChanged, 1),
             (Ev::TrackedDeviceDeactivated, 2),
-            (Ev::TrackedDeviceActivated, 2),
+                        (Ev::TrackedDeviceActivated, 2),
+            (Ev::TrackedDeviceRoleChanged, 2),
         ]
     );
     b.assert_controllers("oculus_touch");
@@ -301,7 +309,8 @@ fn direct_profile_change_replaces_the_device() {
         b.events(),
         [
             (Ev::TrackedDeviceDeactivated, 1),
-            (Ev::TrackedDeviceActivated, 1),
+                        (Ev::TrackedDeviceActivated, 1),
+            (Ev::TrackedDeviceRoleChanged, 1),
         ]
     );
     assert_eq!(b.controller_type(1).as_deref(), Some("oculus_touch"));
@@ -355,7 +364,9 @@ fn input_focus_holds_off_disconnects() {
         b.events(),
         [
             (Ev::TrackedDeviceDeactivated, 1),
+            (Ev::TrackedDeviceRoleChanged, 1),
             (Ev::TrackedDeviceDeactivated, 2),
+            (Ev::TrackedDeviceRoleChanged, 2),
         ]
     );
     set_state(&b, xr::SessionState::VISIBLE);
@@ -477,7 +488,10 @@ fn hand_tracking_without_any_profile() {
 
     fakexr::set_hand_tracked(b.f.raw_session(), LeftHand, Some(Source::UNOBSTRUCTED));
     b.sync();
-    assert_eq!(b.events(), [(Ev::TrackedDeviceActivated, 1)]);
+    assert_eq!(b.events(), [
+        (Ev::TrackedDeviceActivated, 1),
+        (Ev::TrackedDeviceRoleChanged, 1),
+    ]);
     assert!(b.connected(1) && !b.connected(2));
     assert_eq!(
         b.controller_type(1).as_deref(),
@@ -547,7 +561,10 @@ fn hand_tracking_without_any_profile() {
 
     b.f.input.expire_connection_grace();
     assert!(!b.connected(1));
-    assert_eq!(b.events(), [(Ev::TrackedDeviceDeactivated, 1)]);
+    assert_eq!(b.events(), [
+        (Ev::TrackedDeviceDeactivated, 1),
+        (Ev::TrackedDeviceRoleChanged, 1),
+    ]);
 }
 
 #[test]
@@ -563,7 +580,10 @@ fn controller_replaces_hand_tracked_without_profile() {
     b.events();
     fakexr::set_hand_tracked(b.f.raw_session(), LeftHand, Some(Source::UNOBSTRUCTED));
     b.sync();
-    assert_eq!(b.events(), [(Ev::TrackedDeviceActivated, 1)]);
+    assert_eq!(b.events(), [
+        (Ev::TrackedDeviceActivated, 1),
+        (Ev::TrackedDeviceRoleChanged, 1),
+    ]);
 
     // Picking up the controller: the app sees the hand go and the controller come.
     b.f.set_interaction_profile::<OculusTouch>(LeftHand);
@@ -572,7 +592,8 @@ fn controller_replaces_hand_tracked_without_profile() {
         b.events(),
         [
             (Ev::TrackedDeviceDeactivated, 1),
-            (Ev::TrackedDeviceActivated, 1),
+                        (Ev::TrackedDeviceActivated, 1),
+            (Ev::TrackedDeviceRoleChanged, 1),
         ]
     );
     assert_eq!(b.controller_type(1).as_deref(), Some("oculus_touch"));
@@ -580,7 +601,10 @@ fn controller_replaces_hand_tracked_without_profile() {
     // A controller turned on while no hand was there just connects.
     b.f.set_interaction_profile::<OculusTouch>(RightHand);
     b.sync();
-    assert_eq!(b.events(), [(Ev::TrackedDeviceActivated, 2)]);
+    assert_eq!(b.events(), [
+        (Ev::TrackedDeviceActivated, 2),
+        (Ev::TrackedDeviceRoleChanged, 2),
+    ]);
 }
 
 #[test]
@@ -622,7 +646,9 @@ fn profile_changes_keep_generic_trackers() {
         [
             (Ev::TrackedDeviceActivated, 0),
             (Ev::TrackedDeviceActivated, 1),
+            (Ev::TrackedDeviceRoleChanged, 1),
             (Ev::TrackedDeviceActivated, 2),
+            (Ev::TrackedDeviceRoleChanged, 2),
             (Ev::TrackedDeviceActivated, 3),
         ]
     );
@@ -674,7 +700,8 @@ fn hand_takes_over_controller_without_profile() {
         b.events(),
         [
             (Ev::TrackedDeviceDeactivated, 1),
-            (Ev::TrackedDeviceActivated, 1),
+                        (Ev::TrackedDeviceActivated, 1),
+            (Ev::TrackedDeviceRoleChanged, 1),
         ]
     );
     assert!(b.connected(1));
@@ -693,7 +720,10 @@ fn hand_takes_over_controller_without_profile() {
     // The right controller is just gone once its grace is over.
     b.f.input.expire_connection_grace();
     assert!(b.connected(1) && !b.connected(2));
-    assert_eq!(b.events(), [(Ev::TrackedDeviceDeactivated, 2)]);
+    assert_eq!(b.events(), [
+        (Ev::TrackedDeviceDeactivated, 2),
+        (Ev::TrackedDeviceRoleChanged, 2),
+    ]);
 
     // Picking the controller back up replaces the hand.
     b.f.set_interaction_profile::<OculusTouch>(LeftHand);
@@ -702,7 +732,8 @@ fn hand_takes_over_controller_without_profile() {
         b.events(),
         [
             (Ev::TrackedDeviceDeactivated, 1),
-            (Ev::TrackedDeviceActivated, 1),
+                        (Ev::TrackedDeviceActivated, 1),
+            (Ev::TrackedDeviceRoleChanged, 1),
         ]
     );
     assert_eq!(b.controller_type(1).as_deref(), Some("oculus_touch"));
