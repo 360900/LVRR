@@ -1778,6 +1778,24 @@ mod tests {
         assert_ne!(handgrip[2][3], 0.0);
     }
 
+    /// The profiles' pose transforms apply SteamVR's `rotate_xyz` the way the component parser
+    /// does: Z, then Y, then X.
+    #[test]
+    fn profile_transforms_follow_steamvr_rotation_order() {
+        let (profile, hand) = profile_for_model("valve_controller_knu_1_0_left").unwrap();
+        let tip = profile
+            .pose_transformation(hand, BoundPoseType::Tip)
+            .unwrap();
+        // From valve_controller_knu_1_0_left.json.
+        let expected = Mat4::from_translation(Vec3::new(0.006, -0.015, 0.02))
+            * components::rotate_xyz([-40.0, -5.0, 0.0]);
+        assert!(tip.abs_diff_eq(expected, 1e-6), "{tip:?}\n{expected:?}");
+        let wrong = Mat4::from_translation(Vec3::new(0.006, -0.015, 0.02))
+            * Mat4::from_rotation_x((-40.0_f32).to_radians())
+            * Mat4::from_rotation_y((-5.0_f32).to_radians());
+        assert!(!tip.abs_diff_eq(wrong, 1e-4));
+    }
+
     #[test]
     fn profile_render_models_resolve() {
         let mut names = Vec::new();

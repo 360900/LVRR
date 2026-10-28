@@ -186,19 +186,19 @@ impl InteractionProfile for Knuckles {
             BoundPoseType::Tip => Some(PoseTransformations {
                 left_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
-                        -40.0_f32.to_radians(),
-                        -5.0_f32.to_radians(),
+                        EulerRot::ZYX,
                         0_f32.to_radians(),
+                        -5.0_f32.to_radians(),
+                        -40.0_f32.to_radians(),
                     ),
                     Vec3::new(0.006, -0.015, 0.02),
                 ),
                 right_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
-                        -40.0_f32.to_radians(),
-                        5.0_f32.to_radians(),
+                        EulerRot::ZYX,
                         0_f32.to_radians(),
+                        5.0_f32.to_radians(),
+                        -40.0_f32.to_radians(),
                     ),
                     Vec3::new(-0.006, -0.015, 0.02),
                 ),
@@ -206,19 +206,19 @@ impl InteractionProfile for Knuckles {
             BoundPoseType::Base => Some(PoseTransformations {
                 left_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
-                        -155.4_f32.to_radians(),
-                        -0.427_f32.to_radians(),
+                        EulerRot::ZYX,
                         7.081_f32.to_radians(),
+                        -0.427_f32.to_radians(),
+                        -155.4_f32.to_radians(),
                     ),
                     Vec3::new(0.004758, -0.037977, 0.200466),
                 ),
                 right_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
-                        -155.4_f32.to_radians(),
-                        -0.427_f32.to_radians(),
+                        EulerRot::ZYX,
                         -7.081_f32.to_radians(),
+                        -0.427_f32.to_radians(),
+                        -155.4_f32.to_radians(),
                     ),
                     Vec3::new(-0.004758, -0.037977, 0.200466),
                 ),
@@ -226,19 +226,19 @@ impl InteractionProfile for Knuckles {
             BoundPoseType::Handgrip => Some(PoseTransformations {
                 left_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
-                        15.392_f32.to_radians(),
-                        -2.071_f32.to_radians(),
+                        EulerRot::ZYX,
                         0.303_f32.to_radians(),
+                        -2.071_f32.to_radians(),
+                        15.392_f32.to_radians(),
                     ),
                     Vec3::new(-0.003851, 0.003715, 0.075948),
                 ),
                 right_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
-                        15.392_f32.to_radians(),
-                        2.071_f32.to_radians(),
+                        EulerRot::ZYX,
                         -0.303_f32.to_radians(),
+                        2.071_f32.to_radians(),
+                        15.392_f32.to_radians(),
                     ),
                     Vec3::new(0.003851, 0.003715, 0.075948),
                 ),
@@ -246,19 +246,19 @@ impl InteractionProfile for Knuckles {
             BoundPoseType::Grip => Some(PoseTransformations {
                 left_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
-                        15.392_f32.to_radians(),
-                        -2.071_f32.to_radians(),
+                        EulerRot::ZYX,
                         0.303_f32.to_radians(),
+                        -2.071_f32.to_radians(),
+                        15.392_f32.to_radians(),
                     ),
                     Vec3::new(0.0, -0.015, 0.13),
                 ),
                 right_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
-                        15.392_f32.to_radians(),
-                        2.071_f32.to_radians(),
+                        EulerRot::ZYX,
                         -0.303_f32.to_radians(),
+                        2.071_f32.to_radians(),
+                        15.392_f32.to_radians(),
                     ),
                     Vec3::new(0.0, -0.015, 0.13),
                 ),
@@ -266,19 +266,19 @@ impl InteractionProfile for Knuckles {
             BoundPoseType::OpenxrHandmodel => Some(PoseTransformations {
                 left_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
-                        -40_f32.to_radians(),
-                        -5_f32.to_radians(),
+                        EulerRot::ZYX,
                         0_f32.to_radians(),
+                        -5_f32.to_radians(),
+                        -40_f32.to_radians(),
                     ),
                     Vec3::new(-0.015, -0.015, 0.13),
                 ),
                 right_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
-                        -40_f32.to_radians(),
-                        5_f32.to_radians(),
+                        EulerRot::ZYX,
                         0_f32.to_radians(),
+                        5_f32.to_radians(),
+                        -40_f32.to_radians(),
                     ),
                     Vec3::new(0.015, -0.015, 0.13),
                 ),
@@ -286,19 +286,19 @@ impl InteractionProfile for Knuckles {
             BoundPoseType::OpenxrPinch => Some(PoseTransformations {
                 left_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
-                        -70_f32.to_radians(),
-                        -15_f32.to_radians(),
+                        EulerRot::ZYX,
                         35_f32.to_radians(),
+                        -15_f32.to_radians(),
+                        -70_f32.to_radians(),
                     ),
                     Vec3::new(0.05, 0.006, 0.0675),
                 ),
                 right_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
-                        -70_f32.to_radians(),
-                        15_f32.to_radians(),
+                        EulerRot::ZYX,
                         -35_f32.to_radians(),
+                        15_f32.to_radians(),
+                        -70_f32.to_radians(),
                     ),
                     Vec3::new(-0.05, 0.006, 0.0675),
                 ),
@@ -306,19 +306,19 @@ impl InteractionProfile for Knuckles {
             BoundPoseType::OpenxrPoke => Some(PoseTransformations {
                 left_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
+                        0_f32.to_radians(),
+                        0_f32.to_radians(),
                         -60_f32.to_radians(),
-                        0_f32.to_radians(),
-                        0_f32.to_radians(),
                     ),
                     Vec3::new(-0.04, -0.0575, 0.0039),
                 ),
                 right_hand: Mat4::from_rotation_translation(
                     Quat::from_euler(
-                        EulerRot::XYZ,
+                        EulerRot::ZYX,
+                        0_f32.to_radians(),
+                        0_f32.to_radians(),
                         -60_f32.to_radians(),
-                        0_f32.to_radians(),
-                        0_f32.to_radians(),
                     ),
                     Vec3::new(0.04, -0.0575, 0.0039),
                 ),
