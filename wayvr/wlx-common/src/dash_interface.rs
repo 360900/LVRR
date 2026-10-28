@@ -123,6 +123,12 @@ pub trait DashInterface<T> {
 	fn lvrr_batteries(&mut self, _data: &mut T) -> Vec<lvrr_common::state::Battery> {
 		Vec::new()
 	}
+	/// None when the desktop can't add monitors
+	fn lvrr_virtual_monitors(&mut self, _data: &mut T) -> Option<Vec<lvrr_common::state::VirtualMonitor>> {
+		None
+	}
+	fn lvrr_add_virtual_monitor(&mut self, _data: &mut T, _width: u32, _height: u32) {}
+	fn lvrr_remove_virtual_monitor(&mut self, _data: &mut T, _name: &str) {}
 	fn clipboard_set_text(&mut self, _data: &mut T, _text: &str) -> anyhow::Result<()> {
 		anyhow::bail!("No clipboard")
 	}

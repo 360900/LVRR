@@ -32,9 +32,8 @@ where
     R: Any + Send,
 {
     inner: PipewireCapture<R>,
-    /// the session lives as long as this connection
-    conn: Connection,
-    session: Path<'static>,
+    /// after `inner`, so the capture stops before the session
+    session: MutterSession,
 }
 
 impl<R> MutterScreencastCapture<R>
@@ -45,16 +44,70 @@ where
     /// wl_output name. None when no Mutter owns the name, it refused, or did not answer
     /// in time.
     pub fn new(name: Arc<str>, connector: &str, embed_cursor: bool) -> Option<Self> {
+        MutterSession::start(name, embed_cursor, None, |session, props| {
+            session.method_call(SESSION, "RecordMonitor", (connector, props))
+        })
+        .map(Self::from_session)
+    }
+
+    pub fn from_session(session: MutterSession) -> Self {
+        let name = session.name.clone();
+        let inner = match session.size {
+            Some((width, height)) => PipewireCapture::with_size(name, session.node, width, height),
+            None => PipewireCapture::new(name, session.node),
+        };
+        Self { inner, session }
+    }
+}
+
+/// A screencast session the compositor started. It has no frame type yet, so another
+/// thread can ask for it.
+pub struct MutterSession {
+    name: Arc<str>,
+    node: u32,
+    /// the frame size a virtual monitor takes
+    size: Option<(u32, u32)>,
+    /// the session lives as long as this connection
+    conn: Connection,
+    session: Path<'static>,
+}
+
+impl MutterSession {
+    /// Asks the compositor to add a monitor of this size and record it. The monitor goes
+    /// away with the session. None when no Mutter owns the name, it refused, or did not
+    /// answer in time.
+    pub fn virtual_monitor(
+        name: Arc<str>,
+        width: u32,
+        height: u32,
+        embed_cursor: bool,
+    ) -> Option<Self> {
+        Self::start(
+            name,
+            embed_cursor,
+            Some((width, height)),
+            |session, props| session.method_call(SESSION, "RecordVirtual", (props,)),
+        )
+    }
+
+    /// Mutter is running, so `virtual_monitor` can work
+    pub fn available() -> bool {
+        Connection::new_session().is_ok_and(|conn| has_owner(&conn))
+    }
+
+    fn start(
+        name: Arc<str>,
+        embed_cursor: bool,
+        size: Option<(u32, u32)>,
+        record: impl FnOnce(
+            &dbus::blocking::Proxy<'_, &Connection>,
+            PropMap,
+        ) -> Result<(Path<'static>,), dbus::Error>,
+    ) -> Option<Self> {
         let conn = Connection::new_session()
             .inspect_err(|e| log::debug!("session bus: {e}"))
             .ok()?;
-
-        // only the running compositor, never an activation attempt
-        let bus = conn.with_proxy("org.freedesktop.DBus", "/org/freedesktop/DBus", TIMEOUT);
-        let (owned,): (bool,) = bus
-            .method_call("org.freedesktop.DBus", "NameHasOwner", (BUS,))
-            .ok()?;
-        if !owned {
+        if !has_owner(&conn) {
             return None;
         }
 
@@ -74,10 +127,16 @@ where
             "cursor-mode".into(),
             Variant(Box::new(cursor) as Box<dyn RefArg>),
         );
+        if size.is_some() {
+            // a monitor of the desktop, not a shared screen; ignored before API version 3
+            props.insert(
+                "is-platform".into(),
+                Variant(Box::new(true) as Box<dyn RefArg>),
+            );
+        }
         let session_proxy = conn.with_proxy(BUS, session.clone(), TIMEOUT);
-        let (stream,): (Path<'static>,) = session_proxy
-            .method_call(SESSION, "RecordMonitor", (connector, props))
-            .inspect_err(|e| log::warn!("{name}: Mutter screencast: RecordMonitor: {e}"))
+        let (stream,) = record(&session_proxy, props)
+            .inspect_err(|e| log::warn!("{name}: Mutter screencast: record: {e}"))
             .ok()?;
 
         // the node id comes as a signal once the session started
@@ -122,17 +181,23 @@ where
 
         log::info!("{name}: Mutter screencast: PipeWire node {node}");
         Some(Self {
-            inner: PipewireCapture::new(name, node),
+            name,
+            node,
+            size,
             conn,
             session,
         })
     }
 }
 
-impl<R> Drop for MutterScreencastCapture<R>
-where
-    R: Any + Send,
-{
+/// Only the running compositor, never an activation attempt
+fn has_owner(conn: &Connection) -> bool {
+    let bus = conn.with_proxy("org.freedesktop.DBus", "/org/freedesktop/DBus", TIMEOUT);
+    bus.method_call("org.freedesktop.DBus", "NameHasOwner", (BUS,))
+        .is_ok_and(|(owned,): (bool,)| owned)
+}
+
+impl Drop for MutterSession {
     fn drop(&mut self) {
         let session = self.conn.with_proxy(BUS, self.session.clone(), TIMEOUT);
         let _: Result<(), _> = session.method_call(SESSION, "Stop", ());

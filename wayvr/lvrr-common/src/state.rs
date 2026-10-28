@@ -119,6 +119,16 @@ impl BatteryDevice {
 	}
 }
 
+pub const MAX_VIRTUAL_MONITORS: usize = 3;
+
+/// A monitor that exists only in VR, added to the desktop by WayVR
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VirtualMonitor {
+	pub name: String,
+	pub width: u32,
+	pub height: u32,
+}
+
 /// A battery reported by the OpenXR runtime
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Battery {

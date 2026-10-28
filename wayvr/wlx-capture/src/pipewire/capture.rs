@@ -65,6 +65,8 @@ where
     name: Arc<str>,
     data: Option<CaptureData<R>>,
     node_id: u32,
+    /// LVRR: the only frame size offered
+    size: Option<(u32, u32)>,
     handle: Option<JoinHandle<Result<(), Error>>>,
 }
 
@@ -77,8 +79,17 @@ where
             name,
             data: None,
             node_id,
+            size: None,
             handle: None,
         }
+    }
+
+    /// LVRR: offers only this frame size. A Mutter virtual monitor takes the size the
+    /// consumer asks for.
+    pub fn with_size(name: Arc<str>, node_id: u32, width: u32, height: u32) -> Self {
+        let mut capture = Self::new(name, node_id);
+        capture.size = Some((width, height));
+        capture
     }
 }
 
@@ -115,12 +126,14 @@ where
         self.handle = Some(std::thread::spawn({
             let name = self.name.clone();
             let node_id = self.node_id;
+            let size = self.size;
             let formats = dmabuf_formats.to_vec();
 
             move || {
                 main_loop::<U, R>(
                     name,
                     node_id,
+                    size,
                     formats,
                     tx_frame,
                     rx_ctrl,
@@ -171,9 +184,11 @@ where
     fn request_new_frame(&mut self) {}
 }
 
+#[allow(clippy::too_many_arguments)]
 fn main_loop<U, R>(
     name: Arc<str>,
     node_id: u32,
+    size: Option<(u32, u32)>,
     dmabuf_formats: Vec<DrmFormat>,
     sender: mpsc::SyncSender<R>,
     receiver: pw::channel::Receiver<PwChangeRequest>,
@@ -430,10 +445,10 @@ where
 
     let mut format_params: Vec<Vec<u8>> = fourcc_mods
         .iter()
-        .filter_map(|f| obj_to_bytes(get_format_params(Some(f))).ok())
+        .filter_map(|f| obj_to_bytes(get_format_params(Some(f), size)).ok())
         .collect();
 
-    format_params.push(obj_to_bytes(get_format_params(None)).unwrap()); // safe unwrap: known
+    format_params.push(obj_to_bytes(get_format_params(None, size)).unwrap()); // safe unwrap: known
     // good values
 
     let mut params: Vec<&Pod> = format_params
@@ -525,7 +540,10 @@ fn get_meta_object(key: u32, size: usize) -> Object {
     )
 }
 
-fn get_format_params(fmt: Option<(&DrmFourcc, &Vec<DrmModifier>)>) -> Object {
+fn get_format_params(
+    fmt: Option<(&DrmFourcc, &Vec<DrmModifier>)>,
+    size: Option<(u32, u32)>,
+) -> Object {
     let mut obj = spa::pod::object!(
         spa::utils::SpaTypes::ObjectParamFormat,
         spa::param::ParamType::EnumFormat,
@@ -570,6 +588,16 @@ fn get_format_params(fmt: Option<(&DrmFourcc, &Vec<DrmModifier>)>) -> Object {
             }
         ),
     );
+
+    if let Some((width, height)) = size {
+        let key = spa::param::format::FormatProperties::VideoSize.as_raw();
+        obj.properties.retain(|p| p.key != key);
+        obj.properties.push(spa::pod::property!(
+            spa::param::format::FormatProperties::VideoSize,
+            Rectangle,
+            spa::utils::Rectangle { width, height }
+        ));
+    }
 
     if let Some(fmt) = fmt {
         let spa_fmt = fourcc_to_spa(*fmt.0);

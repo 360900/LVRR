@@ -439,6 +439,31 @@ impl DashInterface<AppState> for DashInterfaceLive {
         crate::lvrr::set_perf_overlay(app, visible);
     }
 
+    fn lvrr_virtual_monitors(
+        &mut self,
+        app: &mut AppState,
+    ) -> Option<Vec<lvrr_common::state::VirtualMonitor>> {
+        crate::lvrr::virtual_monitors_supported(app).then(|| {
+            app.lvrr
+                .virtual_monitors
+                .iter()
+                .map(|m| lvrr_common::state::VirtualMonitor {
+                    name: m.name.to_string(),
+                    width: m.width,
+                    height: m.height,
+                })
+                .collect()
+        })
+    }
+
+    fn lvrr_add_virtual_monitor(&mut self, app: &mut AppState, width: u32, height: u32) {
+        crate::lvrr::add_virtual_monitor(app, width, height);
+    }
+
+    fn lvrr_remove_virtual_monitor(&mut self, app: &mut AppState, name: &str) {
+        crate::lvrr::remove_virtual_monitor(app, name);
+    }
+
     fn clipboard_set_text(&mut self, _app: &mut AppState, text: &str) -> anyhow::Result<()> {
         crate::lvrr::clipboard_set_text(text)
     }

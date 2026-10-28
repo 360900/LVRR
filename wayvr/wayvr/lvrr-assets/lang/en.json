@@ -1,5 +1,6 @@
 {
   "LVRR": {
+    "VIRTUAL_MONITOR_FAILED": "Could not add the virtual monitor",
     "PERF": {
       "REFRESH_RATE": "Refresh rate",
       "GAME_FPS": "Game",

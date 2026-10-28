@@ -22,6 +22,8 @@ pub mod mirror;
 #[cfg(feature = "pipewire")]
 pub mod pw;
 #[cfg(feature = "wayland")]
+pub mod virtual_monitor;
+#[cfg(feature = "wayland")]
 pub mod wl;
 #[cfg(feature = "x11")]
 pub mod x11;
@@ -75,6 +77,8 @@ pub fn create_screens(app: &mut AppState) -> anyhow::Result<(ScreenCreateData, D
 
     #[cfg(feature = "wayland")]
     {
+        // LVRR: or they would show as screens
+        virtual_monitor::remove_orphans();
         if let Some(mut wl) = wlx_capture::wayland::WlxClient::new() {
             log::info!("Wayland detected.");
             return Ok((

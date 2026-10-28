@@ -35,7 +35,10 @@
       "SWITCH": "Switch",
       "PERF_OVERLAY": "Performance overlay",
       "PASSTHROUGH": "Passthrough",
-      "ERROR": "Error"
+      "ERROR": "Error",
+      "VIRTUAL_MONITORS": "Virtual monitors",
+      "VIRTUAL_MONITORS_HOWTO": "Up to three extra monitors that exist only in VR. They show up as screens and in your desktop's display settings.",
+      "REMOVE": "Remove"
     },
     "LIBRARY": {
       "TITLE": "Library",

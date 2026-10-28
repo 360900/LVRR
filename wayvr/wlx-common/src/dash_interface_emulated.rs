@@ -74,6 +74,7 @@ pub struct DashInterfaceEmulated {
 	// LVRR: LVRR_EMU=connected (default), offline, absent or none
 	lvrr: Option<lvrr_common::emulator::LvrrEmulator>,
 	lvrr_perf_overlay: bool,
+	lvrr_virtual_monitors: Vec<lvrr_common::state::VirtualMonitor>,
 }
 
 impl DashInterfaceEmulated {
@@ -157,6 +158,7 @@ impl DashInterfaceEmulated {
 				_ => Some(lvrr_common::emulator::LvrrEmulator::new(true)),
 			},
 			lvrr_perf_overlay: false,
+			lvrr_virtual_monitors: Vec::new(),
 		}
 	}
 }
@@ -209,6 +211,24 @@ impl DashInterface<()> for DashInterfaceEmulated {
 
 	fn lvrr_set_perf_overlay(&mut self, _data: &mut (), visible: bool) {
 		self.lvrr_perf_overlay = visible;
+	}
+
+	fn lvrr_virtual_monitors(&mut self, _data: &mut ()) -> Option<Vec<lvrr_common::state::VirtualMonitor>> {
+		Some(self.lvrr_virtual_monitors.clone())
+	}
+
+	fn lvrr_add_virtual_monitor(&mut self, _data: &mut (), width: u32, height: u32) {
+		let monitors = &mut self.lvrr_virtual_monitors;
+		if let Some(name) = (1..=lvrr_common::state::MAX_VIRTUAL_MONITORS)
+			.map(|i| format!("LVRR-{i}"))
+			.find(|n| monitors.iter().all(|m| m.name != *n))
+		{
+			monitors.push(lvrr_common::state::VirtualMonitor { name, width, height });
+		}
+	}
+
+	fn lvrr_remove_virtual_monitor(&mut self, _data: &mut (), name: &str) {
+		self.lvrr_virtual_monitors.retain(|m| m.name != name);
 	}
 
 	fn enumerate_vulkan_devices(&mut self, _: &mut ()) -> anyhow::Result<Vec<String>> {
