@@ -278,6 +278,24 @@ XrSystemBoundaryVisibilityPropertiesMETA xr::system::boundary_visibility_propert
 	return boundary_prop;
 }
 
+XrSystemSimultaneousHandsAndControllersPropertiesMETA xr::system::simultaneous_hands_and_controllers_properties() const
+{
+	if (!id)
+		throw std::invalid_argument("this");
+
+	XrSystemSimultaneousHandsAndControllersPropertiesMETA simultaneous_prop{
+	        .type = XR_TYPE_SYSTEM_SIMULTANEOUS_HANDS_AND_CONTROLLERS_PROPERTIES_META,
+	};
+
+	XrSystemProperties prop{
+	        .type = XR_TYPE_SYSTEM_PROPERTIES,
+	        .next = &simultaneous_prop,
+	};
+	CHECK_XR(xrGetSystemProperties(*inst, id, &prop));
+
+	return simultaneous_prop;
+}
+
 xr::passthrough_type xr::system::passthrough_supported() const
 {
 	if (utils::contains(environment_blend_modes(XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO), XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND))

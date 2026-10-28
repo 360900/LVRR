@@ -100,6 +100,7 @@ pub struct Capabilities {
 	pub high_power_mode: bool,
 	pub passthrough_boundary: bool,
 	pub see_through: bool,
+	pub simultaneous_hands: bool,
 	pub usb_network: bool,
 	pub keyboard_mouse: bool,
 	pub hand_tracking: bool,
@@ -142,6 +143,7 @@ pub struct Config {
 	pub high_power_mode: bool,
 	pub passthrough_boundary: bool,
 	pub see_through: f32,
+	pub simultaneous_hands: bool,
 	pub usb_network: bool,
 	pub extended_config: bool,
 }

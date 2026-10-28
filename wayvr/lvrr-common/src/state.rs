@@ -36,6 +36,7 @@ pub const HEADSET_KEYS: &[&str] = &[
 	"high_power_mode",
 	"passthrough_boundary",
 	"see_through",
+	"simultaneous_hands",
 	"usb_network",
 	"extended_config",
 ];

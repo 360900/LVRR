@@ -452,6 +452,14 @@ fn settings() -> Vec<Setting> {
 			control: toggle(|c| c.hand_tracking),
 		},
 		Setting {
+			key: "simultaneous_hands",
+			label: "LVRR.HEADSET.SIMULTANEOUS_HANDS",
+			section: Tracking,
+			restart: false,
+			show: |h| h.capabilities.simultaneous_hands,
+			control: toggle(|c| c.simultaneous_hands),
+		},
+		Setting {
 			key: "eye_gaze",
 			label: "LVRR.HEADSET.EYE_TRACKING",
 			section: Tracking,

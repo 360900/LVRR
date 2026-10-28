@@ -38,6 +38,7 @@
         120.0
       ],
       "see_through": true,
+      "simultaneous_hands": true,
       "spacewarp": true,
       "usb_network": false
     },
@@ -75,6 +76,7 @@
       "resolution_scale": 1.2000000476837158,
       "see_through": 0.0,
       "sharpening": 0.5,
+      "simultaneous_hands": false,
       "super_sampling": "off",
       "usb_network": false
     },

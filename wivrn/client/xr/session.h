@@ -55,6 +55,10 @@ class session : public utils::handle<XrSession, xrDestroySession>
 
 	void update_boundary_visibility();
 
+	PFN_xrResumeSimultaneousHandsAndControllersTrackingMETA xrResumeSimultaneousHandsAndControllersTrackingMETA = nullptr;
+	PFN_xrPauseSimultaneousHandsAndControllersTrackingMETA xrPauseSimultaneousHandsAndControllersTrackingMETA = nullptr;
+	bool simultaneous_hands_and_controllers = false;
+
 public:
 	session() = default;
 	session(instance &, system &, vk::raii::Instance &, vk::raii::PhysicalDevice &, vk::raii::Device &, thread_safe<vk::raii::Queue> & queue, int queue_family_index);
@@ -113,5 +117,11 @@ public:
 	}
 	void set_passthrough_boundary_enabled(bool);
 	void on_boundary_visibility_changed(XrBoundaryVisibilityMETA);
+
+	bool simultaneous_hands_and_controllers_supported() const
+	{
+		return xrResumeSimultaneousHandsAndControllersTrackingMETA;
+	}
+	void set_simultaneous_hands_and_controllers(bool);
 };
 } // namespace xr

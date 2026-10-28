@@ -119,6 +119,7 @@
       "FORWARD_MOUSE": "Forward the mouse",
       "FORWARD_GAMEPAD": "Forward the gamepad",
       "HAND_TRACKING": "Hand tracking",
+      "SIMULTANEOUS_HANDS": "Hands and controllers together",
       "EYE_TRACKING": "Eye tracking",
       "FACE_TRACKING": "Face tracking",
       "BODY_TRACKING": "Body tracking",

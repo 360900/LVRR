@@ -433,11 +433,14 @@ void scenes::stream::tracking()
 						if (std::ranges::contains(pattern, device_id::BODY, &to_headset::tracking_control::sample::device))
 						{
 							if (std::holds_alternative<std::monostate>(body_tracker))
+							{
+								session.set_simultaneous_hands_and_controllers(false);
 								body_tracker = xr::make_body_tracker(
 								        instance,
 								        system,
 								        session,
 								        application::get_generic_trackers());
+							}
 						}
 						else
 							body_tracker.emplace<std::monostate>();
@@ -454,6 +457,9 @@ void scenes::stream::tracking()
 						              pred / 1'000);
 					}
 				}
+
+				// Meta's body tracking doesn't work alongside it
+				session.set_simultaneous_hands_and_controllers(lvrr_simultaneous_hands and std::holds_alternative<std::monostate>(body_tracker));
 			}
 
 			hands.clear();
@@ -651,6 +657,8 @@ void scenes::stream::tracking()
 			lvrr_connection_lost(e);
 		}
 	}
+
+	session.set_simultaneous_hands_and_controllers(false);
 }
 
 void scenes::stream::operator()(to_headset::tracking_control && packet)

@@ -86,6 +86,8 @@ public:
 	bool passthrough_boundary_enabled = false;
 	// LVRR: fades the stream over passthrough, 0: opaque
 	float see_through = 0;
+	// LVRR: XR_META_simultaneous_hands_and_controllers, one hand tracked while the other holds a controller
+	bool simultaneous_hands = false;
 	// LVRR: contrast adaptive sharpening of the decoded stream, 0: off, up to 1
 	float sharpness = 0;
 	// LVRR: scale of the FOV tangents reported to the server, 1: headset FOV

@@ -355,6 +355,7 @@ const std::vector<config_field> & configuration::config_fields()
 	        scalar("passthrough_enabled", &configuration::passthrough_enabled),
 	        scalar("passthrough_boundary_enabled", &configuration::passthrough_boundary_enabled),
 	        scalar("see_through", &configuration::see_through),
+	        scalar("simultaneous_hands", &configuration::simultaneous_hands),
 	        scalar("sharpness", &configuration::sharpness),
 	        scalar("fov_horizontal", &configuration::fov_horizontal),
 	        scalar("fov_vertical", &configuration::fov_vertical),

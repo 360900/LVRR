@@ -97,6 +97,7 @@ struct headset_config
 	std::optional<bool> high_power_mode;
 	std::optional<bool> passthrough_boundary;
 	std::optional<float> see_through; // 0: opaque stream, up to max_see_through
+	std::optional<bool> simultaneous_hands;
 	std::optional<bool> usb_network;
 	std::optional<bool> extended_config;
 };
@@ -118,6 +119,7 @@ struct headset_capabilities
 	bool high_power_mode;
 	bool passthrough_boundary;
 	bool see_through;
+	bool simultaneous_hands;
 	bool usb_network;
 	bool keyboard_mouse;
 	bool hand_tracking;

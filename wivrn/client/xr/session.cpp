@@ -63,6 +63,12 @@ xr::session::session(xr::instance & inst, xr::system & sys, vk::raii::Instance &
 
 	if (inst.has_extension(XR_META_BOUNDARY_VISIBILITY_EXTENSION_NAME) and sys.boundary_visibility_properties().supportsBoundaryVisibility)
 		xrRequestBoundaryVisibilityMETA = inst.get_proc<PFN_xrRequestBoundaryVisibilityMETA>("xrRequestBoundaryVisibilityMETA");
+
+	if (inst.has_extension(XR_META_SIMULTANEOUS_HANDS_AND_CONTROLLERS_EXTENSION_NAME) and sys.simultaneous_hands_and_controllers_properties().supportsSimultaneousHandsAndControllers)
+	{
+		xrResumeSimultaneousHandsAndControllersTrackingMETA = inst.get_proc<PFN_xrResumeSimultaneousHandsAndControllersTrackingMETA>("xrResumeSimultaneousHandsAndControllersTrackingMETA");
+		xrPauseSimultaneousHandsAndControllersTrackingMETA = inst.get_proc<PFN_xrPauseSimultaneousHandsAndControllersTrackingMETA>("xrPauseSimultaneousHandsAndControllersTrackingMETA");
+	}
 }
 
 std::vector<XrReferenceSpaceType> xr::session::get_reference_spaces() const
@@ -419,6 +425,36 @@ void xr::session::update_boundary_visibility()
 		spdlog::warn("Boundary visibility change failed: {}", xr::to_string(res));
 		boundary_request_failed = true;
 	}
+}
+
+// LVRR: lets one hand be tracked while the other holds a controller, paused by default
+void xr::session::set_simultaneous_hands_and_controllers(bool enabled)
+{
+	if (not xrResumeSimultaneousHandsAndControllersTrackingMETA or enabled == simultaneous_hands_and_controllers)
+		return;
+
+	// remembered even on failure so a refused request isn't retried every frame
+	simultaneous_hands_and_controllers = enabled;
+	XrResult res;
+	if (enabled)
+	{
+		XrSimultaneousHandsAndControllersTrackingResumeInfoMETA info{
+		        .type = XR_TYPE_SIMULTANEOUS_HANDS_AND_CONTROLLERS_TRACKING_RESUME_INFO_META,
+		};
+		res = xrResumeSimultaneousHandsAndControllersTrackingMETA(id, &info);
+	}
+	else
+	{
+		XrSimultaneousHandsAndControllersTrackingPauseInfoMETA info{
+		        .type = XR_TYPE_SIMULTANEOUS_HANDS_AND_CONTROLLERS_TRACKING_PAUSE_INFO_META,
+		};
+		res = xrPauseSimultaneousHandsAndControllersTrackingMETA(id, &info);
+	}
+
+	if (res == XR_SUCCESS)
+		spdlog::info("Simultaneous hands and controllers {}", enabled ? "resumed" : "paused");
+	else
+		spdlog::warn("Simultaneous hands and controllers {} failed: {}", enabled ? "resume" : "pause", xr::to_string(res));
 }
 
 void xr::session::set_performance_level(XrPerfSettingsDomainEXT domain, XrPerfSettingsLevelEXT level)

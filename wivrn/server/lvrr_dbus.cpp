@@ -102,6 +102,7 @@ void publish_offline()
 	X(high_power_mode)        \
 	X(passthrough_boundary)   \
 	X(see_through)            \
+	X(simultaneous_hands)     \
 	X(usb_network)            \
 	X(extended_config)
 
@@ -226,6 +227,7 @@ json capabilities_to_json(const lvrr::headset_capabilities & caps)
 	        {"high_power_mode", caps.high_power_mode},
 	        {"passthrough_boundary", caps.passthrough_boundary},
 	        {"see_through", caps.see_through},
+	        {"simultaneous_hands", caps.simultaneous_hands},
 	        {"usb_network", caps.usb_network},
 	        {"keyboard_mouse", caps.keyboard_mouse},
 	        {"hand_tracking", caps.hand_tracking},

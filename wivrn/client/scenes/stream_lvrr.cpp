@@ -128,6 +128,7 @@ void scenes::stream::lvrr_start()
 	const auto & config = application::get_config();
 	lvrr_fov_horizontal = std::clamp(config.fov_horizontal, lvrr::min_fov_tangent, 1.f);
 	lvrr_fov_vertical = std::clamp(config.fov_vertical, lvrr::min_fov_tangent, 1.f);
+	lvrr_simultaneous_hands = config.simultaneous_hands;
 	lvrr_report(0);
 }
 
@@ -165,6 +166,7 @@ lvrr::headset_capabilities scenes::stream::lvrr_capabilities()
 	caps.high_power_mode = instance.has_extension(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
 	caps.passthrough_boundary = session.boundary_visibility_supported();
 	caps.see_through = composition_layer_color_scale_bias_supported and system.passthrough_supported() != xr::passthrough_type::none;
+	caps.simultaneous_hands = session.simultaneous_hands_and_controllers_supported();
 #ifdef __ANDROID__
 	caps.usb_network = application::get_hmd_traits().usb_net;
 #endif
@@ -225,6 +227,7 @@ lvrr::headset_config scenes::stream::lvrr_config()
 	        .high_power_mode = config.high_power_mode,
 	        .passthrough_boundary = config.passthrough_boundary_enabled,
 	        .see_through = config.see_through,
+	        .simultaneous_hands = config.simultaneous_hands,
 	        .usb_network = config.usb_network,
 	        .extended_config = config.extended_config,
 	};
@@ -388,6 +391,8 @@ bool scenes::stream::lvrr_apply(const lvrr::headset_config & patch)
 	}
 	if (patch.see_through and caps.see_through)
 		config.see_through = std::clamp(*patch.see_through, 0.f, lvrr::max_see_through);
+	if (patch.simultaneous_hands and caps.simultaneous_hands)
+		lvrr_simultaneous_hands = config.simultaneous_hands = *patch.simultaneous_hands;
 #ifdef __ANDROID__
 	if (patch.usb_network and caps.usb_network)
 	{

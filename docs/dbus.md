@@ -38,7 +38,7 @@ LVRR's server (`wivrn-server`) keeps WiVRn's session bus interface: name `io.git
 | `body_parts` | array of `chest`, `left_elbow`, `right_elbow`, `hip`, `left_knee`, `right_knee`, `left_foot`, `right_foot` | now |
 | `posture` | `standing`, `seated` | now |
 | `height_offset` | meters, for the current posture | now |
-| `high_power_mode`, `passthrough_boundary`, `usb_network`, `extended_config` | boolean | now |
+| `high_power_mode`, `passthrough_boundary`, `simultaneous_hands`, `usb_network`, `extended_config` | boolean | now |
 | `see_through` | 0 (opaque stream) to 0.8, fades the stream over passthrough | now |
 
 "restart" settings are saved on the headset and apply to the next session: `restart_required` is then true. Call `RestartSession` to apply them.
