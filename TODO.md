@@ -69,7 +69,8 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
 
 18. Render models (M)
     - without a SteamVR install, the bundled meshes have a 1x1 grey texture and there are no HMD, base station, Pico, Quest Pro or native WMR meshes; with one, its models and textures are used
-    - components never animate; one fake component per model (the whole mesh) even where SteamVR's JSON lists them; button masks 0
+    - components only from SteamVR's JSON; the bundled meshes stay one fake component with no moving parts
+    - a stick's or pad's tilt direction per axis, and whether `mTrackingToComponentLocal` moves with its part, are read from SteamVR's files and the Unity plugin, not verified on a headset
     - `XR_EXT_render_model`, `XR_EXT_interaction_render_model`, `XR_FB_render_model`, `XR_MSFT_controller_model`
     - WiVRn: none of these; bundled assets needed there
 19. Resolution and refresh (S-M)

@@ -77,7 +77,7 @@ If a launcher strips `RUST_LOG`, put the same filter string in a file named `log
 
 `XRIZER_ADDITIONAL_BINDINGS` - `;` separated list of controller types to load bindings for in addition to the ones the game lists, e.g. `knuckles;oculus_touch`. Each is read from the custom bindings directory, or `bindings_<controller_type>.json` next to the game's action manifest.
 
-Controller models come from SteamVR's own files, with their textures, when SteamVR is installed in a Steam library. Without it, bundled meshes with a plain grey texture are used.
+Controller models come from SteamVR's own files, with their textures and moving parts (triggers, sticks, buttons), when SteamVR is installed in a Steam library. Without it, bundled meshes with a plain grey texture are used.
 
 Settings games write through `IVRSettings` are kept in `~/.config/xrizer/settings.json` (under `$XDG_CONFIG_HOME` if set), like SteamVR keeps them in `steamvr.vrsettings`. `supersampleScale` in its `steamvr` section (an area factor, `1.5` is 150 %) and `resolutionScale` (a percentage) in a game's `steam.app.<id>` section scale the render size like SteamVR's resolution settings.
 

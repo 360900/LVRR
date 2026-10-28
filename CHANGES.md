@@ -192,6 +192,7 @@ Accuracy and polish.
 | Area | Change | Commits |
 |------|--------|---------|
 | render models | with a SteamVR install in a Steam library, its models load with their textures (PNG and TGA) by every name spelling, drivers' models included; `GetRenderModelOriginalPath` and `GetRenderModelThumbnailURL` answer for them; the bundled meshes stay the fallback | `2ed64a0` |
+| render model components | SteamVR's models have the components their JSON lists: `GetComponentCount`/`Name`, each part's mesh as `<model>/<part>`, `GetComponentButtonMask`; `GetComponentState` moves triggers, grips, buttons, sticks, trackpads and the Frame's dpad with the controller's raw input (an action set of our own, synced with the app's), shows the trackpad touch marker and the scroll wheel per SteamVR's visibility rules, reports `IsTouched`/`IsPressed`/`IsScrolled`; pose components report an identity render model transform and their frame as the local one, as the Unity plugin composes them | `c400f44` |
 | resolution | `supersampleScale` and the app's `resolutionScale` scale the render size like SteamVR's resolution settings, from xrizer's settings file | `762fa3f` |
 | compositor | `FadeGrid` fades over its time, which `GetCurrentGridAlpha` reports | `762fa3f` |
 | skeletal | `GetSkeletalBoneDataCompressed`/`DecompressSkeletalBoneData` and IVRInput_004's variants, in a format of our own holding both transform spaces | `d26b910` |
