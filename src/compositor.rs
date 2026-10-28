@@ -439,11 +439,15 @@ impl Compositor {
                 result = self.openxr.restart_session();
             }
         }
-        result.map_err(|e| {
+        let result = result.map_err(|e| {
             // No session will be created with it anymore.
             self.tmp_backend.lock().unwrap().take();
             restart_error(e)
-        })
+        });
+        if result.is_ok() {
+            self.openxr.scene_application_started();
+        }
+        result
     }
 
     /// Submit, with the layer of an array texture to show for SubmitWithArrayIndex.
@@ -2616,9 +2620,11 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let xr = Arc::new(
-                OpenXrData::new(&Injector::default(), vr::EVRApplicationType::Other).unwrap(),
-            );
+            Self::with_type(vr::EVRApplicationType::Other)
+        }
+
+        fn with_type(ty: vr::EVRApplicationType) -> Self {
+            let xr = Arc::new(OpenXrData::new(&Injector::default(), ty).unwrap());
             let vk = Arc::new(VulkanData::new_temporary(&xr.instance, xr.system_id));
             let comp = Arc::new(Compositor::new(xr.clone(), &Injector::default()));
             xr.compositor.set(Arc::downgrade(&comp));
@@ -2790,6 +2796,60 @@ mod tests {
             panic!("Init succeeded without the extensions");
         };
         assert!(format!("{e:?}").contains("VK_bar"), "{e:?}");
+    }
+
+    /// A scene app starts, runs once it submits frames and quits when asked. SteamVR reports
+    /// that as its scene application state, and the app becoming the scene application as a
+    /// change of it.
+    #[test]
+    fn scene_application_state() {
+        use crate::system::System;
+        use vr::EVRSceneApplicationState as State;
+        use vr::IVRSystem022_Interface;
+
+        let f = Fixture::with_type(vr::EVRApplicationType::Scene);
+        let xr = &f.comp.openxr;
+        let system = Arc::new(System::new(xr.clone(), &Injector::default()));
+        xr.system.set(Arc::downgrade(&system));
+        let next_event = || {
+            let mut event = vr::VREvent_t::default();
+            system
+                .PollNextEvent(&mut event, std::mem::size_of_val(&event) as u32)
+                .then_some(event)
+        };
+        let next_event_of = |ty: vr::EVREventType| {
+            std::iter::from_fn(next_event)
+                .find(|e| e.eventType == ty.0)
+                .unwrap_or_else(|| panic!("no {ty:?} event"))
+        };
+
+        assert_eq!(xr.scene_application_state(), State::Starting);
+        f.ensure_real_session(false);
+        assert_eq!(xr.scene_application_state(), State::Running);
+        let event = next_event_of(vr::EVREventType::SceneApplicationChanged);
+        assert_eq!(unsafe { event.data.process.pid }, std::process::id());
+        assert_eq!(unsafe { event.data.process.oldPid }, 0);
+        let event = next_event().expect("no event");
+        assert_eq!(
+            event.eventType,
+            vr::EVREventType::SceneApplicationStateChanged.0
+        );
+        // Only once.
+        xr.scene_application_started();
+        assert!(
+            std::iter::from_fn(next_event)
+                .all(|e| e.eventType != vr::EVREventType::SceneApplicationChanged.0)
+        );
+
+        xr.session_data.get().session.request_exit().unwrap();
+        xr.poll_events();
+        next_event_of(vr::EVREventType::Quit);
+        let event = next_event().expect("no event");
+        assert_eq!(
+            event.eventType,
+            vr::EVREventType::SceneApplicationStateChanged.0
+        );
+        assert_eq!(xr.scene_application_state(), State::Quitting);
     }
 
     #[test]

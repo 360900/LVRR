@@ -94,6 +94,13 @@ pub struct OpenXrData<C: Compositor> {
     /// Whether the runtime tells us when the user puts on or takes off the headset.
     pub supports_user_presence: bool,
     user_present: AtomicBool,
+    /// Since when the user hasn't been present, for [STANDBY_TIMEOUT].
+    absent_since: parking_lot::Mutex<Option<Instant>>,
+    /// Whether the headset is in standby, see [Self::update_standby].
+    standby: AtomicBool,
+    /// Whether the app has been told it's the scene application, see
+    /// [Self::scene_application_started].
+    scene_started: AtomicBool,
     /// Set while the runtime holds the input focus it took from us (e.g. its system menu).
     input_focus_captured: AtomicBool,
     /// Change time of a runtime recenter of LOCAL that hasn't taken effect yet.
@@ -434,6 +441,9 @@ impl<C: Compositor> OpenXrData<C> {
             logged_errors: Mutex::default(),
             supports_user_presence,
             user_present: true.into(),
+            absent_since: parking_lot::Mutex::new(None),
+            standby: false.into(),
+            scene_started: false.into(),
             input_focus_captured: false.into(),
             pending_recenter: parking_lot::Mutex::new(None),
             stage_moved: false.into(),
@@ -507,6 +517,7 @@ impl<C: Compositor> OpenXrData<C> {
         if self.is_lost() {
             return;
         }
+        self.update_standby();
         if self.stage_moved.swap(false, Ordering::Relaxed) {
             // The runtime moved the stage, which replaces any standing zero pose the app set.
             self.move_origin(
@@ -604,6 +615,11 @@ impl<C: Compositor> OpenXrData<C> {
                             },
                             Default::default(),
                         );
+                        *self.absent_since.lock() = (!present).then(Instant::now);
+                        if present && self.standby.swap(false, Ordering::Relaxed) {
+                            info!("Leaving standby");
+                            self.push_event(vr::EVREventType::LeaveStandbyMode, Default::default());
+                        }
                     }
                 }
                 xr::Event::DisplayRefreshRateChangedFB(event) => {
@@ -725,6 +741,78 @@ impl<C: Compositor> OpenXrData<C> {
         self.user_present.load(Ordering::Relaxed)
     }
 
+    /// Whether the headset is in standby: taken off for [STANDBY_TIMEOUT].
+    pub fn in_standby(&self) -> bool {
+        self.standby.load(Ordering::Relaxed)
+    }
+
+    /// SteamVR turns the displays off once the headset has been idle for its standby timeout,
+    /// and tells the app with EnterStandbyMode. Runtimes handle their displays themselves, so the
+    /// app is told at the same point, and LeaveStandbyMode once the headset is put on again.
+    fn update_standby(&self) {
+        if self.user_present() || self.in_standby() {
+            return;
+        }
+        let timed_out = self
+            .absent_since
+            .lock()
+            .is_some_and(|since| since.elapsed() >= STANDBY_TIMEOUT);
+        if timed_out && !self.standby.swap(true, Ordering::Relaxed) {
+            info!("Entering standby, the headset has been off for {STANDBY_TIMEOUT:?}");
+            self.push_event(vr::EVREventType::EnterStandbyMode, Default::default());
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expire_standby_timeout(&self) {
+        if let Some(since) = self.absent_since.lock().as_mut() {
+            *since = Instant::now()
+                .checked_sub(STANDBY_TIMEOUT)
+                .unwrap_or_else(Instant::now);
+        }
+    }
+
+    /// Where the app is in its life as SteamVR's scene application: starting until it submits
+    /// frames, running, and quitting once asked to. Other application types run alongside a
+    /// scene application xrizer knows nothing about, so they get Running.
+    pub fn scene_application_state(&self) -> vr::EVRSceneApplicationState {
+        if self.application_type != vr::EVRApplicationType::Scene {
+            return vr::EVRSceneApplicationState::Running;
+        }
+        if self.exiting.load(Ordering::Relaxed) {
+            vr::EVRSceneApplicationState::Quitting
+        } else if self.scene_started.load(Ordering::Relaxed) {
+            vr::EVRSceneApplicationState::Running
+        } else {
+            vr::EVRSceneApplicationState::Starting
+        }
+    }
+
+    /// The app started submitting frames, so it's the scene application now, which SteamVR
+    /// tells every app, this one included.
+    pub fn scene_application_started(&self) {
+        if self.application_type != vr::EVRApplicationType::Scene
+            || self.scene_started.swap(true, Ordering::Relaxed)
+        {
+            return;
+        }
+        self.push_event(
+            vr::EVREventType::SceneApplicationChanged,
+            vr::VREvent_Data_t {
+                process: vr::VREvent_Process_t {
+                    pid: std::process::id(),
+                    oldPid: 0,
+                    bForced: false,
+                    bConnectionLost: false,
+                },
+            },
+        );
+        self.push_event(
+            vr::EVREventType::SceneApplicationStateChanged,
+            Default::default(),
+        );
+    }
+
     /// Pushes a system event that isn't about a particular device.
     pub(crate) fn push_event(&self, ty: vr::EVREventType, data: vr::VREvent_Data_t) {
         if let Some(system) = self.system.get() {
@@ -841,6 +929,12 @@ impl<C: Compositor> OpenXrData<C> {
                 },
             },
         });
+        if self.application_type == vr::EVRApplicationType::Scene {
+            self.push_event(
+                vr::EVREventType::SceneApplicationStateChanged,
+                Default::default(),
+            );
+        }
         if !connection_lost {
             self.quit_watchdog.start();
         }
@@ -1210,6 +1304,9 @@ impl<C: Compositor> OpenXrData<C> {
         )
     }
 }
+
+/// How long the headset is off before standby, SteamVR's `turnOffScreensTimeout` default.
+const STANDBY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Opt-in: a runtime recenter (e.g. a long press of the Quest system button) also recenters the
 /// standing universe, like SteamVR does for Quest headsets through Virtual Desktop. Off by

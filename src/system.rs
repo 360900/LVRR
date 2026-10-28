@@ -1646,6 +1646,9 @@ impl vr::IVRSystem026_Interface for System {
         device_index: vr::TrackedDeviceIndex_t,
     ) -> vr::EDeviceActivityLevel {
         match device_index {
+            vr::k_unTrackedDeviceIndex_Hmd if self.openxr.in_standby() => {
+                vr::EDeviceActivityLevel::Standby
+            }
             vr::k_unTrackedDeviceIndex_Hmd if !self.openxr.user_present() => {
                 vr::EDeviceActivityLevel::Idle
             }
@@ -2771,6 +2774,31 @@ mod tests {
         (xr, system, input)
     }
 
+    /// SteamVR reports every bindings file it loads, then that the bindings and the manifest
+    /// are in place.
+    #[test]
+    fn binding_load_events() {
+        let (_xr, system, _input) = system_with_input();
+        let events: Vec<u32> = std::iter::from_fn(|| next_event(&system).map(|e| e.eventType))
+            .collect();
+        let position = |ty: vr::EVREventType| events.iter().rposition(|&e| e == ty.0);
+        let loaded = position(vr::EVREventType::Input_BindingLoadSuccessful)
+            .expect("no bindings loaded");
+        let failed = position(vr::EVREventType::Input_BindingLoadFailed).unwrap_or(0);
+        let reloaded =
+            position(vr::EVREventType::ActionBindingReloaded).expect("bindings not reloaded");
+        let manifest = position(vr::EVREventType::Input_ActionManifestReloaded)
+            .expect("manifest not reloaded");
+        assert!(loaded < reloaded && failed < reloaded && reloaded < manifest, "{events:?}");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|&&e| e == vr::EVREventType::ActionBindingReloaded.0)
+                .count(),
+            1
+        );
+    }
+
     /// Syncs the test manifest's first action set and applies pending profile changes.
     fn sync_profiles(xr: &RealOpenXrData, input: &TestInput) {
         use vr::IVRInput010_Interface;
@@ -3263,6 +3291,17 @@ mod tests {
         assert_eq!(event.trackedDeviceIndex, vr::k_unTrackedDeviceIndex_Hmd);
         assert_eq!(activity(), vr::EDeviceActivityLevel::Idle);
 
+        // Off for SteamVR's standby timeout: the headset is in standby.
+        xr.poll_events();
+        assert!(next_event(&system).is_none());
+        xr.expire_standby_timeout();
+        xr.poll_events();
+        let event = next_event(&system).expect("no event");
+        assert_eq!(event.eventType, vr::EVREventType::EnterStandbyMode.0);
+        assert_eq!(activity(), vr::EDeviceActivityLevel::Standby);
+        xr.poll_events();
+        assert!(next_event(&system).is_none());
+
         fakexr::set_user_presence(session(&xr), true);
         xr.poll_events();
         let event = next_event(&system).expect("no event");
@@ -3270,7 +3309,19 @@ mod tests {
             event.eventType,
             vr::EVREventType::TrackedDeviceUserInteractionStarted.0
         );
+        let event = next_event(&system).expect("no event");
+        assert_eq!(event.eventType, vr::EVREventType::LeaveStandbyMode.0);
         assert_eq!(activity(), vr::EDeviceActivityLevel::UserInteraction);
+
+        // Taking it off again starts the timeout over.
+        fakexr::set_user_presence(session(&xr), false);
+        xr.poll_events();
+        assert_eq!(
+            next_event(&system).expect("no event").eventType,
+            vr::EVREventType::TrackedDeviceUserInteractionEnded.0
+        );
+        assert!(next_event(&system).is_none());
+        assert_eq!(activity(), vr::EDeviceActivityLevel::Idle);
     }
 
     #[test]
@@ -3337,6 +3388,7 @@ mod tests {
 
     /// eventAgeSeconds is how long ago the event happened, like in SteamVR.
     #[test]
+    #[cfg_attr(miri, ignore = "timing")]
     fn queued_event_reports_its_age() {
         let (_xr, system) = system_with_events();
         system.push_event(vr::VREvent_t {
