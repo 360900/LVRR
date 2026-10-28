@@ -103,7 +103,7 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
     - WMR legacy mapping unverified: SteamVR's WMR driver isn't shipped on Linux
     - `vive_tracker_handed` legacy bindings (trackers: 21)
 24. Dominant hand (S-M)
-    - stored, bindings never mirrored; `supports_dominant_hand_setting` not parsed
+    - stored, bindings never mirrored; `supports_dominant_hand_setting` not parsed. SteamVR's shipped settings have no dominant hand key, only `SetDominantHand` drives it
 25. Compositor (S-M)
     - `CanRenderScene` always true, `GetCurrentSceneFocusProcess` always our pid
     - partial `GetCumulativeStats`
