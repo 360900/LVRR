@@ -158,6 +158,23 @@ struct InputEvent {
     ty: vr::EVREventType,
     index: vr::TrackedDeviceIndex_t,
     data: vr::VREvent_Controller_t,
+    /// When it happened, for `eventAgeSeconds`.
+    at: std::time::Instant,
+}
+
+impl InputEvent {
+    fn new(
+        ty: vr::EVREventType,
+        index: vr::TrackedDeviceIndex_t,
+        data: vr::VREvent_Controller_t,
+    ) -> Self {
+        Self {
+            ty,
+            index,
+            data,
+            at: std::time::Instant::now(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -3825,11 +3842,11 @@ impl<C: openxr_data::Compositor> Input<C> {
                         vr::EVREventType::TrackedDeviceDeactivated,
                         vr::EVREventType::TrackedDeviceActivated,
                     ] {
-                        events.push_back(InputEvent {
+                        events.push_back(InputEvent::new(
                             ty,
-                            index: i as vr::TrackedDeviceIndex_t,
-                            data: Default::default(),
-                        });
+                            i as vr::TrackedDeviceIndex_t,
+                            Default::default(),
+                        ));
                     }
                 }
             } else {
@@ -3839,15 +3856,15 @@ impl<C: openxr_data::Compositor> Input<C> {
                     if current { "" } else { "not " }
                 );
 
-                let event = InputEvent {
-                    ty: if current {
+                let event = InputEvent::new(
+                    if current {
                         vr::EVREventType::TrackedDeviceActivated
                     } else {
                         vr::EVREventType::TrackedDeviceDeactivated
                     },
-                    index: i as vr::TrackedDeviceIndex_t,
-                    data: Default::default(),
-                };
+                    i as vr::TrackedDeviceIndex_t,
+                    Default::default(),
+                );
                 if current {
                     events.insert(activations, event);
                     activations += 1;
@@ -3872,7 +3889,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             unsafe {
                 (&raw mut (*out).eventType).write(event.ty.0);
                 (&raw mut (*out).trackedDeviceIndex).write(event.index);
-                (&raw mut (*out).eventAgeSeconds).write(0.0);
+                (&raw mut (*out).eventAgeSeconds).write(event.at.elapsed().as_secs_f32());
                 (&raw mut (*out).data.controller).write(event.data);
             }
             true

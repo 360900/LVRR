@@ -3,7 +3,7 @@ use crate::{
     compositor::{Compositor, is_usable_swapchain, is_valid_swapchain_info},
     graphics_backends::{GraphicsBackend, SupportedBackend, supported_apis_enum},
     openxr_data::{GraphicalSession, OpenXrData, Session, SessionData, SessionGuard},
-    system::System,
+    system::{QueuedEvent, System},
 };
 use glam::{Mat3, Quat, Vec3, vec3};
 use log::{debug, trace};
@@ -532,7 +532,7 @@ impl OverlayMan {
         let (key, queued) = overlays
             .iter_mut()
             .find_map(|(key, overlay)| Some((key, overlay.events.pop_front()?)))?;
-        System::copy_event(&queued, event, size);
+        System::copy_event(&queued.take(), event, size);
         Some(key.data().as_ffi())
     }
 
@@ -583,7 +583,7 @@ impl OverlayMan {
             else {
                 return vr::EVROverlayError::UnknownOverlay;
             };
-            overlay.events.extend(events);
+            overlay.events.extend(events.iter().copied().map(QueuedEvent::new));
         } else {
             let system = self.system.force(|i| System::new(self.openxr.clone(), i));
             events.iter().for_each(|e| system.push_event(*e));
@@ -916,7 +916,7 @@ struct Overlay {
     compositor: Option<SupportedBackend>,
     rect: Option<xr::Rect2Di>,
     flags: u32,
-    events: VecDeque<vr::VREvent_t>,
+    events: VecDeque<QueuedEvent>,
     /// SetOverlayRaw pixels waiting for the app's graphics, see [OverlayMan::upload_pending_raw].
     pending_raw: Option<PendingRaw>,
 }
@@ -1531,7 +1531,7 @@ impl OverlayMan {
             };
             overlay
                 .events
-                .push_back(image_event(event, key.data().as_ffi()));
+                .push_back(QueuedEvent::new(image_event(event, key.data().as_ffi())));
         }
     }
 
@@ -1924,7 +1924,9 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         };
         let key = OverlayKey::from(KeyData::from_ffi(handle));
         if let Some(overlay) = self.overlays.write().unwrap().get_mut(key) {
-            overlay.events.push_back(image_event(event, handle));
+            overlay
+                .events
+                .push_back(QueuedEvent::new(image_event(event, handle)));
         }
         result.err().unwrap_or(vr::EVROverlayError::None)
     }
@@ -2053,7 +2055,7 @@ impl vr::IVROverlay028_Interface for OverlayMan {
         else {
             return false;
         };
-        System::copy_event(&queued, event, size);
+        System::copy_event(&queued.take(), event, size);
         true
     }
     fn WaitFrameSync(&self, _: u32) -> vr::EVROverlayError {
@@ -4180,7 +4182,7 @@ mod tests {
             assert_eq!({ event.device }, vr::k_unTrackedDeviceIndex_Hmd);
             // cNewInput, then the user value.
             assert_eq!({ event.data }, [0, 0, 7, 0]);
-            assert_eq!({ event.age }, 0.0);
+            assert!((0.0..1.0).contains(&{ event.age }));
             assert_eq!({ event.canary }, 0xdeadbeef);
         }
         assert!(!vr::IVROverlay007On008::PollNextOverlayEvent(

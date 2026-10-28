@@ -421,7 +421,7 @@ fn parallel_fov(fov: xr::Fovf, canting: Quat) -> xr::Fovf {
 #[versions(026, 023, 022, 021, 020, 019, 017, 016, 015, 014, 012, 011, 010, 009)]
 pub struct System {
     openxr: Arc<RealOpenXrData>, // We don't need to test session restarting.
-    events: Mutex<VecDeque<vr::VREvent_t>>,
+    events: Mutex<VecDeque<QueuedEvent>>,
     input: Injected<Input<crate::compositor::Compositor>>,
     overlay: Injected<OverlayMan>,
     vtables: Vtables,
@@ -589,7 +589,7 @@ impl System {
 
     pub fn push_event(&self, event: vr::VREvent_t) {
         let mut events = self.events.lock().unwrap();
-        events.push_back(event);
+        events.push_back(QueuedEvent::new(event));
     }
 
     #[cfg(feature = "monado")]
@@ -601,6 +601,29 @@ impl System {
             .as_ref()?
             .get_device_from_vr_index(device_index)
             .and_then(|device| device.battery_status().ok())
+    }
+}
+
+/// An event waiting for the app to poll it, with when it happened for `eventAgeSeconds`.
+pub struct QueuedEvent {
+    at: std::time::Instant,
+    event: vr::VREvent_t,
+}
+
+impl QueuedEvent {
+    pub fn new(event: vr::VREvent_t) -> Self {
+        Self {
+            at: std::time::Instant::now(),
+            event,
+        }
+    }
+
+    /// The event with its age filled in.
+    pub fn take(self) -> vr::VREvent_t {
+        vr::VREvent_t {
+            eventAgeSeconds: self.at.elapsed().as_secs_f32(),
+            ..self.event
+        }
     }
 }
 
@@ -1029,29 +1052,26 @@ impl vr::IVRSystem026_Interface for System {
         pose: *mut vr::TrackedDevicePose_t,
     ) -> bool {
         self.pump();
-        if let Some(queued) = self.events.lock().unwrap().pop_front() {
-            // Truncated to the app's size, so older event structs only get what they have room for.
-            Self::copy_event(&queued, event, size);
-            if !pose.is_null() {
-                unsafe { pose.write(Default::default()) };
+        let queued = self.events.lock().unwrap().pop_front();
+        let got_event = match queued {
+            Some(queued) => {
+                // Truncated to the app's size, so older event structs only get what they have
+                // room for.
+                Self::copy_event(&queued.take(), event, size);
+                true
             }
-            return true;
-        }
-
-        let Some(input) = self.input.get() else {
-            return false;
+            None => match self.input.get() {
+                Some(input) => input.get_next_event(size, event),
+                None => false,
+            },
         };
-
-        let got_event = input.get_next_event(size, event);
         if got_event && !pose.is_null() {
-            unsafe {
-                let index = (&raw const (*event).trackedDeviceIndex).read();
-                pose.write(
-                    input
-                        .get_device_pose(index, Some(origin), self.openxr.get_display_time(), None)
-                        .unwrap_or_default(),
-                );
-            }
+            // The event's device where it's tracked, like SteamVR; the identity pose otherwise.
+            let index = unsafe { (&raw const (*event).trackedDeviceIndex).read() };
+            let device_pose = self.input.get().and_then(|input| {
+                input.get_device_pose(index, Some(origin), self.openxr.get_display_time(), None)
+            });
+            unsafe { pose.write(device_pose.unwrap_or_default()) };
         }
         got_event
     }
@@ -3221,8 +3241,24 @@ mod tests {
         assert_eq!(event.event_type, vr::EVREventType::TrackedDeviceActivated.0);
         assert_eq!(event.device, vr::k_unTrackedDeviceIndex_Hmd);
         assert_eq!(event.data, [0; 4]);
-        assert_eq!(event.age, 0.0);
+        assert!((0.0..1.0).contains(&event.age));
         assert_eq!(event.canary, 0xdeadbeef);
+    }
+
+    /// eventAgeSeconds is how long ago the event happened, like in SteamVR.
+    #[test]
+    fn queued_event_reports_its_age() {
+        let (_xr, system) = system_with_events();
+        system.push_event(vr::VREvent_t {
+            eventType: vr::EVREventType::IpdChanged.0,
+            ..Default::default()
+        });
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let mut event = vr::VREvent_t::default();
+        assert!(system.PollNextEvent(&mut event, std::mem::size_of_val(&event) as u32));
+        assert_eq!(event.eventType, vr::EVREventType::IpdChanged.0);
+        assert!(event.eventAgeSeconds >= 0.02, "{}", event.eventAgeSeconds);
+        assert!(event.eventAgeSeconds < 1.0, "{}", event.eventAgeSeconds);
     }
 
     #[test]

@@ -435,11 +435,11 @@ impl<C: openxr_data::Compositor> Input<C> {
     ) {
         let mut events = self.events.lock().unwrap();
         let mut push = |ty, id: vr::EVRButtonId| {
-            events.push_back(super::InputEvent {
+            events.push_back(super::InputEvent::new(
                 ty,
-                index: device_index,
-                data: vr::VREvent_Controller_t { button: id.0 },
-            });
+                device_index,
+                vr::VREvent_Controller_t { button: id.0 },
+            ));
         };
         for &id in buttons {
             let mask = button_mask_from_id(id);
