@@ -74,6 +74,7 @@ Status: `pending` | `merged` | `superseded-by-<n>` | `blocked` | `dropped` | `re
 | 444 | clientcore: don't panic in Cleanup | merged | #423, #439; graceful cleanup with outstanding refs |
 | 445 | compositor: replace todo!() with warnings | merged | fixes #283; GetLastFrameRenderer conflict resolved to std::process::id(); GetFrameTimings implemented by 446, SubmitWithArrayIndex fixed in sweep |
 | 446 | compositor: implement GetFrameTimings | merged | real timing from last presented frame |
+| 453 | openxr_data: enable XR_EXT_view_configuration_views_change | merged | eye size is queried per call, so apps that query again get the new size; change logged; not on WiVRn |
 
 ## Fork fixes (not upstream PRs)
 

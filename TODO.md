@@ -76,7 +76,7 @@ Effort: S under a day, M a few days, L a week or more. "WiVRn" notes describe wh
     - WiVRn: none of these; bundled assets needed there
 19. Resolution and refresh (S-M)
     - `supersampleScale` and per-app `resolutionScale` don't affect the render size
-    - upstream PR #453 (`XR_EXT_view_configuration_views_change`)
+    - `XR_EXT_view_configuration_views_change` enabled (upstream PR #453), but no event tells apps to query the size again; SteamVR has none either
     - `xrRequestDisplayRefreshRateFB` never called
     - WiVRn: no `views_change`; `xrRequestDisplayRefreshRateFB` works and disables its automatic rate
 20. Events (S-M)

@@ -631,6 +631,12 @@ impl<C: Compositor> OpenXrData<C> {
                 }
                 // Hidden area meshes are fetched from the runtime whenever the app asks.
                 xr::Event::VisibilityMaskChangedKHR(_) => debug!("visibility mask changed"),
+                // The recommended eye size is queried whenever the app asks, so apps that
+                // query it again (or restart VR) pick the new size up.
+                xr::Event::ViewConfigurationViewsChangedEXT(_) => {
+                    let (width, height) = self.recommended_eye_size();
+                    info!("Recommended eye size changed to {width}x{height}");
+                }
                 xr::Event::EventsLost(event) => {
                     warn!("The runtime dropped {} events", event.lost_event_count())
                 }
