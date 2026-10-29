@@ -504,6 +504,7 @@ fn checks(root: &Path) -> Vec<Check> {
         checks::openxr(root, session_running),
         checks::openvr(root, &config),
         checks::steam(root),
+        checks::pressure_vessel(),
         checks::uinput(&config),
         checks::usb(&config),
         checks::pipewire(),
@@ -542,6 +543,7 @@ pub fn main(args: &[String]) -> ExitCode {
                 "firewall" => fix_firewall(),
                 "avahi" => checks::fix_avahi(),
                 "steam" => checks::fix_steam(&root),
+                "pressure-vessel" => checks::fix_pressure_vessel(),
                 _ => continue,
             };
             if let Err(e) = result {

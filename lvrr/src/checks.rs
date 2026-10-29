@@ -252,6 +252,126 @@ pub fn fix_steam(root: &Path) -> Result<(), String> {
     }
 }
 
+/// The variable pressure-vessel needs to pass LVRR's OpenXR runtime into Steam's
+/// sandbox; without it xrizer in a game can't reach the runtime socket
+const OPENXR_IMPORT_VAR: &str = "PRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES";
+/// Dropped in the user's config so every login sets the variable for Steam
+const ENV_CONF: &str = "environment.d/lvrr.conf";
+const ENV_CONF_TEXT: &str = "# Written by LVRR: let Steam's pressure-vessel sandbox reach LVRR's OpenXR runtime.\nPRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES=1\n";
+
+/// `~/.config/environment.d/lvrr.conf`
+fn env_conf_path() -> Option<PathBuf> {
+    crate::xdg_dir("XDG_CONFIG_HOME", ".config")
+        .ok()
+        .map(|dir| dir.join(ENV_CONF))
+}
+
+/// The variable is in this process's environment, so the session has it
+fn openxr_import_in_env() -> bool {
+    env::var(OPENXR_IMPORT_VAR).as_deref() == Ok("1")
+}
+
+/// Our environment.d file already sets it, so it applies after the next login
+fn env_conf_sets_import() -> bool {
+    env_conf_path().is_some_and(|path| {
+        fs::read_to_string(path).is_ok_and(|text| {
+            text.lines()
+                .any(|l| l.trim() == format!("{OPENXR_IMPORT_VAR}=1"))
+        })
+    })
+}
+
+/// Whether the Steam flatpak's override sets the variable in its [Environment]
+fn flatpak_imports_openxr(scope: &str) -> Result<bool, String> {
+    let output = Command::new("flatpak")
+        .args([scope, "override", "--show", STEAM_FLATPAK])
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| format!("running flatpak: {e}"))?;
+    if !output.status.success() {
+        return Err("Could not read the Steam flatpak's permissions.".to_string());
+    }
+    Ok(has_openxr_env(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// Looks for `PRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES=1` in the [Environment]
+/// group of a flatpak override
+fn has_openxr_env(overrides: &str) -> bool {
+    let mut environment = false;
+    for line in overrides.lines().map(str::trim) {
+        if line.starts_with('[') {
+            environment = line == "[Environment]";
+        } else if environment
+            && let Some(value) = line.strip_prefix(&format!("{OPENXR_IMPORT_VAR}="))
+        {
+            return value.trim() == "1";
+        }
+    }
+    false
+}
+
+/// Steam sandboxes VR games with pressure-vessel, which hides LVRR's OpenXR
+/// runtime unless `PRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES=1` is set. Without
+/// it a game's xrizer fails with `ERROR_RUNTIME_UNAVAILABLE`.
+pub fn pressure_vessel() -> Check {
+    let (status, message) = if let Some(scope) = flatpak_scope() {
+        match flatpak_imports_openxr(scope) {
+            Ok(true) => (
+                Status::Ok,
+                "The Steam flatpak passes LVRR's runtime into VR games.".to_string(),
+            ),
+            Ok(false) => (
+                Status::Fail,
+                "Steam VR games can't reach LVRR's runtime. Fixing lets the Steam flatpak import it; restart Steam afterwards.".to_string(),
+            ),
+            Err(e) => (Status::Warn, e),
+        }
+    } else if openxr_import_in_env() {
+        (
+            Status::Ok,
+            "Steam VR games inherit LVRR's runtime.".to_string(),
+        )
+    } else if env_conf_sets_import() {
+        (
+            Status::Warn,
+            "Steam VR games reach LVRR's runtime after the next login. Log out and back in to apply it.".to_string(),
+        )
+    } else {
+        (
+            Status::Fail,
+            format!(
+                "Steam VR games can't reach LVRR's runtime, so they start on the monitor instead of the headset. Fixing sets {OPENXR_IMPORT_VAR} for your session; log out and back in to apply it."
+            ),
+        )
+    };
+    let mut c = check("pressure-vessel", "Steam VR runtime", status, message);
+    if status == Status::Fail {
+        c.fix = Some(FIX);
+    }
+    c
+}
+
+/// Sets the pressure-vessel OpenXR import for Steam: a flatpak override for
+/// the Steam flatpak, else `~/.config/environment.d/lvrr.conf` for the session
+pub fn fix_pressure_vessel() -> Result<(), String> {
+    if let Some(scope) = flatpak_scope() {
+        let env = format!("--env={OPENXR_IMPORT_VAR}=1");
+        return if scope == "--system" {
+            run(
+                "pkexec",
+                &["flatpak", "override", scope, &env, STEAM_FLATPAK],
+            )
+        } else {
+            run("flatpak", &["override", scope, &env, STEAM_FLATPAK])
+        };
+    }
+    let path = env_conf_path().ok_or("could not find the config directory")?;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    }
+    fs::write(&path, ENV_CONF_TEXT).map_err(|e| format!("writing {}: {e}", path.display()))
+}
+
 fn flatpak_scope() -> Option<&'static str> {
     crate::which("flatpak")?;
     ["--user", "--system"].into_iter().find(|scope| {
@@ -559,6 +679,19 @@ mod tests {
             ["xdg-run/wivrn", "xdg-config/openxr", "/opt/lvrr"]
         );
         assert!(filesystems("[Environment]\nFOO=1\n").is_empty());
+    }
+
+    #[test]
+    fn openxr_env() {
+        let on = "[Context]\nfilesystems=xdg-run/wivrn\n\n[Environment]\nPRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES=1\n";
+        assert!(has_openxr_env(on));
+        // the same key outside [Environment] does not count
+        let ctx = "[Context]\nPRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES=1\n";
+        assert!(!has_openxr_env(ctx));
+        assert!(!has_openxr_env(
+            "[Environment]\nPRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES=0\n"
+        ));
+        assert!(!has_openxr_env(""));
     }
 
     #[test]
