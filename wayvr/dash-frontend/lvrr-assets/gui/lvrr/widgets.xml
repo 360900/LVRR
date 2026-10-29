@@ -15,6 +15,19 @@
     <div id="${id}" flex_direction="row" align_items="center" gap="12" flex_wrap="wrap" />
   </template>
 
+  <!-- id; a row that wraps its children within the parent's width -->
+  <template name="WrapRow">
+    <div id="${id}" flex_direction="row" align_items="center" gap="12" flex_wrap="wrap" width="100%" />
+  </template>
+
+  <!-- translation; a section heading with an underline rule -->
+  <template name="SectionHeader">
+    <div flex_direction="column" gap="6" width="100%" margin_top="12">
+      <label translation="${translation}" weight="bold" size="16" color="on_background" />
+      <rectangle width="100%" height="2" color="outline" />
+    </div>
+  </template>
+
   <!-- id; a row that never wraps, for a Column of details followed by buttons -->
   <template name="Line">
     <div id="${id}" flex_direction="row" align_items="center" gap="12" width="100%" />

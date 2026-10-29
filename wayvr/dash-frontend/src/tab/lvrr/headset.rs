@@ -297,18 +297,6 @@ fn settings() -> Vec<Setting> {
 			},
 		},
 		Setting {
-			key: "foveation",
-			label: "LVRR.HEADSET.FOVEATION",
-			section: Streaming,
-			restart: true,
-			show: always,
-			control: Control::Slider {
-				range: |h| (if h.config.extended_config { 0.0 } else { 30.0 }, 80.0, 5.0),
-				get: |c| c.foveation * 100.0,
-				set: |v| json!(v / 100.0),
-			},
-		},
-		Setting {
 			key: "codec",
 			label: "LVRR.HEADSET.CODEC",
 			section: Streaming,
@@ -323,6 +311,18 @@ fn settings() -> Vec<Setting> {
 					options
 				},
 				get: |c| json!(c.codec.key()),
+			},
+		},
+		Setting {
+			key: "foveation",
+			label: "LVRR.HEADSET.FOVEATION",
+			section: Streaming,
+			restart: true,
+			show: always,
+			control: Control::Slider {
+				range: |h| (if h.config.extended_config { 0.0 } else { 30.0 }, 80.0, 5.0),
+				get: |c| c.foveation * 100.0,
+				set: |v| json!(v / 100.0),
 			},
 		},
 		Setting {
@@ -910,7 +910,7 @@ fn mount(
 			let column = ui.column(row)?;
 			ui.text(column, Text::Key(setting.label))?;
 			let selected = Rc::new(RefCell::new(h.config.body_parts.clone()));
-			let parts = ui.row(column)?;
+			let parts = ui.wrap_row(column)?;
 			for part in BODY_PARTS
 				.iter()
 				.filter(|p| h.capabilities.body_parts.iter().any(|c| c == *p))

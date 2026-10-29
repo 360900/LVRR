@@ -104,6 +104,11 @@ impl<'a> Ui<'a> {
 		self.container("Line", parent, |_| {})
 	}
 
+	/// A row that wraps its children onto the next line within the parent's width
+	pub fn wrap_row(&mut self, parent: WidgetID) -> anyhow::Result<WidgetID> {
+		self.container("WrapRow", parent, |_| {})
+	}
+
 	pub fn column(&mut self, parent: WidgetID) -> anyhow::Result<WidgetID> {
 		self.container("Column", parent, |_| {})
 	}
@@ -127,6 +132,13 @@ impl<'a> Ui<'a> {
 
 	pub fn muted(&mut self, parent: WidgetID, text: Text) -> anyhow::Result<()> {
 		self.label("Text", parent, text, 12, "secondary")
+	}
+
+	/// A section heading with an underline rule, to separate groups of rows
+	pub fn section_header(&mut self, parent: WidgetID, translation: &str) -> anyhow::Result<()> {
+		let mut params = TemplateParams::new();
+		params.insert("translation", translation);
+		self.instantiate("SectionHeader", parent, params)
 	}
 
 	pub fn bold(&mut self, parent: WidgetID, text: Text, size: u32) -> anyhow::Result<()> {
