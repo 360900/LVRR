@@ -6,7 +6,7 @@
     "RESTART_SESSION": "Restart session",
     "RESTART_SESSION_CONFIRM": "Restart the session? Running VR apps close and the headset reconnects.",
     "RESTART_REQUIRED": "Some changes apply after the session restarts.",
-    "APPLIES_AFTER_RESTART": "After restart",
+    "APPLIES_AFTER_RESTART": "Requires restart",
     "DISCONNECT": "Disconnect headset",
     "QUIT": "Stop LVRR",
     "QUIT_CONFIRM": "Stop LVRR? The headset disconnects and all VR apps close.",
