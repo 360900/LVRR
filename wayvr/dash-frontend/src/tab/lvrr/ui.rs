@@ -113,9 +113,14 @@ impl<'a> Ui<'a> {
 		self.container("Column", parent, |_| {})
 	}
 
-	/// A column as wide as its content, such as a game cover with its settings below
-	pub fn stack(&mut self, parent: WidgetID) -> anyhow::Result<WidgetID> {
-		self.container("Stack", parent, |_| {})
+	/// A positioning context sized to its child, so a `corner_overlay` can pin to it
+	pub fn cover_wrap(&mut self, parent: WidgetID) -> anyhow::Result<WidgetID> {
+		self.container("CoverWrap", parent, |_| {})
+	}
+
+	/// A container pinned to the top-right corner of a `cover_wrap`
+	pub fn corner_overlay(&mut self, parent: WidgetID) -> anyhow::Result<WidgetID> {
+		self.container("CornerOverlay", parent, |_| {})
 	}
 
 	fn label(&mut self, template: &str, parent: WidgetID, text: Text, size: u32, color: &str) -> anyhow::Result<()> {

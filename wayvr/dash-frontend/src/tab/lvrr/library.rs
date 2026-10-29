@@ -490,11 +490,11 @@ impl<T: 'static> TabLvrrLibrary<T> {
 					let (tasks, id) = (self.tasks.clone(), app.id.clone());
 					Box::new(move |cover: CoverArt| tasks.push(Task::SetCover(id, Rc::new(cover))))
 				};
-				let stack = ui.stack(covers)?;
+				let wrap = ui.cover_wrap(covers)?;
 				let view = game_cover::View::new(game_cover::Params {
 					ess: &mut ConstructEssentials {
 						layout: ui.layout,
-						parent: stack,
+						parent: wrap,
 					},
 					executor,
 					manifest: &manifest,
@@ -510,7 +510,7 @@ impl<T: 'static> TabLvrrLibrary<T> {
 					Ok(())
 				}));
 				self.covers.entry(app.id.clone()).or_default().push(view);
-				self.mount_options(ui, stack, app)?;
+				self.mount_options(ui, wrap, app, true)?;
 			}
 		}
 
@@ -535,14 +535,20 @@ impl<T: 'static> TabLvrrLibrary<T> {
 				log::warn!("Could not show the icon of {}: {e:?}", app.id);
 			}
 			ui.bold(row, Text::Raw(&app.name), 16)?;
-			self.mount_options(ui, row, app)?;
+			self.mount_options(ui, row, app, false)?;
 		}
 		Ok(())
 	}
 
 	/// A menu with the controllers the game sees through xrizer, and Remove for added apps.
 	/// A game that doesn't see the real controllers says so.
-	fn mount_options(&self, ui: &mut Ui, parent: WidgetID, app: &VrApplication) -> anyhow::Result<()> {
+	fn mount_options(
+		&self,
+		ui: &mut Ui,
+		parent: WidgetID,
+		app: &VrApplication,
+		corner: bool,
+	) -> anyhow::Result<()> {
 		let mut cells = Vec::new();
 		let mut controllers = ControllerType::Auto;
 		if let Some(app_id) = app.steam_app_id() {
@@ -576,13 +582,17 @@ impl<T: 'static> TabLvrrLibrary<T> {
 		if cells.is_empty() {
 			return Ok(());
 		}
-		let line = ui.line(parent)?;
+		let container = if corner {
+			ui.corner_overlay(parent)?
+		} else {
+			ui.line(parent)?
+		};
 		if controllers != ControllerType::Auto {
-			ui.badge(line, controllers_key(controllers), "secondary")?;
+			ui.badge(container, controllers_key(controllers), "secondary")?;
 		}
 		let tasks = self.tasks.clone();
 		ui.menu_button(
-			line,
+			container,
 			"@/dashboard/options.svg",
 			"LVRR.LIBRARY.OPTIONS",
 			cells,

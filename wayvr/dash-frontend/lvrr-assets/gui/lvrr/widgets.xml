@@ -38,9 +38,14 @@
     <div id="${id}" flex_direction="column" gap="4" flex_grow="1" flex_shrink="1" />
   </template>
 
-  <!-- id -->
-  <template name="Stack">
-    <div id="${id}" flex_direction="column" align_items="center" gap="4" />
+  <!-- id; a positioning context sized to its child, for overlays on a game cover -->
+  <template name="CoverWrap">
+    <div id="${id}" position="relative" flex_direction="column" />
+  </template>
+
+  <!-- id; pinned to the top-right corner of a relative parent -->
+  <template name="CornerOverlay">
+    <div id="${id}" position="absolute" align_self="start" justify_self="end" margin_top="6" margin_right="6" flex_direction="row" align_items="center" gap="4" />
   </template>
 
   <!-- text, translation, size, color -->
