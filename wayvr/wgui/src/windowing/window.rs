@@ -10,7 +10,6 @@ use crate::{
 	animation::{Animation, AnimationDuration, AnimationEasing},
 	assets::AssetPathRef,
 	components::button::ComponentButton,
-	drawing,
 	event::{EventListenerKind, StyleSetRequest},
 	i18n::Translation,
 	layout::{Layout, LayoutTask, LayoutTasks, WidgetPair},
@@ -242,12 +241,9 @@ impl WguiWindow {
 		};
 
 		let input_grabber = if params.extra.close_if_clicked_outside {
-			// LVRR: round the dim backdrop so its corners don't poke past the rounded
-			// panel behind the menu
-			let mut rect = WidgetRectangle::create(crate::widget::rectangle::WidgetRectangleParams {
-				round: crate::widget::util::WLength::Units(8.0),
-				..Default::default()
-			});
+			// LVRR: an invisible catcher that closes the menu on an outside click. No dim
+			// fill: its square corners showed past the rounded panel behind the menu.
+			let mut rect = WidgetRectangle::create(Default::default());
 			rect.flags.consume_mouse_events = true;
 
 			let this = self.clone();
@@ -270,19 +266,6 @@ impl WguiWindow {
 					..Default::default()
 				},
 			)?;
-
-			// Fade animation
-			Animation::new(
-				widget.id,
-				AnimationDuration::Seconds(0.333),
-				AnimationEasing::OutQuad,
-				Box::new(|common, data| {
-					let rect = data.obj.get_as_mut::<WidgetRectangle>().unwrap() /* should always succeed */;
-					rect.params.color = drawing::Color::new(0.0, 0.0, 0.0, data.pos * 0.3).into();
-					common.alterables.mark_redraw();
-				}),
-			)
-			.submit_l(params.layout);
 
 			Some(widget)
 		} else {
