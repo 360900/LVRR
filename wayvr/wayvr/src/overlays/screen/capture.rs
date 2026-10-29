@@ -24,7 +24,7 @@ use wlx_capture::{
 use wlx_common::{config::GeneralConfig, overlays::StereoMode};
 
 use crate::{
-    graphics::dmabuf::{ExportedDmabufImage, export_dmabuf_image, fourcc_to_vk},
+    graphics::dmabuf::{ExportedDmabufImage, WGfxDmabuf, export_dmabuf_image, fourcc_to_vk},
     state::AppState,
     windowing::backend::{FrameMeta, RenderResources},
 };
@@ -526,6 +526,12 @@ pub struct WlxCaptureIn {
     gfx: Arc<WGfx>,
     dma_exporter: Option<Arc<Mutex<MyFirstDmaExporter>>>,
     use_capture_queue: bool,
+    /// LVRR: copy each captured frame into our own image before the compositor reuses
+    /// the buffer. Off by default: the copy submits on a second GPU queue from the
+    /// capture thread, concurrent with headset rendering, which faults some drivers
+    /// (NVIDIA Blackwell, Xid 69). Enable with LVRR_COPY_CAPTURED_FRAMES=1 on setups
+    /// where the compositor draws screens on a different GPU and motion tears.
+    copy_frames: bool,
 }
 
 impl WlxCaptureIn {
@@ -539,6 +545,7 @@ impl WlxCaptureIn {
             gfx: app.gfx.clone(),
             dma_exporter: dma_exporter.map(|exporter| Arc::new(Mutex::new(exporter))),
             use_capture_queue: app.gfx.has_capture_queue(),
+            copy_frames: std::env::var("LVRR_COPY_CAPTURED_FRAMES").as_deref() == Ok("1"),
         }
     }
 }
@@ -729,8 +736,15 @@ pub(super) fn receive_callback(me: &WlxCaptureIn, frame: WlxFrame) -> Option<Wlx
             }
             log::trace!("{}: New DMA-buf frame", me.name);
             let format = frame.format;
-            // LVRR: copied, the compositor may draw into the buffer again once this returns
-            match lvrr_dmabuf::frame_image(me, frame) {
+            // LVRR: by default sample the imported frame in place, like upstream. With
+            // copy_frames the frame is copied first, so the compositor can reuse the
+            // buffer without tearing when it draws on another GPU (see WlxCaptureIn).
+            let image = if me.copy_frames {
+                lvrr_dmabuf::frame_image(me, frame)
+            } else {
+                me.gfx.dmabuf_texture(frame)
+            };
+            match image {
                 Ok(image) => Some(WlxCaptureOut {
                     image: me.gfx.create_image_view(image).ok()?,
                     format,
