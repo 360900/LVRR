@@ -242,7 +242,12 @@ impl WguiWindow {
 		};
 
 		let input_grabber = if params.extra.close_if_clicked_outside {
-			let mut rect = WidgetRectangle::create(Default::default());
+			// LVRR: round the dim backdrop so its corners don't poke past the rounded
+			// panel behind the menu
+			let mut rect = WidgetRectangle::create(crate::widget::rectangle::WidgetRectangleParams {
+				round: crate::widget::util::WLength::Units(8.0),
+				..Default::default()
+			});
 			rect.flags.consume_mouse_events = true;
 
 			let this = self.clone();
