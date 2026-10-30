@@ -806,16 +806,25 @@ impl<T: 'static> TabLvrrHeadset<T> {
 
 		let (title, icon) = self.section.title_icon();
 		let group = ui.group(parent, title, icon)?;
-		if self.section == Section::System {
-			let row = ui.row(group)?;
-			ui.badge(row, "LVRR.HEADSET.ADVANCED", "danger")?;
-			ui.muted(row, Text::Key("LVRR.HEADSET.ADVANCED_NOTE"))?;
-		}
 		if self.section == Section::Video {
 			mount_presets(&mut ui, group, &h, &self.tasks)?;
 		}
-		for setting in settings().iter().filter(|s| s.section == self.section && (s.show)(&h)) {
+		let all = settings();
+		// the risky settings go last, under a note that applies to them only
+		let (advanced, normal): (Vec<&Setting>, Vec<&Setting>) = all
+			.iter()
+			.filter(|s| s.section == self.section && (s.show)(&h))
+			.partition(|s| setting_advanced(s.key));
+		for setting in normal {
 			mount(&mut ui, group, setting, &h, &self.tasks, &mut self.sliders)?;
+		}
+		if !advanced.is_empty() {
+			let row = ui.row(group)?;
+			ui.badge(row, "LVRR.HEADSET.ADVANCED", "danger")?;
+			ui.muted(row, Text::Key("LVRR.HEADSET.ADVANCED_NOTE"))?;
+			for setting in advanced {
+				mount(&mut ui, group, setting, &h, &self.tasks, &mut self.sliders)?;
+			}
 		}
 		if self.section == Section::Devices && !h.server_input_forwarding {
 			ui.muted(group, Text::Key("LVRR.HEADSET.NO_INPUT_FORWARDING"))?;
@@ -939,9 +948,6 @@ fn mount(
 			}
 		}
 	}
-	if setting_advanced(key) {
-		ui.badge(row, "LVRR.HEADSET.ADVANCED", "danger")?;
-	}
 	if !badge_consumed && let Some((translation, color)) = badge {
 		ui.badge(row, translation, color)?;
 	}
@@ -951,7 +957,8 @@ fn mount(
 	Ok(())
 }
 
-/// Settings that can break the stream or drain the battery, flagged with an Advanced badge
+/// Settings that can break the stream or drain the battery, listed last in their section
+/// under an Advanced note
 fn setting_advanced(key: &str) -> bool {
 	matches!(key, "extended_config" | "high_power_mode")
 }
