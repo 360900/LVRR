@@ -806,6 +806,11 @@ impl<T: 'static> TabLvrrHeadset<T> {
 
 		let (title, icon) = self.section.title_icon();
 		let group = ui.group(parent, title, icon)?;
+		if self.section == Section::System {
+			let row = ui.row(group)?;
+			ui.badge(row, "LVRR.HEADSET.ADVANCED", "danger")?;
+			ui.muted(row, Text::Key("LVRR.HEADSET.ADVANCED_NOTE"))?;
+		}
 		if self.section == Section::Video {
 			mount_presets(&mut ui, group, &h, &self.tasks)?;
 		}
@@ -866,6 +871,8 @@ fn mount(
 	} else {
 		None
 	};
+	// a slider shows the restart badge next to its own label
+	let mut badge_consumed = false;
 	match &setting.control {
 		Control::Toggle { get, set } => {
 			let (tasks, set) = (tasks.clone(), *set);
@@ -887,8 +894,7 @@ fn mount(
 				});
 			})?;
 			sliders.push(slider);
-			// the badge sits next to the slider's label
-			return Ok(());
+			badge_consumed = true;
 		}
 		Control::Choice { options, get } => {
 			let current = get(&h.config);
@@ -933,8 +939,28 @@ fn mount(
 			}
 		}
 	}
-	if let Some((translation, color)) = badge {
+	if setting_advanced(key) {
+		ui.badge(row, "LVRR.HEADSET.ADVANCED", "danger")?;
+	}
+	if !badge_consumed && let Some((translation, color)) = badge {
 		ui.badge(row, translation, color)?;
 	}
+	if let Some(description) = setting_description(key) {
+		ui.muted(parent, Text::Key(description))?;
+	}
 	Ok(())
+}
+
+/// Settings that can break the stream or drain the battery, flagged with an Advanced badge
+fn setting_advanced(key: &str) -> bool {
+	matches!(key, "extended_config" | "high_power_mode")
+}
+
+/// A one-line explanation shown under a setting whose name is not self-explanatory
+fn setting_description(key: &str) -> Option<&'static str> {
+	match key {
+		"extended_config" => Some("LVRR.HEADSET.EXTENDED_CONFIG_DESC"),
+		"high_power_mode" => Some("LVRR.HEADSET.HIGH_POWER_DESC"),
+		_ => None,
+	}
 }
