@@ -1332,6 +1332,15 @@ void wivrn_session::reconnect(std::stop_token stop)
 			headset_info.country = info.country;
 			headset_info.variant = info.variant;
 
+			// LVRR: the headset's new stream shows the hands until told otherwise, and its
+			// statistics start over
+			{
+				std::lock_guard lock(lvrr_hands_mutex);
+				lvrr_hands_shown.reset();
+			}
+			lvrr_stats_ns = 0;
+			lvrr_update_hands();
+
 			break;
 		}
 		catch (std::exception & e)
