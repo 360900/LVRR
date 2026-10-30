@@ -1451,7 +1451,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
- "freedesktop-desktop-entry",
  "glam",
  "keyvalues-parser",
  "log",

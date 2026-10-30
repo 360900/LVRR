@@ -132,6 +132,7 @@ impl DesktopFinder {
 
 		let mut known_files = HashSet::new();
 		let mut entries = HashMap::<String, DesktopEntryOwned>::new();
+		let default_browser = default_https_handler();
 
 		let icons_folder = cache_dir::get_path("icons");
 		if !std::fs::exists(&icons_folder).unwrap_or(false) {
@@ -176,7 +177,14 @@ impl DesktopFinder {
 					continue;
 				}
 
-				if desktop.only_show_in().is_some() || desktop.terminal() || desktop.no_display() || desktop.hidden() {
+				// LVRR: browsers often register their https handler as a NoDisplay entry; keep the
+				// default one so a web browser can still be opened in VR
+				let hidden_default_browser = desktop.no_display() && default_browser.as_deref() == Some(app_id);
+				if desktop.only_show_in().is_some()
+					|| desktop.terminal()
+					|| (desktop.no_display() && !hidden_default_browser)
+					|| desktop.hidden()
+				{
 					continue;
 				}
 
@@ -332,4 +340,15 @@ impl DesktopFinder {
 		});
 		self.bg_task = Some(bg_task);
 	}
+}
+
+/// LVRR: the desktop entry id of the default https handler, without `.desktop`
+fn default_https_handler() -> Option<String> {
+	let output = std::process::Command::new("xdg-mime")
+		.args(["query", "default", "x-scheme-handler/https"])
+		.output()
+		.ok()?;
+	let id = String::from_utf8(output.stdout).ok()?;
+	let id = id.trim().trim_end_matches(".desktop");
+	(!id.is_empty()).then(|| id.to_owned())
 }
