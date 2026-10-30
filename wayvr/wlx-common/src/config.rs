@@ -429,7 +429,7 @@ pub struct GeneralConfig {
 	#[serde(default = "def_true")]
 	pub use_skybox: bool,
 
-	#[serde(default = "def_true")]
+	#[serde(default)]
 	pub use_passthrough: bool,
 
 	#[serde(default = "def_max_height")]

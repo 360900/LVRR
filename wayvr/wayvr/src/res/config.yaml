@@ -137,7 +137,7 @@
 
 ## Monado/WiVRn only. Use passthrough camera if the headset supports it.
 ## If disabled, the skybox will be shown.
-#use_passthrough: true
+#use_passthrough: false
 
 ## Monado/WiVRn only. Display a skybox when no scene application is running.
 ## If disabled, there will be no background rendered (solid black).
