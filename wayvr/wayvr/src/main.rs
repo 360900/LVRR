@@ -136,6 +136,8 @@ fn init_run_params(no_audio: bool) -> backend::RunParams {
         load_palette(&config.color_palette),
     )
     .expect("Failed to init Globals, can't proceed");
+    // LVRR: no dim behind menus, its square corners show past the rounded panels
+    wgui_globals.get().popup_backdrop_dim = false;
 
     backend::RunParams {
         wgui_globals,

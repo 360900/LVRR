@@ -97,6 +97,8 @@ impl DashFrontend {
             color_palette: &app.session.config.color_palette,
             executor: app.executor.clone(),
         })?;
+        // LVRR: no dim behind dropdowns, its square corners show past the rounded panel
+        frontend.layout.state.globals.get().popup_backdrop_dim = false;
 
         frontend
             .tasks
