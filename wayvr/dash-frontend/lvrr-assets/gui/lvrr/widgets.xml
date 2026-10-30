@@ -43,9 +43,10 @@
     <div id="${id}" position="relative" flex_direction="column" />
   </template>
 
-  <!-- id; pinned to the top-right corner of a relative parent -->
+  <!-- id; pinned to the top-right corner of a CoverWrap. CoverWrap is a column, so
+       align_self moves along the horizontal axis; justify_self does nothing in flexbox. -->
   <template name="CornerOverlay">
-    <div id="${id}" position="absolute" align_self="start" justify_self="end" margin_top="6" margin_right="6" flex_direction="row" align_items="center" gap="4" />
+    <div id="${id}" position="absolute" align_self="end" margin_top="6" margin_right="6" flex_direction="row" align_items="center" gap="4" />
   </template>
 
   <!-- text, translation, size, color -->
