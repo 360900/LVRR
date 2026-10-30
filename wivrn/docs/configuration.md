@@ -154,7 +154,8 @@ When a headset with the app installed shows up in `adb` while the server waits f
 (plugged in, or the adb connection coming back after a drop), the server sets up the adb tunnel
 and starts the app on the headset, which connects to it. It does this once each time the headset
 shows up, so quitting the app doesn't start it again. A headset that shows up during a session is
-connected if the session ends within a minute.
+connected if the session ends within a minute. During a session the server only restores the adb
+tunnel, so a headset whose adb connection dropped can reconnect to the session.
 
 ## `debug-gui`
 Default value: `false`

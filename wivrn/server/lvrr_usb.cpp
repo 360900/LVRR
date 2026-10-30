@@ -42,6 +42,8 @@ struct device
 {
 	std::chrono::steady_clock::time_point seen;
 	bool done = false;
+	// the adb tunnel is set up, which an adb drop takes down with it
+	bool reversed = false;
 };
 
 std::optional<lvrr_usb::server> config;
@@ -101,9 +103,10 @@ std::string uri()
 	return "wivrn+tcp://:" + pin + "@127.0.0.1:" + port;
 }
 
-void connect(const std::string & serial)
+// Sets up the adb tunnel, and with start_app also starts the headset app pointed at it
+void connect(const std::string & serial, bool start_app)
 {
-	adb({"-s", serial, "shell", "pm", "list", "packages", "io.github.lvrr"}, [serial](auto output) {
+	adb({"-s", serial, "shell", "pm", "list", "packages", "io.github.lvrr"}, [serial, start_app](auto output) {
 		if (not output or not config)
 			return;
 
@@ -120,14 +123,16 @@ void connect(const std::string & serial)
 		if (package == std::end(packages))
 			return;
 
-		std::cerr << "USB: connecting the headset " << serial << std::endl;
+		std::cerr << (start_app ? "USB: connecting the headset " : "USB: restoring the adb tunnel for ") << serial << std::endl;
 		auto tcp = "tcp:" + std::to_string(config->port);
-		adb({"-s", serial, "reverse", tcp, tcp}, [serial, package = std::string(*package)](auto output) {
+		adb({"-s", serial, "reverse", tcp, tcp}, [serial, start_app, package = std::string(*package)](auto output) {
 			if (not output or not config)
 			{
 				std::cerr << "USB: adb reverse failed for " << serial << std::endl;
 				return;
 			}
+			if (not start_app)
+				return;
 			adb({"-s", serial, "shell", "am", "start", "-a", "android.intent.action.VIEW", "-d", uri(), package}, [serial](auto output) {
 				if (not output)
 					std::cerr << "USB: starting the headset app failed on " << serial << std::endl;
@@ -166,9 +171,16 @@ void on_devices(std::optional<std::string> output)
 		if (idle)
 		{
 			d.done = true;
-			connect(serial);
+			connect(serial, true);
+			continue;
 		}
-		else if (now - d.seen > pending_timeout)
+		// during a session only the tunnel, so a headset whose adb dropped can reconnect to it
+		if (not d.reversed)
+		{
+			d.reversed = true;
+			connect(serial, false);
+		}
+		if (now - d.seen > pending_timeout)
 			d.done = true;
 	}
 }
