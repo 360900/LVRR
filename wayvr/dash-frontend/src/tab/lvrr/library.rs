@@ -38,10 +38,9 @@ use crate::{
 	},
 	util::{
 		cached_fetcher::CoverArt,
-		popup_manager::PopupHolder,
 		steam_utils::{AppManifest, GameSortMethod, SteamUtils},
 	},
-	views::{app_launcher, game_cover},
+	views::game_cover,
 };
 
 /// The dashboard itself is listed as a VR app when WayVR is installed system-wide
@@ -65,8 +64,16 @@ const MAX_CANDIDATES: usize = 30;
 enum Task {
 	Request(LvrrRequest),
 	Frontend(FrontendTask),
-	SetCover(String, Rc<CoverArt>),
-	Start { id: String, name: String },
+	/// A cover loaded for the render `generation`; older ones are dropped
+	SetCover {
+		generation: u64,
+		id: String,
+		cover: Rc<CoverArt>,
+	},
+	Start {
+		id: String,
+		name: String,
+	},
 	OpenMenu(context_menu::Position, Vec<context_menu::Cell>),
 	SetControllers(u64, ControllerType),
 	SetSort(Sort),
@@ -119,11 +126,12 @@ pub struct TabLvrrLibrary<T> {
 	/// The inner None until the server answered
 	shown: Option<Option<Vec<VrApplication>>>,
 	cover_common: game_cover::ViewCommon,
-	/// A game can be shown twice, as recent and in the list
-	covers: HashMap<String, Vec<game_cover::View>>,
+	/// By app id; a game is listed in one section only
+	covers: HashMap<String, game_cover::View>,
+	/// Bumped on each render, so covers requested by an earlier render are ignored
+	cover_generation: u64,
 	starting: Option<Starting>,
 	context_menu: ContextMenu,
-	launcher: PopupHolder<app_launcher::View>,
 	marker: PhantomData<T>,
 }
 
@@ -138,8 +146,10 @@ impl<T: 'static> Tab<T> for TabLvrrLibrary<T> {
 			match task {
 				Task::Request(request) => frontend.tasks.push(FrontendTask::Lvrr(request)),
 				Task::Frontend(task) => frontend.tasks.push(task),
-				Task::SetCover(id, cover) => {
-					for view in self.covers.get_mut(&id).into_iter().flatten() {
+				Task::SetCover { generation, id, cover } => {
+					if generation == self.cover_generation
+						&& let Some(view) = self.covers.get_mut(&id)
+					{
 						view.set_cover_art(&mut self.cover_common, &mut frontend.layout, &cover)?;
 					}
 				}
@@ -243,9 +253,6 @@ impl<T: 'static> Tab<T> for TabLvrrLibrary<T> {
 			self.render(frontend, applications.as_deref())?;
 			self.shown = Some(applications);
 		}
-		self
-			.launcher
-			.with_view_res(|view| view.update(&mut frontend.interface, data))?;
 		Ok(())
 	}
 }
@@ -285,9 +292,9 @@ impl<T: 'static> TabLvrrLibrary<T> {
 			shown: None,
 			cover_common: game_cover::ViewCommon::new(globals),
 			covers: HashMap::new(),
+			cover_generation: 0,
 			starting: None,
 			context_menu: ContextMenu::default(),
-			launcher: PopupHolder::default(),
 			marker: PhantomData,
 		};
 		tab.render_toolbar(frontend)?;
@@ -364,6 +371,7 @@ impl<T: 'static> TabLvrrLibrary<T> {
 	fn render(&mut self, frontend: &mut Frontend<T>, applications: Option<&[VrApplication]>) -> anyhow::Result<()> {
 		frontend.layout.remove_children(self.list);
 		self.covers.clear();
+		self.cover_generation = self.cover_generation.wrapping_add(1);
 		let globals = frontend.layout.state.globals.clone();
 		let executor = frontend.executor.clone();
 		let mut widgets = wgui::parser::parse_from_assets(&ui::doc_params(&globals), &mut frontend.layout, self.list)?;
@@ -402,15 +410,17 @@ impl<T: 'static> TabLvrrLibrary<T> {
 				// keep the recent apps out of the full list below, so a game is not
 				// listed in both sections
 				let recent_ids: HashSet<&str> = recent.iter().map(|a| a.id.as_str()).collect();
-				ui.section_header(group, "LVRR.LIBRARY.RECENT")?;
-				self.mount_apps(&executor, &mut ui, group, &recent)?;
-				ui.section_header(group, "LVRR.LIBRARY.ALL_APPS")?;
 				let rest: Vec<&VrApplication> = shown
 					.iter()
 					.copied()
 					.filter(|a| !recent_ids.contains(a.id.as_str()))
 					.collect();
-				self.mount_apps(&executor, &mut ui, group, &rest)?;
+				ui.section_header(group, "LVRR.LIBRARY.RECENT")?;
+				self.mount_apps(&executor, &mut ui, group, &recent)?;
+				if !rest.is_empty() {
+					ui.section_header(group, "LVRR.LIBRARY.ALL_APPS")?;
+					self.mount_apps(&executor, &mut ui, group, &rest)?;
+				}
 			}
 		} else {
 			self.mount_apps(&executor, &mut ui, group, &shown)?;
@@ -487,8 +497,14 @@ impl<T: 'static> TabLvrrLibrary<T> {
 					last_played: None,
 				};
 				let on_loaded = {
-					let (tasks, id) = (self.tasks.clone(), app.id.clone());
-					Box::new(move |cover: CoverArt| tasks.push(Task::SetCover(id, Rc::new(cover))))
+					let (tasks, id, generation) = (self.tasks.clone(), app.id.clone(), self.cover_generation);
+					Box::new(move |cover: CoverArt| {
+						tasks.push(Task::SetCover {
+							generation,
+							id,
+							cover: Rc::new(cover),
+						});
+					})
 				};
 				let wrap = ui.cover_wrap(covers)?;
 				let view = game_cover::View::new(game_cover::Params {
@@ -509,7 +525,7 @@ impl<T: 'static> TabLvrrLibrary<T> {
 					});
 					Ok(())
 				}));
-				self.covers.entry(app.id.clone()).or_default().push(view);
+				self.covers.insert(app.id.clone(), view);
 				self.mount_options(ui, wrap, app, true)?;
 			}
 		}
@@ -542,13 +558,7 @@ impl<T: 'static> TabLvrrLibrary<T> {
 
 	/// A menu with the controllers the game sees through xrizer, and Remove for added apps.
 	/// A game that doesn't see the real controllers says so.
-	fn mount_options(
-		&self,
-		ui: &mut Ui,
-		parent: WidgetID,
-		app: &VrApplication,
-		corner: bool,
-	) -> anyhow::Result<()> {
+	fn mount_options(&self, ui: &mut Ui, parent: WidgetID, app: &VrApplication, corner: bool) -> anyhow::Result<()> {
 		let mut cells = Vec::new();
 		let mut controllers = ControllerType::Auto;
 		if let Some(app_id) = app.steam_app_id() {

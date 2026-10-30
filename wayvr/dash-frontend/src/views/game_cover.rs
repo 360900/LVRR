@@ -141,9 +141,8 @@ impl View {
 		layout: &mut Layout,
 		cover_art: &CoverArt,
 	) -> anyhow::Result<()> {
-		// clear the loading spinner and any image already mounted, so applying the cover
-		// twice (a game listed in both the Recent and All rows shares one app id) does not
-		// stack two images side by side
+		// clear the loading spinner and any image already mounted, so a cover applied more
+		// than once never stacks two images side by side
 		layout.remove_children(self.id_image_parent);
 
 		if cover_art.compressed_image_data.is_empty() {
