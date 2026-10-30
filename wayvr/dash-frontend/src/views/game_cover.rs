@@ -49,7 +49,6 @@ pub struct Params<'a, 'b> {
 pub struct View {
 	pub button: Rc<ComponentButton>,
 	id_image_parent: WidgetID,
-	id_loading: WidgetID,
 	app_name: String,
 	app_id: AppID,
 }
@@ -142,7 +141,10 @@ impl View {
 		layout: &mut Layout,
 		cover_art: &CoverArt,
 	) -> anyhow::Result<()> {
-		layout.remove_widget(self.id_loading);
+		// clear the loading spinner and any image already mounted, so applying the cover
+		// twice (a game listed in both the Recent and All rows shares one app id) does not
+		// stack two images side by side
+		layout.remove_children(self.id_image_parent);
 
 		if cover_art.compressed_image_data.is_empty() {
 			// mount placeholder
@@ -276,7 +278,8 @@ impl View {
 			rect_gradient_style(taffy::AlignSelf::END, 0.05),
 		)?;
 
-		let id_loading = wgui_simple::create_loading(wgui_simple::CreateLoadingParams {
+		// the loading spinner lives in image_parent and is cleared when the cover arrives
+		wgui_simple::create_loading(wgui_simple::CreateLoadingParams {
 			layout: params.ess.layout,
 			parent_id: image_parent.id,
 			with_text: false,
@@ -296,7 +299,6 @@ impl View {
 			id_image_parent: image_parent.id,
 			app_name: params.manifest.name.clone(),
 			app_id: params.manifest.app_id.clone(),
-			id_loading,
 		})
 	}
 }

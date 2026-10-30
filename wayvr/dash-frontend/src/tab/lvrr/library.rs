@@ -399,8 +399,8 @@ impl<T: 'static> TabLvrrLibrary<T> {
 			if recent.is_empty() {
 				self.mount_apps(&executor, &mut ui, group, &shown)?;
 			} else {
-				// the recent apps are a subset of `shown`; keep them out of the full
-				// list below so they are not shown twice
+				// keep the recent apps out of the full list below, so a game is not
+				// listed in both sections
 				let recent_ids: HashSet<&str> = recent.iter().map(|a| a.id.as_str()).collect();
 				ui.section_header(group, "LVRR.LIBRARY.RECENT")?;
 				self.mount_apps(&executor, &mut ui, group, &recent)?;
