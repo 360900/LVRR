@@ -383,7 +383,7 @@ void scenes::lobby::lvrr_gui_shell(XrTime predicted_display_time)
 	}
 
 	ImGui::SetCursorPos({col_x, shell_pad});
-	bool close = ui::shell_top(col_w, icon, title, _cS("tooltip of the close button in the lobby", "Stop LVRR"));
+	bool close = ui::shell_top(col_w, icon, title, _cS("tooltip of the close button in the lobby", "Close the app"));
 
 	ImGui::SetCursorPos({col_x, content_y});
 	ui::shell_content_begin({col_w, content_h}, shell_content_padding);
@@ -434,7 +434,7 @@ void scenes::lobby::lvrr_gui_shell(XrTime predicted_display_time)
 
 	if (close)
 		ImGui::OpenPopup("stop lvrr");
-	if (ui::confirm_modal("stop lvrr", _cS("confirmation messagebox title", "Stop LVRR"), _S("Close the headset app? The PC keeps running."), _cS("button", "Stop"), _("Cancel"), true) == 1)
+	if (ui::confirm_modal("stop lvrr", _cS("confirmation messagebox title", "Close the app"), _S("Close the headset app? The PC keeps running."), _cS("button", "Close"), _("Cancel"), true) == 1)
 		application::pop_scene();
 
 	ImGui::End();
