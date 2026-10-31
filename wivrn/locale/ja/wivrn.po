@@ -1028,7 +1028,7 @@ msgstr "デバッグ"
 #: client/scenes/lobby_gui.cpp:1282
 msgctxt "tab label"
 msgid "About"
-msgstr "WiVRnについて"
+msgstr "LVRRについて"
 
 #: client/scenes/lobby_gui.cpp:1284
 msgctxt "tab label"

@@ -2,12 +2,14 @@
 //!
 //! Only user-visible strings and images change; identifiers (binaries, D-Bus names, config
 //! directories) keep their upstream names. Re-run it after merging an upstream: it is
-//! idempotent, and `--check` reports what still needs rebranding, rules that no longer match,
-//! and upstream images that changed under LVRR's replacements.
+//! idempotent, and reports rules that no longer match and upstream images that changed under
+//! LVRR's replacements. `--accept-images` records those images once their replacements were
+//! reviewed; `--check` changes nothing and also reports what still needs rebranding.
 //!
 //! WayVR's language files are rebranded when they are loaded (see
 //! `wayvr/lvrr-common/src/rebrand.rs`), so they never need editing here.
 
+use std::collections::HashMap;
 use std::fs;
 use std::process::Command;
 
@@ -192,8 +194,9 @@ const RULES: &[Rule] = &[
     ),
 ];
 
-/// Translatable headset strings: changed in the sources and, with their translations, in
-/// every `wivrn/locale/*/wivrn.po`.
+/// Translatable headset strings naming WiVRn: changed in the sources and, with their
+/// translations, in every `wivrn/locale/*/wivrn.po`. Translations naming it where the
+/// source doesn't need no rule: `rebrand_po` renames those.
 const MESSAGES: &[(&[&str], &str, &str)] = &[
     (
         &["wivrn/client/scenes/gui_settings.cpp"],
@@ -255,12 +258,23 @@ const COPIES: &[(&str, &str)] = &[
     ),
 ];
 
-/// Upstream images LVRR's assets replace, with the git blob ids they were replaced at, in
-/// `packaging/rebrand-upstream.txt`. A changed blob means upstream changed the image.
-const REPLACED: &[&str] = &[
-    "wayvr/dash-frontend/assets/dashboard/splash.png",
-    "wayvr/dash-frontend/assets/dashboard/wayvr_dashboard_mono.svg",
-    "wayvr/wayvr/src/assets/watch/wayvr_dashboard_mono.svg",
+/// Upstream images LVRR replaces, each with the LVRR file to compare and edit when upstream
+/// changes it: its `lvrr-assets` replacement, or the logo `COPIES` installs there. The
+/// upstream images' git blob ids at the last review are in `packaging/rebrand-upstream.txt`;
+/// a changed blob means upstream changed the image.
+const REPLACED: &[(&str, &str)] = &[
+    (
+        "wayvr/dash-frontend/assets/dashboard/splash.png",
+        "wayvr/dash-frontend/lvrr-assets/dashboard/splash.png",
+    ),
+    (
+        "wayvr/dash-frontend/assets/dashboard/wayvr_dashboard_mono.svg",
+        "packaging/logo/lvrr-mono.svg",
+    ),
+    (
+        "wayvr/wayvr/src/assets/watch/wayvr_dashboard_mono.svg",
+        "packaging/logo/lvrr-mono.svg",
+    ),
 ];
 const REPLACED_RECORD: &str = "packaging/rebrand-upstream.txt";
 
@@ -269,9 +283,10 @@ const SCANNED_SOURCES: &str = "wivrn/client";
 const TRANSLATABLE: &[&str] = &["_(\"", "_S(\"", "_F(\"", "_cS(", "_cF(", "_C("];
 
 pub fn run(args: &[String]) -> Result {
-    let check = match args {
-        [] => false,
-        [a] if a == "--check" => true,
+    let (check, accept_images) = match args {
+        [] => (false, false),
+        [a] if a == "--check" => (true, false),
+        [a] if a == "--accept-images" => (false, true),
         _ => {
             return Err(format!(
                 "rebrand: unknown arguments {args:?}\n\n{}",
@@ -330,16 +345,35 @@ pub fn run(args: &[String]) -> Result {
         }
     }
 
+    // A changed image needs a look at its replacement before it's recorded, so
+    // only --accept-images records it.
     let record = replaced_record()?;
-    if check {
-        let recorded = fs::read_to_string(root().join(REPLACED_RECORD)).unwrap_or_default();
-        if recorded != record {
-            problems.push(format!(
-				"upstream changed an image LVRR replaces, or {REPLACED_RECORD} is missing; review the replacement in lvrr-assets, then run `cargo xtask rebrand`"
-			));
-        }
-    } else {
+    let recorded = fs::read_to_string(root().join(REPLACED_RECORD)).unwrap_or_default();
+    let (new, old) = (blob_ids(&record), blob_ids(&recorded));
+    let images: Vec<_> = REPLACED
+        .iter()
+        .filter(|(upstream, _)| new.get(upstream) != old.get(upstream))
+        .collect();
+    if accept_images {
         write(REPLACED_RECORD, &record)?;
+        for (upstream, _) in images {
+            println!("accepted: {upstream}");
+        }
+    } else if !images.is_empty() {
+        for (upstream, replacement) in images {
+            problems.push(format!(
+                "{upstream}: upstream changed this image; compare it with {replacement}, then run `cargo xtask rebrand --accept-images`"
+            ));
+        }
+    } else if recorded != record {
+        // Stale lines only, which need no review
+        if check {
+            problems.push(format!(
+                "{REPLACED_RECORD} is out of date; run `cargo xtask rebrand`"
+            ));
+        } else {
+            write(REPLACED_RECORD, &record)?;
+        }
     }
 
     problems.extend(unbranded_messages()?);
@@ -365,9 +399,12 @@ pub fn run(args: &[String]) -> Result {
     Ok(())
 }
 
-/// Rebrands the entries of a gettext catalog whose msgid is one of `MESSAGES`: the msgid
-/// becomes the new source string, and the translations get the new name.
+/// Rebrands a gettext catalog: entries whose msgid is one of `MESSAGES` get the new source
+/// string, and translations get the new name, also where a translator added it. Not in the
+/// header, whose metadata changes with every Weblate sync, nor for other sources naming
+/// WiVRn: they need a `MESSAGES` rule (`unbranded_messages` asks for one) and may hold a URL.
 fn rebrand_po(text: &str) -> String {
+    let rename = |line: &str| line.replace("WiVRn", "LVRR").replace("WinVRn", "LVRR");
     let mut out = Vec::new();
     for entry in text.split("\n\n") {
         let lines: Vec<&str> = entry.lines().collect();
@@ -383,14 +420,32 @@ fn rebrand_po(text: &str) -> String {
             .iter()
             .map(|l| l.trim_start_matches("msgid ").trim_matches('"'))
             .collect();
-        let Some((_, _, to)) = MESSAGES.iter().find(|(_, from, _)| *from == msgid) else {
+        let mut rebranded: Vec<String> = lines[..start].iter().map(|l| l.to_string()).collect();
+        if let Some((_, _, to)) = MESSAGES.iter().find(|(_, from, _)| *from == msgid) {
+            rebranded.push(format!("msgid \"{to}\""));
+            for line in &lines[end..] {
+                rebranded.push(rename(line));
+            }
+        } else if msgid.is_empty() || msgid.contains("WiVRn") {
             out.push(entry.to_string());
             continue;
-        };
-        let mut rebranded: Vec<String> = lines[..start].iter().map(|l| l.to_string()).collect();
-        rebranded.push(format!("msgid \"{to}\""));
-        for line in &lines[end..] {
-            rebranded.push(line.replace("WiVRn", "LVRR").replace("WinVRn", "LVRR"));
+        } else {
+            // Only msgstr and msgstr[N] lines and their continuations: msgctxt, msgid_plural
+            // and comments stay as upstream has them
+            let mut in_msgstr = false;
+            for line in &lines[start..] {
+                in_msgstr = line.starts_with("msgstr") || (in_msgstr && line.starts_with('"'));
+                rebranded.push(if in_msgstr {
+                    rename(line)
+                } else {
+                    line.to_string()
+                });
+            }
+        }
+        // Keeps untouched catalogs byte for byte
+        if rebranded == lines {
+            out.push(entry.to_string());
+            continue;
         }
         let mut rebranded = rebranded.join("\n");
         if entry.ends_with('\n') {
@@ -420,7 +475,7 @@ fn po_files() -> Result<Vec<String>> {
 
 fn replaced_record() -> Result<String> {
     let mut record = String::new();
-    for file in REPLACED {
+    for &(file, _) in REPLACED {
         let out = Command::new("git")
             .current_dir(root())
             .args(["hash-object", file])
@@ -438,6 +493,15 @@ fn replaced_record() -> Result<String> {
         ));
     }
     Ok(record)
+}
+
+/// The blob ids in a `REPLACED_RECORD`, by path.
+fn blob_ids(record: &str) -> HashMap<&str, &str> {
+    record
+        .lines()
+        .filter_map(|l| l.split_once(' '))
+        .map(|(blob, path)| (path, blob))
+        .collect()
 }
 
 /// Translatable headset strings mentioning WiVRn that no message rule covers, typically new
@@ -486,4 +550,49 @@ fn write(file: &str, text: &str) -> Result {
         return Ok(());
     }
     fs::write(&path, text).map_err(|e| format!("{file}: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn po_translations() {
+        // The header, msgctxt, comments, sources naming WiVRn and obsolete entries keep it
+        let po = r#"msgid ""
+msgstr ""
+"Project-Id-Version: WiVRn\n"
+
+#. In the WiVRn lobby
+msgctxt "WiVRn tab"
+msgid "About"
+msgstr "WiVRnについて"
+
+msgid "Input the PIN"
+msgid_plural "Input the PINs"
+msgstr[0] "PIN z WiVRn"
+msgstr[1] ""
+"PINy z WinVRn"
+
+msgid "See https://github.com/WiVRn/WiVRn"
+msgstr "Zobacz https://github.com/WiVRn/WiVRn"
+
+#~ msgid "Connected"
+#~ msgstr "Połączono z WiVRn"
+"#;
+        let rebranded = po
+            .replace("WiVRnについて", "LVRRについて")
+            .replace("PIN z WiVRn", "PIN z LVRR")
+            .replace("PINy z WinVRn", "PINy z LVRR");
+        assert_eq!(rebrand_po(po), rebranded);
+        assert_eq!(rebrand_po(&rebranded), rebranded);
+    }
+
+    #[test]
+    fn replaced_files_are_editable() {
+        // The next run writes COPIES over its destinations, reverting an edit made there
+        for (_, file) in REPLACED {
+            assert!(!COPIES.iter().any(|(_, dst)| dst == file), "{file}");
+        }
+    }
 }

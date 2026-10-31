@@ -7,7 +7,7 @@ use std::env;
 use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 mod rebrand;
@@ -17,7 +17,8 @@ const USAGE: &str = "usage: cargo xtask <command>
 commands:
   build [--release] [--prefix P] [--i686] [--only C,...]
         build the components (xrizer, wivrn, wayvr, lvrr) for prefix P
-        (default /opt/lvrr); --i686 also builds the 32-bit xrizer
+        (default /opt/lvrr); --i686 also builds the 32-bit xrizer; --only
+        rebuilds some of them and needs the same options as the last full build
   install [--destdir D]
         install the last build into its prefix, under D if given
   dist [--prefix P]
@@ -30,8 +31,10 @@ commands:
   client
         build WiVRn's desktop headset client into target/client-stage, for testing
         the server without a headset
-  rebrand [--check]
-        show LVRR instead of WiVRn and WayVR to users; run after merging an upstream
+  rebrand [--check | --accept-images]
+        show LVRR instead of WiVRn and WayVR to users; run after merging an
+        upstream; --accept-images records upstream images LVRR replaces once
+        their replacements were reviewed
   version
         print the LVRR version";
 
@@ -84,6 +87,7 @@ fn target() -> PathBuf {
 }
 
 /// Settings of the last `build`, which `install` needs.
+#[derive(PartialEq)]
 struct Build {
     prefix: PathBuf,
     release: bool,
@@ -124,6 +128,12 @@ impl Build {
     fn profile(&self) -> &'static str {
         if self.release { "release" } else { "debug" }
     }
+
+    /// WiVRn's CMake dir. Each build type needs its own, or every switch
+    /// between dev and release builds recompiles all of WiVRn and Monado.
+    fn wivrn_dir(&self) -> PathBuf {
+        target().join(if self.release { "wivrn" } else { "wivrn-dev" })
+    }
 }
 
 fn build(args: &[String]) -> Result {
@@ -151,7 +161,35 @@ fn build(args: &[String]) -> Result {
     if !b.prefix.is_absolute() {
         return Err("--prefix must be an absolute path".into());
     }
-    b.save()?;
+    // A desktop entry's program path can't contain '=', and a newline would
+    // also break target/lvrr-build.
+    let prefix = b.prefix.to_string_lossy();
+    if prefix.contains(|c: char| c == '=' || c.is_control()) {
+        return Err("--prefix can't contain '=' or control characters".into());
+    }
+    // CMake caches the prefix with '..' collapsed, which install() would never
+    // match with the record (and tar strips it from dist's member names).
+    if b.prefix.components().any(|c| c == Component::ParentDir) {
+        return Err("--prefix can't contain '..'".into());
+    }
+    // install() takes every component built with the recorded options, so
+    // building only some with other options would mix builds.
+    if COMPONENTS.iter().any(|c| !only.contains(c)) {
+        let last = Build::load()
+            .map_err(|_| "--only needs an earlier full build; build all components first")?;
+        if last != b {
+            let flags = match (last.release, last.i686) {
+                (true, true) => "--release --i686",
+                (true, false) => "--release",
+                (false, true) => "--i686",
+                (false, false) => "no --release or --i686",
+            };
+            return Err(format!(
+                "--only needs the last full build's options ({flags}, prefix {}); build all components to change them",
+                last.prefix.display()
+            ));
+        }
+    }
 
     let ver = version()?;
     for c in COMPONENTS.iter().filter(|c| only.contains(c)) {
@@ -164,7 +202,8 @@ fn build(args: &[String]) -> Result {
             _ => unreachable!(),
         }
     }
-    Ok(())
+    // Saved last, so a failed build doesn't record options its artifacts lack.
+    b.save()
 }
 
 fn build_xrizer(b: &Build, ver: &str) -> Result {
@@ -197,7 +236,7 @@ fn build_xrizer(b: &Build, ver: &str) -> Result {
 }
 
 fn build_wivrn(b: &Build, ver: &str) -> Result {
-    let dir = target().join("wivrn");
+    let dir = b.wivrn_dir();
     // Put LVRR's xrizer ahead of the places WiVRn searches by default.
     let compat = format!(
         "{}:{}",
@@ -248,6 +287,17 @@ fn wivrn_compat_search_path() -> Result<String> {
         .ok_or_else(|| format!("{}: OVR_COMPAT_SEARCH_PATH not found", path.display()))
 }
 
+/// The prefix the WiVRn build in `dir` is configured for, read from its CMakeCache.txt.
+fn wivrn_install_prefix(dir: &Path) -> Result<PathBuf> {
+    let path = dir.join("CMakeCache.txt");
+    let text = fs::read_to_string(&path)
+        .map_err(|_| format!("{} has no WiVRn build; build wivrn first", dir.display()))?;
+    text.lines()
+        .find_map(|l| l.strip_prefix("CMAKE_INSTALL_PREFIX:")?.split_once('='))
+        .map(|(_, value)| PathBuf::from(value))
+        .ok_or_else(|| format!("{}: CMAKE_INSTALL_PREFIX not found", path.display()))
+}
+
 fn build_wayvr(b: &Build) -> Result {
     let mut cmd = cargo(&root().join("wayvr"));
     cmd.args([
@@ -286,8 +336,20 @@ fn install(args: &[String]) -> Result {
         None => b.prefix.clone(),
     };
 
+    // cmake --install takes the prefix WiVRn was configured for, which is also
+    // compiled into the server.
+    let wivrn = b.wivrn_dir();
+    let configured = wivrn_install_prefix(&wivrn)?;
+    if configured != b.prefix {
+        return Err(format!(
+            "{} is configured for {}, not {}; build wivrn for that prefix first",
+            wivrn.display(),
+            configured.display(),
+            b.prefix.display()
+        ));
+    }
     let mut cmd = Command::new("cmake");
-    cmd.arg("--install").arg(target().join("wivrn"));
+    cmd.arg("--install").arg(&wivrn);
     if let Some(d) = &destdir {
         cmd.env("DESTDIR", d);
     }
@@ -308,12 +370,19 @@ fn install(args: &[String]) -> Result {
         &xrizer_dst.join("version.txt"),
         0o644,
     )?;
+    // A 32-bit xrizer left by an earlier --i686 build would get out of date.
+    let xrizer32 = xrizer_dst.join("vrclient.so");
     if b.i686 {
         copy(
             &xrizer.join(I686).join(profile).join("bin/vrclient.so"),
-            &xrizer_dst.join("vrclient.so"),
+            &xrizer32,
             0o755,
         )?;
+    } else if remove_file(&xrizer32)? {
+        eprintln!(
+            "xtask: removed {}, this build has no --i686",
+            xrizer32.display()
+        );
     }
 
     for bin in ["wayvr", "wayvrctl", "lvrr-ui"] {
@@ -335,19 +404,25 @@ fn install(args: &[String]) -> Result {
         &prefix.join("share/icons/hicolor/scalable/apps/io.github.lvrr.svg"),
         0o644,
     )?;
-    let template = root().join("packaging/lvrr.desktop.in");
-    let desktop = fs::read_to_string(&template)
-        .map_err(|e| format!("{}: {e}", template.display()))?
-        .replace("@PREFIX@", &b.prefix.display().to_string());
-    // named after the window's app id, so desktops match the two
     let applications = prefix.join("share/applications");
-    write(&applications.join("io.github.lvrr.desktop"), &desktop)?;
-    match fs::remove_file(applications.join("lvrr.desktop")) {
-        Err(e) if e.kind() != ErrorKind::NotFound => {
-            return Err(format!("removing the old lvrr.desktop: {e}"));
-        }
-        _ => {}
+    let exec = |bin: &str| desktop_exec_arg(&b.prefix.join(bin).display().to_string());
+    for (template, entry) in [
+        // named after the window's app id, so desktops match the two
+        ("lvrr.desktop.in", "io.github.lvrr.desktop"),
+        // not in menus; KWin before 6.8 offers its screencast only to
+        // clients whose entry lists it
+        ("lvrr-wayvr.desktop.in", "io.github.lvrr.wayvr.desktop"),
+    ] {
+        let template = root().join("packaging").join(template);
+        let desktop = fs::read_to_string(&template)
+            .map_err(|e| format!("{}: {e}", template.display()))?
+            .replace("@LVRR@", &exec("bin/lvrr"))
+            .replace("@WAYVR@", &exec("bin/wayvr"))
+            .replace("@PREFIX@", &desktop_string(&b.prefix.display().to_string()));
+        write(&applications.join(entry), &desktop)?;
     }
+    // io.github.lvrr.desktop's old name
+    remove_file(&applications.join("lvrr.desktop"))?;
 
     eprintln!("xtask: installed to {}", prefix.display());
     Ok(())
@@ -362,6 +437,10 @@ fn dist(args: &[String]) -> Result {
             _ => return Err(format!("dist: unknown argument {arg}\n\n{USAGE}")),
         }
     }
+    // Only the prefix is packed (see below); fail before the long build.
+    if Path::new(&prefix).file_name().is_none() {
+        return Err("dist: --prefix must be below /".into());
+    }
     build(&strings(&["--release", "--i686", "--prefix", &prefix]))?;
 
     let dist = target().join("dist");
@@ -370,8 +449,22 @@ fn dist(args: &[String]) -> Result {
     install(&strings(&["--destdir", &stage.display().to_string()]))?;
 
     let tarball = dist.join(format!("lvrr-{}-x86_64.tar.gz", version()?));
+    // Extracted into / as root, tar sets the owner and mode of every directory
+    // in the archive, existing ones too. So pack only the prefix, not / or
+    // /opt, owned by root and with modes that don't depend on the builder.
     let mut cmd = Command::new("tar");
-    cmd.arg("-C").arg(&stage).arg("-czf").arg(&tarball).arg(".");
+    cmd.args([
+        "--owner=0",
+        "--group=0",
+        "--numeric-owner",
+        "--mode=u=rwX,go=rX,a-s",
+        "--sort=name",
+    ])
+    .arg("-C")
+    .arg(&stage)
+    .arg("-czf")
+    .arg(&tarball)
+    .arg(Path::new(&prefix).strip_prefix("/").unwrap());
     run(cmd)?;
     remove_dir(&stage)?;
     println!("{}", tarball.display());
@@ -544,11 +637,7 @@ fn copy(src: &Path, dst: &Path, mode: u32) -> Result {
     if let Some(dir) = dst.parent() {
         fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     }
-    match fs::remove_file(dst) {
-        Ok(()) => (),
-        Err(e) if e.kind() == ErrorKind::NotFound => (),
-        Err(e) => return Err(format!("removing {}: {e}", dst.display())),
-    }
+    remove_file(dst)?;
     fs::copy(src, dst).map_err(|e| format!("copying {}: {e}", src.display()))?;
     fs::set_permissions(dst, fs::Permissions::from_mode(mode))
         .map_err(|e| format!("setting mode of {}: {e}", dst.display()))
@@ -561,11 +650,49 @@ fn write(dst: &Path, contents: &str) -> Result {
     fs::write(dst, contents).map_err(|e| format!("writing {}: {e}", dst.display()))
 }
 
+/// `s` escaped as a desktop entry string value, which readers unescape first.
+/// Only backslashes need it; build() keeps control characters out of the prefix.
+fn desktop_string(s: &str) -> String {
+    s.replace('\\', "\\\\")
+}
+
+/// `arg` as one argument of a desktop entry's Exec key, quoted and escaped as
+/// the Desktop Entry spec asks.
+fn desktop_exec_arg(arg: &str) -> String {
+    const RESERVED: &[char] = &[
+        ' ', '\t', '\n', '"', '\'', '\\', '>', '<', '~', '|', '&', ';', '$', '*', '?', '#', '(',
+        ')', '`',
+    ];
+    let mut quoted = arg.to_string();
+    if arg.contains(RESERVED) {
+        quoted = String::from('"');
+        for c in arg.chars() {
+            if matches!(c, '"' | '`' | '$' | '\\') {
+                quoted.push('\\');
+            }
+            quoted.push(c);
+        }
+        quoted.push('"');
+    }
+    // %% stands for % whether a reader expands field codes before unquoting
+    // (GLib) or after (the spec).
+    desktop_string(&quoted.replace('%', "%%"))
+}
+
 fn remove_dir(dir: &Path) -> Result {
     match fs::remove_dir_all(dir) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
         Err(e) => Err(format!("removing {}: {e}", dir.display())),
+    }
+}
+
+/// Removes a file; false if there was none.
+fn remove_file(path: &Path) -> Result<bool> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("removing {}: {e}", path.display())),
     }
 }
 
@@ -602,4 +729,31 @@ fn run_staged(args: &[String]) -> Result {
 
 fn strings(args: &[&str]) -> Vec<String> {
     args.iter().map(|s| s.to_string()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn desktop_exec_args() {
+        assert_eq!(desktop_exec_arg("/opt/lvrr/bin/lvrr"), "/opt/lvrr/bin/lvrr");
+        assert_eq!(
+            desktop_exec_arg("/home/Jane Doe/lvrr/bin/lvrr"),
+            r#""/home/Jane Doe/lvrr/bin/lvrr""#
+        );
+        assert_eq!(
+            desktop_exec_arg("/opt/100%/bin/lvrr"),
+            "/opt/100%%/bin/lvrr"
+        );
+        // the spec's examples: \\$ for a dollar sign, \\\\ for a backslash
+        assert_eq!(
+            desktop_exec_arg("/opt/a$b/bin/lvrr"),
+            r#""/opt/a\\$b/bin/lvrr""#
+        );
+        assert_eq!(
+            desktop_exec_arg(r"/opt/a\b/bin/lvrr"),
+            r#""/opt/a\\\\b/bin/lvrr""#
+        );
+    }
 }

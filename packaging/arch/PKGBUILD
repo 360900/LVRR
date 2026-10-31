@@ -4,7 +4,8 @@ pkgrel=1
 pkgdesc="Linux VR Runtime: VR streaming to standalone headsets, OpenVR games without SteamVR and desktop in VR"
 arch=(x86_64)
 url="https://github.com/360900/LVRR"
-license=(GPL-3.0-or-later)
+# WiVRn, xrizer and lvrr; wayvr and the LVRR window; Monado
+license=(GPL-3.0-or-later GPL-3.0-only BSL-1.0)
 depends=(
   # WiVRn server
   avahi boost-libs cairo ffmpeg glib2 glibc libarchive libbsd libgcc libgl libnotify libpipewire libpng
@@ -23,7 +24,8 @@ makedepends=(
 )
 optdepends=(
   'android-tools: lvrr usb and lvrr install'
-  'wl-clipboard: copying from the LVRR window on Wayland'
+  'wl-clipboard: copying text on Wayland'
+  'xclip: copying text on X11'
 )
 provides=(lvrr)
 conflicts=(lvrr)
@@ -52,4 +54,5 @@ package() {
   install -d "$pkgdir/usr/bin" "$pkgdir/usr/share/applications"
   ln -s /opt/lvrr/bin/lvrr "$pkgdir/usr/bin/lvrr"
   ln -s /opt/lvrr/share/applications/io.github.lvrr.desktop "$pkgdir/usr/share/applications/io.github.lvrr.desktop"
+  ln -s /opt/lvrr/share/applications/io.github.lvrr.wayvr.desktop "$pkgdir/usr/share/applications/io.github.lvrr.wayvr.desktop"
 }

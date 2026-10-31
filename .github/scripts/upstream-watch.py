@@ -123,7 +123,15 @@ def main():
     report = ["# Upstream watch", ""]
     attention = False
     for name, repo, branch, prefix, local_edits in read_upstreams():
-        findings = check(name, repo, branch, prefix, local_edits, ack_commits, seen)
+        try:
+            findings = check(name, repo, branch, prefix, local_edits, ack_commits, seen)
+        except subprocess.CalledProcessError as e:
+            # Show git's own error and still report the other upstreams.
+            err = (e.stderr or "").strip() or f"exit status {e.returncode}"
+            findings = [
+                f"`{' '.join(e.cmd)}` failed:\n\n"
+                + "\n".join("      " + line for line in err.splitlines())
+            ]
         report.append(f"## {name}: {repo} `{branch}`")
         report.append("")
         if findings:

@@ -1,9 +1,13 @@
 name: CI
 
+# Markdown alone doesn't run CI, except docs/dbus.md, whose config table
+# lvrr-common's tests check.
 on:
   push:
     branches: [main]
+    paths: ['**', '!**.md', 'docs/dbus.md']
   pull_request:
+    paths: ['**', '!**.md', 'docs/dbus.md']
   workflow_dispatch:
 
 concurrency:
@@ -16,26 +20,20 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
+# Job names must not be make_release or build_appimage, which wayvr's build.rs
+# adds to its version.
 jobs:
-  # Job names must not be make_release or build_appimage, which wayvr's
-  # build.rs adds to its version.
   linux:
     name: Linux
     runs-on: ubuntu-24.04
     container: archlinux:base-devel
     steps:
-      - name: Install dependencies
+      # Checkout needs git to clone with history, and the PKGBUILD's lib32
+      # dependencies need multilib.
+      - name: Install git
         run: |
           printf '\n[multilib]\nInclude = /etc/pacman.d/mirrorlist\n' >> /etc/pacman.conf
-          pacman -Syu --noconfirm --needed git rustup \
-            boost clang cli11 cmake eigen extra-cmake-modules glib2-devel libdrm ninja nlohmann-json python \
-            qt6-tools shaderc vulkan-headers \
-            avahi boost-libs cairo ffmpeg glib2 libarchive libbsd libgl libnotify libpipewire libpng librsvg \
-            libx11 libxcb openssl systemd-libs vulkan-icd-loader x264 \
-            kcoreaddons ki18n kiconthemes kirigami kirigami-addons polkit qcoro qqc2-desktop-style qt6-base \
-            qt6-declarative \
-            alsa-lib dav1d dbus libinput libxext libxkbcommon libxkbcommon-x11 libxrandr openvr openxr \
-            lib32-gcc-libs lib32-glibc
+          pacman -Syu --noconfirm --needed git
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
@@ -43,33 +41,80 @@ jobs:
       # git (and the versions WiVRn and wayvr take from it) would fail.
       - name: Trust the checkout
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      # The package's own dependencies, so CI fails when the PKGBUILD lacks one.
+      - name: Install dependencies
+        shell: bash
+        run: |
+          source packaging/arch/PKGBUILD
+          pacman -S --noconfirm --needed "${makedepends[@]}" "${depends[@]}"
       - name: Install Rust
         run: rustup toolchain install
+      # No listed target dir may contain another: rust-cache would strip the
+      # inner one down to the outer workspace's dependencies. So the root
+      # workspace (lvrr, xtask) isn't listed; it rebuilds in under a minute.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
-            . -> target
             xrizer -> ../target/xrizer
             wayvr -> ../target/wayvr
-      - name: Lint
-        run: |
-          cargo fmt --check
-          cargo fmt --check --all --manifest-path wayvr/Cargo.toml
-          cargo clippy --locked -p lvrr -p xtask --all-targets -- -D warnings
-          cargo xtask rebrand --check
       - name: Build
+        id: build
         run: cargo xtask dist
-      - name: Test LVRR server
-        run: target/wivrn/server/lvrr-test
-      - name: Test wayvr
-        working-directory: wayvr
-        env:
-          CARGO_TARGET_DIR: ../target/wayvr
-        run: cargo test --workspace --locked --release
       - uses: actions/upload-artifact@v7
         with:
           name: lvrr-linux-x86_64
           path: target/dist/*.tar.gz
+      - name: Test LVRR server
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: target/wivrn/server/lvrr-test
+      - name: Test wayvr
+        if: ${{ !cancelled() }}
+        working-directory: wayvr
+        env:
+          CARGO_TARGET_DIR: ../target/wayvr
+        run: cargo test --workspace --locked --release
+      # Here rather than in Lint for the packages lvrr-ui's dependencies need.
+      # Only LVRR's crates: upstream wayvr code isn't clippy-clean. In release,
+      # so it reuses Build's build scripts and proc macros instead of caching
+      # a second, dev-profile tree.
+      - name: Lint LVRR's wayvr crates
+        if: ${{ !cancelled() }}
+        working-directory: wayvr
+        env:
+          CARGO_TARGET_DIR: ../target/wayvr
+        run: cargo clippy --locked --release -p lvrr-common -p lvrr-ui --all-targets --no-deps -- -D warnings
+
+  # Its own job, so a lint failure doesn't skip the build and the tests.
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    steps:
+      - name: Install dependencies
+        run: pacman -Syu --noconfirm --needed git rustup dbus
+      - uses: actions/checkout@v6
+      # As in the Linux job; rebrand --check runs git.
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Install Rust
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      # One step per check, so a failing one doesn't hide the others.
+      - name: Format
+        run: cargo fmt --check
+      - name: Format wayvr
+        if: ${{ !cancelled() }}
+        run: cargo fmt --check --all --manifest-path wayvr/Cargo.toml
+      - name: Clippy
+        if: ${{ !cancelled() }}
+        run: cargo clippy --locked -p lvrr -p xtask --all-targets -- -D warnings
+      - name: Rebrand check
+        if: ${{ !cancelled() }}
+        run: cargo xtask rebrand --check
+      # Here, where rust-cache keeps the root workspace's build.
+      - name: Test lvrr and xtask
+        if: ${{ !cancelled() }}
+        run: cargo test --workspace --locked
 
   android:
     name: Android (${{ matrix.type }})
@@ -120,6 +165,21 @@ jobs:
             echo "$APK_KEYSTORE_BASE64" | base64 --decode --ignore-garbage > wivrn/ks.keystore
           else
             echo "No signing secrets, the release APK will be unsigned"
+          fi
+      # One debug key for every run, so a newer debug APK installs over an
+      # older one. The secret is a base64 debug.keystore with AGP's defaults
+      # (store and key password android, alias androiddebugkey).
+      - name: Debug signing key
+        if: matrix.type == 'debug'
+        env:
+          APK_DEBUG_KEYSTORE_BASE64: ${{ secrets.APK_DEBUG_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$APK_DEBUG_KEYSTORE_BASE64" ]; then
+            dir="${ANDROID_USER_HOME:-$HOME/.android}"
+            mkdir -p "$dir"
+            echo "$APK_DEBUG_KEYSTORE_BASE64" | base64 --decode --ignore-garbage > "$dir/debug.keystore"
+          else
+            echo "No debug keystore secret, the debug APK gets a new signing key"
           fi
       - name: Build
         run: cargo xtask apk ${{ matrix.type == 'debug' && '--debug' || '' }} -- -Pwivrn_compress_glb=ON

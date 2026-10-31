@@ -590,7 +590,7 @@ msgstr "PIN"
 
 #: client/scenes/lobby_gui.cpp:191
 msgid "Input the PIN displayed on the dashboard"
-msgstr "Wprowadź PIN wyświetlany w aplikacji WiVRn na komputerze"
+msgstr "Wprowadź PIN wyświetlany w aplikacji LVRR na komputerze"
 
 #: client/scenes/lobby_gui.cpp:273
 msgid "Disconnected"
