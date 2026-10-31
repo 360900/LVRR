@@ -130,7 +130,10 @@ impl KdeStream {
                 return None;
             }
             client.wait_readable(deadline);
-            client.dispatch_pending();
+            if let Err(e) = client.try_dispatch_pending() {
+                log::warn!("{name}: KDE screencast: the Wayland connection failed: {e}");
+                return None;
+            }
         };
 
         match answer {

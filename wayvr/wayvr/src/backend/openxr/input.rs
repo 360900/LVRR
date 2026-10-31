@@ -145,7 +145,7 @@ impl MultiClickHandler {
         }
     }
 
-    fn check(&mut self, state: bool) -> bool {
+    fn check(&mut self, state: bool, counts: bool) -> bool {
         if !state {
             self.held_active = false;
             self.held_inactive = false;
@@ -157,6 +157,13 @@ impl MultiClickHandler {
         }
 
         if self.held_inactive {
+            return false;
+        }
+
+        // LVRR: a press that doesn't count, like a grab, also drops the clicks before it
+        if !counts {
+            self.previous = [None, None];
+            self.held_inactive = true;
             return false;
         }
 
@@ -192,10 +199,13 @@ enum ButtonConditionSet {
 struct ButtonBinding {
     conditions: ButtonConditionSet,
     clicks: MultiClickHandler,
+    // LVRR: a multi-click that the grab's input alone fires counts a press only while the
+    // pointer points at nothing and holds nothing, so retrying a grab doesn't fire it
+    idle_only: bool,
 }
 
 impl ButtonBinding {
-    fn state(&mut self, physical_inputs: &[PhysicalInput]) -> bool {
+    fn state(&mut self, physical_inputs: &[PhysicalInput], idle: bool) -> bool {
         let active = match &mut self.conditions {
             ButtonConditionSet::Any(conditions) => {
                 let mut active = false;
@@ -213,7 +223,7 @@ impl ButtonBinding {
             }
         };
 
-        self.clicks.check(active)
+        self.clicks.check(active, idle || !self.idle_only)
     }
 }
 
@@ -227,10 +237,10 @@ impl CustomClickAction {
         self.bindings.push(binding);
     }
 
-    fn state(&mut self, physical_inputs: &[PhysicalInput]) -> bool {
+    fn state(&mut self, physical_inputs: &[PhysicalInput], idle: bool) -> bool {
         let mut active = false;
         for binding in &mut self.bindings {
-            active |= binding.state(physical_inputs);
+            active |= binding.state(physical_inputs, idle);
         }
         active
     }
@@ -622,9 +632,13 @@ impl OpenXrPointer {
         xr: &XrState,
         physical_inputs: &[PhysicalInput],
     ) -> anyhow::Result<()> {
-        pointer.now.click = self.source.click.state(physical_inputs);
+        // LVRR: points at nothing and holds nothing, as of the last interact()
+        let idle =
+            pointer.interaction.hovered_id.is_none() && pointer.interaction.grabbed.is_none();
 
-        pointer.now.grab = self.source.grab.state(physical_inputs);
+        pointer.now.click = self.source.click.state(physical_inputs, idle);
+
+        pointer.now.grab = self.source.grab.state(physical_inputs, idle);
 
         let scroll = self
             .source
@@ -635,23 +649,24 @@ impl OpenXrPointer {
         pointer.now.scroll_x = scroll.x;
         pointer.now.scroll_y = scroll.y;
 
-        pointer.now.alt_click = self.source.alt_click.state(physical_inputs);
+        pointer.now.alt_click = self.source.alt_click.state(physical_inputs, idle);
 
-        pointer.now.show_hide = self.source.show_hide.state(physical_inputs);
+        pointer.now.show_hide = self.source.show_hide.state(physical_inputs, idle);
 
-        pointer.now.click_modifier_right = self.source.modifier_right.state(physical_inputs);
+        pointer.now.click_modifier_right = self.source.modifier_right.state(physical_inputs, idle);
 
-        pointer.now.toggle_dashboard = self.source.toggle_dashboard.state(physical_inputs);
+        pointer.now.toggle_dashboard = self.source.toggle_dashboard.state(physical_inputs, idle);
 
-        pointer.now.click_modifier_middle = self.source.modifier_middle.state(physical_inputs);
+        pointer.now.click_modifier_middle =
+            self.source.modifier_middle.state(physical_inputs, idle);
 
-        pointer.now.move_mouse = self.source.move_mouse.state(physical_inputs);
+        pointer.now.move_mouse = self.source.move_mouse.state(physical_inputs, idle);
 
-        pointer.now.space_drag = self.source.space_drag.state(physical_inputs);
+        pointer.now.space_drag = self.source.space_drag.state(physical_inputs, idle);
 
-        pointer.now.space_rotate = self.source.space_rotate.state(physical_inputs);
+        pointer.now.space_rotate = self.source.space_rotate.state(physical_inputs, idle);
 
-        pointer.now.space_reset = self.source.space_reset.state(physical_inputs);
+        pointer.now.space_reset = self.source.space_reset.state(physical_inputs, idle);
 
         Ok(())
     }
@@ -866,6 +881,7 @@ fn build_button_bindings(
     side: usize,
     profile_index: usize,
     physical_input_map: &PhysicalInputMap,
+    grab_inputs: &[usize],
 ) -> Vec<ButtonBinding> {
     let mut bindings = Vec::with_capacity(2);
     let threshold = action_threshold(action, side);
@@ -878,9 +894,15 @@ fn build_button_bindings(
         }
     });
     if !alternatives.is_empty() {
+        // LVRR: e.g. the hand profile's double fist, which shares the grab's grasp input
+        let idle_only = !matches!(count, ClickCount::Single)
+            && alternatives
+                .iter()
+                .any(|condition| grab_inputs.contains(&condition.input));
         bindings.push(ButtonBinding {
             conditions: ButtonConditionSet::Any(alternatives),
             clicks: MultiClickHandler::new(count),
+            idle_only,
         });
     }
 
@@ -905,6 +927,8 @@ fn build_button_bindings(
             bindings.push(ButtonBinding {
                 conditions: ButtonConditionSet::All(conditions),
                 clicks: MultiClickHandler::new(count),
+                // LVRR: a chord needs more than the grab
+                idle_only: false,
             });
         }
     }
@@ -914,6 +938,7 @@ fn build_button_bindings(
 
 fn add_button_bindings(
     action: Option<&OpenXrInputAction>,
+    grab: Option<&OpenXrInputAction>,
     profile_index: usize,
     hands: &mut [&mut OpenXrHandSource; 3],
     physical_input_map: &PhysicalInputMap,
@@ -924,7 +949,21 @@ fn add_button_bindings(
     };
 
     for (side, hand) in hands.iter_mut().enumerate() {
-        for binding in build_button_bindings(action, side, profile_index, physical_input_map) {
+        // LVRR: the inputs this hand grabs with
+        let mut grab_inputs = Vec::new();
+        for_each_path(grab.and_then(|grab| action_spec(grab, side)), |path| {
+            if let Some(input) = physical_input_index(physical_input_map, profile_index, path) {
+                grab_inputs.push(input);
+            }
+        });
+
+        for binding in build_button_bindings(
+            action,
+            side,
+            profile_index,
+            physical_input_map,
+            &grab_inputs,
+        ) {
             field(&mut **hand).add_binding(binding);
         }
     }
@@ -970,6 +1009,7 @@ fn suggest_bindings(
         // create out virtual buttons, then the xr::Binding's
         add_button_bindings(
             profile.click.as_ref(),
+            profile.grab.as_ref(),
             profile_index,
             hands,
             physical_input_map,
@@ -977,6 +1017,7 @@ fn suggest_bindings(
         );
         add_button_bindings(
             profile.alt_click.as_ref(),
+            profile.grab.as_ref(),
             profile_index,
             hands,
             physical_input_map,
@@ -984,6 +1025,8 @@ fn suggest_bindings(
         );
         add_button_bindings(
             profile.grab.as_ref(),
+            // LVRR: never idle-only, or a double-click grab could not grab a panel
+            None,
             profile_index,
             hands,
             physical_input_map,
@@ -991,6 +1034,7 @@ fn suggest_bindings(
         );
         add_button_bindings(
             profile.show_hide.as_ref(),
+            profile.grab.as_ref(),
             profile_index,
             hands,
             physical_input_map,
@@ -998,6 +1042,7 @@ fn suggest_bindings(
         );
         add_button_bindings(
             profile.toggle_dashboard.as_ref(),
+            profile.grab.as_ref(),
             profile_index,
             hands,
             physical_input_map,
@@ -1005,6 +1050,7 @@ fn suggest_bindings(
         );
         add_button_bindings(
             profile.space_drag.as_ref(),
+            profile.grab.as_ref(),
             profile_index,
             hands,
             physical_input_map,
@@ -1012,6 +1058,7 @@ fn suggest_bindings(
         );
         add_button_bindings(
             profile.space_rotate.as_ref(),
+            profile.grab.as_ref(),
             profile_index,
             hands,
             physical_input_map,
@@ -1019,6 +1066,7 @@ fn suggest_bindings(
         );
         add_button_bindings(
             profile.space_reset.as_ref(),
+            profile.grab.as_ref(),
             profile_index,
             hands,
             physical_input_map,
@@ -1026,6 +1074,7 @@ fn suggest_bindings(
         );
         add_button_bindings(
             profile.click_modifier_right.as_ref(),
+            profile.grab.as_ref(),
             profile_index,
             hands,
             physical_input_map,
@@ -1033,6 +1082,7 @@ fn suggest_bindings(
         );
         add_button_bindings(
             profile.click_modifier_middle.as_ref(),
+            profile.grab.as_ref(),
             profile_index,
             hands,
             physical_input_map,
@@ -1040,6 +1090,7 @@ fn suggest_bindings(
         );
         add_button_bindings(
             profile.move_mouse.as_ref(),
+            profile.grab.as_ref(),
             profile_index,
             hands,
             physical_input_map,

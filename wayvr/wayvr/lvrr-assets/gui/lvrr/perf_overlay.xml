@@ -17,9 +17,11 @@
       <Stat id="encoder_skipped" translation="LVRR.PERF.ENCODER_SKIPPED" />
       <Stat id="latency" translation="LVRR.PERF.LATENCY" />
       <Stat id="encode" translation="LVRR.PERF.ENCODE" />
-      <Stat id="network" translation="LVRR.PERF.NETWORK" />
+      <Stat id="send" translation="LVRR.PERF.SEND" />
+      <Stat id="transfer" translation="LVRR.PERF.TRANSFER" />
       <Stat id="decode" translation="LVRR.PERF.DECODE" />
-      <Stat id="bandwidth" translation="LVRR.PERF.BANDWIDTH" />
+      <Stat id="display" translation="LVRR.PERF.DISPLAY" />
+      <Stat id="network" translation="LVRR.PERF.NETWORK" />
       <Stat id="headset_gpu" translation="LVRR.PERF.HEADSET_GPU" />
     </rectangle>
   </elements>

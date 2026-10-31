@@ -3,7 +3,6 @@
 mod perf_overlay;
 
 use std::{
-    io::Write,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -11,13 +10,15 @@ use std::{
 use lvrr_common::{
     link::LvrrLink,
     state::{
-        Battery, BatteryDevice, Link, LvrrBackend, LvrrRequest, MAX_VIRTUAL_MONITORS, MessageKind,
-        Notice,
+        Battery, BatteryDevice, Failure, Link, LvrrBackend, LvrrRequest, MAX_VIRTUAL_MONITORS,
+        MessageKind, Notice, Reason,
     },
 };
 use serde::{Deserialize, Serialize};
 use wgui::i18n::Translation;
-use wlx_common::{config_io, overlays::ToastTopic};
+use wlx_common::{
+    astr_containers::AStrMapExt, config_io, dash_interface::DashInterface, overlays::ToastTopic,
+};
 
 #[cfg(feature = "wayland")]
 use crate::overlays::screen::virtual_monitor;
@@ -26,7 +27,7 @@ use crate::{
         input::TrackedDeviceRole,
         task::{OverlayTask, TaskType},
     },
-    overlays::toast::Toast,
+    overlays::{dashboard::DashInterfaceLive, toast::Toast},
     state::AppState,
     windowing::OverlaySelector,
 };
@@ -37,16 +38,27 @@ const CONFIG_FILE: &str = "lvrr.json5";
 pub struct LvrrApp {
     pub link: Option<LvrrLink>,
     pub perf_overlay: bool,
+    /// Screens copy their captured frames, from the config as it was at start; read when
+    /// a capture starts
+    pub copy_captured_frames: bool,
     /// The dashboard has a focused edit box, the keyboard types into it
     pub dash_text_focus: bool,
     /// Typed text for the dashboard
     pub dash_text: Vec<String>,
     pub virtual_monitors: Vec<VirtualMonitor>,
+    /// Saved sizes not added yet, which the config keeps: they wait for the screens, and
+    /// stay on a desktop that can't add monitors
+    saved_monitors: Vec<(u32, u32)>,
     /// How this desktop adds outputs, once looked up; None when it can't
     #[cfg(feature = "wayland")]
     virtual_method: std::cell::OnceCell<Option<virtual_monitor::Method>>,
+    /// The virtual monitor whose new output is being looked for, and until when
+    locating: Option<(Arc<str>, Instant)>,
     /// The mouse's area changes once a removed output is gone
     extent_refresh_at: Option<Instant>,
+    /// Counts output adds and removes, after which the virtual monitors read their place
+    /// again
+    layout_gen: u64,
     /// What the server last heard about the dashboard
     dashboard_reported: Option<bool>,
 }
@@ -66,6 +78,11 @@ struct LvrrConfig {
     perf_overlay: bool,
     /// Sizes of the virtual monitors, added again at start
     virtual_monitors: Vec<(u32, u32)>,
+    /// Copy each captured DMA-buf frame before the compositor draws into it again, for
+    /// screens that mix frames during motion when it draws on another GPU. Off by
+    /// default: the copy faults some drivers, and it needs a second graphics queue. Set
+    /// by hand; saving keeps the file's value.
+    copy_captured_frames: bool,
 }
 
 impl LvrrConfig {
@@ -97,23 +114,37 @@ pub fn start(app: &mut AppState) {
     }
     let config = LvrrConfig::load();
     app.lvrr.perf_overlay = config.perf_overlay;
+    app.lvrr.copy_captured_frames = config.copy_captured_frames;
     if app.lvrr.perf_overlay {
         perf_overlay::set_visible(app, true);
     }
-    for (width, height) in config.virtual_monitors {
-        add_virtual_monitor(app, width, height);
+    app.lvrr.saved_monitors = config.virtual_monitors;
+    if !app.lvrr.saved_monitors.is_empty() {
+        // once the screens exist, which tell whether this is Wayland: OpenVR starts this
+        // before it makes them
+        app.tasks.enqueue(TaskType::Global(Box::new(|app| {
+            if virtual_monitors_supported(app) {
+                for (width, height) in std::mem::take(&mut app.lvrr.saved_monitors) {
+                    add(app, width, height, true);
+                }
+            }
+        })));
     }
 }
 
 fn save_config(app: &AppState) {
-    let config = LvrrConfig {
-        perf_overlay: app.lvrr.perf_overlay,
-        virtual_monitors: app
-            .lvrr
-            .virtual_monitors
-            .iter()
-            .map(|m| (m.width, m.height))
-            .collect(),
+    // what WayVR doesn't change keeps the file's value, also when edited meanwhile
+    let mut config = LvrrConfig::load();
+    config.perf_overlay = app.lvrr.perf_overlay;
+    // a session that can't add the saved monitors leaves them saved
+    config.virtual_monitors = if app.lvrr.saved_monitors.is_empty() {
+        // by name: start() adds them in order, each under the lowest free name, which
+        // keys its saved placement and attributes
+        let mut monitors: Vec<_> = app.lvrr.virtual_monitors.iter().collect();
+        monitors.sort_by(|a, b| a.name.cmp(&b.name));
+        monitors.iter().map(|m| (m.width, m.height)).collect()
+    } else {
+        app.lvrr.saved_monitors.clone()
     };
     if let Err(e) = config.save() {
         log::warn!("Could not save {CONFIG_FILE}: {e:?}");
@@ -179,6 +210,12 @@ fn virtual_method(app: &mut AppState) -> Option<virtual_monitor::Method> {
 
 /// Adds a virtual monitor, shown as a screen, and remembers it
 pub fn add_virtual_monitor(app: &mut AppState, width: u32, height: u32) {
+    add(app, width, height, false);
+}
+
+/// With `restore`, for the saved monitors added again at start, a failure keeps the
+/// monitor and tries again instead of removing it
+fn add(app: &mut AppState, width: u32, height: u32, restore: bool) {
     #[cfg(feature = "wayland")]
     {
         let Some(method) = virtual_method(app) else {
@@ -201,15 +238,16 @@ pub fn add_virtual_monitor(app: &mut AppState, width: u32, height: u32) {
             height,
             output: None,
         });
-        virtual_monitor::spawn(app, method, name, width, height);
+        virtual_monitor::spawn(app, method, name, width, height, restore);
         save_config(app);
     }
     #[cfg(not(feature = "wayland"))]
-    let _ = (app, width, height);
+    let _ = (app, width, height, restore);
 }
 
 /// Removes a virtual monitor and its screen
 pub fn remove_virtual_monitor(app: &mut AppState, name: &str) {
+    end_locate_turn(app, name);
     let before = app.lvrr.virtual_monitors.len();
     app.lvrr.virtual_monitors.retain(|m| &*m.name != name);
     if app.lvrr.virtual_monitors.len() == before {
@@ -219,6 +257,8 @@ pub fn remove_virtual_monitor(app: &mut AppState, name: &str) {
         .enqueue(TaskType::Overlay(OverlayTask::DropImmediate(
             OverlaySelector::Name(name.into()),
         )));
+    // the next monitor to take the name starts with default stereo and mouse transform
+    app.session.config.attribs.arc_rm(name);
     app.lvrr.extent_refresh_at = Some(Instant::now() + Duration::from_secs(1));
     save_config(app);
 }
@@ -240,6 +280,41 @@ pub fn set_virtual_monitor_output(app: &mut AppState, name: &str, output: Arc<st
         .find(|m| &*m.name == name)
     {
         m.output = Some(output);
+    }
+    // a new output can move the auto-placed ones
+    app.lvrr.layout_gen += 1;
+}
+
+/// Changes when outputs were added or removed. wlroots and Hyprland then place the
+/// auto-placed outputs again, LVRR's among them.
+pub const fn layout_gen(app: &AppState) -> u64 {
+    app.lvrr.layout_gen
+}
+
+/// Lets one virtual monitor at a time add an output that only the order tells apart.
+/// False while another holds the turn, unless that one was removed or is past its
+/// deadline, as when it is hidden.
+pub fn take_locate_turn(app: &mut AppState, name: &str, until: Instant) -> bool {
+    if let Some((holder, deadline)) = &app.lvrr.locating
+        && **holder != *name
+        && Instant::now() < *deadline
+        && app.lvrr.virtual_monitors.iter().any(|m| m.name == *holder)
+    {
+        return false;
+    }
+    app.lvrr.locating = Some((name.into(), until));
+    true
+}
+
+/// Gives the turn back once the output is found, or the monitor failed or was removed
+pub fn end_locate_turn(app: &mut AppState, name: &str) {
+    if app
+        .lvrr
+        .locating
+        .as_ref()
+        .is_some_and(|(holder, _)| **holder == *name)
+    {
+        app.lvrr.locating = None;
     }
 }
 
@@ -269,57 +344,59 @@ pub fn tick(app: &mut AppState) {
         .is_some_and(|t| Instant::now() >= t)
     {
         app.lvrr.extent_refresh_at = None;
+        // auto-placed outputs after the removed one move into its place
+        app.lvrr.layout_gen += 1;
         if let Some(wl) = wlx_capture::wayland::WlxClient::new() {
             virtual_monitor::set_desktop_extent(app, &wl);
         }
     }
+
+    // gives a game the Library started its title, also when its session comes while the
+    // dashboard is hidden and doesn't update, and ends a start that failed. The failure is
+    // copied, as the list borrows the app.
+    let failed = app
+        .lvrr
+        .link
+        .as_ref()
+        .and_then(|link| link.state().failed_start.clone());
+    dash_frontend::frontend::lvrr_poll_start(failed.as_ref(), || {
+        DashInterfaceLive::new()
+            .monado_client_list(app, true)
+            .unwrap_or_default()
+    });
 
     let notices = match app.lvrr.link.as_mut() {
         Some(link) => link.poll(),
         None => return,
     };
     for notice in notices {
-        let (topic, text) = match notice {
+        let (topic, title, body) = match notice {
             Notice::Message(message) => {
                 let topic = match message.kind {
                     MessageKind::Info => ToastTopic::System,
                     MessageKind::Urgent => ToastTopic::Priority,
                     MessageKind::Error => ToastTopic::Error,
                 };
-                (topic, message.text)
+                let body = Translation::from_raw_text_string(message.text);
+                (topic, Translation::from_raw_text("LVRR"), body)
             }
-            Notice::RequestFailed { request, error } => {
-                (ToastTopic::Error, format!("{request} failed: {error}"))
+            // what failed, and why
+            Notice::RequestFailed { title, failure } => {
+                // the headset may still apply the change, so it isn't titled as a failure
+                let (topic, title) = if failure == Failure::Known(Reason::HeadsetSlow) {
+                    (ToastTopic::System, Translation::from_raw_text("LVRR"))
+                } else {
+                    (ToastTopic::Error, Translation::from_translation_key(title))
+                };
+                let body = match failure {
+                    Failure::Known(reason) => Translation::from_translation_key(reason.key()),
+                    Failure::Other(text) => Translation::from_raw_text_string(text),
+                };
+                (topic, title, body)
             }
         };
-        Toast::new(
-            topic,
-            Some(Translation::from_raw_text("LVRR")),
-            Translation::from_raw_text_string(text),
-        )
-        .with_timeout(5.0)
-        .submit(app);
+        Toast::new(topic, Some(title), body)
+            .with_timeout(5.0)
+            .submit(app);
     }
-}
-
-/// Copies text to the desktop clipboard
-pub fn clipboard_set_text(text: &str) -> anyhow::Result<()> {
-    for (program, args) in [
-        ("wl-copy", &[][..]),
-        ("xclip", &["-selection", "clipboard"][..]),
-    ] {
-        let Ok(mut child) = std::process::Command::new(program)
-            .args(args)
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-        else {
-            continue;
-        };
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(text.as_bytes())?;
-        }
-        child.wait()?;
-        return Ok(());
-    }
-    anyhow::bail!("Install wl-clipboard or xclip to copy text")
 }

@@ -1,16 +1,44 @@
 {
   "LVRR": {
-    "VIRTUAL_MONITOR_FAILED": "Could not add the virtual monitor",
+    "NOT_RUNNING": "Start LVRR and connect the headset first.",
+    "VIRTUAL_MONITOR_FAILED": "Couldn't add the virtual monitor",
+    "VIRTUAL_MONITOR_RETRYING": "Couldn't add the virtual monitor yet, trying again",
+    "KDE_SCREENCAST_HIDDEN": "Plasma doesn't share the screens with LVRR",
+    "KDE_SCREENCAST_HOWTO": "Screens need the screen cast pop-up on the desktop, and virtual monitors aren't available. Link io.github.lvrr.wayvr.desktop into ~/.local/share/applications (see the README), then restart the LVRR desktop.",
+    "FAILED": {
+      "HEADSET_SETTINGS": "Couldn't change the headset settings",
+      "RESTART_SESSION": "Couldn't restart the session",
+      "STOP_SESSION": "Couldn't end the session",
+      "DISCONNECT": "Couldn't disconnect the headset",
+      "QUIT": "Couldn't stop LVRR",
+      "PAIR": "Couldn't start pairing",
+      "STOP_PAIRING": "Couldn't stop pairing",
+      "FORGET": "Couldn't forget the headset",
+      "RENAME": "Couldn't rename the headset",
+      "SERVER_SETTINGS": "Couldn't save the server settings",
+      "LIST_APPS": "Couldn't list the VR apps",
+      "START_APP": "Couldn't launch the app",
+      "STOP_APP": "Couldn't stop the app"
+    },
+    "REASON": {
+      "HEADSET_SLOW": "The headset hasn't answered yet. It may still apply the new settings.",
+      "NO_HEADSET": "No headset is connected.",
+      "NO_SESSION": "No headset session is running.",
+      "BUSY": "The headset session didn't end. Quit LVRR on the headset and try again.",
+      "SERVER_GONE": "The LVRR server didn't answer."
+    },
     "PERF": {
       "REFRESH_RATE": "Refresh rate",
       "GAME_FPS": "Game",
       "GAME_MISSED": "Missed frames",
       "ENCODER_SKIPPED": "Skipped by encoder",
       "LATENCY": "Latency",
-      "ENCODE": "Encoding",
+      "ENCODE": "Encode",
+      "SEND": "Send",
+      "TRANSFER": "Transfer",
+      "DECODE": "Decode",
+      "DISPLAY": "Display",
       "NETWORK": "Network",
-      "DECODE": "Decoding",
-      "BANDWIDTH": "Bandwidth",
       "HEADSET_GPU": "Headset GPU"
     }
   }

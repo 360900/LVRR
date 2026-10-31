@@ -173,6 +173,8 @@ pub struct Layout {
 	registered_components_to_refresh: HashMap<taffy::NodeId, ComponentWeak>,
 	sounds_to_play_once: Vec<WguiSoundType>,
 	focused_component: Option<ComponentWeak>,
+	/// LVRR: bumped each time `set_focus` gives a component the focus
+	focus_serial: u64,
 
 	// Global EventAlterables queue, always processed in update() call at the end
 	pub alterables: EventAlterables,
@@ -635,6 +637,7 @@ impl Layout {
 			tasks: LayoutTasks::new(),
 			sounds_to_play_once: Vec::new(),
 			focused_component: None,
+			focus_serial: 0,
 			alterables: Default::default(),
 			global_events_to_emit: Vec::new(),
 		})
@@ -825,6 +828,8 @@ impl Layout {
 			});
 
 			self.focused_component = Some(to_focus.weak());
+			// LVRR: also for the component that had it, an edit box takes the focus on every press
+			self.focus_serial = self.focus_serial.wrapping_add(1);
 		}
 
 		Ok(())
@@ -833,6 +838,12 @@ impl Layout {
 	/// Whether a component such as an edit box has focus and takes text input
 	pub fn has_focus(&self) -> bool {
 		self.focused_component.as_ref().is_some_and(|c| c.upgrade().is_some())
+	}
+
+	/// LVRR: changes each time a component is given the focus, so a caller can tell whether an
+	/// event gave it
+	pub const fn focus_serial(&self) -> u64 {
+		self.focus_serial
 	}
 
 	fn set_style_request(&mut self, widget_id: WidgetID, style_request: &event::StyleSetRequest) {

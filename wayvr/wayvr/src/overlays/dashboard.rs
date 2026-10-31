@@ -45,6 +45,7 @@ use crate::{
     },
     config::{none_if_0, save_settings},
     ipc::ipc_server::gen_env_vec,
+    overlays::keyboard::KEYBOARD_NAME,
     state::AppState,
     subsystem::hid::WheelDelta,
     windowing::{
@@ -183,11 +184,13 @@ impl OverlayBackend for DashFrontend {
                 text: Some(text.into()),
             }));
         }
-        app.lvrr.dash_text_focus = self.inner.layout.has_focus();
 
         if let Err(e) = self.update(app, self.timestep.alpha) {
             log::error!("uncaught exception: {e:?}");
         }
+        // LVRR: after the update, so a focus a page gives, as the Library's clear button does,
+        // keeps the keyboard typing into the dashboard
+        app.lvrr.dash_text_focus = self.inner.layout.has_focus();
 
         Ok(if self.inner.layout.check_toggle_needs_redraw() {
             ShouldRender::Should
@@ -308,8 +311,19 @@ impl OverlayBackend for DashFrontend {
                 device: DeviceBitmask::from_index(hit.pointer),
             })
         };
+        // LVRR: a press on an edit box shows the keyboard, which types into it. The box takes the
+        // focus again on every press. Other presses leave a hidden keyboard hidden; buttons,
+        // sliders and checkboxes drop the focus.
+        let serial = self.inner.layout.focus_serial();
         self.push_event(&e);
         app.lvrr.dash_text_focus = self.inner.layout.has_focus();
+        if pressed && app.lvrr.dash_text_focus && self.inner.layout.focus_serial() != serial {
+            app.tasks
+                .enqueue(TaskType::Overlay(OverlayTask::ToggleOverlay(
+                    OverlaySelector::Name(KEYBOARD_NAME.into()),
+                    ToggleMode::EnsureOn,
+                )));
+        }
 
         // released while off-panel → send mouse leave as well
         if !pressed && !self.has_focus[hit.pointer] {
@@ -425,7 +439,7 @@ impl DashInterface<AppState> for DashInterfaceLive {
         use lvrr_common::state::LvrrBackend;
         match app.lvrr.link.as_mut() {
             Some(link) => link.request(request),
-            None => anyhow::bail!("Not connected to the LVRR server"),
+            None => anyhow::bail!("The LVRR server is not running"),
         }
     }
 
@@ -466,8 +480,9 @@ impl DashInterface<AppState> for DashInterfaceLive {
         crate::lvrr::remove_virtual_monitor(app, name);
     }
 
+    // LVRR: the same copy as in the desktop window
     fn clipboard_set_text(&mut self, _app: &mut AppState, text: &str) -> anyhow::Result<()> {
-        crate::lvrr::clipboard_set_text(text)
+        lvrr_common::clipboard::set_text(text)
     }
 
     fn enumerate_vulkan_devices(&mut self, data: &mut AppState) -> anyhow::Result<Vec<String>> {

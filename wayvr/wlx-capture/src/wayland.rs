@@ -239,6 +239,26 @@ impl WlxClient {
             }
         }
     }
+
+    /// LVRR: dispatch_pending that tells the caller when the connection failed. A failed read
+    /// fails again on every call, so a loop that only logs it spins.
+    pub fn try_dispatch_pending(&mut self) -> Result<(), String> {
+        let queue = self.queue.clone();
+        let Ok(mut queue_mut) = queue.lock() else {
+            return Err("the event queue lock is poisoned".into());
+        };
+        if let Some(reader) = queue_mut.prepare_read()
+            && let Err(err) = reader.read()
+            && !matches!(&err, WaylandError::Io(e) if e.kind() == std::io::ErrorKind::WouldBlock)
+        {
+            return Err(err.to_string());
+        }
+        if let Err(err) = queue_mut.dispatch_pending(self) {
+            // a malformed event is dropped, the connection still works
+            log::warn!("Error while dispatching pending events: {err:?}");
+        }
+        Ok(())
+    }
 }
 
 pub(crate) fn wl_transform_to_frame_transform(transform: Transform) -> frame::Transform {

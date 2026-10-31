@@ -155,8 +155,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     if !args.multi && !ensure_single_instance(args.replace) {
-        println!("Looks like the LVRR desktop is already running.");
-        println!("Use --replace and I will terminate it for you.");
+        // LVRR: a --replace that gave up printed why
+        if !args.replace {
+            println!("Looks like the LVRR desktop is already running.");
+            println!("Use --replace and I will terminate it for you.");
+        }
         return Ok(());
     }
 
@@ -186,8 +189,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     auto_run(args, &mut used_backend);
 
     if RESTART.load(Ordering::Relaxed) {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
         log::warn!("Restarting...");
-        let exe = std::env::current_exe()?;
+        let mut exe = std::env::current_exe()?;
+        // LVRR: once an update replaced the binary, /proc/self/exe ends in " (deleted)"
+        if let Some(path) = exe.as_os_str().as_bytes().strip_suffix(b" (deleted)") {
+            exe = PathBuf::from(OsStr::from_bytes(path));
+        }
         let mut args = vec!["--replace", "--show"];
 
         match used_backend {
@@ -263,9 +271,8 @@ fn auto_run(args: Args, used_backend: &mut Option<XrBackend>) {
     log::error!("No more backends to try");
 
     let instructions_key = match (tried_xr, tried_vr) {
-        (true, true) => "NOTIFICATION.NOT_RUNNING_XR_VR",
-        (false, true) => "NOTIFICATION.NOT_RUNNING_VR",
-        (true, false) => "NOTIFICATION.NOT_RUNNING_XR",
+        // LVRR: LVRR's server becomes the runtime when a headset connects
+        (true, _) | (_, true) => "LVRR.NOT_RUNNING",
         _ => "NOTIFICATION.INVALID_ARGS",
     };
 
@@ -412,37 +419,119 @@ fn lvrr_wait_or_kill(system: &mut sysinfo::System, pid: Pid) {
     }
 }
 
+/// LVRR: the process if it's a wayvr other than this one. A pid file left by a crash can name
+/// another program by now, so the process name has to match ours. Not the binary's path: an
+/// update replaces the binary under a running instance.
+fn lvrr_find_wayvr(system: &mut sysinfo::System, pid: u32) -> Option<&sysinfo::Process> {
+    let (pid, own) = (Pid::from_u32(pid), Pid::from_u32(std::process::id()));
+    // a restart in place keeps the pid
+    if pid == own {
+        return None;
+    }
+    system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid, own]), true);
+    let name = system
+        .process(own)
+        .map_or_else(|| std::ffi::OsStr::new("wayvr"), sysinfo::Process::name);
+    system
+        .process(pid)
+        .filter(|p| p.name() == name && p.status() != sysinfo::ProcessStatus::Zombie)
+}
+
+/// LVRR: the pid in the file
+fn lvrr_read_pid(mut file: &std::fs::File) -> Option<u32> {
+    use std::io::Seek;
+    file.rewind().ok()?;
+    std::io::read_to_string(file).ok()?.trim().parse().ok()
+}
+
+/// LVRR: --replace waits for the instance holding the lock to quit: SIGTERM, and SIGKILL 3 s later
+/// for a frozen one. False when it's still there 3 s after that, or when another --replace took
+/// the lock first, so pressing Restart desktop twice starts one desktop.
+fn lvrr_replace_locked(file: &std::fs::File) -> bool {
+    let mut system = sysinfo::System::new();
+    let mut target = None;
+    let mut killed = false;
+    let mut since = Instant::now();
+    while matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock)) {
+        // the holder writes its pid right after taking the lock
+        if let Some(pid) = lvrr_read_pid(file)
+            && let Some(proc) = lvrr_find_wayvr(&mut system, pid)
+        {
+            match target {
+                None => {
+                    proc.kill_with(sysinfo::Signal::Term);
+                    target = Some(pid);
+                    since = Instant::now();
+                }
+                Some(old) if old != pid => {
+                    println!("The previous instance was replaced by another one.");
+                    return false;
+                }
+                Some(_) if !killed && since.elapsed() > Duration::from_secs(3) => {
+                    println!("The previous instance didn't quit, killing it.");
+                    proc.kill();
+                    killed = true;
+                }
+                Some(_) => {}
+            }
+        }
+        if since.elapsed() > Duration::from_secs(6) {
+            println!("The previous instance couldn't be stopped.");
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    true
+}
+
+/// LVRR: never closed, so the pid file stays locked as long as the process runs
+static PID_LOCK: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
+
 fn ensure_single_instance(replace: bool) -> bool {
+    use std::{fs::TryLockError, os::unix::fs::FileExt};
+
     let mut path =
         std::env::var("XDG_RUNTIME_DIR").map_or_else(|_| PathBuf::from("/tmp"), PathBuf::from);
     path.push("wayvr.pid");
 
-    if path.exists() {
-        // load contents
-        if let Ok(pid_str) = std::fs::read_to_string(&path)
-            && let Ok(pid) = pid_str.trim().parse::<u32>()
-        {
-            let mut system = sysinfo::System::new();
-            system.refresh_processes(
-                sysinfo::ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
-                false,
-            );
-            // LVRR: a restart in place keeps the pid
-            if let Some(proc) = system.process(sysinfo::Pid::from_u32(pid))
-                && pid != std::process::id()
-            {
-                if replace {
-                    proc.kill_with(sysinfo::Signal::Term);
-                    lvrr_wait_or_kill(&mut system, Pid::from_u32(pid));
-                } else {
-                    return false;
-                }
+    // LVRR: the running instance holds a lock on the pid file, which a crash or the in-place
+    // restart's exec drops, so a pid left in the file doesn't count. The file is never removed:
+    // a waiter could lock the removed one while a new start creates another.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .unwrap();
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::Error(e)) => println!("Failed to lock {}: {e}", path.display()),
+        Err(TryLockError::WouldBlock) if !replace => return false,
+        Err(TryLockError::WouldBlock) => {
+            if !lvrr_replace_locked(&file) {
+                return false;
             }
         }
     }
 
+    // LVRR: a wayvr that doesn't lock, upstream's or LVRR's from before the lock
+    let mut system = sysinfo::System::new();
+    if let Some(pid) = lvrr_read_pid(&file)
+        && let Some(proc) = lvrr_find_wayvr(&mut system, pid)
+    {
+        if replace {
+            proc.kill_with(sysinfo::Signal::Term);
+            lvrr_wait_or_kill(&mut system, Pid::from_u32(pid));
+        } else {
+            return false;
+        }
+    }
+
     let pid = std::process::id().to_string();
-    std::fs::write(path, pid).unwrap();
+    file.set_len(0).unwrap();
+    file.write_all_at(pid.as_bytes(), 0).unwrap();
+    let _ = PID_LOCK.set(file);
 
     true
 }

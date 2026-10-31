@@ -7,7 +7,10 @@ use std::{
 
 use anyhow::Context;
 use glam::{Affine3A, Quat, Vec3, vec3};
-use lvrr_common::{headset::HeadsetStats, state::LvrrBackend};
+use lvrr_common::{
+    headset::{DecoderTiming, HeadsetStats},
+    state::LvrrBackend,
+};
 use wgui::{
     event::EventListenerKind,
     i18n::Translation,
@@ -33,8 +36,8 @@ const REFRESH: Duration = Duration::from_millis(500);
 
 type Field = fn(&HeadsetStats) -> String;
 
-/// Label ids in perf_overlay.xml and their values
-const FIELDS: [(&str, Field); 10] = [
+/// Label ids in perf_overlay.xml and their values, as Home and PC > Performance show them
+const FIELDS: [(&str, Field); 12] = [
     ("refresh_rate", |s| format!("{:.0} Hz", s.display_hz)),
     ("game_fps", |s| {
         s.game_fps
@@ -45,17 +48,20 @@ const FIELDS: [(&str, Field); 10] = [
         format!("{:.0}/s", s.encoder_skipped_fps)
     }),
     ("latency", |s| format!("{:.0} ms", s.latency_ms())),
-    ("encode", |s| ms(s, |d| d.encode_ms)),
-    ("network", |s| ms(s, |d| d.send_ms + d.network_ms)),
-    ("decode", |s| ms(s, |d| d.decode_ms)),
-    ("bandwidth", |s| format!("{:.0} Mbit/s", s.rx_bps / 1e6)),
+    ("encode", |s| stage(s, |d| d.encode_ms)),
+    ("send", |s| stage(s, |d| d.send_ms)),
+    ("transfer", |s| stage(s, |d| d.network_ms)),
+    ("decode", |s| stage(s, |d| d.decode_ms)),
+    ("display", |s| stage(s, |d| d.display_ms)),
+    ("network", |s| format!("{:.0} Mbit/s", s.rx_bps / 1e6)),
     ("headset_gpu", |s| format!("{:.1} ms", s.gpu_time_ms)),
 ];
 
-/// The slowest video stream's value
-fn ms(stats: &HeadsetStats, value: fn(&lvrr_common::headset::DecoderTiming) -> f32) -> String {
-    let max = stats.decoders.iter().map(value).fold(0.0, f32::max);
-    format!("{max:.1} ms")
+/// A latency stage of the slowest video stream, the one `latency` shows
+fn stage(stats: &HeadsetStats, value: fn(&DecoderTiming) -> f32) -> String {
+    stats
+        .slowest_decoder()
+        .map_or_else(|| "-".to_string(), |d| format!("{:.1} ms", value(d)))
 }
 
 pub fn set_visible(app: &mut AppState, visible: bool) {

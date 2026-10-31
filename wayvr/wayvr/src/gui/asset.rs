@@ -42,4 +42,35 @@ mod tests {
                 .as_ref()
         );
     }
+
+    /// The toasts of failed LVRR requests say what failed and why, with lvrr-common's keys and
+    /// the dashboard's words
+    #[test]
+    fn lvrr_failure_strings() {
+        let en: serde_json::Value =
+            serde_json::from_slice(&GuiAsset.load_from_path("lang/en.json").unwrap()).unwrap();
+        let source = include_str!("../../../lvrr-common/src/state.rs");
+        let mut keys = 0;
+        for prefix in ["\"LVRR.FAILED.", "\"LVRR.REASON."] {
+            for (start, _) in source.match_indices(prefix) {
+                let key = &source[start + 1..];
+                let key = &key[..key.find('"').unwrap()];
+                let value = key.split('.').try_fold(&en, |v, k| v.get(k));
+                assert!(
+                    value.is_some_and(serde_json::Value::is_string),
+                    "{key} is missing from en.json"
+                );
+                keys += 1;
+            }
+        }
+        assert!(keys > 10, "found only {keys} keys");
+        let dash = include_str!("../../../dash-frontend/lvrr-assets/lang/en.json");
+        let dash: serde_json::Value = serde_json::from_str(dash).unwrap();
+        for block in ["FAILED", "REASON"] {
+            assert_eq!(
+                en["LVRR"][block], dash["LVRR"][block],
+                "LVRR.{block} differs from dash-frontend's en.json, which lvrr-ui shows"
+            );
+        }
+    }
 }

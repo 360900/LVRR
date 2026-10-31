@@ -1,5 +1,5 @@
 use glam::{DVec2, vec2};
-use wgui::log::LogErr;
+use wgui::{i18n::Translation, log::LogErr};
 use wlx_capture::{
     ext_image_copy_capture::ExtImageCopyCapture,
     frame::Transform,
@@ -8,10 +8,14 @@ use wlx_capture::{
     wayland::{WlxClient, WlxOutput},
     wlr_screencopy::WlrScreencopyCapture,
 };
-use wlx_common::{astr_containers::AStrMapExt, config::CaptureMethod};
+use wlx_common::{astr_containers::AStrMapExt, config::CaptureMethod, overlays::ToastTopic};
 
 use crate::{
-    overlays::screen::{backend::CaptureType, create_screen_from_backend, pw::ScreenCastBackend},
+    backend::task::TaskType,
+    overlays::{
+        screen::{backend::CaptureType, create_screen_from_backend, pw::ScreenCastBackend},
+        toast::Toast,
+    },
     state::{AppState, ScreenMeta},
     windowing::backend::OverlayBackend,
 };
@@ -107,9 +111,11 @@ pub fn create_screen_renderer_wl(
         return Ok(Box::new(backend));
     }
 
+    // LVRR: KWin's and Mutter's screencasts are PipeWire streams like the portal's, so
+    // PipeWire CPU takes them too and skips the picker; should_render keeps it off DMA-buf
     if matches!(
         app.session.config.capture_method,
-        CaptureMethod::PipeWire | CaptureMethod::Auto
+        CaptureMethod::PipeWire | CaptureMethod::PipeWireCpu | CaptureMethod::Auto
     ) && protocols.kde_screencast
         && let Some(mut backend) = ScreenBackend::new_kde_screencast(output, app)
     {
@@ -122,7 +128,7 @@ pub fn create_screen_renderer_wl(
 
     if matches!(
         app.session.config.capture_method,
-        CaptureMethod::PipeWire | CaptureMethod::Auto
+        CaptureMethod::PipeWire | CaptureMethod::PipeWireCpu | CaptureMethod::Auto
     ) && let Some(mut backend) = ScreenBackend::new_mutter_screencast(output, app)
     {
         log::info!("{}: Using Mutter screencast capture", output.name);
@@ -163,6 +169,33 @@ pub fn create_screens_wayland(
             && wl.maybe_ext_output_source_mgr.is_some(),
         kde_screencast: wl.maybe_kde_screencast_mgr.is_some(),
     };
+    // LVRR: KWin before 6.8 offers its screencast only to clients whose desktop entry
+    // lists it; without the screencast, Home has no virtual monitors either. A compositor
+    // with screen copy isn't KWin, whatever XDG_CURRENT_DESKTOP says for Qt themes
+    if !protocols.kde_screencast
+        && !protocols.wlr_screencopy
+        && !protocols.ext_image_copy
+        && std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|v| v.split(':').any(|d| d == "KDE"))
+    {
+        log::warn!(
+            "KWin offers no screencast to wayvr, so screens use the portal and virtual monitors \
+             are unavailable: Plasma before 6.8 needs io.github.lvrr.wayvr.desktop in an \
+             applications directory"
+        );
+        // from the first frame, so it queues behind the backend's "running" toast:
+        // submitted now, it would take that toast's place and show twice
+        app.tasks.enqueue(TaskType::Global(Box::new(|app| {
+            Toast::new(
+                ToastTopic::Error,
+                Some(Translation::from_translation_key(
+                    "LVRR.KDE_SCREENCAST_HIDDEN",
+                )),
+                Translation::from_translation_key("LVRR.KDE_SCREENCAST_HOWTO"),
+            )
+            .with_timeout(15.0)
+            .submit(app);
+        })));
+    }
 
     for (id, output) in &wl.outputs {
         if app.screens.iter().any(|s| s.name == output.name) {

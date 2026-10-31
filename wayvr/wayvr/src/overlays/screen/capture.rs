@@ -19,7 +19,7 @@ use wgui::{
 };
 use wlx_capture::{
     DrmFormat, DrmFourcc, DrmModifier, WlxCapture,
-    frame::{self as wlx_frame, DmaExporter, FrameFormat, MouseMeta, WlxFrame},
+    frame::{self as wlx_frame, DmaExporter, FrameFormat, MouseMeta, NoDmabuf, WlxFrame},
 };
 use wlx_common::{config::GeneralConfig, overlays::StereoMode};
 
@@ -464,46 +464,73 @@ impl MyFirstDmaExporter {
         ))
     }
 
+    /// LVRR: `allowed` lists the modifiers the compositor takes, any when empty
     fn set_format(
         &mut self,
         width: u32,
         height: u32,
         fourcc: wlx_capture::DrmFourcc,
-    ) -> Option<()> {
+        allowed: &[u64],
+    ) -> Result<(), NoDmabuf> {
+        let is_allowed =
+            |modifier: DrmModifier| allowed.is_empty() || allowed.contains(&u64::from(modifier));
         if let Some(image) = self.images.first() {
             let extent = image.view.image().extent();
-            if self.fourcc == fourcc && extent[0] == width && extent[1] == height {
-                return Some(());
+            // LVRR: only a full pair, next_frame takes turns with the two images
+            if self.images.len() == 2
+                && self.fourcc == fourcc
+                && extent[0] == width
+                && extent[1] == height
+                && is_allowed(image.modifier)
+            {
+                return Ok(());
             }
         }
-        self.images.clear();
 
+        // LVRR: the first explicit modifier the compositor allows, Vulkan exports no implicit
+        // one. With a list, none is no error and leaves the images alone: the caller tries its
+        // next format, which may use them.
         let Some(modifier) = self
             .drm_formats
             .iter()
-            .filter(|f| f.code == fourcc)
+            .filter(|f| f.code == fourcc && f.modifier != DrmModifier::Invalid)
             .map(|f| f.modifier)
-            .next()
+            .find(|modifier| is_allowed(*modifier))
         else {
-            log::error!("Unsupported format requested: {fourcc}");
-            return None;
+            if allowed.is_empty() {
+                log::error!("Unsupported format requested: {fourcc}");
+            }
+            return Err(NoDmabuf::Modifier);
         };
+        self.images.clear();
 
+        // LVRR: a failed export is NoDmabuf::Export, so image copy takes shared memory instead
+        // of repeating the export for its other formats
         let format = fourcc_to_vk(fourcc)
             .log_err("Could not export new dmabuf due to invalid format")
-            .ok()?;
+            .map_err(|_| NoDmabuf::Export)?;
 
+        // LVRR: keep the images and their format only once both exported, so a failed export
+        // leaves no lone image and the check above reuses the pair for every format
+        let mut images = smallvec![];
         for _ in 0..2 {
             let image = export_dmabuf_image(&self.gfx, [width, height, 1], format, modifier)
                 .log_err(&format!(
                     "Could not export DMA-buf image {width}x{height} {fourcc} {modifier:?}"
                 ))
-                .ok()?;
+                .map_err(|_| NoDmabuf::Export)?;
 
-            self.images.push(image);
+            images.push(image);
         }
+        self.images = images;
+        self.fourcc = fourcc;
 
-        Some(())
+        Ok(())
+    }
+
+    // LVRR: the GPU the images are allocated on
+    fn drm_render_node(&self) -> Option<(u32, u32)> {
+        self.gfx.device_info().drm_render_node
     }
 
     fn next_frame(&mut self) -> Option<(wlx_frame::FramePlane, DrmModifier)> {
@@ -529,8 +556,12 @@ pub struct WlxCaptureIn {
     /// LVRR: copy each captured frame into our own image before the compositor reuses
     /// the buffer. Off by default: the copy submits on a second GPU queue from the
     /// capture thread, concurrent with headset rendering, which faults some drivers
-    /// (NVIDIA Blackwell, Xid 69). Enable with LVRR_COPY_CAPTURED_FRAMES=1 on setups
-    /// where the compositor draws screens on a different GPU and motion tears.
+    /// (NVIDIA Blackwell, Xid 69). Enable with `copy_captured_frames: true` in
+    /// lvrr.json5 on setups where the compositor draws screens on a different GPU and
+    /// motion tears; LVRR_COPY_CAPTURED_FRAMES=1 only reaches `lvrr desktop`, as the
+    /// server starts wayvr with the user manager's environment. Never on GPUs with one
+    /// graphics queue: MainThreadWlxCapture gives the buffer back before the render
+    /// thread sees the frame, so a copy there protects nothing and stalls rendering.
     copy_frames: bool,
 }
 
@@ -540,12 +571,23 @@ impl WlxCaptureIn {
         app: &AppState,
         dma_exporter: Option<MyFirstDmaExporter>,
     ) -> Self {
+        // LVRR: see copy_frames
+        let copy_requested = app.lvrr.copy_captured_frames
+            || std::env::var("LVRR_COPY_CAPTURED_FRAMES").as_deref() == Ok("1");
+        let copy_frames = copy_requested && app.gfx.has_capture_queue();
+        if copy_frames {
+            log::info!("{name}: copying captured frames");
+        } else if copy_requested {
+            log::warn!(
+                "{name}: copying captured frames needs a GPU with a second graphics queue, sampling them in place"
+            );
+        }
         Self {
             name,
             gfx: app.gfx.clone(),
             dma_exporter: dma_exporter.map(|exporter| Arc::new(Mutex::new(exporter))),
             use_capture_queue: app.gfx.has_capture_queue(),
-            copy_frames: std::env::var("LVRR_COPY_CAPTURED_FRAMES").as_deref() == Ok("1"),
+            copy_frames,
         }
     }
 }
@@ -558,8 +600,30 @@ impl DmaExporter for WlxCaptureIn {
         fourcc: DrmFourcc,
     ) -> Option<(wlx_frame::FramePlane, DrmModifier)> {
         let mut dma_exporter = self.dma_exporter.as_ref()?.lock().ok()?;
-        dma_exporter.set_format(width, height, fourcc)?;
+        dma_exporter.set_format(width, height, fourcc, &[]).ok()?;
         dma_exporter.next_frame()
+    }
+
+    // LVRR: image copy names the modifiers and the GPU the compositor takes dma-bufs from. No
+    // exporter or a poisoned one can't export for any format.
+    fn next_frame_allowed(
+        &mut self,
+        width: u32,
+        height: u32,
+        fourcc: DrmFourcc,
+        modifiers: &[u64],
+    ) -> Result<(wlx_frame::FramePlane, DrmModifier), NoDmabuf> {
+        let mut dma_exporter = self
+            .dma_exporter
+            .as_ref()
+            .and_then(|exporter| exporter.lock().ok())
+            .ok_or(NoDmabuf::Export)?;
+        dma_exporter.set_format(width, height, fourcc, modifiers)?;
+        dma_exporter.next_frame().ok_or(NoDmabuf::Export)
+    }
+
+    fn drm_render_node(&self) -> Option<(u32, u32)> {
+        self.dma_exporter.as_ref()?.lock().ok()?.drm_render_node()
     }
 }
 
@@ -856,8 +920,29 @@ impl DmaExporter for DmaExporterProxy {
         fourcc: DrmFourcc,
     ) -> Option<(wlx_frame::FramePlane, DrmModifier)> {
         let mut exporter = self.0.as_ref()?.lock().ok()?;
-        exporter.set_format(width, height, fourcc)?;
+        exporter.set_format(width, height, fourcc, &[]).ok()?;
         exporter.next_frame()
+    }
+
+    // LVRR: as for WlxCaptureIn
+    fn next_frame_allowed(
+        &mut self,
+        width: u32,
+        height: u32,
+        fourcc: DrmFourcc,
+        modifiers: &[u64],
+    ) -> Result<(wlx_frame::FramePlane, DrmModifier), NoDmabuf> {
+        let mut exporter = self
+            .0
+            .as_ref()
+            .and_then(|exporter| exporter.lock().ok())
+            .ok_or(NoDmabuf::Export)?;
+        exporter.set_format(width, height, fourcc, modifiers)?;
+        exporter.next_frame().ok_or(NoDmabuf::Export)
+    }
+
+    fn drm_render_node(&self) -> Option<(u32, u32)> {
+        self.0.as_ref()?.lock().ok()?.drm_render_node()
     }
 }
 

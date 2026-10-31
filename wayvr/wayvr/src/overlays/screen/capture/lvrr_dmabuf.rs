@@ -3,7 +3,9 @@
 //! does, mixes frames during motion, most visibly when the compositor draws on another GPU.
 //!
 //! So each frame is copied into an image of our own while the capture still holds the buffer,
-//! after the compositor's writes have finished.
+//! after the compositor's writes have finished. This runs on the capture thread and submits on
+//! the second graphics queue, so it needs a GPU that has one: with a single queue, captures
+//! give the buffer back before the render thread sees the frame (see `MainThreadWlxCapture`).
 
 use std::{sync::Arc, time::Duration, time::Instant};
 
@@ -47,21 +49,13 @@ fn copy(me: &WlxCaptureIn, imported: &Arc<Image>) -> anyhow::Result<Arc<Image>> 
         imported.format(),
         ImageUsage::TRANSFER_DST | ImageUsage::TRANSFER_SRC | ImageUsage::SAMPLED,
     )?;
-    let mut cmd = if me.use_capture_queue {
-        me.gfx
-            .create_capture_command_buffer(CommandBufferUsage::OneTimeSubmit)?
-    } else {
-        me.gfx
-            .create_xfer_command_buffer(CommandBufferUsage::OneTimeSubmit)?
-    };
+    let mut cmd = me
+        .gfx
+        .create_capture_command_buffer(CommandBufferUsage::OneTimeSubmit)?;
     cmd.copy_image(imported, [0, 0, 0], &image, [0, 0, 0], None)?;
     // waits until the copy is done, so the buffer goes back only afterwards
-    if me.use_capture_queue {
-        let _guard = CAPTURE_QUEUE_MUTEX.lock().unwrap(); // mutex poison only
-        cmd.build_and_execute_now()?;
-    } else {
-        cmd.build_and_execute_now()?;
-    }
+    let _guard = CAPTURE_QUEUE_MUTEX.lock().unwrap(); // mutex poison only
+    cmd.build_and_execute_now()?;
     Ok(image)
 }
 

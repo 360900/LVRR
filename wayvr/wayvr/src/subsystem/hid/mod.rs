@@ -352,8 +352,11 @@ impl XkbKeymap {
         state.key_get_utf8(xkb::Keycode::from(key as u32))
     }
 
-    /// LVRR: the text a key types with all of the given modifiers
+    /// LVRR: the text a key types with all of the given modifiers, and NumLock on: the keypad
+    /// caps show its digits (keyboard/layout.rs, `label_for_key(vk, NUM_LOCK)`) and an edit box
+    /// has no use for KP_End and the like. NumLock only changes the keypad.
     pub fn text_for_key(&self, key: VirtualKey, modifiers: KeyModifier) -> String {
+        let modifiers = modifiers | NUM_LOCK;
         let mut state = xkb::State::new(&self.inner);
         for bit in (0..8)
             .map(|i| (1 as KeyModifier) << i)
@@ -413,4 +416,25 @@ pub use x11::get_keymap_x11;
 #[cfg(not(feature = "x11"))]
 pub fn get_keymap_x11() -> anyhow::Result<XkbKeymap> {
     anyhow::bail!("X11 support not enabled.")
+}
+
+// LVRR: text typed into the dashboard
+#[cfg(test)]
+mod tests {
+    use super::{SHIFT, VirtualKey, XkbKeymap};
+
+    #[test]
+    fn text_for_key() {
+        // needs xkeyboard-config
+        let Some(keymap) = XkbKeymap::from_layout_variant("us", "") else {
+            return;
+        };
+        // the keypad types the digits its caps show
+        assert_eq!(keymap.text_for_key(VirtualKey::KP_1, 0), "1");
+        assert_eq!(keymap.text_for_key(VirtualKey::KP_Decimal, 0), ".");
+        // other keys stay as they were
+        assert_eq!(keymap.text_for_key(VirtualKey::A, 0), "a");
+        assert_eq!(keymap.text_for_key(VirtualKey::A, SHIFT), "A");
+        assert_eq!(keymap.text_for_key(VirtualKey::BackSpace, 0), "\x08");
+    }
 }

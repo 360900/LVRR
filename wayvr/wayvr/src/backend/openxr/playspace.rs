@@ -392,6 +392,12 @@ impl PlayspaceMover {
 
         self.gravity.reset();
         let offset = self.playspace_state.openxr_space_center;
+        // LVRR: every write tells all apps that their reference spaces changed, and the button
+        // may be meant for the game. The tolerance covers the matrix to quaternion round trip.
+        if before.abs_diff_eq(offset, 1e-4) {
+            log::debug!("Space reset: already at the center");
+            return;
+        }
         apply_offset(offset, &mut monado.ipc);
 
         if !app.session.config.space_drag_affects_world {
