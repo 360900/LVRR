@@ -24,8 +24,10 @@
 #include "utils/ring_buffer.h"
 #include <magic_enum.hpp>
 #include <memory>
+#include <mutex>
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/format-utils.h>
+#include <utility>
 
 namespace wivrn
 {
@@ -68,6 +70,9 @@ struct pipewire_device : public audio_device
 	// headset only hears about a pause that lasts
 	spa_source * mic_off_timer = nullptr;
 	bool mic_on_sent = false;
+	// LVRR: resume() sends the microphone state from the network thread, the callbacks from
+	// the PipeWire loop; held across each send so mic_on_sent matches the headset's last one
+	std::mutex mic_mutex;
 	static void mic_off_timeout(void * self_v, uint64_t expirations);
 	void arm_mic_off(bool arm);
 	pw_stream_events mic_events{
@@ -265,10 +270,11 @@ struct pipewire_device : public audio_device
 			thread = std::jthread(
 			        [this](std::stop_token) {
 				pw_main_loop_run(pw_loop.get());
-				if (mic_off_timer)
-					pw_loop_destroy_source(pw_main_loop_get_loop(pw_loop.get()), mic_off_timer);
 				speaker.reset();
 				microphone.reset();
+				// LVRR: after the microphone, whose teardown re-arms the timer
+				if (mic_off_timer)
+					pw_loop_destroy_source(pw_main_loop_get_loop(pw_loop.get()), std::exchange(mic_off_timer, nullptr));
 				; });
 	}
 };
@@ -366,8 +372,10 @@ void pipewire_device::mic_state_changed(void * self_v, pw_stream_state old, pw_s
 		case PW_STREAM_STATE_PAUSED:
 			self->arm_mic_off(true);
 			return;
-		case PW_STREAM_STATE_STREAMING:
+		case PW_STREAM_STATE_STREAMING: {
 			self->arm_mic_off(false);
+			// LVRR: see mic_mutex
+			std::lock_guard lock(self->mic_mutex);
 			if (self->mic_on_sent)
 				return;
 			try
@@ -380,6 +388,7 @@ void pipewire_device::mic_state_changed(void * self_v, pw_stream_state old, pw_s
 				U_LOG_W("failed to update microphone state: %s", e.what());
 			}
 			return;
+		}
 	}
 }
 
@@ -394,6 +403,7 @@ void pipewire_device::arm_mic_off(bool arm)
 void pipewire_device::mic_off_timeout(void * self_v, uint64_t)
 {
 	auto self = (pipewire_device *)self_v;
+	std::lock_guard lock(self->mic_mutex);
 	if (self->mic_state == PW_STREAM_STATE_STREAMING)
 		return;
 	try
@@ -451,6 +461,8 @@ void pipewire_device::pause()
 void pipewire_device::resume()
 {
 	session.send_control(to_headset::audio_stream_description{desc});
+	// LVRR: see mic_mutex
+	std::lock_guard lock(mic_mutex);
 	mic_on_sent = mic_state == PW_STREAM_STATE_STREAMING;
 	session.send_control(to_headset::feature_control{to_headset::feature_control::microphone, mic_on_sent});
 }

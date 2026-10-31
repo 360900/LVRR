@@ -147,7 +147,8 @@ wivrn::wivrn_session::wivrn_session(std::unique_ptr<wivrn_connection> connection
 
 	if (use_steamvr_lh)
 	{
-		if (conf.lh_stick_deadzone > 0.01f)
+		// LVRR: any deadzone the config sets applies, LVRR's slider steps by 0.01 and upstream's by 0.05
+		if (conf.lh_stick_deadzone > 0.f)
 			setenv("LH_STICK_DEADZONE", std::format("{:.2}", *conf.lh_stick_deadzone).c_str(), true);
 
 		if (conf.lh_max_extrapolation.has_value())
@@ -996,9 +997,10 @@ void wivrn_session::operator()(audio_data && data)
 		audio_handle->process_mic_data(std::move(data));
 }
 
-void wivrn_session::operator()(to_monado::stop &&)
+void wivrn_session::operator()(to_monado::stop && packet)
 {
-	send_stopping(lvrr::server_stopping::reason_t::stopped);
+	// LVRR: stopped when LVRR quits, disconnected when StopSession ends only the session
+	send_stopping(packet.reason);
 	request_stop();
 }
 
@@ -1177,7 +1179,8 @@ void wivrn_session::quit_if_no_client()
 	if (count == 0)
 	{
 		U_LOG_I("No OpenXR client connected, exiting");
-		send_stopping(lvrr::server_stopping::reason_t::stopped);
+		// LVRR: only the session ends, LVRR keeps running and listens again
+		send_stopping(lvrr::server_stopping::reason_t::disconnected);
 		request_stop();
 	}
 	// LVRR: the dashboard is always a client, so a lost headset gets a bounded wait
@@ -1294,7 +1297,6 @@ void wivrn_session::reconnect(std::stop_token stop)
 
 			connection->reset(stop, std::move(*tcp), [this]() { quit_if_no_client(); });
 			*net_exception.lock() = nullptr;
-			reconnect_deadline = 0;
 
 			// validate if headset is compatible with the current session
 
@@ -1307,20 +1309,33 @@ void wivrn_session::reconnect(std::stop_token stop)
 			{
 				// LVRR: the headset can't change this itself, so start a new session for it
 				U_LOG_W("Headset incompatible with session: %s, restarting the session", refuse_conn->c_str());
-				send_control(lvrr::expect_reconnect{.timeout_ms = 30'000});
+				send_expect_reconnect();
 				connection->shutdown();
 				request_stop();
 				return;
 			}
 
+			// LVRR: main files the headset's settings under its key, which can differ from the one
+			// the session started with, and starts the dashboard again if it quit. Sent before
+			// run_net relays any packet of this connection, so main has the key first.
+			send_to_main(from_monado::headset_resumed{
+			        .public_key = connection->headset_public_key(),
+			        .dashboard_running = app_pacers.running().overlay,
+			});
+
+			// LVRR: the headset's new stream takes its settings as the session's, so restart_required
+			// also says whether this session kept other ones, see operator()(lvrr::headset_settings &&)
+			lvrr_outdated = warn_conn;
+
 			if (warn_conn)
 			{
+				// LVRR: the dashboard offers Restart session, not a server restart
 				send_control(to_headset::server_message{
 				        .kind = to_headset::server_message::kind::toast_urgent,
-				        .msg = "Stream resumed with outdated settings. Restart the server for settings to apply.",
+				        .msg = "Stream resumed with the previous settings. Restart the session to apply the new ones.",
 				});
 
-				U_LOG_W("Session resumed with outdated settings. Restart the server for settings to apply.");
+				U_LOG_W("Session resumed with the previous settings, a session restart applies the new ones");
 			}
 
 			// update headset info
@@ -1334,13 +1349,12 @@ void wivrn_session::reconnect(std::stop_token stop)
 
 			// LVRR: the headset's new stream shows the hands until told otherwise, and its
 			// statistics start over
-			{
-				std::lock_guard lock(lvrr_hands_mutex);
-				lvrr_hands_shown.reset();
-			}
+			lvrr_hands_shown.reset();
 			lvrr_stats_ns = 0;
 			lvrr_update_hands();
 
+			// LVRR: cleared last, so a headset that fails above leaves the wait bounded
+			reconnect_deadline = 0;
 			break;
 		}
 		catch (std::exception & e)

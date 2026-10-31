@@ -17,8 +17,10 @@
 
 #include "lvrr_offline.h"
 
+#include <cerrno>
 #include <fstream>
 #include <iostream>
+#include <system_error>
 
 using json = nlohmann::json;
 
@@ -61,16 +63,23 @@ void save()
 {
 	if (file.empty())
 		return;
+	auto tmp = file;
+	tmp += ".tmp";
 	try
 	{
-		auto tmp = file;
-		tmp += ".tmp";
-		std::ofstream(tmp) << store.dump(1, '\t') << '\n';
+		std::ofstream out(tmp);
+		out << store.dump(1, '\t') << '\n';
+		out.close();
+		// A failed write, on a full disk for example, keeps the previous store
+		if (not out)
+			throw std::system_error(errno, std::system_category());
 		std::filesystem::rename(tmp, file);
 	}
 	catch (std::exception & e)
 	{
 		std::cerr << "Cannot save " << file << ": " << e.what() << std::endl;
+		std::error_code ec;
+		std::filesystem::remove(tmp, ec);
 	}
 }
 } // namespace
@@ -95,6 +104,19 @@ void load(const std::filesystem::path & path)
 		store["headsets"] = json::object();
 	if (not store["last"].is_string())
 		store["last"] = "";
+	// The functions below read each entry's settings and throw on an entry that isn't an object,
+	// which only a hand edit makes
+	auto & headsets = store["headsets"];
+	for (auto it = headsets.begin(); it != headsets.end();)
+	{
+		if (it->contains("settings") and (*it)["settings"].is_object())
+			++it;
+		else
+		{
+			std::cerr << "Ignoring headset " << it.key() << " in " << path << std::endl;
+			it = headsets.erase(it);
+		}
+	}
 }
 
 void set_headset(const std::string & public_key)
@@ -128,7 +150,8 @@ json offline_view()
 		return nullptr;
 	const auto & entry = *headset(last());
 	json view = entry["settings"];
-	const json & changes = entry["pending"];
+	// const operator[] on a missing key reads past the map in release builds
+	json changes = entry.value("pending", json());
 	if (changes.is_object() and view["config"].is_object())
 		view["config"].update(changes);
 	view["offline"] = true;
@@ -173,6 +196,9 @@ void forget(const std::string & public_key)
 	store["headsets"].erase(public_key);
 	if (last() == public_key)
 		store["last"] = "";
+	// Unpairing doesn't disconnect the headset, whose next reports would add it back
+	if (current == public_key)
+		current.clear();
 	save();
 }
 

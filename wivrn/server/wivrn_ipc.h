@@ -48,6 +48,14 @@ struct server_error
 	std::string message;
 };
 
+// LVRR: a headset passed the running session's checks and resumes it
+struct headset_resumed
+{
+	std::string public_key;
+	// an overlay application, the dashboard, has a session
+	bool dashboard_running;
+};
+
 using packets = std::variant<
         wivrn::from_headset::headset_info_packet,
         wivrn::from_headset::settings_changed,
@@ -58,13 +66,17 @@ using packets = std::variant<
         server_error,
         wivrn::lvrr::headset_settings,
         wivrn::lvrr::stats,
-        wivrn::to_headset::server_message>;
+        wivrn::to_headset::server_message,
+        headset_resumed>;
 } // namespace from_monado
 
 namespace to_monado
 {
 struct stop
-{};
+{
+	// LVRR: what the headset is told; StopSession ends only the session, LVRR keeps running
+	wivrn::lvrr::server_stopping::reason_t reason = wivrn::lvrr::server_stopping::reason_t::stopped;
+};
 
 struct disconnect
 {};

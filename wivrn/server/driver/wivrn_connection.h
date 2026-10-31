@@ -139,6 +139,10 @@ public:
 			std::visit(std::forward<T>(visitor), std::move(*packet));
 		while (auto packet = control.receive_pending())
 			std::visit(std::forward<T>(visitor), std::move(*packet));
+		// LVRR: like the stream socket, a read of the IPC socket keeps the other packets it took,
+		// which poll no longer reports
+		while (auto packet = wivrn_ipc_socket_monado->receive_pending())
+			std::visit(std::forward<T>(visitor), std::move(*packet));
 
 		int r = ::poll(fds, std::size(fds), timeout);
 		if (r < 0)

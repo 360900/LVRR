@@ -1,0 +1,60 @@
+From 1edf176525e81a2819083d11aaf8f9ec0be994a4 Mon Sep 17 00:00:00 2001
+From: 360900 <ziyad.koca@hotmail.com>
+Date: Sat, 31 Oct 2026 04:19:56 +0300
+Subject: [PATCH] st/oxr: supersampling precedence and forced count
+
+XrCompositionLayerSettingsFB gives normal super sampling precedence
+when a layer sets both the normal and the quality bit, but quality was
+tested first: such layers got 8 samples instead of 4.
+
+OXR_FORCE_SUPER_SAMPLING was passed on as is, so a negative value
+became about 4 billion samples, and 3 or 32 read outside the layer
+shader's sample positions. Only 1, 2, 4, 8 and 16 are used now, other
+values are ignored with a warning.
+---
+ .../oxr/oxr_session_frame_end.c               | 23 +++++++++++++------
+ 1 file changed, 16 insertions(+), 7 deletions(-)
+
+diff --git a/src/xrt/state_trackers/oxr/oxr_session_frame_end.c b/src/xrt/state_trackers/oxr/oxr_session_frame_end.c
+index 0504a0f2f..d95f643f7 100644
+--- a/src/xrt/state_trackers/oxr/oxr_session_frame_end.c
++++ b/src/xrt/state_trackers/oxr/oxr_session_frame_end.c
+@@ -205,19 +205,28 @@ convert_layer_settings_flags(XrCompositionLayerSettingsFlagsFB xr_layer_settings
+ static uint32_t
+ select_sample_count(enum xrt_layer_composition_flags comp_flags)
+ {
+-	uint32_t sample_count_overrride = debug_get_num_option_force_super_sampling();
+-	if (sample_count_overrride) {
+-		return sample_count_overrride;
+-	}
+-
+-	if ((comp_flags & XRT_COMPOSITION_LAYER_PROCESSING_QUALITY_SUPER_SAMPLING_BIT_FB) != 0) {
+-		return 8;
++	// The compositor's layer shader only has sample positions for these counts.
++	long forced = debug_get_num_option_force_super_sampling();
++	if (forced == 1 || forced == 2 || forced == 4 || forced == 8 || forced == 16) {
++		return (uint32_t)forced;
++	}
++	if (forced != 0) {
++		static bool _once = false;
++		if (!_once) {
++			_once = true;
++			U_LOG_W("OXR_FORCE_SUPER_SAMPLING=%ld ignored, use 1, 2, 4, 8 or 16", forced);
++		}
+ 	}
+ 
++	// XrCompositionLayerSettingsFB gives NORMAL precedence when both are set.
+ 	if ((comp_flags & XRT_COMPOSITION_LAYER_PROCESSING_NORMAL_SUPER_SAMPLING_BIT_FB) != 0) {
+ 		return 4;
+ 	}
+ 
++	if ((comp_flags & XRT_COMPOSITION_LAYER_PROCESSING_QUALITY_SUPER_SAMPLING_BIT_FB) != 0) {
++		return 8;
++	}
++
+ 	return 1;
+ }
+ 
+-- 
+2.56.0
+

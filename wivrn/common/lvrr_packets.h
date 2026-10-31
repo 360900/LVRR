@@ -148,7 +148,7 @@ struct set_headset_settings
 	headset_config config;
 };
 
-// The server is about to close the connection on purpose; the headset reconnects within
+// The server is about to close the connection on purpose; the headset keeps reconnecting for
 // timeout_ms without showing an error.
 struct expect_reconnect
 {
@@ -161,7 +161,7 @@ struct server_stopping
 	enum class reason_t : uint8_t
 	{
 		stopped,      // the server quits
-		disconnected, // the PC disconnected the headset
+		disconnected, // the PC disconnected the headset or ended its session
 	};
 
 	reason_t reason;
@@ -197,12 +197,17 @@ struct headset_stats
 	std::vector<decoder_timing> decoders;
 };
 
-// The PC's side of the statistics, measured by the session for the same period.
+// The PC's side of the statistics, measured by the session for the same period, and what the
+// session streams with, which changes only with a new session.
 struct pc_stats
 {
-	std::optional<float> game_fps; // new game frames shown per second, nullopt without a game
-	float game_missed_fps;         // compositor frames per second that repeated the game's last frame
-	float encoder_skipped_fps;     // composited frames per second the encoders were too busy for
+	std::optional<float> game_fps;     // new game frames shown per second, nullopt without a game
+	float game_missed_fps;             // compositor frames per second that repeated the game's last frame
+	float encoder_skipped_fps;         // composited frames per second the encoders were too busy for
+	std::optional<codec_choice> codec; // nullopt for raw video
+	uint8_t bit_depth;                 // 8 or 10
+	uint16_t render_width;             // recommended render size, after resolution_scale
+	uint16_t render_height;
 };
 
 // Session to main process only.

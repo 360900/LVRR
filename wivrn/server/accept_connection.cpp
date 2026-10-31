@@ -40,8 +40,30 @@ std::unique_ptr<wivrn::TCP> wivrn::accept_connection(wivrn_session & cnx, std::s
 	        {.fd = wivrn_ipc_socket_monado->get_fd(), .events = POLLIN},
 	};
 
+	auto visitor = utils::overloaded{
+	        [&cnx](to_monado::stop) {
+		        // gets handled in wivrn_session::reconnect since we return nullptr
+		        U_LOG_I("Received stop packet during reconnect, stopping");
+		        cnx.request_stop();
+	        },
+	        [&cnx](to_monado::restart_session) {
+		        U_LOG_I("Received restart request during reconnect, stopping");
+		        cnx.request_stop();
+	        },
+	        [](auto &&) {
+		        // Ignore request when no headset is connected
+	        },
+	};
+
 	while (not stop.stop_requested())
 	{
+		// LVRR: a read of the IPC socket keeps the other packets it took, which poll no longer
+		// reports, and the session's last read before the headset was lost can have left some
+		while (auto packet = wivrn_ipc_socket_monado->receive_pending())
+			std::visit(visitor, *packet);
+		if (stop.stop_requested())
+			break;
+
 		if (poll(fds, std::size(fds), 100) < 0)
 		{
 			perror("poll");
@@ -58,21 +80,7 @@ std::unique_ptr<wivrn::TCP> wivrn::accept_connection(wivrn_session & cnx, std::s
 		{
 			auto packet = receive_from_main();
 			if (packet)
-				std::visit(utils::overloaded{
-				                   [&cnx](to_monado::stop) {
-					                   // gets handled in wivrn_session::reconnect since we return nullptr
-					                   U_LOG_I("Received stop packet during reconnect, stopping");
-					                   cnx.request_stop();
-				                   },
-				                   [&cnx](to_monado::restart_session) {
-					                   U_LOG_I("Received restart request during reconnect, stopping");
-					                   cnx.request_stop();
-				                   },
-				                   [](auto &&) {
-					                   // Ignore request when no headset is connected
-				                   },
-				           },
-				           *packet);
+				std::visit(visitor, *packet);
 		}
 
 		if (tick)

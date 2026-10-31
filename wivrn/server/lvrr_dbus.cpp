@@ -19,10 +19,8 @@
 
 #include "application.h"
 #include "lvrr_offline.h"
-#include "utils/load_icon.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -41,11 +39,16 @@ namespace
 WivrnServer * dbus_server = nullptr;
 hooks session;
 
+// The headset reported its settings since it connected, so HeadsetSettings shows them and it
+// answers changes. Not HeadsetConnected: that turns true before the handshake, which drops them.
+bool headset_live = false;
+
 // SetHeadsetSettings calls waiting for the headset's answer, by request id
 struct pending_request
 {
 	GDBusMethodInvocation * invocation;
 	guint timeout;
+	json patch; // kept for the next connection if the headset leaves first
 };
 std::map<uint32_t, pending_request> pending;
 uint32_t next_request_id = 1;
@@ -55,6 +58,18 @@ const guint request_timeout_ms = 3000;
 // headset answers, and whether they need a session restart
 uint32_t offline_request_id = 0;
 bool offline_restart = false;
+
+// Features the headset last reported waiting for a permission, as a feature_bit mask
+uint8_t permission_pending = 0;
+
+// The headset is still on the connection its session started with, so only the dashboard runs and
+// restarting for those changes closes no game. Stays false for a headset back in a running session.
+bool new_session = false;
+
+// Clears HeadsetStats once the samples stop: the headset sends them from its frame loop, which
+// stops while it sleeps or renders nothing, and it stays connected meanwhile
+guint stats_timeout = 0;
+const guint stats_timeout_ms = 3000;
 
 uint32_t new_request_id()
 {
@@ -243,24 +258,12 @@ void return_error(GDBusMethodInvocation * invocation, const char * name, const s
 	g_dbus_method_invocation_return_dbus_error(invocation, (std::string("io.github.wivrn.Server.") + name).c_str(), message.c_str());
 }
 
-// list_applications() scans Steam and desktop files; GetApplicationIcon is called once per app.
-// Listing rescans, the dashboard may just have added an app.
-const std::unordered_map<std::string, application> & applications(bool rescan = false)
-{
-	static std::unordered_map<std::string, application> apps;
-	static std::chrono::steady_clock::time_point updated;
-	auto now = std::chrono::steady_clock::now();
-	if (rescan or apps.empty() or now - updated > std::chrono::seconds(10))
-	{
-		apps = list_applications();
-		updated = now;
-	}
-	return apps;
-}
+// The VR applications, refreshed by every ListApplications: the dashboard may just have added an app
+std::unordered_map<std::string, application> apps;
 
 gboolean on_set_headset_settings(WivrnServer * skeleton, GDBusMethodInvocation * invocation, const gchar * patch, gpointer)
 {
-	if (not session.headset_connected() and not lvrr_offline::known())
+	if (not headset_live and not lvrr_offline::known())
 	{
 		return_error(invocation, "NotConnected", "No headset is connected");
 		return TRUE;
@@ -279,8 +282,8 @@ gboolean on_set_headset_settings(WivrnServer * skeleton, GDBusMethodInvocation *
 		return TRUE;
 	}
 
-	// Kept for the next connection
-	if (not session.headset_connected())
+	// Kept for the next connection, or the connecting headset's first report
+	if (not headset_live)
 	{
 		std::string text = lvrr_offline::stage(patch_json).dump();
 		wivrn_server_set_headset_settings(dbus_server, text.c_str());
@@ -297,7 +300,7 @@ gboolean on_set_headset_settings(WivrnServer * skeleton, GDBusMethodInvocation *
 			pending.erase(it);
 		}
 		return G_SOURCE_REMOVE; }, GUINT_TO_POINTER(id));
-	pending[id] = {invocation, timeout};
+	pending[id] = {invocation, timeout, std::move(patch_json)};
 
 	session.send_to_session(lvrr::set_headset_settings{.request_id = id, .config = std::move(config)});
 	return TRUE;
@@ -313,8 +316,9 @@ gboolean on_restart_session(WivrnServer * skeleton, GDBusMethodInvocation * invo
 
 gboolean on_stop_session(WivrnServer * skeleton, GDBusMethodInvocation * invocation, gpointer)
 {
+	// LVRR keeps running, to pair another headset for example: the headset says the PC disconnected it
 	if (session.session_running())
-		session.send_to_session(to_monado::stop{});
+		session.send_to_session(to_monado::stop{.reason = lvrr::server_stopping::reason_t::disconnected});
 	wivrn_server_complete_stop_session(skeleton, invocation);
 	return TRUE;
 }
@@ -329,8 +333,19 @@ gboolean on_set_dashboard_visible(WivrnServer * skeleton, GDBusMethodInvocation 
 
 gboolean on_list_applications(WivrnServer * skeleton, GDBusMethodInvocation * invocation, gpointer)
 {
+	// The scan throws on some unreadable directories, which must not unwind through GLib
+	try
+	{
+		apps = list_applications();
+	}
+	catch (std::exception & e)
+	{
+		return_error(invocation, "Failed", e.what());
+		return TRUE;
+	}
+
 	std::vector<std::tuple<std::string, std::string, std::string>> list;
-	for (const auto & [id, app]: applications(true))
+	for (const auto & [id, app]: apps)
 	{
 		auto name = app.name.find("");
 		list.emplace_back(id, name != app.name.end() ? name->second : id, app.icon_path ? app.icon_path->string() : "");
@@ -342,44 +357,6 @@ gboolean on_list_applications(WivrnServer * skeleton, GDBusMethodInvocation * in
 	for (const auto & [id, name, icon]: list)
 		g_variant_builder_add(&builder, "(sss)", id.c_str(), name.c_str(), icon.c_str());
 	wivrn_server_complete_list_applications(skeleton, invocation, g_variant_builder_end(&builder));
-	return TRUE;
-}
-
-gboolean on_get_application_icon(WivrnServer * skeleton, GDBusMethodInvocation * invocation, const gchar * id, gpointer)
-{
-	const auto & apps = applications();
-	auto it = apps.find(id);
-	if (it == apps.end() or not it->second.icon_path)
-	{
-		return_error(invocation, "NotFound", std::string("No icon for ") + id);
-		return TRUE;
-	}
-	// Desktop entries may name a theme icon instead, which callers resolve themselves
-	if (not it->second.icon_path->is_absolute())
-	{
-		return_error(invocation, "NotFound", "Icon of " + std::string(id) + " is a theme icon name: " + it->second.icon_path->string());
-		return TRUE;
-	}
-
-	try
-	{
-		const auto & icons = load_icon(*it->second.icon_path);
-		if (icons.empty())
-			throw std::runtime_error("no image in " + it->second.icon_path->string());
-
-		// same choice as the headset's application list
-		const auto & largest = std::ranges::max(icons, [](const wivrn::icon & a, const wivrn::icon & b) {
-			if (a.bpp != b.bpp)
-				return a.bpp < b.bpp;
-			return a.width * a.height < b.width * b.height;
-		});
-		GVariant * png = g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, largest.png_data.data(), largest.png_data.size(), 1);
-		wivrn_server_complete_get_application_icon(skeleton, invocation, png);
-	}
-	catch (std::exception & e)
-	{
-		return_error(invocation, "Failed", e.what());
-	}
 	return TRUE;
 }
 
@@ -453,6 +430,9 @@ json to_json(const lvrr::stats & all)
 	        {"game_fps", all.pc.game_fps ? json(*all.pc.game_fps) : json(nullptr)},
 	        {"game_missed_fps", all.pc.game_missed_fps},
 	        {"encoder_skipped_fps", all.pc.encoder_skipped_fps},
+	        {"codec", all.pc.codec ? value_to_json(*all.pc.codec) : json(nullptr)},
+	        {"bit_depth", all.pc.bit_depth},
+	        {"render_size", json::array({all.pc.render_width, all.pc.render_height})},
 	};
 }
 
@@ -491,7 +471,6 @@ void setup(WivrnServer * server, hooks h)
 	g_signal_connect(server, "handle-stop-session", G_CALLBACK(on_stop_session), nullptr);
 	g_signal_connect(server, "handle-set-dashboard-visible", G_CALLBACK(on_set_dashboard_visible), nullptr);
 	g_signal_connect(server, "handle-list-applications", G_CALLBACK(on_list_applications), nullptr);
-	g_signal_connect(server, "handle-get-application-icon", G_CALLBACK(on_get_application_icon), nullptr);
 	g_signal_connect(server, "handle-start-application", G_CALLBACK(on_start_application), nullptr);
 	g_signal_connect(server, "handle-stop-application", G_CALLBACK(on_stop_application), nullptr);
 
@@ -502,6 +481,8 @@ void setup(WivrnServer * server, hooks h)
 
 void on_headset_settings(const lvrr::headset_settings & settings)
 {
+	headset_live = true;
+	permission_pending = settings.permission_pending;
 	json value = to_json(settings);
 	lvrr_offline::remember(value);
 
@@ -511,7 +492,12 @@ void on_headset_settings(const lvrr::headset_settings & settings)
 	{
 		offline_request_id = 0;
 		lvrr_offline::clear_pending();
-		restart = offline_restart and settings.restart_required;
+		if (offline_restart and settings.restart_required)
+		{
+			restart = new_session;
+			if (not restart)
+				std::cerr << "Changes made while the headset was away need a session restart, left to the dashboard" << std::endl;
+		}
 	}
 
 	auto changes = lvrr_offline::pending();
@@ -552,6 +538,13 @@ void on_headset_settings(const lvrr::headset_settings & settings)
 void on_headset_stats(const lvrr::stats & stats)
 {
 	wivrn_server_set_headset_stats(dbus_server, to_json(stats).dump().c_str());
+
+	if (stats_timeout)
+		g_source_remove(stats_timeout);
+	stats_timeout = g_timeout_add(stats_timeout_ms, [](void *) -> gboolean {
+		stats_timeout = 0;
+		wivrn_server_set_headset_stats(dbus_server, "");
+		return G_SOURCE_REMOVE; }, nullptr);
 }
 
 void on_server_message(const to_headset::server_message & message)
@@ -561,21 +554,50 @@ void on_server_message(const to_headset::server_message & message)
 
 void on_headset_disconnected()
 {
+	// Features waiting for a permission are kept as changes too: the call that turned one on was
+	// answered, and a prompt the headset holds until its session runs ends with the stream. First,
+	// so a waiting call's newer value wins; cleared, as on_session_ended() calls this again
+	if (uint8_t waiting = std::exchange(permission_pending, 0))
+	{
+		json held = json::object();
+		for (auto [bit, name]: feature_names)
+			if (waiting & bit)
+				held[name] = true;
+		lvrr_offline::stage(held);
+	}
+
+	// Calls still waiting keep their change for the next connection, as without a headset
 	for (auto & [id, request]: pending)
 	{
 		g_source_remove(request.timeout);
-		return_error(request.invocation, "NotConnected", "The headset disconnected");
+		json view = lvrr_offline::stage(request.patch);
+		if (view.is_null())
+			return_error(request.invocation, "NotConnected", "The headset disconnected");
+		else
+			wivrn_server_complete_set_headset_settings(dbus_server, request.invocation, view.dump().c_str());
 	}
 	pending.clear();
 	// not answered, sent again next time
 	offline_request_id = 0;
 
+	headset_live = false;
+	new_session = false;
 	publish_offline();
+	if (stats_timeout)
+		g_source_remove(stats_timeout);
+	stats_timeout = 0;
 	wivrn_server_set_headset_stats(dbus_server, "");
 }
 
 void on_session_starting(const std::string & public_key)
 {
+	lvrr_offline::set_headset(public_key);
+	new_session = true;
+}
+
+void on_headset_resumed(const std::string & public_key)
+{
+	// Possibly another paired headset than the session's. new_session stays false: a game may run.
 	lvrr_offline::set_headset(public_key);
 }
 
@@ -587,7 +609,21 @@ void on_session_ended()
 void on_key_revoked(const std::string & public_key)
 {
 	lvrr_offline::forget(public_key);
-	if (not session.headset_connected())
+	if (not headset_live)
 		publish_offline();
+}
+
+std::optional<application> find_application(const std::string & id)
+{
+	// A scan blocks the main loop, and the Library's Play just follows the listing that showed the app
+	auto it = apps.find(id);
+	if (it == apps.end())
+	{
+		apps = list_applications();
+		it = apps.find(id);
+		if (it == apps.end())
+			return std::nullopt;
+	}
+	return it->second;
 }
 } // namespace lvrr_dbus

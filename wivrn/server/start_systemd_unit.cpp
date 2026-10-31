@@ -111,6 +111,9 @@ void systemd_units_manager::on_job_removed(
 	if (strcmp(result, "done"))
 	{
 		std::cerr << "Failed to start application " << node.mapped() << ": " << result << std::endl;
+		// LVRR: it may have been the last one, which update_fsm waits for
+		if (not self->running() and self->state_changed_cb)
+			self->state_changed_cb();
 		return;
 	}
 
@@ -139,6 +142,19 @@ void systemd_units_manager::on_job_removed(
 		        {
 			        std::cerr << "failed to create unit proxy: " << error->message << std::endl;
 			        g_error_free(error);
+			        // LVRR: its job is gone, so it may have been the last one, which update_fsm waits for
+			        if (not self->running() and self->state_changed_cb)
+				        self->state_changed_cb();
+			        return;
+		        }
+
+		        // LVRR: a unit that ended before its proxy loaded gets no notify::active-state and would
+		        // count as running for good (a wayvr that finds one running, a steam:// launcher)
+		        if (const char * state = unit_unit_get_active_state(unit.get());
+		            state and (state == std::string_view("inactive") or state == std::string_view("failed")))
+		        {
+			        if (not self->running() and self->state_changed_cb)
+				        self->state_changed_cb();
 			        return;
 		        }
 
@@ -242,6 +258,11 @@ void systemd_units_manager::start_application(const std::vector<std::string> & a
 	                      "(sv)",
 	                      "Description",
 	                      g_variant_new("s", "Application spawned by LVRR"));
+	// LVRR: one slice for the apps, so lvrr logs -f follows apps started after it
+	g_variant_builder_add(&b,
+	                      "(sv)",
+	                      "Slice",
+	                      g_variant_new("s", "app-lvrr.slice"));
 
 	variant_builder argv(G_VARIANT_TYPE("as"));
 	for (const auto & arg: args)

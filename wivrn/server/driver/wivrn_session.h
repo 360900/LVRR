@@ -105,8 +105,10 @@ class wivrn_session : public xrt_system_devices
 	beman::inplace_vector::inplace_vector<wivrn_generic_tracker, from_headset::htc_body::max_tracked_poses> generic_trackers;
 	std::optional<wivrn_uinput> uinput_handler;
 	bool gamepad_connected = false; // network thread only
-	int64_t lvrr_stats_ns = 0;      // LVRR: last headset statistics, network thread only
-	std::mutex lvrr_hands_mutex;    // LVRR: for the two below
+	int64_t lvrr_stats_ns = 0;      // LVRR: start of the PC rates' period, network thread only
+	lvrr::pc_stats lvrr_pc_stats{}; // LVRR: last PC rates and stream settings sent, network thread only
+	bool lvrr_outdated = false;     // LVRR: resumed with other restart settings, network thread only
+	// LVRR: network thread only, see lvrr_update_hands
 	bool lvrr_dashboard_open = false;
 	std::optional<bool> lvrr_hands_shown; // last lvrr::show_hands sent
 
@@ -200,6 +202,7 @@ public:
 	void operator()(lvrr::headset_settings &&);
 	void operator()(lvrr::headset_stats &&);
 	void send_stopping(lvrr::server_stopping::reason_t);
+	void send_expect_reconnect();
 
 	void operator()(to_monado::stop &&);
 	void operator()(to_monado::disconnect &&);

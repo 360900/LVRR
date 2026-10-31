@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include "application.h"
 #include "wivrn_ipc.h"
 #include "wivrn_packets.h"
 #include "wivrn_server_dbus.h"
@@ -24,6 +25,7 @@
 #include <filesystem>
 #include <functional>
 #include <nlohmann/json_fwd.hpp>
+#include <optional>
 #include <string>
 
 // The LVRR parts of the io.github.wivrn.Server interface: headset settings and statistics,
@@ -32,7 +34,6 @@ namespace lvrr_dbus
 {
 struct hooks
 {
-	std::function<bool()> headset_connected;
 	std::function<bool()> session_running;
 	std::function<void(to_monado::packets)> send_to_session;
 	// Starts an application from the list, or the configured one for an empty id; throws on failure
@@ -49,8 +50,14 @@ void on_server_message(const wivrn::to_headset::server_message &);
 void on_headset_disconnected();
 // A session starts for the headset with this public key
 void on_session_starting(const std::string & public_key);
+// The headset with this public key resumes the running session
+void on_headset_resumed(const std::string & public_key);
 void on_session_ended();
 void on_key_revoked(const std::string & public_key);
+
+// The application with this id as the last scan found it, scanning again when it isn't there;
+// throws when that scan fails
+std::optional<wivrn::application> find_application(const std::string & id);
 
 // Exposed for tests
 nlohmann::json to_json(const wivrn::lvrr::headset_settings &);

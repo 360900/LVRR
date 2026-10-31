@@ -25,6 +25,7 @@
 #include "utils/wivrn_trace.h"
 #include "utils/wivrn_vk_bundle.h"
 
+#include <charconv>
 #include <iostream>
 #include <ranges>
 #include <stdexcept>
@@ -225,9 +226,23 @@ wivrn::video_encoder_vulkan::video_encoder_vulkan(
 		rate_control.reset();
 	}
 
-	// LVRR: RADV's level 0 is the speed preset, 1 is balanced
+	// LVRR: from Mesa 26.1 RADV maps the level to a preset: 0 speed (balanced for HEVC before VCN5),
+	// 1 balanced, 2 quality. Older RADV takes the speed preset from the ultra-low-latency tuning.
 	if (vk.physical_device.getProperties().vendorID == 0x1002 and encode_caps.maxQualityLevels > 1)
 		quality_level.qualityLevel = 1;
+	// LVRR: "quality" in the encoder's options overrides the level, as in ffmpeg's Vulkan encoders
+	const uint32_t max_quality_level = std::max(encode_caps.maxQualityLevels, 1u) - 1;
+	if (auto it = settings.options.find("quality"); it != settings.options.end())
+	{
+		const std::string & value = it->second;
+		uint32_t level;
+		auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), level);
+		if (ec == std::errc{} and ptr == value.data() + value.size())
+			quality_level.qualityLevel = std::min(level, max_quality_level);
+		else
+			U_LOG_W("Invalid quality option \"%s\", using level %u", value.c_str(), quality_level.qualityLevel);
+	}
+	U_LOG_I("Vulkan encoder %d uses quality level %u (max %u)", stream_idx, quality_level.qualityLevel, max_quality_level);
 
 	constexpr uint32_t cb_min_size = 8;
 	uint32_t granWidth =

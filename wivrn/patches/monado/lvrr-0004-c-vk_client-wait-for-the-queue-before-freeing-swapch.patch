@@ -1,4 +1,4 @@
-From 0c3e5aa3fb463d9b5d9472be48da87f601302191 Mon Sep 17 00:00:00 2001
+From db011009218e20e43ee8a5638eca13fb8fc72a16 Mon Sep 17 00:00:00 2001
 From: 360900 <ziyad.koca@hotmail.com>
 Date: Mon, 26 Oct 2026 16:36:18 +0300
 Subject: [PATCH] c/vk_client: wait for the queue before freeing swapchain
@@ -8,32 +8,315 @@ xrDestroySwapchain freed the images while the app's GPU work on them
 could still be running. Unity games such as Bonelab recreate their
 swapchains on a render scale change with the last frames in flight,
 which faulted the GPU (Xid 31 on NVIDIA) and lost the session.
+
+Waiting for the app's queue in xrDestroySwapchain is not allowed
+either: XR_KHR_vulkan_enable lets the runtime use it only in
+xrBeginFrame, xrEndFrame, xrAcquireSwapchainImage and
+xrReleaseSwapchainImage, and Proton's wineopenxr locks DXVK's
+submissions only around those. So keep a destroyed swapchain's images,
+memory and barrier command buffers until a fence submitted in the next
+xrBeginFrame or xrEndFrame has signaled.
+
+Destroying the compositor waits on the host, up to a second: on the
+fences already submitted, and for swapchains destroyed after the last
+frame on the timeline semaphore value of the last commit. Without a
+timeline semaphore (XR_KHR_vulkan_enable, Proton) those are still
+freed at once. What is still in use after that is leaked, together
+with the command pool and the semaphore.
 ---
- src/xrt/compositor/client/comp_vk_client.c | 11 +++++++++++
- 1 file changed, 11 insertions(+)
+ src/xrt/compositor/client/comp_vk_client.c | 188 +++++++++++++++++++--
+ src/xrt/compositor/client/comp_vk_client.h |   9 +
+ 2 files changed, 185 insertions(+), 12 deletions(-)
 
 diff --git a/src/xrt/compositor/client/comp_vk_client.c b/src/xrt/compositor/client/comp_vk_client.c
-index ad3c7a6..d2025c6 100644
+index ad3c7a6f7..f97d5adcf 100644
 --- a/src/xrt/compositor/client/comp_vk_client.c
 +++ b/src/xrt/compositor/client/comp_vk_client.c
-@@ -286,6 +286,17 @@ client_vk_swapchain_destroy(struct xrt_swapchain *xsc)
- 	}
- 	vk_cmd_pool_unlock(&c->pool);
+@@ -11,7 +11,10 @@
  
-+	// The app may still have GPU work on the images: Unity games recreate their swapchains
-+	// on a render scale change while the last frames with the old ones are in flight, and
-+	// freeing the images under that work faulted the GPU (Xid 31 on NVIDIA) and lost the
-+	// session.
-+	{
-+		COMP_TRACE_IDENT(queue_wait_idle);
-+		vk_queue_lock(vk->main_queue);
-+		vk->vkQueueWaitIdle(vk->main_queue->queue);
-+		vk_queue_unlock(vk->main_queue);
+ #include "vk/vk_compositor_flags.h"
+ 
++#include "os/os_time.h"
++
+ #include "util/u_misc.h"
++#include "util/u_time.h"
+ #include "util/u_handles.h"
+ #include "util/u_trace_marker.h"
+ #include "util/u_debug.h"
+@@ -129,6 +132,33 @@ setup_semaphore(struct client_vk_compositor *c)
+ }
+ #endif
+ 
++/*!
++ * Waits on the host for the timeline semaphore value of the last commit, which is signaled once all work queued
++ * before it is done. Returns VK_SUCCESS at once without a timeline semaphore.
++ */
++static VkResult
++wait_for_last_commit(struct client_vk_compositor *c, uint64_t timeout_ns)
++{
++#ifdef VK_KHR_timeline_semaphore
++	struct vk_bundle *vk = &c->vk;
++
++	if (c->sync.semaphore == VK_NULL_HANDLE || vk->vkWaitSemaphores == NULL) {
++		return VK_SUCCESS;
 +	}
 +
++	VkSemaphoreWaitInfo wait_info = {
++	    .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
++	    .semaphoreCount = 1,
++	    .pSemaphores = &c->sync.semaphore,
++	    .pValues = &c->sync.value,
++	};
++
++	return vk->vkWaitSemaphores(vk->device, &wait_info, timeout_ns);
++#else
++	return VK_SUCCESS;
++#endif
++}
++
+ 
+ /*
+  *
+@@ -264,16 +294,16 @@ submit_fallback(struct client_vk_compositor *c, xrt_result_t *out_xret)
+  *
+  */
+ 
++/*!
++ * Frees a destroyed swapchain's barrier command buffers, images and memory.
++ *
++ * @pre Command pool lock must be held, see @ref vk_cmd_pool_lock.
++ */
+ static void
+-client_vk_swapchain_destroy(struct xrt_swapchain *xsc)
++free_swapchain_locked(struct client_vk_compositor *c, struct client_vk_swapchain *sc)
+ {
+-	COMP_TRACE_MARKER();
+-
+-	struct client_vk_swapchain *sc = client_vk_swapchain(xsc);
+-	struct client_vk_compositor *c = sc->c;
+ 	struct vk_bundle *vk = &c->vk;
+ 
+-	vk_cmd_pool_lock(&c->pool);
+ 	for (uint32_t i = 0; i < sc->base.base.image_count; i++) {
+ 		if (sc->acquire[i] != VK_NULL_HANDLE) {
+ 			vk->vkFreeCommandBuffers(vk->device, c->pool.pool, 1, &sc->acquire[i]);
+@@ -284,7 +314,6 @@ client_vk_swapchain_destroy(struct xrt_swapchain *xsc)
+ 			sc->release[i] = VK_NULL_HANDLE;
+ 		}
+ 	}
+-	vk_cmd_pool_unlock(&c->pool);
+ 
  	for (uint32_t i = 0; i < sc->base.base.image_count; i++) {
  		if (sc->base.images[i] != VK_NULL_HANDLE) {
- 			vk->vkDestroyImage(vk->device, sc->base.images[i], NULL);
+@@ -298,12 +327,102 @@ client_vk_swapchain_destroy(struct xrt_swapchain *xsc)
+ 		}
+ 	}
+ 
+-	// Drop our reference, does NULL checking.
+-	xrt_swapchain_native_reference(&sc->xscn, NULL);
++	if (sc->retired_fence != VK_NULL_HANDLE) {
++		vk->vkDestroyFence(vk->device, sc->retired_fence, NULL);
++	}
+ 
+ 	free(sc);
+ }
+ 
++/*!
++ * Whether the app's queue is done with a destroyed swapchain. The first call fences it with an empty
++ * submit, which signals once all work queued before it is done.
++ *
++ * @pre Command pool lock must be held, see @ref vk_cmd_pool_lock.
++ */
++static bool
++retired_swapchain_is_done_locked(struct client_vk_compositor *c, struct client_vk_swapchain *sc)
++{
++	struct vk_bundle *vk = &c->vk;
++	VkResult ret;
++
++	if (sc->retired_fence == VK_NULL_HANDLE) {
++		VkFenceCreateInfo fence_info = {
++		    .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
++		};
++		VkFence fence = VK_NULL_HANDLE;
++
++		ret = vk->vkCreateFence(vk->device, &fence_info, NULL, &fence);
++		if (ret != VK_SUCCESS) {
++			VK_ERROR(vk, "vkCreateFence: %s", vk_result_string(ret));
++			return false; // Tried again on the next frame.
++		}
++
++		ret = vk_cmd_submit_locked(vk, vk->main_queue, 0, NULL, fence);
++		if (ret != VK_SUCCESS) {
++			vk->vkDestroyFence(vk->device, fence, NULL);
++			return false; // Tried again on the next frame.
++		}
++
++		sc->retired_fence = fence;
++	}
++
++	ret = vk->vkGetFenceStatus(vk->device, sc->retired_fence);
++
++	return ret == VK_SUCCESS || ret == VK_ERROR_DEVICE_LOST;
++}
++
++/*!
++ * Frees the destroyed swapchains the app's queue is done with, takes the pool lock. Only called from
++ * xrBeginFrame and xrEndFrame, where the runtime may use that queue.
++ */
++static void
++reap_retired_swapchains(struct client_vk_compositor *c)
++{
++	vk_cmd_pool_lock(&c->pool);
++
++	struct client_vk_swapchain **link = &c->retired;
++	while (*link != NULL) {
++		struct client_vk_swapchain *sc = *link;
++
++		if (!retired_swapchain_is_done_locked(c, sc)) {
++			link = &sc->retired_next;
++			continue;
++		}
++
++		*link = sc->retired_next;
++		free_swapchain_locked(c, sc);
++	}
++
++	vk_cmd_pool_unlock(&c->pool);
++}
++
++static void
++client_vk_swapchain_destroy(struct xrt_swapchain *xsc)
++{
++	COMP_TRACE_MARKER();
++
++	struct client_vk_swapchain *sc = client_vk_swapchain(xsc);
++	struct client_vk_compositor *c = sc->c;
++
++	// Drop our reference, does NULL checking. The memory we imported stays valid without it.
++	xrt_swapchain_native_reference(&sc->xscn, NULL);
++
++	/*
++	 * The app may still have GPU work on the images: Unity games recreate their swapchains on a
++	 * render scale change with the last frames in flight, and freeing the images under that work
++	 * faulted the GPU (Xid 31 on NVIDIA) and lost the session. Waiting for the queue is not allowed
++	 * here: XR_KHR_vulkan_enable lets the runtime use it only in xrBeginFrame, xrEndFrame,
++	 * xrAcquireSwapchainImage and xrReleaseSwapchainImage, and Proton's wineopenxr locks DXVK's
++	 * submissions only around those. So the next frames free the swapchain, once a fence submitted
++	 * there has signaled.
++	 */
++	vk_cmd_pool_lock(&c->pool);
++	sc->retired_next = c->retired;
++	c->retired = sc;
++	vk_cmd_pool_unlock(&c->pool);
++}
++
+ static xrt_result_t
+ client_vk_swapchain_acquire_image(struct xrt_swapchain *xsc, uint32_t *out_index)
+ {
+@@ -402,14 +521,54 @@ client_vk_compositor_destroy(struct xrt_compositor *xc)
+ 	struct client_vk_compositor *c = client_vk_compositor(xc);
+ 	struct vk_bundle *vk = &c->vk;
+ 
+-	if (c->sync.semaphore != VK_NULL_HANDLE) {
++	/*
++	 * The queue may not be used here, so wait on the host, at most a second in total: on the fences
++	 * already submitted, and for the swapchains destroyed after the last frame, which have none, on the
++	 * timeline semaphore value of the last commit. Without one (XR_KHR_vulkan_enable, Proton) those are
++	 * freed at once. What is still busy after that is left to vkDestroyDevice, as freeing it could fault
++	 * the GPU. So are the pool, which holds its barrier command buffers, and the semaphore, whose last
++	 * signal may still be pending.
++	 */
++	vk_cmd_pool_lock(&c->pool);
++	int64_t deadline_ns = os_monotonic_get_ns() + U_TIME_1S_IN_NS;
++	bool leaked = false;
++	while (c->retired != NULL) {
++		struct client_vk_swapchain *sc = c->retired;
++		c->retired = sc->retired_next;
++
++		int64_t left_ns = deadline_ns - os_monotonic_get_ns();
++		uint64_t timeout_ns = left_ns > 0 ? (uint64_t)left_ns : 0;
++		VkResult ret;
++		if (sc->retired_fence != VK_NULL_HANDLE) {
++			ret = vk->vkWaitForFences(vk->device, 1, &sc->retired_fence, VK_TRUE, timeout_ns);
++		} else {
++			ret = wait_for_last_commit(c, timeout_ns);
++		}
++		if (ret == VK_TIMEOUT) {
++			leaked = true;
++			continue;
++		}
++
++		free_swapchain_locked(c, sc);
++	}
++	vk_cmd_pool_unlock(&c->pool);
++
++	if (leaked) {
++		VK_WARN(vk, "Destroyed swapchains still in use after a second, leaking them");
++	}
++
++	if (!leaked && c->sync.semaphore != VK_NULL_HANDLE) {
+ 		vk->vkDestroySemaphore(vk->device, c->sync.semaphore, NULL);
+ 		c->sync.semaphore = VK_NULL_HANDLE;
+ 	}
+ 	xrt_compositor_semaphore_reference(&c->sync.xcsem, NULL);
+ 
+-	// Now safe to free the pool.
+-	vk_cmd_pool_destroy(vk, &c->pool);
++	if (leaked) {
++		os_mutex_destroy(&c->pool.mutex);
++	} else {
++		// Now safe to free the pool.
++		vk_cmd_pool_destroy(vk, &c->pool);
++	}
+ 
+ 	vk_deinit_mutex(vk);
+ 
+@@ -453,6 +612,9 @@ client_vk_compositor_wait_frame(struct xrt_compositor *xc,
+ static xrt_result_t
+ client_vk_compositor_begin_frame(struct xrt_compositor *xc, int64_t frame_id)
+ {
++	// Not only in layer_commit: frames ended without layers never reach it.
++	reap_retired_swapchains(client_vk_compositor(xc));
++
+ 	// Pipe down call into native compositor.
+ 	return xrt_comp_begin_frame(to_native_compositor(xc), frame_id);
+ }
+@@ -619,6 +781,8 @@ client_vk_compositor_layer_commit(struct xrt_compositor *xc, xrt_graphics_sync_h
+ 
+ 	struct client_vk_compositor *c = client_vk_compositor(xc);
+ 
++	reap_retired_swapchains(c);
++
+ 	if (c->renderdoc_enabled) {
+ 		struct vk_bundle *vk = &c->vk;
+ 		VkResult ret = vk_cmd_pool_submit_cmd_buffer(vk, &c->pool, c->dcb);
+diff --git a/src/xrt/compositor/client/comp_vk_client.h b/src/xrt/compositor/client/comp_vk_client.h
+index 63f333184..ad7164548 100644
+--- a/src/xrt/compositor/client/comp_vk_client.h
++++ b/src/xrt/compositor/client/comp_vk_client.h
+@@ -52,6 +52,12 @@ struct client_vk_swapchain
+ 	// Prerecorded swapchain image ownership/layout transition barriers
+ 	VkCommandBuffer acquire[XRT_MAX_SWAPCHAIN_IMAGES];
+ 	VkCommandBuffer release[XRT_MAX_SWAPCHAIN_IMAGES];
++
++	//! Next destroyed swapchain in @ref client_vk_compositor::retired.
++	struct client_vk_swapchain *retired_next;
++
++	//! Signals once the queue is done with this destroyed swapchain, submitted on the next frame.
++	VkFence retired_fence;
+ };
+ 
+ /*!
+@@ -80,6 +86,9 @@ struct client_vk_compositor
+ 
+ 	struct vk_cmd_pool pool;
+ 
++	//! Destroyed swapchains the app's queue may still be using, protected by the pool's mutex.
++	struct client_vk_swapchain *retired;
++
+ 	bool renderdoc_enabled;
+ 	VkCommandBuffer dcb;
+ };
 -- 
 2.56.0
 

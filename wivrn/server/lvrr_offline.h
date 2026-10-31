@@ -26,10 +26,10 @@
 // and the server sends the changes when it connects again (docs/dbus.md).
 namespace lvrr_offline
 {
-// Reads the store; a missing or broken file starts empty
+// Reads the store; a missing or broken file starts empty, a broken entry is dropped
 void load(const std::filesystem::path &);
 
-// The headset of the session that starts
+// The headset of the session that starts or resumes
 void set_headset(const std::string & public_key);
 
 // Settings the connected headset reported, as HeadsetSettings JSON
@@ -48,7 +48,7 @@ nlohmann::json stage(const nlohmann::json & patch);
 nlohmann::json pending();
 void clear_pending();
 
-// An unpaired headset is forgotten
+// An unpaired headset is forgotten, also the connected one: its later reports aren't kept
 void forget(const std::string & public_key);
 
 // Whether a patch has settings that apply to the next session only

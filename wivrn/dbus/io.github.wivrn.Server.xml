@@ -99,12 +99,6 @@
 			<arg type="a(sss)" name="Applications" direction="out"/>
 			<annotation name="org.qtproject.QtDBus.QtTypeName.Out0" value="QList&lt;std::tuple&lt;QString,QString,QString&gt;&gt;"/>
 		</method>
-		<method name="GetApplicationIcon">
-			<arg type="s" name="Id" direction="in"/>
-			<arg type="ay" name="Png" direction="out">
-				<annotation name="org.gtk.GDBus.C.ForceGVariant" value="true"/>
-			</arg>
-		</method>
 		<method name="StartApplication">
 			<arg type="s" name="Id" direction="in"/>
 		</method>

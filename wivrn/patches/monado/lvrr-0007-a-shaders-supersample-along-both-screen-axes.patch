@@ -1,0 +1,105 @@
+From a410cad6017c1dd654ef5ac1175434e127275e99 Mon Sep 17 00:00:00 2001
+From: 360900 <ziyad.koca@hotmail.com>
+Date: Sat, 31 Oct 2026 04:09:16 +0300
+Subject: [PATCH] a/shaders: supersample along both screen axes
+
+Per-layer supersampling scaled its sample pattern per uv axis by the uv
+difference to the diagonal neighbour, which is the pixel footprint only
+on an upright layer. On a rolled layer the pixels of each 2x2 quad were
+filtered unevenly, two mostly along u and two mostly along v, and at 45
+degrees each along one axis only, so text shimmered in a 2x2 pattern.
+
+Take the uv differences to the horizontal and the vertical neighbour as
+the two screen axis derivatives and place the samples along both. Build
+the quads from the subgroup lane IDs, as Vulkan doesn't tie them to
+gl_LocalInvocationIndex.
+---
+ src/xrt/auxiliary/render/shaders/layer.comp | 40 +++++++++++++--------
+ 1 file changed, 26 insertions(+), 14 deletions(-)
+
+diff --git a/src/xrt/auxiliary/render/shaders/layer.comp b/src/xrt/auxiliary/render/shaders/layer.comp
+index 6b8dddb4f..3ea5c15aa 100644
+--- a/src/xrt/auxiliary/render/shaders/layer.comp
++++ b/src/xrt/auxiliary/render/shaders/layer.comp
+@@ -6,6 +6,7 @@
+ 
+ #version 460
+ #extension GL_GOOGLE_include_directive : require
++#extension GL_KHR_shader_subgroup_basic : require
+ #extension GL_KHR_shader_subgroup_ballot : require
+ #extension GL_KHR_shader_subgroup_shuffle : require
+ 
+@@ -168,36 +169,43 @@ vec4 sample_source_texture(vec2 uv, uint layer) {
+ 		return texture(source[source_image_index], uv);
+ 	}
+ 
+-	// All invocations are laid out in 2x2 quads. Therefore to obtain
+-	// a full derivative coordinates have to be swapped diagonally.
++	// All invocations are laid out in 2x2 quads (see main), so lane ^ 1 is the
++	// horizontal and lane ^ 2 the vertical neighbour. Their uv differences are
++	// the derivatives along both screen axes, which also hold on a rolled layer.
+ 	//   x 1 2 3 4 5 6 7 8
+ 	//  y+----------------
+ 	//  1| 0 1 4 5 8 9 C D
+-	//   |  X   X   X   X  ...
+ 	//  2| 2 3 6 7 A B E F
+ 
+-	uint peer_idx = gl_SubgroupInvocationID ^ 3;
++	uint lane = gl_SubgroupInvocationID;
+ 	vec4 colour = vec4(.0);
+ 
+-	// Check if both invocations have reached a valid uv coordinate
+-	bool peer_valid = subgroupBallotBitExtract(subgroupBallot(true), peer_idx);
++	// Swap with both neighbours before any branch: a neighbour missing one of
++	// its own neighbours skips the branch, so a shuffle inside it could read an
++	// inactive invocation
++	uvec4 ballot = subgroupBallot(true);
++	vec2 h = subgroupShuffleXor(uv, 1u);
++	vec2 v = subgroupShuffleXor(uv, 2u);
+ 
+-	if (peer_valid) {
+-		// Swap with peer and calculate derivative
+-		vec2 diff = uv - subgroupShuffle(uv, peer_idx);
++	// Check if both neighbours have reached a valid uv coordinate
++	if (subgroupBallotBitExtract(ballot, lane ^ 1u) && subgroupBallotBitExtract(ballot, lane ^ 2u)) {
++		vec2 dx = (lane & 1u) != 0u ? uv - h : h - uv;
++		vec2 dy = (lane & 2u) != 0u ? uv - v : v - uv;
+ 
+ 		// Handle non-continuous wraping uvs for cilinder and equirect layers
+ 		// TODO: this will probably need some more work
+ 		vec2 extent = abs(LAYER.post_transform.zw);
+-		diff = mix(diff, diff - extent * sign(diff), greaterThan(abs(diff), extent / 2));
++		dx = mix(dx, dx - extent * sign(dx), greaterThan(abs(dx), extent / 2));
++		dy = mix(dy, dy - extent * sign(dy), greaterThan(abs(dy), extent / 2));
+ 
+ 		// Accumulate requested number of samples and average them out
+ 		for (uint sample_idx = 0; sample_idx < sample_count; sample_idx++) {
+-			colour += texture(source[source_image_index], uv + diff * sample_offsets[sample_idx + sample_count - 1]);
++			vec2 offset = sample_offsets[sample_idx + sample_count - 1];
++			colour += texture(source[source_image_index], uv + dx * offset.x + dy * offset.y);
+ 		}
+ 		colour /= sample_count;
+ 	} else {
+-		// Peer invocation is inactive, fallback to a single sample
++		// A neighbour invocation is inactive, fallback to a single sample
+ 		colour = texture(source[source_image_index], uv);
+ 	}
+ 
+@@ -712,8 +720,12 @@ vec4 do_layers(vec2 view_uv)
+ 
+ void main()
+ {
+-	uint quad_idx = gl_LocalInvocationIndex / 4;
+-	uint local_idx = gl_LocalInvocationIndex % 4;
++	// Number the invocations by subgroup lane: Vulkan doesn't tie lanes to
++	// gl_LocalInvocationIndex, and sample_source_texture needs each pixel's
++	// quad neighbours at lane ^ 1 and lane ^ 2.
++	uint id = gl_SubgroupID * gl_SubgroupSize + gl_SubgroupInvocationID;
++	uint quad_idx = id / 4;
++	uint local_idx = id % 4;
+ 
+ 	uvec3 n_quads = gl_WorkGroupSize / 2;
+ 	uvec3 base = gl_WorkGroupID * gl_WorkGroupSize;
+-- 
+2.56.0
+

@@ -193,6 +193,12 @@ public:
 		return skipped_frames.exchange(0);
 	}
 
+	// LVRR: the left eye's encoder, fixed for the session
+	const encoder_settings & get_stream_settings() const
+	{
+		return settings[0];
+	}
+
 	void set_bitrate(uint32_t);
 	void update_foveation(const from_headset::foveation &);
 

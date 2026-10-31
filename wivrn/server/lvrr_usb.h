@@ -20,16 +20,18 @@
 #include <functional>
 #include <string>
 
-// Polls adb from the main loop. When a device with the headset app shows up (plugged in, USB
-// debugging allowed, or adb back after a drop) while the server waits for a headset, it sets
-// up the adb tunnel and starts the app on it, once per appearance.
+// Polls adb from the main loop. When a device on USB with the headset app shows up (plugged in,
+// USB debugging allowed, or adb back after a drop) while the server waits for a headset, it sets
+// up the adb tunnel and starts the app on it, once per appearance, retrying an attempt that
+// failed. While a headset streams it only sets up the tunnel. An adb server restart takes the
+// tunnel down, so it is set up again every 10 s.
 namespace lvrr_usb
 {
 struct server
 {
 	int port;
-	// Whether the server waits for a headset
-	std::function<bool()> idle;
+	// Whether the server waits for a headset: it listens, or a session waits for its lost headset
+	std::function<bool()> waiting;
 	// The pairing PIN, empty when pairing is off
 	std::function<std::string()> pin;
 };

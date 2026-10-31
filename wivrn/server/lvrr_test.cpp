@@ -21,6 +21,7 @@
 
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <unistd.h>
 #include <nlohmann/json.hpp>
@@ -148,7 +149,16 @@ lvrr::stats example_stats()
 	};
 	return {
 	        .headset = std::move(headset),
-	        .pc = {.game_fps = 88, .game_missed_fps = 2, .encoder_skipped_fps = 0.5f},
+	        .pc = {
+	                .game_fps = 88,
+	                .game_missed_fps = 2,
+	                .encoder_skipped_fps = 0.5f,
+	                .codec = lvrr::codec_choice::h265,
+	                .bit_depth = 10,
+	                // the example settings' eye size times their resolution_scale
+	                .render_width = 2016,
+	                .render_height = 2112,
+	        },
 	};
 }
 
@@ -216,6 +226,18 @@ int main(int argc, char ** argv)
 	check(not lvrr_offline::known() and lvrr_offline::offline_view().is_null(), "no headset known at first");
 	lvrr_offline::set_headset("key-a");
 	lvrr_offline::remember(lvrr_dbus::to_json(example_settings()));
+	// Every write to /dev/full fails, as on a full disk
+	auto tmp = store;
+	tmp += ".tmp";
+	if (std::filesystem::exists("/dev/full"))
+	{
+		std::filesystem::create_symlink("/dev/full", tmp);
+		lvrr_offline::stage(json::parse(R"({"bitrate_bps": 1})"));
+		check(std::filesystem::is_regular_file(store) and not std::filesystem::is_symlink(tmp), "a failed save keeps the store");
+		lvrr_offline::load(store);
+		lvrr_offline::set_headset("key-a");
+		check(lvrr_offline::known() and lvrr_offline::offline_view()["pending"].is_null(), "a failed save leaves the store as it was");
+	}
 	auto changes = json::parse(R"({"bitrate_bps": 30000000, "codec": "h265"})");
 	auto view = lvrr_offline::stage(changes);
 	check(view["offline"] == true and view["pending"] == changes, "offline view has the changes");
@@ -233,6 +255,18 @@ int main(int argc, char ** argv)
 	check(lvrr_offline::pending().is_null() and lvrr_offline::offline_view()["pending"].is_null(), "applied changes are cleared");
 	lvrr_offline::forget("key-a");
 	check(not lvrr_offline::known(), "an unpaired headset is forgotten");
+	lvrr_offline::remember(lvrr_dbus::to_json(example_settings()));
+	check(not lvrr_offline::known() and lvrr_offline::offline_view().is_null(), "a forgotten headset's next report is not kept");
+
+	// A hand-edited store keeps the entries it can use
+	auto edited = json::parse(R"({"last": "a", "headsets": {"a": {}, "b": [], "c": {"settings": 1}}})");
+	edited["headsets"]["a"]["settings"] = lvrr_dbus::to_json(example_settings());
+	std::ofstream(store) << edited;
+	lvrr_offline::load(store);
+	check(lvrr_offline::known() and lvrr_offline::offline_view()["pending"].is_null(), "a hand-edited store loads");
+	lvrr_offline::set_headset("b");
+	lvrr_offline::remember(lvrr_dbus::to_json(example_settings()));
+	check(lvrr_offline::known(), "a headset whose entry was dropped is remembered again");
 	std::filesystem::remove(store);
 	check(lvrr_dbus::to_json(settings)["offline"] == false and lvrr_dbus::to_json(settings)["pending"].is_null(), "live settings are not offline");
 

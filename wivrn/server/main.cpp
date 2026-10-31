@@ -204,6 +204,9 @@ const AvahiPoll * poll_api;
 guint server_watch;
 guint server_kill_watch;
 pid_t server_pid;
+// LVRR: the session lost its headset and waits for it, see accept_connection. Unlike the
+// HeadsetConnected property, not while a session starts.
+bool headset_lost;
 std::optional<std::jthread> connection_thread;
 
 std::unique_ptr<children_manager> children;
@@ -301,8 +304,15 @@ void start_server(configuration config)
 		assert(server_watch == 0);
 		assert(server_kill_watch == 0);
 		wivrn_server_set_session_running(dbus_server, true);
+		// LVRR: a packet of the previous session read after it ended may have set it
+		headset_lost = false;
 		server_watch = g_child_watch_add(server_pid, [](pid_t, int status, void *) {
 			wivrn_server_set_session_running(dbus_server, false);
+			// LVRR: a session can also end without headset_disconnected (headset app quit, StopSession,
+			// RestartSession, a refused headset, a crash), so release here what its handler releases
+			inhibitor.reset();
+			wivrn_server_set_headset_connected(dbus_server, false);
+			wivrn_server_set_client_tab(dbus_server, "");
 			lvrr_dbus::on_session_ended();
 			display_child_status(status, "Server");
 			g_source_remove(server_watch);
@@ -373,6 +383,9 @@ void start_publishing()
 			        {"protocol", protocol_string},
 			        {"version", wivrn::display_version()},
 			        {"cookie", server_cookie()},
+			        // LVRR: lets the headset tell this server from another WiVRn server, which publishes the
+			        // same keys. TXT isn't part of protocol_version, older headset apps still connect
+			        {"lvrr", "1"},
 			};
 			auto configuration = wivrn::configuration();
 			publisher.emplace(poll_api, configuration.hostname, "_wivrn._tcp", configuration.port, TXT);
@@ -391,7 +404,9 @@ void configure_usb()
 	lvrr_usb::configure(config.usb_auto_connect,
 	                    {
 	                            .port = config.port,
-	                            .idle = [] { return listener != nullptr; },
+	                            // LVRR: also while a session waits for its lost headset, so a headset whose
+	                            // adb dropped is started again pointed at it
+	                            .waiting = [] { return listener != nullptr or (server_watch != 0 and headset_lost); },
 	                            .pin = [] { return pin; },
 	                    });
 }
@@ -541,11 +556,16 @@ void start_app_by_id(const std::string & app_id)
 		children->start_application(configuration().application);
 		return;
 	}
-	const auto & apps = list_applications();
-	auto it = apps.find(app_id);
-	if (it == apps.end())
+	auto app = lvrr_dbus::find_application(app_id);
+	if (not app)
 		throw std::runtime_error("unknown application " + app_id);
-	children->start_application(it->second.exec, it->second.path);
+	children->start_application(app->exec, app->path);
+}
+
+// LVRR: the configured application is the dashboard
+bool is_dashboard(const std::vector<std::string> & application)
+{
+	return not application.empty() and std::filesystem::path(application.front()).filename() == "wayvr";
 }
 
 // LVRR: the headset's "Restart desktop". wayvr runs once, and --replace ends the running one
@@ -553,7 +573,7 @@ void start_app_by_id(const std::string & app_id)
 void restart_application()
 {
 	auto application = configuration().application;
-	if (not application.empty() and std::filesystem::path(application.front()).filename() == "wayvr")
+	if (is_dashboard(application))
 		application.push_back("--replace");
 	children->start_application(application);
 }
@@ -561,7 +581,8 @@ void restart_application()
 gboolean control_received(gint fd, GIOCondition condition, gpointer user_data)
 {
 	auto packet = wivrn_ipc_socket_main_loop->receive();
-	if (packet)
+	// LVRR: the read keeps the other packets it took, which no longer wake the main loop
+	while (packet)
 	{
 		std::visit(utils::overloaded{
 		                   [&](const wivrn::from_headset::headset_info_packet & info) {
@@ -590,15 +611,8 @@ gboolean control_received(gint fd, GIOCondition condition, gpointer user_data)
 			                   stop_publishing();
 			                   inhibitor.emplace();
 			                   wivrn_server_set_headset_connected(dbus_server, true);
-			                   // LVRR: bring the dashboard back if it stopped while the session kept running
-			                   try
-			                   {
-				                   start_app_by_id("");
-			                   }
-			                   catch (std::exception & e)
-			                   {
-				                   std::cerr << "Failed to start application: " << e.what() << std::endl;
-			                   }
+			                   // LVRR: see configure_usb
+			                   headset_lost = false;
 		                   },
 		                   [&](const from_monado::headset_disconnected &) {
 			                   start_publishing();
@@ -606,6 +620,27 @@ gboolean control_received(gint fd, GIOCondition condition, gpointer user_data)
 			                   wivrn_server_set_headset_connected(dbus_server, false);
 			                   wivrn_server_set_client_tab(dbus_server, "");
 			                   lvrr_dbus::on_headset_disconnected();
+			                   // LVRR: see configure_usb
+			                   headset_lost = true;
+		                   },
+		                   [&](const from_monado::headset_resumed & resumed) {
+			                   // LVRR: possibly not the headset the session started for, and its handshake
+			                   // updated the key's last connection
+			                   lvrr_dbus::on_headset_resumed(resumed.public_key);
+			                   expose_known_keys_on_dbus();
+			                   // LVRR: bring the dashboard back if it stopped while the session kept running; not
+			                   // another configured application, which would run twice
+			                   auto application = configuration().application;
+			                   if (resumed.dashboard_running or not is_dashboard(application))
+				                   return;
+			                   try
+			                   {
+				                   children->start_application(application);
+			                   }
+			                   catch (std::exception & e)
+			                   {
+				                   std::cerr << "Failed to start application: " << e.what() << std::endl;
+			                   }
 		                   },
 		                   [&](const wivrn::from_headset::stream_tab_changed & event) {
 			                   wivrn_server_set_client_tab(dbus_server, magic_enum::enum_name(event.tab).data());
@@ -618,6 +653,7 @@ gboolean control_received(gint fd, GIOCondition condition, gpointer user_data)
 		                   [&](const wivrn::to_headset::server_message & message) { lvrr_dbus::on_server_message(message); },
 		           },
 		           *packet);
+		packet = wivrn_ipc_socket_main_loop->receive_pending();
 	}
 
 	return G_SOURCE_CONTINUE;
@@ -934,7 +970,6 @@ void on_name_acquired(GDBusConnection * connection, const gchar * name, gpointer
 
 	lvrr_dbus::setup(dbus_server,
 	                 {
-	                         .headset_connected = [] { return bool(wivrn_server_get_headset_connected(dbus_server)); },
 	                         .session_running = [] { return server_watch != 0; },
 	                         .send_to_session = [](to_monado::packets packet) { std::visit([](auto && p) { wivrn_ipc_socket_main_loop->send(std::move(p)); }, std::move(packet)); },
 	                         .start_application = start_app_by_id,

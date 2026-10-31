@@ -1,4 +1,4 @@
-From 0051ac229422b79cb0eb57061ee85841018bc147 Mon Sep 17 00:00:00 2001
+From 01e9f38db0c089f8c792651e70fab8c9671c5a78 Mon Sep 17 00:00:00 2001
 From: 360900 <ziyad.koca@hotmail.com>
 Date: Mon, 26 Oct 2026 17:09:23 +0300
 Subject: [PATCH] c/gl_client: copy frames through host memory for apps on
@@ -13,15 +13,18 @@ textures, which are read back into host memory on release and copied into
 the native images by a Vulkan device on the runtime's GPU. Depth images
 are not copied, nothing reads them.
 
+The copy is slower than rendering on the runtime's GPU, so a warning
+names both GPUs and says to start the app on the runtime's one.
+
 The OpenXR state tracker passes the runtime's device UUID to the GL
 client compositors for the comparison.
 ---
  src/xrt/compositor/client/CMakeLists.txt      |   5 +-
  src/xrt/compositor/client/comp_egl_client.c   |   4 +-
- src/xrt/compositor/client/comp_gl_client.c    |  38 +-
+ src/xrt/compositor/client/comp_gl_client.c    |  53 +-
  src/xrt/compositor/client/comp_gl_client.h    |  22 +-
- .../client/comp_gl_hostcopy_swapchain.c       | 830 ++++++++++++++++++
- .../client/comp_gl_hostcopy_swapchain.h       |  68 ++
+ .../client/comp_gl_hostcopy_swapchain.c       | 943 ++++++++++++++++++
+ .../client/comp_gl_hostcopy_swapchain.h       |  80 ++
  .../compositor/client/comp_gl_win32_client.c  |   1 +
  .../compositor/client/comp_gl_xlib_client.c   |   6 +-
  .../compositor/client/comp_gl_xlib_client.h   |   3 +-
@@ -31,7 +34,7 @@ client compositors for the comparison.
  .../state_trackers/oxr/oxr_session_gfx_egl.c  |   1 +
  .../oxr/oxr_session_gfx_gl_xlib.c             |  10 +-
  .../oxr/oxr_session_gfx_gles_android.c        |   1 +
- 15 files changed, 982 insertions(+), 18 deletions(-)
+ 15 files changed, 1122 insertions(+), 18 deletions(-)
  create mode 100644 src/xrt/compositor/client/comp_gl_hostcopy_swapchain.c
  create mode 100644 src/xrt/compositor/client/comp_gl_hostcopy_swapchain.h
 
@@ -79,7 +82,7 @@ index 12b13e773..2d698401f 100644
  		free(ceglc);
  		EGL_ERROR("Failed to initialize compositor");
 diff --git a/src/xrt/compositor/client/comp_gl_client.c b/src/xrt/compositor/client/comp_gl_client.c
-index 479b276fa..46c46e37f 100644
+index 479b276fa..65fb4e4a6 100644
 --- a/src/xrt/compositor/client/comp_gl_client.c
 +++ b/src/xrt/compositor/client/comp_gl_client.c
 @@ -26,6 +26,7 @@
@@ -110,7 +113,7 @@ index 479b276fa..46c46e37f 100644
  	if (vk_format == 0) {
  		U_LOG_E("Invalid format!");
  		return XRT_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED;
-@@ -451,7 +452,7 @@ client_gl_swapchain_create(struct xrt_compositor *xc,
+@@ -451,12 +452,20 @@ client_gl_swapchain_create(struct xrt_compositor *xc,
  	}
  
  	// Check before setting the context.
@@ -119,7 +122,20 @@ index 479b276fa..46c46e37f 100644
  	if (vk_format == 0) {
  		U_LOG_E("Invalid format!");
  		return XRT_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED;
-@@ -479,6 +480,12 @@ client_gl_swapchain_create(struct xrt_compositor *xc,
+ 	}
+ 
++	// Refuse what can't go through host memory before the native images are made.
++	if (c->hostcopy != NULL) {
++		xret = client_gl_hostcopy_swapchain_check(info);
++		if (xret != XRT_SUCCESS) {
++			return xret;
++		}
++	}
++
+ 	xret = client_gl_compositor_context_begin(xc, CLIENT_GL_CONTEXT_REASON_OTHER);
+ 	if (xret != XRT_SUCCESS) {
+ 		return xret;
+@@ -479,6 +488,12 @@ client_gl_swapchain_create(struct xrt_compositor *xc,
  	vkinfo.format = vk_format;
  	vkinfo.bits |= xsccp.extra_bits;
  
@@ -132,7 +148,7 @@ index 479b276fa..46c46e37f 100644
  	struct xrt_swapchain_native *xscn = NULL; // Has to be NULL.
  	xret = xrt_comp_native_create_swapchain(c->xcn, &vkinfo, &xscn);
  
-@@ -580,6 +587,7 @@ client_gl_compositor_destroy(struct xrt_compositor *xc)
+@@ -580,6 +595,7 @@ client_gl_compositor_destroy(struct xrt_compositor *xc)
  void
  client_gl_compositor_fini(struct client_gl_compositor *c)
  {
@@ -140,7 +156,7 @@ index 479b276fa..46c46e37f 100644
  	os_mutex_destroy(&c->context_mutex);
  }
  
-@@ -589,7 +597,8 @@ client_gl_compositor_init(struct client_gl_compositor *c,
+@@ -589,7 +605,8 @@ client_gl_compositor_init(struct client_gl_compositor *c,
                            client_gl_context_begin_locked_func_t context_begin_locked,
                            client_gl_context_end_locked_func_t context_end_locked,
                            client_gl_swapchain_create_func_t create_swapchain,
@@ -150,7 +166,7 @@ index 479b276fa..46c46e37f 100644
  {
  	assert(context_begin_locked != NULL);
  	assert(context_end_locked != NULL);
-@@ -646,5 +655,24 @@ client_gl_compositor_init(struct client_gl_compositor *c,
+@@ -646,5 +663,31 @@ client_gl_compositor_init(struct client_gl_compositor *c,
  
  	os_mutex_init(&c->context_mutex);
  
@@ -159,10 +175,17 @@ index 479b276fa..46c46e37f 100644
 +	if (runtime_device_uuid != NULL &&
 +	    client_gl_compositor_context_begin(&c->base, CLIENT_GL_CONTEXT_REASON_OTHER) == XRT_SUCCESS) {
 +		bool needed = client_gl_hostcopy_needed(runtime_device_uuid);
++
++		// The app's GPU for the warning, read while the context is current.
++		char gl_renderer[256] = "an unknown GPU";
++		const char *renderer = needed ? (const char *)glGetString(GL_RENDERER) : NULL;
++		if (renderer != NULL) {
++			snprintf(gl_renderer, sizeof(gl_renderer), "%s", renderer);
++		}
 +		client_gl_compositor_context_end(&c->base, CLIENT_GL_CONTEXT_REASON_OTHER);
 +
 +		if (needed) {
-+			c->hostcopy = client_gl_hostcopy_create(runtime_device_uuid);
++			c->hostcopy = client_gl_hostcopy_create(runtime_device_uuid, gl_renderer);
 +			if (c->hostcopy == NULL) {
 +				U_LOG_E(
 +				    "The OpenGL context is on another GPU than the runtime and frames can't be copied");
@@ -238,10 +261,10 @@ index b498f2e78..52f4d83d0 100644
   * Free all resources from the client_gl_compositor, does not free the
 diff --git a/src/xrt/compositor/client/comp_gl_hostcopy_swapchain.c b/src/xrt/compositor/client/comp_gl_hostcopy_swapchain.c
 new file mode 100644
-index 000000000..d1797c129
+index 000000000..7f8073b86
 --- /dev/null
 +++ b/src/xrt/compositor/client/comp_gl_hostcopy_swapchain.c
-@@ -0,0 +1,830 @@
+@@ -0,0 +1,943 @@
 +// Copyright 2026, 360900
 +// SPDX-License-Identifier: BSL-1.0
 +/*!
@@ -271,6 +294,7 @@ index 000000000..d1797c129
 +#include "vk/vk_cmd_pool.h"
 +#endif
 +
++#include <stdio.h>
 +#include <stdlib.h>
 +#include <string.h>
 +
@@ -290,7 +314,7 @@ index 000000000..d1797c129
 +	bool mutex_initialized;
 +};
 +
-+//! Enough for a 65536 pixel wide texture.
++//! Enough for the full mip chain of a 32768 pixel wide or tall texture.
 +#define HOSTCOPY_MAX_LEVELS 16
 +
 +struct client_gl_hostcopy_swapchain
@@ -312,9 +336,6 @@ index 000000000..d1797c129
 +
 +	//! Where each mip level starts in the staging buffer, all its layers one after the other.
 +	VkDeviceSize level_offset[HOSTCOPY_MAX_LEVELS];
-+
-+	//! Framebuffer the textures are attached to for reading.
-+	GLuint fbo;
 +
 +	//! The native images, imported into the hostcopy device.
 +	VkImage images[XRT_MAX_SWAPCHAIN_IMAGES];
@@ -390,6 +411,18 @@ index 000000000..d1797c129
 +	}
 +}
 +
++/*!
++ * Whether the frames are copied into the native images. Depth and stencil
++ * never reach the runtime's side.
++ */
++static bool
++is_uploaded(const struct xrt_swapchain_create_info *info)
++{
++	int64_t vk_format = client_gl_format_to_vk(info->format);
++	return (info->bits & XRT_SWAPCHAIN_USAGE_DEPTH_STENCIL) == 0 && vk_format != 0 &&
++	       vk_format < 124 /*VK_FORMAT_D16_UNORM*/;
++}
++
 +static inline uint32_t
 +level_extent(uint32_t extent, uint32_t level)
 +{
@@ -398,7 +431,10 @@ index 000000000..d1797c129
 +}
 +
 +static VkResult
-+find_physical_device(struct vk_bundle *vk, const xrt_uuid_t *uuid, int *out_index)
++find_physical_device(struct vk_bundle *vk,
++                     const xrt_uuid_t *uuid,
++                     int *out_index,
++                     char out_name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE])
 +{
 +	VkPhysicalDevice *devices = NULL;
 +	uint32_t count = 0;
@@ -409,6 +445,7 @@ index 000000000..d1797c129
 +	}
 +
 +	*out_index = -1;
++	out_name[0] = '\0';
 +	for (uint32_t i = 0; i < count; i++) {
 +		VkPhysicalDeviceIDProperties id_props = {
 +		    .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
@@ -421,6 +458,7 @@ index 000000000..d1797c129
 +
 +		if (memcmp(id_props.deviceUUID, uuid->data, XRT_UUID_SIZE) == 0) {
 +			*out_index = (int)i;
++			snprintf(out_name, VK_MAX_PHYSICAL_DEVICE_NAME_SIZE, "%s", props.properties.deviceName);
 +			break;
 +		}
 +	}
@@ -458,13 +496,11 @@ index 000000000..d1797c129
 +		}
 +	}
 +
-+	U_LOG_I("The OpenGL context is on another GPU than the runtime, copying frames through host memory");
-+
 +	return true;
 +}
 +
 +struct client_gl_hostcopy *
-+client_gl_hostcopy_create(const xrt_uuid_t *runtime_device_uuid)
++client_gl_hostcopy_create(const xrt_uuid_t *runtime_device_uuid, const char *gl_renderer)
 +{
 +	struct client_gl_hostcopy *hc = U_TYPED_CALLOC(struct client_gl_hostcopy);
 +	struct vk_bundle *vk = &hc->vk;
@@ -538,7 +574,8 @@ index 000000000..d1797c129
 +	 */
 +
 +	int index = -1;
-+	ret = find_physical_device(vk, runtime_device_uuid, &index);
++	char device_name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE];
++	ret = find_physical_device(vk, runtime_device_uuid, &index, device_name);
 +	if (ret != VK_SUCCESS) {
 +		U_LOG_E("vk_enumerate_physical_devices: %s", vk_result_string(ret));
 +		goto err;
@@ -547,6 +584,12 @@ index 000000000..d1797c129
 +		U_LOG_E("No Vulkan device has the runtime's device UUID");
 +		goto err;
 +	}
++
++	// A warning, the app's process doesn't print info by default.
++	U_LOG_W(
++	    "The app renders OpenGL on %s, but the runtime uses %s: frames are copied through host memory, which is "
++	    "slower. Start the app on %s, for example with DRI_PRIME=1 or prime-run.",
++	    gl_renderer, device_name, device_name);
 +
 +	static const char *const required_device_extensions[] = {
 +	    VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
@@ -635,14 +678,32 @@ index 000000000..d1797c129
 + */
 +
 +/*!
-+ * Reads the texture into the staging buffer, with the app's context current.
++ * Attaches a level and layer of the texture to the bound read framebuffer and
++ * returns the framebuffer's status.
++ */
++static GLenum
++attach_for_read(struct client_gl_hostcopy_swapchain *sc, GLuint tex, uint32_t level, uint32_t layer)
++{
++	if (sc->info.array_size > 1) {
++		glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, tex, (GLint)level, (GLint)layer);
++	} else {
++		glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, sc->base.tex_target, tex,
++		                       (GLint)level);
++	}
++
++	return glCheckFramebufferStatus(GL_READ_FRAMEBUFFER);
++}
++
++/*!
++ * Reads the texture into the staging buffer, in the app's context. Under EGL
++ * that is not the context the swapchain was created in, and framebuffers are
++ * not shared between contexts, so the read framebuffer is made here.
 + */
 +static xrt_result_t
 +read_back(struct client_gl_hostcopy_swapchain *sc, uint32_t index)
 +{
 +	struct xrt_compositor *xc = &sc->base.gl_compositor->base;
 +	const struct xrt_swapchain_create_info *info = &sc->info;
-+	const bool layered = info->array_size > 1;
 +	GLuint tex = sc->base.base.images[index];
 +
 +	xrt_result_t xret = client_gl_compositor_context_begin(xc, CLIENT_GL_CONTEXT_REASON_SYNCHRONIZE);
@@ -669,34 +730,33 @@ index 000000000..d1797c129
 +	glPixelStorei(GL_PACK_ROW_LENGTH, 0);
 +	glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
 +	glPixelStorei(GL_PACK_SKIP_ROWS, 0);
-+	glBindFramebuffer(GL_READ_FRAMEBUFFER, sc->fbo);
++
++	GLuint fbo = 0;
++	glGenFramebuffers(1, &fbo);
++	glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
 +	glReadBuffer(GL_COLOR_ATTACHMENT0);
 +
++	// Checks the framebuffer status, not glGetError, which would see the app's pending errors and clear them.
++	GLenum status = GL_FRAMEBUFFER_COMPLETE;
 +	uint8_t *staging = (uint8_t *)sc->staging_map;
-+	for (uint32_t level = 0; level < info->mip_count; level++) {
++	for (uint32_t level = 0; level < info->mip_count && status == GL_FRAMEBUFFER_COMPLETE; level++) {
 +		uint32_t w = level_extent(info->width, level);
 +		uint32_t h = level_extent(info->height, level);
 +		size_t layer_size = (size_t)w * h * sc->bytes_per_pixel;
 +
 +		for (uint32_t layer = 0; layer < info->array_size; layer++) {
-+			if (layered) {
-+				glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, tex, (GLint)level,
-+				                          (GLint)layer);
-+			} else {
-+				glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, sc->base.tex_target,
-+				                       tex, (GLint)level);
++			status = attach_for_read(sc, tex, level, layer);
++			if (status != GL_FRAMEBUFFER_COMPLETE) {
++				break;
 +			}
 +			glReadPixels(0, 0, (GLsizei)w, (GLsizei)h, sc->read_format, sc->read_type,
 +			             staging + sc->level_offset[level] + layer * layer_size);
 +		}
 +	}
 +
-+	// Don't keep the texture attached, the app may delete or change it.
-+	glFramebufferTexture(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, 0, 0);
-+
-+	GLenum err = glGetError();
-+
 +	glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)prev_read_fbo);
++	// Also detaches the texture.
++	glDeleteFramebuffers(1, &fbo);
 +	glPixelStorei(GL_PACK_ALIGNMENT, prev_pack_alignment);
 +	glPixelStorei(GL_PACK_ROW_LENGTH, prev_pack_row_length);
 +	glPixelStorei(GL_PACK_SKIP_PIXELS, prev_pack_skip_pixels);
@@ -705,15 +765,61 @@ index 000000000..d1797c129
 +
 +	client_gl_compositor_context_end(xc, CLIENT_GL_CONTEXT_REASON_SYNCHRONIZE);
 +
-+	if (err != GL_NO_ERROR) {
++	if (status != GL_FRAMEBUFFER_COMPLETE) {
 +		if (!sc->logged_error) {
-+			U_LOG_E("Reading the swapchain texture back failed: 0x%04x", err);
++			U_LOG_E("Reading the swapchain texture back failed, framebuffer status 0x%04x", status);
 +			sc->logged_error = true;
 +		}
 +		return XRT_ERROR_OPENGL;
 +	}
 +
 +	return XRT_SUCCESS;
++}
++
++/*!
++ * Checks at create that image 0 can be read the way @ref read_back reads it,
++ * since read_back doesn't check glGetError. OpenGL ES only guarantees the
++ * format and type @ref read_format_for picks for RGBA8, SRGB8_ALPHA8 and
++ * RGB10_A2, other formats must be the ones the implementation reports.
++ */
++static bool
++can_read_back(struct client_gl_hostcopy_swapchain *sc)
++{
++	const struct xrt_swapchain_create_info *info = &sc->info;
++	const char *version = (const char *)glGetString(GL_VERSION);
++	const bool gles = version != NULL && strstr(version, "OpenGL ES") == version;
++	const bool guaranteed =
++	    info->format == GL_RGBA8 || info->format == GL_SRGB8_ALPHA8 || info->format == GL_RGB10_A2;
++	bool ok = true;
++
++	GLint prev_read_fbo = 0;
++	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prev_read_fbo);
++
++	GLuint fbo = 0;
++	glGenFramebuffers(1, &fbo);
++	glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
++	glReadBuffer(GL_COLOR_ATTACHMENT0);
++
++	GLenum status = attach_for_read(sc, sc->base.base.images[0], 0, 0);
++	if (status != GL_FRAMEBUFFER_COMPLETE) {
++		U_LOG_E("Can't read back OpenGL format %" PRIu32 ", framebuffer status 0x%04x", info->format, status);
++		ok = false;
++	} else if (gles && !guaranteed) {
++		GLint format = 0;
++		GLint type = 0;
++		glGetIntegerv(GL_IMPLEMENTATION_COLOR_READ_FORMAT, &format);
++		glGetIntegerv(GL_IMPLEMENTATION_COLOR_READ_TYPE, &type);
++		if ((GLenum)format != sc->read_format || (GLenum)type != sc->read_type) {
++			U_LOG_E("Can't read back OpenGL format %" PRIu32 ", OpenGL ES only reads it as 0x%04x 0x%04x",
++			        info->format, (GLenum)format, (GLenum)type);
++			ok = false;
++		}
++	}
++
++	glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)prev_read_fbo);
++	glDeleteFramebuffers(1, &fbo);
++
++	return ok;
 +}
 +
 +/*!
@@ -827,12 +933,10 @@ index 000000000..d1797c129
 +	struct client_gl_hostcopy_swapchain *sc = client_gl_hostcopy_swapchain(xsc);
 +
 +	if (sc->upload && index < sc->base.base.base.image_count) {
-+		xrt_result_t xret = read_back(sc, index);
-+		if (xret == XRT_SUCCESS) {
-+			xret = upload(sc, index);
-+		}
-+		if (xret != XRT_SUCCESS) {
-+			return xret;
++		// A failed copy is logged once and the image keeps its old contents. The release still goes through,
++		// failing it would leave the image acquired in st/oxr, and acquire fails once all images are.
++		if (read_back(sc, index) == XRT_SUCCESS) {
++			upload(sc, index);
 +		}
 +	}
 +
@@ -841,7 +945,8 @@ index 000000000..d1797c129
 +}
 +
 +/*!
-+ * Frees the OpenGL objects, with the app's context current.
++ * Frees the OpenGL objects, with the compositor's context current: Monado's
++ * own one under EGL, shared with the app's.
 + */
 +static void
 +free_gl_resources(struct client_gl_hostcopy_swapchain *sc)
@@ -851,25 +956,16 @@ index 000000000..d1797c129
 +	if (image_count > 0) {
 +		glDeleteTextures(image_count, &sc->base.base.images[0]);
 +	}
-+	if (sc->fbo != 0) {
-+		glDeleteFramebuffers(1, &sc->fbo);
-+	}
 +	U_ZERO_ARRAY(sc->base.base.images);
-+	sc->fbo = 0;
 +}
 +
++/*!
++ * Frees the staging buffer and the imported images, needs no OpenGL context.
++ */
 +static void
-+client_gl_hostcopy_swapchain_destroy(struct xrt_swapchain *xsc)
++free_vk_resources(struct client_gl_hostcopy_swapchain *sc)
 +{
-+	struct client_gl_hostcopy_swapchain *sc = client_gl_hostcopy_swapchain(xsc);
-+	struct client_gl_compositor *c = sc->base.gl_compositor;
 +	struct vk_bundle *vk = &sc->hc->vk;
-+
-+	enum xrt_result xret = client_gl_compositor_context_begin(&c->base, CLIENT_GL_CONTEXT_REASON_OTHER);
-+	if (xret == XRT_SUCCESS) {
-+		free_gl_resources(sc);
-+		client_gl_compositor_context_end(&c->base, CLIENT_GL_CONTEXT_REASON_OTHER);
-+	}
 +
 +	// Every upload was waited for, nothing is in flight.
 +	if (sc->staging_map != NULL) {
@@ -889,11 +985,49 @@ index 000000000..d1797c129
 +			vk->vkFreeMemory(vk->device, sc->mems[i], NULL);
 +		}
 +	}
++}
++
++static void
++client_gl_hostcopy_swapchain_destroy(struct xrt_swapchain *xsc)
++{
++	struct client_gl_hostcopy_swapchain *sc = client_gl_hostcopy_swapchain(xsc);
++	struct client_gl_compositor *c = sc->base.gl_compositor;
++
++	enum xrt_result xret = client_gl_compositor_context_begin(&c->base, CLIENT_GL_CONTEXT_REASON_OTHER);
++	if (xret == XRT_SUCCESS) {
++		free_gl_resources(sc);
++		client_gl_compositor_context_end(&c->base, CLIENT_GL_CONTEXT_REASON_OTHER);
++	}
++
++	free_vk_resources(sc);
 +
 +	// Drop our reference, does NULL checking.
 +	xrt_swapchain_reference((struct xrt_swapchain **)&sc->base.xscn, NULL);
 +
 +	free(sc);
++}
++
++xrt_result_t
++client_gl_hostcopy_swapchain_check(const struct xrt_swapchain_create_info *info)
++{
++	if (info->face_count == 6) {
++		U_LOG_E("Cube swapchains are not supported through host memory");
++		return XRT_ERROR_SWAPCHAIN_FLAG_VALID_BUT_UNSUPPORTED;
++	}
++	if (info->mip_count == 0 || info->mip_count > HOSTCOPY_MAX_LEVELS || info->array_size == 0) {
++		U_LOG_E("Unsupported swapchain: %u mip levels, %u layers", info->mip_count, info->array_size);
++		return XRT_ERROR_SWAPCHAIN_FLAG_VALID_BUT_UNSUPPORTED;
++	}
++
++	GLenum read_format = 0;
++	GLenum read_type = 0;
++	uint32_t bytes_per_pixel = 0;
++	if (is_uploaded(info) && !read_format_for(info->format, &read_format, &read_type, &bytes_per_pixel)) {
++		U_LOG_E("Can't read back OpenGL format %" PRIu32, info->format);
++		return XRT_ERROR_SWAPCHAIN_FORMAT_UNSUPPORTED;
++	}
++
++	return XRT_SUCCESS;
 +}
 +
 +struct xrt_swapchain *
@@ -909,12 +1043,9 @@ index 000000000..d1797c129
 +		U_LOG_E("No hostcopy device or native swapchain!");
 +		return NULL;
 +	}
-+	if (info->face_count == 6) {
-+		U_LOG_E("Cube swapchains are not supported through host memory");
-+		return NULL;
-+	}
-+	if (info->mip_count == 0 || info->mip_count > HOSTCOPY_MAX_LEVELS || info->array_size == 0) {
-+		U_LOG_E("Unsupported swapchain: %u mip levels, %u layers", info->mip_count, info->array_size);
++	// Checked before the native swapchain was made, again here since the level arrays are fixed size.
++	if (client_gl_hostcopy_swapchain_check(info) != XRT_SUCCESS) {
++		u_native_images_unref_all(xscn->images, xscn->base.image_count);
 +		return NULL;
 +	}
 +
@@ -936,11 +1067,7 @@ index 000000000..d1797c129
 +	sc->base.gl_compositor = c;
 +	sc->hc = hc;
 +	sc->info = *info;
-+
-+	// Depth and stencil never reach the runtime's side.
-+	int64_t vk_format = client_gl_format_to_vk(info->format);
-+	sc->upload = (info->bits & XRT_SWAPCHAIN_USAGE_DEPTH_STENCIL) == 0 && vk_format != 0 &&
-+	             vk_format < 124 /*VK_FORMAT_D16_UNORM*/;
++	sc->upload = is_uploaded(info);
 +
 +
 +	/*
@@ -977,6 +1104,9 @@ index 000000000..d1797c129
 +		U_LOG_E("Can't read back OpenGL format %" PRIu32, info->format);
 +		goto err;
 +	}
++	if (!can_read_back(sc)) {
++		goto err;
++	}
 +
 +	VkDeviceSize offset = 0;
 +	for (uint32_t level = 0; level < info->mip_count; level++) {
@@ -1005,7 +1135,7 @@ index 000000000..d1797c129
 +
 +	// The native images were created from this info with Vulkan formats.
 +	struct xrt_swapchain_create_info vkinfo = *info;
-+	vkinfo.format = (uint32_t)vk_format;
++	vkinfo.format = (uint32_t)client_gl_format_to_vk(info->format);
 +	for (uint32_t i = 0; i < vkinfo.format_count; i++) {
 +		vkinfo.formats[i] = (uint32_t)client_gl_format_to_vk(vkinfo.formats[i]);
 +	}
@@ -1018,8 +1148,6 @@ index 000000000..d1797c129
 +		}
 +	}
 +
-+	glGenFramebuffers(1, &sc->fbo);
-+
 +	// Also closes the handles the import didn't take.
 +	u_native_images_unref_all(native_images, image_count);
 +
@@ -1029,10 +1157,10 @@ index 000000000..d1797c129
 +
 +err:
 +	u_native_images_unref_all(native_images, image_count);
-+	// The caller holds the context and drops the native swapchain.
++	// Not through destroy, which takes the context: the caller holds it, and drops the native swapchain itself.
 +	free_gl_resources(sc);
-+	sc->base.xscn = NULL;
-+	client_gl_hostcopy_swapchain_destroy(&sc->base.base.base);
++	free_vk_resources(sc);
++	free(sc);
 +	return NULL;
 +}
 +
@@ -1046,9 +1174,10 @@ index 000000000..d1797c129
 +}
 +
 +struct client_gl_hostcopy *
-+client_gl_hostcopy_create(const xrt_uuid_t *runtime_device_uuid)
++client_gl_hostcopy_create(const xrt_uuid_t *runtime_device_uuid, const char *gl_renderer)
 +{
 +	(void)runtime_device_uuid;
++	(void)gl_renderer;
 +	return NULL;
 +}
 +
@@ -1056,6 +1185,13 @@ index 000000000..d1797c129
 +client_gl_hostcopy_destroy(struct client_gl_hostcopy **hc_ptr)
 +{
 +	*hc_ptr = NULL;
++}
++
++xrt_result_t
++client_gl_hostcopy_swapchain_check(const struct xrt_swapchain_create_info *info)
++{
++	(void)info;
++	return XRT_SUCCESS;
 +}
 +
 +struct xrt_swapchain *
@@ -1074,10 +1210,10 @@ index 000000000..d1797c129
 +#endif
 diff --git a/src/xrt/compositor/client/comp_gl_hostcopy_swapchain.h b/src/xrt/compositor/client/comp_gl_hostcopy_swapchain.h
 new file mode 100644
-index 000000000..1f064519e
+index 000000000..65ae0f5c2
 --- /dev/null
 +++ b/src/xrt/compositor/client/comp_gl_hostcopy_swapchain.h
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,80 @@
 +// Copyright 2026, 360900
 +// SPDX-License-Identifier: BSL-1.0
 +/*!
@@ -1114,25 +1250,37 @@ index 000000000..1f064519e
 + * runtime's. Needs GL_EXT_memory_object for the device UUIDs, without it
 + * returns false and the usual import is tried.
 + *
-+ * The app's context must be current.
++ * A context on the app's device must be current, such as the compositor's:
++ * Monado's own one under EGL, shared with the app's.
 + */
 +bool
 +client_gl_hostcopy_needed(const xrt_uuid_t *runtime_device_uuid);
 +
 +/*!
-+ * Creates a Vulkan device on the runtime's GPU, NULL if there is none.
++ * Creates a Vulkan device on the runtime's GPU, NULL if there is none. Warns
++ * that the frames are copied, naming the app's GPU with @p gl_renderer.
 + */
 +struct client_gl_hostcopy *
-+client_gl_hostcopy_create(const xrt_uuid_t *runtime_device_uuid);
++client_gl_hostcopy_create(const xrt_uuid_t *runtime_device_uuid, const char *gl_renderer);
 +
 +void
 +client_gl_hostcopy_destroy(struct client_gl_hostcopy **hc_ptr);
 +
 +/*!
++ * Checks that a swapchain can go through host memory, before the native
++ * swapchain is made. Logs why it can't and returns the error for the app.
++ *
++ * @see client_gl_hostcopy_swapchain_create
++ */
++xrt_result_t
++client_gl_hostcopy_swapchain_check(const struct xrt_swapchain_create_info *info);
++
++/*!
 + * Create a swapchain, belonging to a client_gl_compositor with a
 + * @ref client_gl_hostcopy, whose frames go through host memory.
 + *
-+ * The caller must ensure that the app context is current.
++ * The caller must make the compositor's context current: Monado's own one
++ * under EGL, shared with the app's.
 + *
 + * @see client_gl_swapchain_create_func_t, client_gl_compositor_init
 + */
