@@ -8,7 +8,8 @@
 
   <blueprint name="context_menu_power_options">
     <context_menu>
-      <cell translation="APP_SETTINGS.RESTART_WAYVR" action="restart" sprite_src_builtin="@/dashboard/refresh.svg"/>
+      <!-- LVRR: restarts only the desktop, upstream's string would say "Restart LVRR" -->
+      <cell translation="LVRR.RESTART_DESKTOP" action="restart" sprite_src_builtin="@/dashboard/refresh.svg"/>
       <!-- LVRR: closing the dashboard would leave no UI, the headset can disconnect instead -->
       <cell translation="LVRR.RESTART_SESSION" action="lvrr_restart_session" sprite_src_builtin="@/dashboard/refresh.svg"/>
       <cell translation="LVRR.DISCONNECT" action="lvrr_disconnect" sprite_src_builtin="@/dashboard/close.svg"/>
@@ -81,7 +82,8 @@
         <div position="relative" width="100%" height="~top_size" min_height="~top_size" max_height="~top_size" justify_content="end">
           <!-- Title bar -->
           <div width="100%" align_items="center" justify_content="center">
-            <rectangle min_width="300" height="100%" consume_mouse_events="1" round="100%" color="background_contrast" align_items="center" justify_content="center" gap="8">
+            <!-- LVRR: the desktop window lets presses on the title move it -->
+            <rectangle id="titlebar" min_width="300" height="100%" consume_mouse_events="1" round="100%" color="background_contrast" align_items="center" justify_content="center" gap="8">
               <sprite id="sprite_titlebar_icon" width="24" height="24" color="on_background_contrast" />
               <label id="label_titlebar_title" weight="bold" size="16" text="Title" color="on_background_contrast" />
             </rectangle>

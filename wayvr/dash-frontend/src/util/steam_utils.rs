@@ -31,6 +31,9 @@ pub struct AppManifest {
 	pub name: String,
 	pub raw_state_flags: u64, // documentation: https://github.com/lutris/lutris/blob/master/docs/steam.rst
 	pub last_played: Option<u64>, // unix timestamp
+	/// LVRR: a Steam tool such as Proton or a Steam Linux Runtime
+	#[serde(default)]
+	pub tool: bool,
 }
 
 // TODO @oo8dev: game sort methods
@@ -117,6 +120,8 @@ fn vdf_parse_appstate<'a>(app_id: AppID, vdf_root: &'a Vdf<'a>) -> Option<AppMan
 		name: String::from(name),
 		raw_state_flags,
 		last_played,
+		// LVRR: set by get_app_manifest, which knows the library folder
+		tool: false,
 	})
 }
 
@@ -251,9 +256,20 @@ impl SteamUtils {
 		let vdf_data = std::fs::read_to_string(manifest_path)?;
 		let vdf_root = keyvalues_parser::parse(&vdf_data)?.into_vdf();
 
-		let Some(manifest) = vdf_parse_appstate(app_entry.app_id.clone(), &vdf_root) else {
+		let Some(mut manifest) = vdf_parse_appstate(app_entry.app_id.clone(), &vdf_root) else {
 			anyhow::bail!("Failed to parse AppState");
 		};
+
+		// LVRR: every Proton build and Steam Linux Runtime ships a toolmanifest.vdf
+		if let Some(app_state) = vdf_root.value.get_obj()
+			&& let Some(install_dir) = get_str_first(app_state, "installdir")
+		{
+			manifest.tool = PathBuf::from(&app_entry.root_path)
+				.join("steamapps/common")
+				.join(install_dir)
+				.join("toolmanifest.vdf")
+				.is_file();
+		}
 
 		Ok(manifest)
 	}

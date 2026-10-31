@@ -3,7 +3,8 @@
   <macro name="tab_style" color="background" />
   <elements>
     <div gap="4" width="100%">
-      <Tabs id="tabs">
+      <!-- the same min_width as pc.xml, so the content starts at the same place on both pages -->
+      <Tabs id="tabs" min_width="150">
         <Tab macro="tab_style" name="video" translation="LVRR.HEADSET.VIDEO" sprite_src_builtin="@/dashboard/display.svg" />
         <Tab macro="tab_style" name="streaming" translation="LVRR.HEADSET.STREAMING" sprite_src_builtin="@/dashboard/usage.svg" />
         <Tab macro="tab_style" name="post_processing" translation="LVRR.HEADSET.POST_PROCESSING" sprite_src_builtin="@/dashboard/magic_wand.svg" />

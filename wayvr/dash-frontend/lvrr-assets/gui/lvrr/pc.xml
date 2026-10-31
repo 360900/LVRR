@@ -3,7 +3,8 @@
   <macro name="tab_style" color="background" />
   <elements>
     <div gap="4" width="100%">
-      <Tabs id="tabs">
+      <!-- the same min_width as headset.xml, so the content starts at the same place on both pages -->
+      <Tabs id="tabs" min_width="150">
         <Tab macro="tab_style" name="performance" translation="LVRR.PC.PERFORMANCE" sprite_src_builtin="@/dashboard/barchart.svg" />
         <Tab macro="tab_style" name="headsets" translation="LVRR.PC.PAIRING" sprite_src_builtin="@/dashboard/wivrn_head_symbolic.svg" />
         <Tab macro="tab_style" name="server" translation="LVRR.PC.SERVER" sprite_src_builtin="@/dashboard/cpu.svg" />

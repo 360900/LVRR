@@ -1,16 +1,10 @@
 //! Headset settings, which the settings window on the headset used to show.
 
-use std::{
-	cell::RefCell,
-	collections::BTreeMap,
-	marker::PhantomData,
-	rc::Rc,
-	time::{Duration, Instant},
-};
+use std::{cell::RefCell, collections::BTreeMap, marker::PhantomData, rc::Rc};
 
 use lvrr_common::{
-	headset::{BODY_PARTS, Codec, Config, HeadsetSettings, PostProcessing, Posture},
-	state::LvrrRequest,
+	headset::{BODY_PARTS, Codec, Config, HeadsetSettings, PostProcessing, Posture, RESTART_KEYS},
+	state::{Link, LvrrRequest, LvrrState},
 };
 use serde_json::{Value, json};
 use wgui::{
@@ -34,8 +28,6 @@ use crate::{
 	},
 };
 
-/// Sliders send their value once they stop moving
-const DEBOUNCE: Duration = Duration::from_millis(400);
 const ACTION_PREFIX: &str = "lvrr;";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -50,6 +42,16 @@ enum Section {
 }
 
 impl Section {
+	const ALL: [Section; 7] = [
+		Section::Video,
+		Section::Streaming,
+		Section::PostProcessing,
+		Section::Audio,
+		Section::Devices,
+		Section::Tracking,
+		Section::System,
+	];
+
 	const fn name(self) -> &'static str {
 		match self {
 			Section::Video => "video",
@@ -63,16 +65,7 @@ impl Section {
 	}
 
 	fn from_name(name: &str) -> Option<Self> {
-		Some(match name {
-			"video" => Section::Video,
-			"streaming" => Section::Streaming,
-			"post_processing" => Section::PostProcessing,
-			"audio" => Section::Audio,
-			"devices" => Section::Devices,
-			"tracking" => Section::Tracking,
-			"system" => Section::System,
-			_ => return None,
-		})
+		Self::ALL.into_iter().find(|s| s.name() == name)
 	}
 
 	const fn title_icon(self) -> (&'static str, &'static str) {
@@ -113,8 +106,6 @@ struct Setting {
 	key: &'static str,
 	label: &'static str,
 	section: Section,
-	/// Only applies to a new session
-	restart: bool,
 	show: fn(&HeadsetSettings) -> bool,
 	control: Control,
 }
@@ -233,7 +224,6 @@ fn settings() -> Vec<Setting> {
 			key: "preferred_refresh_rate",
 			label: "LVRR.HEADSET.REFRESH_RATE",
 			section: Video,
-			restart: false,
 			show: |h| h.capabilities.refresh_rate_control,
 			control: Control::Choice {
 				options: |h| {
@@ -253,7 +243,6 @@ fn settings() -> Vec<Setting> {
 			key: "fps_divider",
 			label: "LVRR.HEADSET.SPACEWARP",
 			section: Video,
-			restart: false,
 			show: |h| h.capabilities.spacewarp && h.config.preferred_refresh_rate != 0.0,
 			control: Control::Toggle {
 				get: |c| c.fps_divider == 2,
@@ -264,7 +253,6 @@ fn settings() -> Vec<Setting> {
 			key: "resolution_scale",
 			label: "LVRR.HEADSET.RESOLUTION",
 			section: Video,
-			restart: true,
 			show: always,
 			control: Control::Slider {
 				range: |h| (50.0, if h.config.extended_config { 350.0 } else { 150.0 }, 5.0),
@@ -276,7 +264,6 @@ fn settings() -> Vec<Setting> {
 			key: "fov_horizontal",
 			label: "LVRR.HEADSET.FOV_HORIZONTAL",
 			section: Video,
-			restart: false,
 			show: always,
 			control: Control::Slider {
 				range: |_| (70.0, 100.0, 1.0),
@@ -288,7 +275,6 @@ fn settings() -> Vec<Setting> {
 			key: "fov_vertical",
 			label: "LVRR.HEADSET.FOV_VERTICAL",
 			section: Video,
-			restart: false,
 			show: always,
 			control: Control::Slider {
 				range: |_| (70.0, 100.0, 1.0),
@@ -300,13 +286,14 @@ fn settings() -> Vec<Setting> {
 			key: "codec",
 			label: "LVRR.HEADSET.CODEC",
 			section: Streaming,
-			restart: true,
 			show: always,
 			control: Control::Choice {
 				options: |h| {
 					let mut options = vec![(json!(Codec::Automatic.key()), key("LVRR.HEADSET.AUTOMATIC"))];
 					for codec in &h.capabilities.codecs {
-						options.push((json!(codec.key()), Translation::from_raw_text(codec.display_name())));
+						if let Some(name) = codec.display_name() {
+							options.push((json!(codec.key()), Translation::from_raw_text(name)));
+						}
 					}
 					options
 				},
@@ -317,7 +304,6 @@ fn settings() -> Vec<Setting> {
 			key: "foveation",
 			label: "LVRR.HEADSET.FOVEATION",
 			section: Streaming,
-			restart: true,
 			show: always,
 			control: Control::Slider {
 				range: |h| (if h.config.extended_config { 0.0 } else { 30.0 }, 80.0, 5.0),
@@ -329,7 +315,6 @@ fn settings() -> Vec<Setting> {
 			key: "bit_depth",
 			label: "LVRR.HEADSET.TEN_BIT",
 			section: Streaming,
-			restart: true,
 			show: |h| h.config.codec != Codec::Automatic && h.capabilities.codecs_10bit.contains(&h.config.codec),
 			control: Control::Toggle {
 				get: |c| c.bit_depth == 10,
@@ -340,10 +325,10 @@ fn settings() -> Vec<Setting> {
 			key: "bitrate_bps",
 			label: "LVRR.HEADSET.BITRATE",
 			section: Streaming,
-			restart: false,
 			show: always,
 			control: Control::Slider {
-				range: |h| (5.0, mbit(h.config.max_bitrate_bps(&h.capabilities)), 1.0),
+				// 5 Mbit/s apart for a VR pointer; the presets and both maximums are on a step
+				range: |h| (5.0, mbit(h.config.max_bitrate_bps(&h.capabilities)), 5.0),
 				get: |c| mbit(c.bitrate_bps),
 				set: |v| json!(v.round() as u64 * 1_000_000),
 			},
@@ -352,7 +337,6 @@ fn settings() -> Vec<Setting> {
 			key: "foveation_override",
 			label: "LVRR.HEADSET.FOVEATION_OVERRIDE",
 			section: Streaming,
-			restart: false,
 			show: always,
 			control: toggle(|c| c.foveation_override),
 		},
@@ -360,19 +344,18 @@ fn settings() -> Vec<Setting> {
 			key: "foveation_pitch",
 			label: "LVRR.HEADSET.FOVEATION_HEIGHT",
 			section: Streaming,
-			restart: false,
 			show: |h| h.config.foveation_override,
 			control: Control::Slider {
 				range: |_| (-45.0, 45.0, 1.0),
-				get: |c| -c.foveation_pitch.to_degrees(),
-				set: |v| json!((-v).to_radians()),
+				// the angle above eye level, so raising the slider raises the center
+				get: |c| c.foveation_pitch.to_degrees(),
+				set: |v| json!(v.to_radians()),
 			},
 		},
 		Setting {
 			key: "foveation_distance",
 			label: "LVRR.HEADSET.FOVEATION_DISTANCE",
 			section: Streaming,
-			restart: false,
 			show: |h| h.config.foveation_override,
 			control: Control::Slider {
 				range: |_| (0.5, 10.0, 0.1),
@@ -384,7 +367,6 @@ fn settings() -> Vec<Setting> {
 			key: "super_sampling",
 			label: "LVRR.HEADSET.SUPERSAMPLING",
 			section: PostProcessing,
-			restart: false,
 			show: |h| h.capabilities.post_processing,
 			control: Control::Choice {
 				options: post_processing_options,
@@ -395,7 +377,6 @@ fn settings() -> Vec<Setting> {
 			key: "sharpening",
 			label: "LVRR.HEADSET.SHARPENING",
 			section: PostProcessing,
-			restart: false,
 			show: always,
 			control: Control::Slider {
 				range: |_| (0.0, 100.0, 5.0),
@@ -407,7 +388,6 @@ fn settings() -> Vec<Setting> {
 			key: "microphone",
 			label: "LVRR.HEADSET.MICROPHONE",
 			section: Audio,
-			restart: true,
 			show: always,
 			control: toggle(|c| c.microphone),
 		},
@@ -415,7 +395,6 @@ fn settings() -> Vec<Setting> {
 			key: "mic_unprocessed",
 			label: "LVRR.HEADSET.MIC_UNPROCESSED",
 			section: Audio,
-			restart: true,
 			show: |h| h.capabilities.android && h.config.microphone,
 			control: toggle(|c| c.mic_unprocessed),
 		},
@@ -423,7 +402,6 @@ fn settings() -> Vec<Setting> {
 			key: "forward_keyboard",
 			label: "LVRR.HEADSET.FORWARD_KEYBOARD",
 			section: Devices,
-			restart: false,
 			show: |h| h.capabilities.keyboard_mouse,
 			control: toggle(|c| c.forward_keyboard),
 		},
@@ -431,7 +409,6 @@ fn settings() -> Vec<Setting> {
 			key: "forward_mouse",
 			label: "LVRR.HEADSET.FORWARD_MOUSE",
 			section: Devices,
-			restart: false,
 			show: |h| h.capabilities.keyboard_mouse,
 			control: toggle(|c| c.forward_mouse),
 		},
@@ -439,7 +416,6 @@ fn settings() -> Vec<Setting> {
 			key: "forward_gamepad",
 			label: "LVRR.HEADSET.FORWARD_GAMEPAD",
 			section: Devices,
-			restart: false,
 			show: always,
 			control: toggle(|c| c.forward_gamepad),
 		},
@@ -447,7 +423,6 @@ fn settings() -> Vec<Setting> {
 			key: "hand_tracking",
 			label: "LVRR.HEADSET.HAND_TRACKING",
 			section: Tracking,
-			restart: true,
 			show: |h| h.capabilities.hand_tracking,
 			control: toggle(|c| c.hand_tracking),
 		},
@@ -455,7 +430,6 @@ fn settings() -> Vec<Setting> {
 			key: "simultaneous_hands",
 			label: "LVRR.HEADSET.SIMULTANEOUS_HANDS",
 			section: Tracking,
-			restart: false,
 			show: |h| h.capabilities.simultaneous_hands,
 			control: toggle(|c| c.simultaneous_hands),
 		},
@@ -463,7 +437,6 @@ fn settings() -> Vec<Setting> {
 			key: "eye_gaze",
 			label: "LVRR.HEADSET.EYE_TRACKING",
 			section: Tracking,
-			restart: true,
 			show: |h| h.capabilities.eye_gaze,
 			control: toggle(|c| c.eye_gaze),
 		},
@@ -471,7 +444,6 @@ fn settings() -> Vec<Setting> {
 			key: "face_tracking",
 			label: "LVRR.HEADSET.FACE_TRACKING",
 			section: Tracking,
-			restart: true,
 			show: |h| h.capabilities.face_tracking,
 			control: toggle(|c| c.face_tracking),
 		},
@@ -479,7 +451,6 @@ fn settings() -> Vec<Setting> {
 			key: "body_tracking",
 			label: "LVRR.HEADSET.BODY_TRACKING",
 			section: Tracking,
-			restart: true,
 			show: |h| h.capabilities.body_tracking,
 			control: toggle(|c| c.body_tracking),
 		},
@@ -487,15 +458,14 @@ fn settings() -> Vec<Setting> {
 			key: "body_parts",
 			label: "LVRR.HEADSET.BODY_PARTS",
 			section: Tracking,
-			restart: false,
-			show: |h| h.capabilities.body_tracking && !h.capabilities.body_parts.is_empty(),
+			// without body tracking the server makes no virtual trackers
+			show: |h| h.capabilities.body_tracking && h.config.body_tracking && !h.capabilities.body_parts.is_empty(),
 			control: Control::BodyParts,
 		},
 		Setting {
 			key: "posture",
 			label: "LVRR.HEADSET.POSTURE",
 			section: Tracking,
-			restart: false,
 			show: always,
 			control: Control::Choice {
 				options: |_| {
@@ -511,7 +481,6 @@ fn settings() -> Vec<Setting> {
 			key: "height_offset",
 			label: "LVRR.HEADSET.HEIGHT",
 			section: Tracking,
-			restart: false,
 			show: always,
 			control: Control::Slider {
 				range: |_| (-30.0, 70.0, 1.0),
@@ -523,7 +492,6 @@ fn settings() -> Vec<Setting> {
 			key: "extended_config",
 			label: "LVRR.HEADSET.EXTENDED_CONFIG",
 			section: System,
-			restart: false,
 			show: always,
 			control: toggle(|c| c.extended_config),
 		},
@@ -531,7 +499,6 @@ fn settings() -> Vec<Setting> {
 			key: "high_power_mode",
 			label: "LVRR.HEADSET.HIGH_POWER",
 			section: System,
-			restart: false,
 			show: |h| h.capabilities.high_power_mode,
 			control: toggle(|c| c.high_power_mode),
 		},
@@ -539,7 +506,6 @@ fn settings() -> Vec<Setting> {
 			key: "passthrough_boundary",
 			label: "LVRR.HEADSET.BOUNDARY",
 			section: System,
-			restart: false,
 			show: |h| h.capabilities.passthrough_boundary,
 			control: toggle(|c| c.passthrough_boundary),
 		},
@@ -547,7 +513,6 @@ fn settings() -> Vec<Setting> {
 			key: "see_through",
 			label: "LVRR.HEADSET.SEE_THROUGH",
 			section: System,
-			restart: false,
 			show: |h| h.capabilities.see_through,
 			control: Control::Slider {
 				range: |_| (0.0, 80.0, 5.0),
@@ -559,7 +524,6 @@ fn settings() -> Vec<Setting> {
 			key: "usb_network",
 			label: "LVRR.HEADSET.USB_NETWORK",
 			section: System,
-			restart: false,
 			show: |h| h.capabilities.usb_network,
 			control: toggle(|c| c.usb_network),
 		},
@@ -572,13 +536,13 @@ enum Task {
 	Edit {
 		key: &'static str,
 		value: Value,
-		/// false for sliders, which are sent once they settle
-		now: bool,
 	},
 	OpenMenu(context_menu::Position, Vec<context_menu::Cell>),
 	/// Index in PRESETS
 	Preset(usize),
 	RestartSession,
+	/// A page, as [`Frontend::lvrr_open`] takes it
+	Open(&'static str),
 }
 
 thread_local! {
@@ -587,17 +551,37 @@ thread_local! {
 }
 
 pub(crate) fn section_name(name: &str) -> Option<&'static str> {
-	[
-		"video",
-		"streaming",
-		"post_processing",
-		"audio",
-		"devices",
-		"tracking",
-		"system",
-	]
-	.into_iter()
-	.find(|n| *n == name)
+	Section::from_name(name).map(Section::name)
+}
+
+/// What the section shows. It is built again only when this changes, as a rebuild for a toast or
+/// another page's change could land between a control's press and release.
+#[derive(Default, PartialEq)]
+struct Shown {
+	link: Link,
+	/// Start LVRR or Pair headset starts LVRR, which changes no state
+	starting: bool,
+	headset: Option<HeadsetSettings>,
+	/// The server's setting, for the note on Devices
+	hid_forwarding: bool,
+}
+
+impl Shown {
+	fn new(state: Option<&LvrrState>, starting: bool) -> Self {
+		state.map_or_else(
+			|| Self {
+				starting,
+				..Self::default()
+			},
+			|s| Self {
+				link: s.link,
+				starting,
+				// each answer has a new request_id, also one that changed nothing
+				headset: s.headset.clone().map(|h| HeadsetSettings { request_id: 0, ..h }),
+				hid_forwarding: s.server_config.get("hid-forwarding").and_then(Value::as_bool) == Some(true),
+			},
+		)
+	}
 }
 
 pub struct TabLvrrHeadset<T> {
@@ -606,10 +590,13 @@ pub struct TabLvrrHeadset<T> {
 	tasks: Tasks<Task>,
 	id_content: WidgetID,
 	section: Section,
-	/// LvrrState generation shown, None to render again
+	/// LvrrState generation last compared with `shown`, None to compare again
 	rendered: Option<u64>,
+	/// None to build the section again
+	shown: Option<Shown>,
+	/// LVRR starts, from the interface
+	starting: bool,
 	pending: BTreeMap<&'static str, Value>,
-	last_edit: Instant,
 	/// The sliders shown, to leave one alone while it is dragged
 	sliders: Vec<Rc<ComponentSlider>>,
 	context_menu: ContextMenu,
@@ -628,13 +615,10 @@ impl<T: 'static> Tab<T> for TabLvrrHeadset<T> {
 					self.section = section;
 					super::set_section(section.name());
 					self.rendered = None;
+					self.shown = None;
 				}
-				Task::Edit { key, value, now } => {
+				Task::Edit { key, value } => {
 					self.pending.insert(key, value);
-					self.last_edit = Instant::now();
-					if now {
-						self.send(frontend);
-					}
 				}
 				Task::OpenMenu(position, cells) => self.context_menu.open(context_menu::OpenParams {
 					on_custom_attribs: None,
@@ -644,18 +628,16 @@ impl<T: 'static> Tab<T> for TabLvrrHeadset<T> {
 				Task::Preset(index) => {
 					if let Some(h) = frontend.interface.lvrr_state(data).and_then(|s| s.headset.clone()) {
 						self.pending.extend(PRESETS[index].patch(&h));
-						self.send(frontend);
 					}
 				}
 				Task::RestartSession => frontend.lvrr_confirm("LVRR.RESTART_SESSION_CONFIRM", LvrrRequest::RestartSession),
+				Task::Open(page) => frontend.lvrr_open(page),
 			}
 		}
 
-		// A dragged slider is neither sent nor rebuilt under the pointer
+		// A slider is sent once released, and not rebuilt under the pointer while held
 		let dragging = self.sliders.iter().any(|s| s.is_dragging());
-		if !dragging && !self.pending.is_empty() && self.last_edit.elapsed() >= DEBOUNCE {
-			self.send(frontend);
-		}
+		let sent = !dragging && self.send(frontend);
 
 		if let TickResult::Action(name) = self.context_menu.tick(&mut frontend.layout, &mut self.state)? {
 			if let Some(index) = name
@@ -665,14 +647,30 @@ impl<T: 'static> Tab<T> for TabLvrrHeadset<T> {
 			{
 				self.tasks.push(Task::Preset(index));
 			} else if let Some((key, value)) = parse_action(&name) {
-				self.tasks.push(Task::Edit { key, value, now: true });
+				self.tasks.push(Task::Edit { key, value });
 			}
 		}
 
-		// Show the headset's answer, unless the user is still moving a slider
-		let generation = frontend.interface.lvrr_state(data).map_or(0, |s| s.generation);
-		if !dragging && self.pending.is_empty() && self.rendered != Some(generation) {
-			self.render(frontend, data, generation)?;
+		// Show the headset's answer once it answered every change sent, or a section just opened,
+		// unless the user is still moving a slider. A change sent now reaches the link next update.
+		let (generation, answered) = frontend
+			.interface
+			.lvrr_state(data)
+			.map_or((0, true), |s| (s.generation, s.headset_requests == 0));
+		// LVRR starting changes no state, nor a start that failed
+		let starting = frontend.interface.lvrr_starting();
+		if self.starting != starting {
+			self.starting = starting;
+			self.rendered = None;
+		}
+		let show = self.rendered.is_none() || (answered && !sent && self.rendered != Some(generation));
+		if !dragging && self.pending.is_empty() && show {
+			self.rendered = Some(generation);
+			let shown = Shown::new(frontend.interface.lvrr_state(data), self.starting);
+			if self.shown.as_ref() != Some(&shown) {
+				self.render(frontend, &shown)?;
+				self.shown = Some(shown);
+			}
 		}
 		Ok(())
 	}
@@ -707,17 +705,9 @@ impl<T: 'static> TabLvrrHeadset<T> {
 		let tabs = state.fetch_component_as::<ComponentTabs>("tabs")?;
 		if section != Section::Video {
 			let mut common = frontend.layout.common();
-			for name in [
-				"video",
-				"streaming",
-				"post_processing",
-				"audio",
-				"devices",
-				"tracking",
-				"system",
-			] {
-				if let Some(button) = tabs.get_tab_button(name) {
-					button.set_sticky_state(&mut common, Section::from_name(name) == Some(section));
+			for s in Section::ALL {
+				if let Some(button) = tabs.get_tab_button(s.name()) {
+					button.set_sticky_state(&mut common, s == section);
 				}
 			}
 		}
@@ -738,18 +728,23 @@ impl<T: 'static> TabLvrrHeadset<T> {
 			id_content,
 			section,
 			rendered: None,
+			shown: None,
+			starting: false,
 			pending: BTreeMap::new(),
-			last_edit: Instant::now(),
 			sliders: Vec::new(),
 			context_menu: ContextMenu::default(),
 			marker: PhantomData,
 		})
 	}
 
-	fn send(&mut self, frontend: &mut Frontend<T>) {
+	/// Sends the changes made, false if there were none
+	fn send(&mut self, frontend: &mut Frontend<T>) -> bool {
 		if self.pending.is_empty() {
-			return;
+			return false;
 		}
+		// the answer is shown even if it matches what was shown before: a control shows the value
+		// picked, which the headset may have refused or clamped
+		self.shown = None;
 		let patch = std::mem::take(&mut self.pending)
 			.into_iter()
 			.map(|(k, v)| (k.to_string(), v))
@@ -759,11 +754,10 @@ impl<T: 'static> TabLvrrHeadset<T> {
 			.push(FrontendTask::Lvrr(LvrrRequest::SetHeadsetSettings(Value::Object(
 				patch,
 			))));
+		true
 	}
 
-	fn render(&mut self, frontend: &mut Frontend<T>, data: &mut T, generation: u64) -> anyhow::Result<()> {
-		self.rendered = Some(generation);
-		let headset = frontend.interface.lvrr_state(data).and_then(|s| s.headset.clone());
+	fn render(&mut self, frontend: &mut Frontend<T>, shown: &Shown) -> anyhow::Result<()> {
 		let desktop = frontend.interface.lvrr_desktop();
 
 		frontend.layout.remove_children(self.id_content);
@@ -774,7 +768,17 @@ impl<T: 'static> TabLvrrHeadset<T> {
 		let parent = self.id_content;
 		self.sliders.clear();
 
-		let Some(h) = headset else {
+		// the server keeps the settings, even of a headset that connected before: it has to run
+		if shown.link != Link::Online {
+			let tasks = frontend.tasks.clone();
+			ui.not_running(parent, shown.link, desktop, shown.starting, move || {
+				tasks.push(FrontendTask::LvrrStartServer);
+			})?;
+			self.widgets = Some(widgets);
+			return Ok(());
+		}
+
+		let Some(h) = &shown.headset else {
 			// the server remembers a headset's settings once it connected
 			let message = if desktop {
 				"LVRR.HEADSET.CONNECT_ONCE"
@@ -789,45 +793,39 @@ impl<T: 'static> TabLvrrHeadset<T> {
 		if h.offline {
 			ui.banner(parent, "LVRR.HEADSET.OFFLINE", "primary")?;
 		} else if h.restart_required {
-			let banner = ui.banner(parent, "LVRR.RESTART_REQUIRED", "tertiary")?;
 			let tasks = self.tasks.clone();
-			ui.button(
-				banner,
-				Text::Key("LVRR.RESTART_SESSION"),
-				"@/dashboard/refresh.svg",
-				move || {
-					tasks.push(Task::RestartSession);
-				},
-			)?;
+			ui.restart_banner(parent, move || tasks.push(Task::RestartSession))?;
 		}
-		if !h.offline && !h.permission_denied.is_empty() {
+		let all = settings();
+		let visible: Vec<&Setting> = all
+			.iter()
+			.filter(|s| s.section == self.section && (s.show)(h))
+			.collect();
+		// only on the section of a refused feature, whose setting is marked
+		if !h.offline && visible.iter().any(|s| h.permission_denied.iter().any(|k| k == s.key)) {
 			ui.banner(parent, "LVRR.HEADSET.PERMISSION_DENIED", "danger")?;
 		}
 
 		let (title, icon) = self.section.title_icon();
 		let group = ui.group(parent, title, icon)?;
 		if self.section == Section::Video {
-			mount_presets(&mut ui, group, &h, &self.tasks)?;
+			mount_presets(&mut ui, group, h, &self.tasks)?;
 		}
-		let all = settings();
 		// the risky settings go last, under a note that applies to them only
-		let (advanced, normal): (Vec<&Setting>, Vec<&Setting>) = all
-			.iter()
-			.filter(|s| s.section == self.section && (s.show)(&h))
-			.partition(|s| setting_advanced(s.key));
+		let (advanced, normal): (Vec<&Setting>, Vec<&Setting>) = visible.into_iter().partition(|s| setting_advanced(s.key));
 		for setting in normal {
-			mount(&mut ui, group, setting, &h, &self.tasks, &mut self.sliders)?;
+			mount(&mut ui, group, setting, h, &self.tasks, &mut self.sliders)?;
 		}
 		if !advanced.is_empty() {
 			let row = ui.row(group)?;
 			ui.badge(row, "LVRR.HEADSET.ADVANCED", "danger")?;
 			ui.muted(row, Text::Key("LVRR.HEADSET.ADVANCED_NOTE"))?;
 			for setting in advanced {
-				mount(&mut ui, group, setting, &h, &self.tasks, &mut self.sliders)?;
+				mount(&mut ui, group, setting, h, &self.tasks, &mut self.sliders)?;
 			}
 		}
 		if self.section == Section::Devices && !h.server_input_forwarding {
-			ui.muted(group, Text::Key("LVRR.HEADSET.NO_INPUT_FORWARDING"))?;
+			mount_forwarding_note(&mut ui, group, h, shown.hid_forwarding, &self.tasks)?;
 		}
 
 		self.widgets = Some(widgets);
@@ -862,6 +860,42 @@ fn mount_presets(ui: &mut Ui, parent: WidgetID, h: &HeadsetSettings, tasks: &Tas
 	Ok(())
 }
 
+/// Why the server takes no forwarded devices, with a button towards the fix. A session reads the
+/// server's setting when it starts, and opening /dev/uinput can fail.
+fn mount_forwarding_note(
+	ui: &mut Ui,
+	parent: WidgetID,
+	h: &HeadsetSettings,
+	hid_forwarding: bool,
+	tasks: &Tasks<Task>,
+) -> anyhow::Result<()> {
+	let (message, button, icon, task) = if !hid_forwarding {
+		(
+			"LVRR.HEADSET.NO_INPUT_FORWARDING",
+			"LVRR.PC.SERVER",
+			"@/dashboard/cpu.svg",
+			Task::Open("pc:server"),
+		)
+	} else if !h.offline {
+		(
+			"LVRR.HEADSET.INPUT_FORWARDING_UNAVAILABLE",
+			"LVRR.RESTART_SESSION",
+			"@/dashboard/refresh.svg",
+			Task::RestartSession,
+		)
+	} else {
+		// the next session reads the setting
+		return Ok(());
+	};
+	// the button goes under a note too long to share its line
+	let row = ui.wrap_row(parent)?;
+	let column = ui.column(row)?;
+	ui.muted(column, Text::Key(message))?;
+	let tasks = tasks.clone();
+	ui.button(row, Text::Key(button), icon, move || tasks.push(task.clone()))?;
+	Ok(())
+}
+
 fn mount(
 	ui: &mut Ui,
 	parent: WidgetID,
@@ -872,10 +906,18 @@ fn mount(
 ) -> anyhow::Result<()> {
 	let row = ui.row(parent)?;
 	let key = setting.key;
+	// turning a feature on can ask for an Android permission on the headset, which reports the
+	// feature off until the prompt is answered
+	let waiting = !h.offline && h.permission_pending.iter().any(|k| k == key);
+	let refused = !h.offline && h.permission_denied.iter().any(|k| k == key);
 	// offline, everything applies when the headset connects
 	let badge = if h.offline {
 		h.pending.get(key).map(|_| ("LVRR.HEADSET.PENDING", "primary"))
-	} else if setting.restart {
+	} else if waiting {
+		Some(("LVRR.HEADSET.PERMISSION_WAITING", "primary"))
+	} else if refused {
+		Some(("LVRR.HEADSET.PERMISSION_REFUSED", "danger"))
+	} else if RESTART_KEYS.contains(&key) {
 		Some(("LVRR.APPLIES_AFTER_RESTART", "tertiary"))
 	} else {
 		None
@@ -885,22 +927,15 @@ fn mount(
 	match &setting.control {
 		Control::Toggle { get, set } => {
 			let (tasks, set) = (tasks.clone(), *set);
-			ui.toggle(row, Text::Key(setting.label), get(&h.config), move |v| {
-				tasks.push(Task::Edit {
-					key,
-					value: set(v),
-					now: true,
-				});
+			// a feature waiting for its permission shows the value picked, as offline changes do
+			ui.toggle(row, Text::Key(setting.label), get(&h.config) || waiting, move |v| {
+				tasks.push(Task::Edit { key, value: set(v) });
 			})?;
 		}
 		Control::Slider { range, get, set } => {
 			let (tasks, set) = (tasks.clone(), *set);
 			let slider = ui.slider(row, setting.label, badge, range(h), get(&h.config), move |v| {
-				tasks.push(Task::Edit {
-					key,
-					value: set(v),
-					now: false,
-				});
+				tasks.push(Task::Edit { key, value: set(v) });
 			})?;
 			sliders.push(slider);
 			badge_consumed = true;
@@ -942,7 +977,6 @@ fn mount(
 					tasks.push(Task::Edit {
 						key,
 						value: json!(*list),
-						now: true,
 					});
 				})?;
 			}
@@ -951,7 +985,7 @@ fn mount(
 	if !badge_consumed && let Some((translation, color)) = badge {
 		ui.badge(row, translation, color)?;
 	}
-	if let Some(description) = setting_description(key) {
+	if let Some(description) = setting_description(key, h) {
 		ui.muted(parent, Text::Key(description))?;
 	}
 	Ok(())
@@ -963,11 +997,37 @@ fn setting_advanced(key: &str) -> bool {
 	matches!(key, "extended_config" | "high_power_mode")
 }
 
-/// A one-line explanation shown under a setting whose name is not self-explanatory
-fn setting_description(key: &str) -> Option<&'static str> {
+/// A one-line explanation shown under a setting whose name is not self-explanatory, or that
+/// other settings hold back
+fn setting_description(key: &str, h: &HeadsetSettings) -> Option<&'static str> {
 	match key {
 		"extended_config" => Some("LVRR.HEADSET.EXTENDED_CONFIG_DESC"),
 		"high_power_mode" => Some("LVRR.HEADSET.HIGH_POWER_DESC"),
+		// the headset pauses it while it tracks the body: Meta's body tracking doesn't work alongside it
+		"simultaneous_hands" if h.capabilities.body_tracking && h.config.body_tracking => {
+			Some("LVRR.HEADSET.SIMULTANEOUS_HANDS_DESC")
+		}
 		_ => None,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use lvrr_common::emulator::EXAMPLE;
+
+	use super::*;
+
+	// The server refuses a whole change over a key it doesn't know, as InvalidSettings
+	#[test]
+	fn server_knows_every_key() {
+		let example: Value = serde_json::from_str(EXAMPLE).unwrap();
+		let config = example["HeadsetSettings"]["config"].as_object().unwrap();
+		let presets = PRESETS
+			.iter()
+			.flat_map(|p| p.patch(&HeadsetSettings::default()))
+			.map(|(key, _)| key);
+		for key in settings().iter().map(|s| s.key).chain(presets) {
+			assert!(config.contains_key(key), "server does not report {key}");
+		}
 	}
 }

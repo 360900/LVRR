@@ -33,9 +33,21 @@
     <div id="${id}" flex_direction="row" align_items="center" gap="12" width="100%" />
   </template>
 
+  <!-- id; takes the rest of a Row's line and puts its children at its end. A Line there
+       would be as wide as the Row and wrap onto a line of its own. -->
+  <template name="RowEnd">
+    <div id="${id}" flex_direction="row" align_items="center" justify_content="end" gap="4" flex_grow="1" />
+  </template>
+
   <!-- id -->
   <template name="Column">
     <div id="${id}" flex_direction="column" gap="4" flex_grow="1" flex_shrink="1" />
+  </template>
+
+  <!-- id; a column as wide as its parent, so section rules and rows span the group.
+       A Group doesn't stretch its children, and a Column is only as wide as its widest row. -->
+  <template name="List">
+    <div id="${id}" flex_direction="column" gap="4" width="100%" />
   </template>
 
   <!-- id; a positioning context sized to its child, for overlays on a game cover -->
@@ -59,21 +71,20 @@
     <label text="${text}" translation="${translation}" size="${size}" color="${color}" weight="bold" wrap="1" />
   </template>
 
-  <!-- src: an absolute path to a png or svg file -->
-  <template name="FileIcon">
-    <sprite src_ext="${src}" width="32" height="32" />
-  </template>
-
-  <!-- translation, color -->
+  <!-- translation, color; body text size, smaller is hard to read on the VR panel -->
   <template name="Badge">
     <rectangle round="4" color="${color}(opacity-0.25)" border="1" border_color="${color}" padding_left="6" padding_right="6" padding_top="2" padding_bottom="2">
-      <label translation="${translation}" size="12" weight="bold" color="${color}" />
+      <label translation="${translation}" size="14" weight="bold" color="${color}" />
     </rectangle>
   </template>
 
-  <!-- id, translation, tooltip, checked -->
-  <template name="Toggle">
-    <CheckBox id="${id}" translation="${translation}" tooltip="${tooltip}" checked="${checked}" />
+  <!-- translation, icon, color; a Badge with an icon before the text, for game covers.
+       Its fill is opaque like IconButton's, a see-through one is hard to read on bright art. -->
+  <template name="IconBadge">
+    <rectangle round="4" color="background_contrast" border="1" border_color="${color}" padding_left="6" padding_right="6" padding_top="2" padding_bottom="2" flex_direction="row" align_items="center" gap="4">
+      <sprite src_builtin="${icon}" width="14" height="14" color="${color}" />
+      <label translation="${translation}" size="14" weight="bold" color="${color}" />
+    </rectangle>
   </template>
 
   <!-- id, text, translation, checked -->
@@ -86,31 +97,36 @@
     <Slider id="${id}" width="300" height="24" min_value="${min}" max_value="${max}" step="${step}" value="${value}" />
   </template>
 
-  <!-- id, text; only the desktop window has a keyboard for it -->
+  <!-- id, text; in VR the keyboard types into it while it has focus -->
   <template name="EditBox">
     <EditBox id="${id}" text="${text}" width="260" height="32" />
   </template>
 
-  <!-- id, text, translation, icon, color -->
+  <!-- id, text, translation, icon, color; a Button clips what overflows it, which lets flexbox
+       shrink it below its content beside a long text in a Line, the sprite first as it has no
+       content size. The text beside it wraps instead. -->
   <template name="Button">
-    <Button id="${id}" height="32" padding="4" gap="8" color="${color}">
-      <sprite src_builtin="${icon}" height="24" width="24" />
+    <Button id="${id}" height="32" padding="4" gap="8" color="${color}" flex_shrink="0">
+      <sprite src_builtin="${icon}" height="24" width="24" flex_shrink="0" />
       <label text="${text}" translation="${translation}" weight="bold" />
     </Button>
   </template>
 
-  <!-- id, icon, tooltip -->
+  <!-- id, icon, tooltip; doesn't shrink beside a long text either, see Button -->
   <template name="IconButton">
-    <Button id="${id}" width="32" height="32" padding="4" color="background_contrast" tooltip="${tooltip}" align_items="center" justify_content="center">
+    <Button id="${id}" width="32" height="32" padding="4" color="background_contrast" tooltip="${tooltip}" align_items="center" justify_content="center" flex_shrink="0">
       <sprite src_builtin="${icon}" height="24" width="24" />
     </Button>
   </template>
 
-  <!-- id, translation, icon -->
+  <!-- id, translation, icon; the label always gets room for two lines, so icons line up across tiles.
+       A sprite has no content size, so without flex_shrink="0" flexbox would squash it first. -->
   <template name="ActionButton">
-    <Button id="${id}" width="150" height="96" padding="8" gap="8" flex_direction="column" align_items="center" justify_content="center">
-      <sprite src_builtin="${icon}" height="40" width="40" />
-      <label translation="${translation}" weight="bold" align="center" wrap="1" />
+    <Button id="${id}" width="150" height="104" padding="8" gap="8" flex_direction="column" align_items="center" justify_content="center">
+      <sprite src_builtin="${icon}" height="40" width="40" flex_shrink="0" />
+      <div height="40" flex_shrink="0" flex_direction="column" justify_content="center" align_items="center">
+        <label translation="${translation}" weight="bold" align="center" wrap="1" />
+      </div>
     </Button>
   </template>
 

@@ -15,7 +15,12 @@ use crate::{
 	i18n::Translation,
 	layout::{Layout, LayoutTask, LayoutTasks, WidgetPair},
 	parser::{self, Fetchable, ParserState},
-	widget::{EventResult, div::WidgetDiv, label::WidgetLabel, rectangle::WidgetRectangle},
+	widget::{
+		EventResult,
+		div::WidgetDiv,
+		label::WidgetLabel,
+		rectangle::{WidgetRectangle, WidgetRectangleParams},
+	},
 };
 
 struct OpenedWindow {
@@ -242,7 +247,11 @@ impl WguiWindow {
 		};
 
 		let input_grabber = if params.extra.close_if_clicked_outside {
-			let mut rect = WidgetRectangle::create(Default::default());
+			// LVRR: transparent unless the dim below fades it in; the default color is opaque black
+			let mut rect = WidgetRectangle::create(WidgetRectangleParams {
+				color: drawing::Color::new(0.0, 0.0, 0.0, 0.0).into(),
+				..Default::default()
+			});
 			rect.flags.consume_mouse_events = true;
 
 			let this = self.clone();

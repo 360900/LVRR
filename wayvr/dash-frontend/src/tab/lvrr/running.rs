@@ -2,7 +2,6 @@
 
 use std::marker::PhantomData;
 
-use lvrr_common::state::LvrrRequest;
 use wgui::{layout::WidgetID, parser::ParserState, task::Tasks};
 use wlx_common::dash_interface::MonadoClient;
 
@@ -11,7 +10,7 @@ use crate::{
 	tab::{
 		Tab, TabType,
 		lvrr::{
-			Page,
+			Page, started,
 			ui::{self, Text, Ui},
 		},
 	},
@@ -23,14 +22,11 @@ const REFRESH_TICKS: u32 = 120;
 #[derive(Clone)]
 enum Task {
 	Focus(i64),
-	Stop(i64),
+	Stop(i64, String),
 	Frontend(FrontendTask),
-	Refresh,
 }
 
 pub struct TabLvrrRunning<T> {
-	#[allow(dead_code)]
-	state: ParserState,
 	widgets: Option<ParserState>,
 	tasks: Tasks<Task>,
 	parent: WidgetID,
@@ -55,17 +51,21 @@ impl<T: 'static> Tab<T> for TabLvrrRunning<T> {
 					}
 					refresh = true;
 				}
-				Task::Stop(id) => {
-					if let Ok(id) = u32::try_from(id) {
-						frontend.lvrr_confirm("LVRR.RUNNING.STOP_CONFIRM", LvrrRequest::StopApplication(id));
-					}
-				}
+				Task::Stop(id, name) => frontend.lvrr_confirm_stop(id, &name),
 				Task::Frontend(task) => frontend.tasks.push(task),
-				Task::Refresh => refresh = true,
 			}
 		}
 		if refresh {
 			let clients = frontend.interface.monado_client_list(data, true).unwrap_or_default();
+			// a game the Library started may have come while it wasn't open, unless the server
+			// refused it
+			started::note_failed(
+				frontend
+					.interface
+					.lvrr_state(data)
+					.and_then(|s| s.failed_start.as_ref()),
+			);
+			started::resolve(&clients);
 			self.render(frontend, &clients)?;
 		}
 		Ok(())
@@ -73,11 +73,8 @@ impl<T: 'static> Tab<T> for TabLvrrRunning<T> {
 }
 
 impl<T: 'static> TabLvrrRunning<T> {
-	pub fn new(frontend: &mut Frontend<T>, parent: WidgetID, _data: &mut T) -> anyhow::Result<Self> {
-		let globals = frontend.layout.state.globals.clone();
-		let state = wgui::parser::parse_from_assets(&ui::doc_params(&globals), &mut frontend.layout, parent)?;
+	pub fn new(_frontend: &mut Frontend<T>, parent: WidgetID, _data: &mut T) -> anyhow::Result<Self> {
 		Ok(Self {
-			state,
 			widgets: None,
 			tasks: Tasks::new(),
 			parent,
@@ -88,8 +85,12 @@ impl<T: 'static> TabLvrrRunning<T> {
 	}
 
 	fn render(&mut self, frontend: &mut Frontend<T>, clients: &[MonadoClient]) -> anyhow::Result<()> {
-		// The dashboard is an overlay and not listed; redraw only when something changed
-		let shown: Vec<_> = clients.iter().map(|c| (c.id, c.name.clone(), c.is_primary)).collect();
+		// The dashboard is an overlay and not listed; redraw only when something changed, also a
+		// title the Library gave
+		let shown: Vec<_> = clients
+			.iter()
+			.map(|c| (c.id, started::title(c), c.is_primary))
+			.collect();
 		if self.shown.as_ref() == Some(&shown) {
 			return Ok(());
 		}
@@ -104,9 +105,12 @@ impl<T: 'static> TabLvrrRunning<T> {
 		if clients.is_empty() {
 			ui.muted(group, Text::Key("LVRR.RUNNING.EMPTY"))?;
 		}
+		// the name column grows, so the buttons line up on the right as on PC > Headsets
 		for client in clients {
-			let row = ui.row(group)?;
-			ui.bold(row, Text::Raw(&client.name), 16)?;
+			let title = started::title(client);
+			let row = ui.line(group)?;
+			let column = ui.column(row)?;
+			ui.bold(column, Text::Raw(&title), 16)?;
 			if client.is_primary {
 				ui.badge(row, "LVRR.RUNNING.FOCUSED", "success")?;
 			} else {
@@ -120,14 +124,13 @@ impl<T: 'static> TabLvrrRunning<T> {
 					},
 				)?;
 			}
-			let (tasks, id) = (self.tasks.clone(), client.id);
+			let (tasks, id, name) = (self.tasks.clone(), client.id, title);
 			ui.danger_button(
 				row,
 				Text::Key("LVRR.RUNNING.STOP"),
 				"@/dashboard/close.svg",
 				move || {
-					tasks.push(Task::Stop(id));
-					tasks.push(Task::Refresh);
+					tasks.push(Task::Stop(id, name.clone()));
 				},
 			)?;
 		}

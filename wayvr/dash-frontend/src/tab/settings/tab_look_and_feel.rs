@@ -65,7 +65,7 @@ impl State {
 		create_color_palettes_button(par.mp, c, tasks.clone(), &popup)?;
 		options_dropdown::<wlx_common::locale::Language>(par.mp, c, &SettingType::Language)?;
 		options_checkbox(par.mp, c, SettingType::OpaqueBackground)?;
-		options_checkbox(par.mp, c, SettingType::HideUsername)?;
+		// LVRR: no Hide username, LVRR's Home shows no user name
 		options_checkbox(par.mp, c, SettingType::HideGrabHelp)?;
 		options_slider_f32(par.mp, c, SettingType::DefaultCurvature, 0.0, 0.5, 0.05)?; // min, max, step
 		options_slider_f32(par.mp, c, SettingType::DefaultOpacity, 0.05, 1.0, 0.05)?; // min, max, step

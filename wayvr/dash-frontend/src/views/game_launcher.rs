@@ -171,6 +171,8 @@ impl View {
 	fn action_launch(&mut self) {
 		match steam_utils::launch(&self.app_id) {
 			Ok(_) => {
+				// LVRR: the next session may be this game's, not that of an app the Library is starting
+				crate::tab::lvrr::started::note_start_elsewhere(&self.app_id);
 				self
 					.frontend_tasks
 					.push(FrontendTask::PushToast(Translation::from_translation_key(

@@ -65,7 +65,10 @@ impl View {
 			Ok(cover_art) => cover_art,
 			Err(e) => {
 				log::error!("request_cover_image failed: {:?}", e);
-				return;
+				// LVRR: the placeholder instead of a spinner that never stops
+				CoverArt {
+					compressed_image_data: Vec::new(),
+				}
 			}
 		};
 
@@ -135,41 +138,65 @@ impl View {
 		Ok(())
 	}
 
+	// LVRR: returns the decoded cover, None for the placeholder, so a caller can keep it and
+	// mount it again with set_glyph
 	pub fn set_cover_art(
 		&mut self,
 		view_common: &mut ViewCommon,
 		layout: &mut Layout,
 		cover_art: &CoverArt,
-	) -> anyhow::Result<()> {
-		// clear the loading spinner and any image already mounted, so a cover applied more
-		// than once never stacks two images side by side
+	) -> anyhow::Result<Option<CustomGlyphData>> {
+		// LVRR: clear the loading spinner and any image already mounted, so a cover applied
+		// more than once never stacks two images side by side
 		layout.remove_children(self.id_image_parent);
 
-		if cover_art.compressed_image_data.is_empty() {
-			// mount placeholder
-			let img = view_common.get_placeholder_image()?.clone();
-			self.mount_image(layout, &img)?;
-			self.mount_placeholder_text(layout, self.id_image_parent, &self.app_name)?;
-		} else {
+		if !cover_art.compressed_image_data.is_empty() {
 			// mount image
 			let path = format!("app:{:?}", self.app_id);
-			let glyph =
-				match CustomGlyphData::from_bytes_raster(&view_common.globals, &path, &cover_art.compressed_image_data) {
-					Ok(c) => c,
-					Err(e) => {
-						log::warn!("failed to decode cover art image: {:?}", e);
-						return Ok(());
-					}
-				};
-			self.mount_image(layout, &glyph)?;
+			match CustomGlyphData::from_bytes_raster(&view_common.globals, &path, &cover_art.compressed_image_data) {
+				Ok(glyph) => {
+					self.mount_image(layout, &glyph)?;
+					return Ok(Some(glyph));
+				}
+				// LVRR: the placeholder below instead of an empty frame
+				Err(e) => log::warn!("failed to decode cover art image: {:?}", e),
+			}
 		}
 
-		Ok(())
+		// mount placeholder
+		let img = view_common.get_placeholder_image()?.clone();
+		self.mount_image(layout, &img)?;
+		self.mount_placeholder_text(layout, self.id_image_parent, &self.app_name)?;
+
+		Ok(None)
+	}
+
+	// LVRR: mounts a cover set_cover_art returned, without decoding it again
+	pub fn set_glyph(&mut self, layout: &mut Layout, glyph: &CustomGlyphData) -> anyhow::Result<()> {
+		layout.remove_children(self.id_image_parent);
+		self.mount_image(layout, glyph)
 	}
 
 	pub fn new(params: Params) -> anyhow::Result<Self> {
+		// LVRR: split, mount builds the widgets
+		let view = Self::mount(params.ess, params.manifest, params.scale)?;
+
+		// request cover image data from the internet or disk cache
+		params
+			.executor
+			.spawn(View::request_cover_image(
+				params.manifest.clone(),
+				Box::new(params.on_loaded),
+			))
+			.detach();
+
+		Ok(view)
+	}
+
+	// LVRR: new without the request, for a caller that loads and keeps the covers itself
+	pub fn mount(ess: &mut ConstructEssentials, manifest: &steam_utils::AppManifest, scale: f32) -> anyhow::Result<Self> {
 		let (widget_button, button) = components::button::construct(
-			params.ess,
+			ess,
 			components::button::Params {
 				color: Some(drawing::Color::new(1.0, 1.0, 1.0, 0.0).into()),
 				border_color: Some(BORDER_COLOR_DEFAULT.into()),
@@ -178,15 +205,15 @@ impl View {
 				border: 2.0,
 				tooltip: Some(TooltipInfo {
 					side: TooltipSide::Bottom,
-					text: Translation::from_raw_text(&params.manifest.name),
+					text: Translation::from_raw_text(&manifest.name),
 				}),
 				style: taffy::Style {
 					position: taffy::Position::Relative,
 					align_items: Some(AlignItems::CENTER),
 					justify_content: Some(JustifyContent::CENTER),
 					size: taffy::Size {
-						width: length(GAME_COVER_SIZE_X * params.scale),
-						height: length(GAME_COVER_SIZE_Y * params.scale),
+						width: length(GAME_COVER_SIZE_X * scale),
+						height: length(GAME_COVER_SIZE_Y * scale),
 					},
 					..Default::default()
 				},
@@ -194,7 +221,7 @@ impl View {
 			},
 		)?;
 
-		let (image_parent, _) = params.ess.layout.add_child(
+		let (image_parent, _) = ess.layout.add_child(
 			widget_button.id,
 			WidgetDiv::create(),
 			taffy::Style {
@@ -231,7 +258,7 @@ impl View {
 		};
 
 		// top shine
-		let (top_shine, _) = params.ess.layout.add_child(
+		let (top_shine, _) = ess.layout.add_child(
 			widget_button.id,
 			rect_gradient(
 				drawing::Color::new(1.0, 1.0, 1.0, 0.2),
@@ -245,7 +272,7 @@ impl View {
 		top_shine.widget.state().flags.new_pass = true;
 
 		// top white gradient
-		params.ess.layout.add_child(
+		ess.layout.add_child(
 			widget_button.id,
 			rect_gradient(
 				drawing::Color::new(1.0, 1.0, 1.0, 0.15),
@@ -256,7 +283,7 @@ impl View {
 		)?;
 
 		// bottom black gradient
-		params.ess.layout.add_child(
+		ess.layout.add_child(
 			widget_button.id,
 			rect_gradient(
 				drawing::Color::new(0.0, 0.0, 0.0, 0.0),
@@ -267,7 +294,7 @@ impl View {
 		)?;
 
 		// bottom shadow
-		params.ess.layout.add_child(
+		ess.layout.add_child(
 			widget_button.id,
 			rect_gradient(
 				drawing::Color::new(0.0, 0.0, 0.0, 0.1),
@@ -277,27 +304,18 @@ impl View {
 			rect_gradient_style(taffy::AlignSelf::END, 0.05),
 		)?;
 
-		// the loading spinner lives in image_parent and is cleared when the cover arrives
+		// LVRR: the loading spinner lives in image_parent and is cleared when the cover arrives
 		wgui_simple::create_loading(wgui_simple::CreateLoadingParams {
-			layout: params.ess.layout,
+			layout: ess.layout,
 			parent_id: image_parent.id,
 			with_text: false,
 		})?;
 
-		// request cover image data from the internet or disk cache
-		params
-			.executor
-			.spawn(View::request_cover_image(
-				params.manifest.clone(),
-				Box::new(params.on_loaded),
-			))
-			.detach();
-
 		Ok(View {
 			button,
 			id_image_parent: image_parent.id,
-			app_name: params.manifest.name.clone(),
-			app_id: params.manifest.app_id.clone(),
+			app_name: manifest.name.clone(),
+			app_id: manifest.app_id.clone(),
 		})
 	}
 }

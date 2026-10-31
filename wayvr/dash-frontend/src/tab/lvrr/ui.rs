@@ -2,18 +2,27 @@
 
 use std::rc::Rc;
 
+use lvrr_common::state::Link;
 use wgui::{
 	assets::AssetPathRef,
 	color::WguiColorName,
 	components::{
-		bar_graph::ComponentBarGraph, button::ComponentButton, checkbox::ComponentCheckbox, editbox::ComponentEditBox,
-		slider::ComponentSlider,
+		bar_graph::ComponentBarGraph,
+		button::ComponentButton,
+		checkbox::ComponentCheckbox,
+		editbox::ComponentEditBox,
+		slider::{self, ComponentSlider},
 	},
 	globals::WguiGlobals,
 	i18n::Translation,
 	layout::{Layout, WidgetID},
 	parser::{Fetchable, ParseDocumentParams, ParserState, TemplateParams},
-	widget::label::WidgetLabel,
+	renderer_vk::text::custom_glyph::CustomGlyphData,
+	taffy::{self, prelude::length},
+	widget::{
+		label::WidgetLabel,
+		sprite::{WidgetSprite, WidgetSpriteParams},
+	},
 	windowing::context_menu,
 };
 
@@ -109,8 +118,19 @@ impl<'a> Ui<'a> {
 		self.container("WrapRow", parent, |_| {})
 	}
 
+	/// Takes the rest of a `row`'s line and puts its children at the end, for buttons after a
+	/// row's content
+	pub fn row_end(&mut self, parent: WidgetID) -> anyhow::Result<WidgetID> {
+		self.container("RowEnd", parent, |_| {})
+	}
+
 	pub fn column(&mut self, parent: WidgetID) -> anyhow::Result<WidgetID> {
 		self.container("Column", parent, |_| {})
+	}
+
+	/// A column as wide as its parent, so section headers and rows in it span a `group`
+	pub fn list(&mut self, parent: WidgetID) -> anyhow::Result<WidgetID> {
+		self.container("List", parent, |_| {})
 	}
 
 	/// A positioning context sized to its child, so a `corner_overlay` can pin to it
@@ -150,11 +170,22 @@ impl<'a> Ui<'a> {
 		self.label("Bold", parent, text, size, "on_background")
 	}
 
-	/// An icon from a file, such as an application's icon
-	pub fn file_icon(&mut self, parent: WidgetID, path: &str) -> anyhow::Result<()> {
-		let mut params = TemplateParams::new();
-		params.insert("src", path);
-		self.instantiate("FileIcon", parent, params)
+	/// An icon from a file, such as an application's icon, untinted. The caller keeps the glyph, so
+	/// a page built again neither reads nor decodes the file again.
+	pub fn file_icon(&mut self, parent: WidgetID, glyph: CustomGlyphData) -> anyhow::Result<()> {
+		let sprite = WidgetSprite::create(WidgetSpriteParams {
+			glyph_data: Some(glyph),
+			..Default::default()
+		});
+		let style = taffy::Style {
+			size: taffy::Size {
+				width: length(32.0_f32),
+				height: length(32.0_f32),
+			},
+			..Default::default()
+		};
+		self.layout.add_child(parent, sprite, style)?;
+		Ok(())
 	}
 
 	/// A small colored tag, color is a theme color such as `primary` or `danger`
@@ -165,12 +196,64 @@ impl<'a> Ui<'a> {
 		self.instantiate("Badge", parent, params)
 	}
 
+	/// A [Self::badge] with an icon before its text, so a short text is enough. The fill is
+	/// opaque, so it stays readable on a game cover.
+	pub fn icon_badge(&mut self, parent: WidgetID, translation: &str, icon: &str, color: &str) -> anyhow::Result<()> {
+		let mut params = TemplateParams::new();
+		params.insert("translation", translation);
+		params.insert("icon", icon);
+		params.insert("color", color);
+		self.instantiate("IconBadge", parent, params)
+	}
+
 	/// A full width notice, returns the row to put buttons in
 	pub fn banner(&mut self, parent: WidgetID, translation: &str, color: &str) -> anyhow::Result<WidgetID> {
 		self.container("Banner", parent, |p| {
 			p.insert("translation", translation);
 			p.insert("color", color);
 		})
+	}
+
+	/// Why the pages can't use LVRR's server, for a `link` that isn't online. The desktop window
+	/// offers to start it, which `lvrr start` refuses while another WiVRn server runs. While
+	/// `starting` it shows that instead of the button, which a failed start brings back.
+	pub fn not_running(
+		&mut self,
+		parent: WidgetID,
+		link: Link,
+		desktop: bool,
+		starting: bool,
+		on_start: impl Fn() + 'static,
+	) -> anyhow::Result<()> {
+		if link == Link::Foreign {
+			self.banner(parent, "LVRR.FOREIGN", "danger")?;
+		} else if starting {
+			self.banner(parent, "LVRR.DESKTOP.STARTING", "primary")?;
+		} else if desktop {
+			let banner = self.banner(parent, "LVRR.DESKTOP.NOT_RUNNING", "danger")?;
+			self.button(
+				banner,
+				Text::Key("LVRR.DESKTOP.START"),
+				"@/dashboard/play.svg",
+				on_start,
+			)?;
+		} else {
+			self.banner(parent, "LVRR.OFFLINE", "danger")?;
+		}
+		Ok(())
+	}
+
+	/// A notice that changes wait for a session restart, with a button that restarts it. Only while
+	/// a session runs: without one the server ignores RestartSession.
+	pub fn restart_banner(&mut self, parent: WidgetID, on_restart: impl Fn() + 'static) -> anyhow::Result<()> {
+		let banner = self.banner(parent, "LVRR.RESTART_REQUIRED", "tertiary")?;
+		self.button(
+			banner,
+			Text::Key("LVRR.RESTART_SESSION"),
+			"@/dashboard/refresh.svg",
+			on_restart,
+		)?;
+		Ok(())
 	}
 
 	pub fn toggle(
@@ -194,7 +277,9 @@ impl<'a> Ui<'a> {
 		Ok(checkbox)
 	}
 
-	/// A slider under its label; `badge` goes next to the label, see [Self::badge]
+	/// A slider under its label; `badge` goes next to the label, see [Self::badge]. `value` is moved
+	/// onto the nearest step: the slider would do that on its first layout and report it as a
+	/// change, which sends a value nobody picked.
 	pub fn slider(
 		&mut self,
 		parent: WidgetID,
@@ -213,12 +298,22 @@ impl<'a> Ui<'a> {
 
 		let id = self.id();
 		let (min, max, step) = range;
+		// by the slider's own rule; to_string gives back the same f32 when parsed
+		let mut start = slider::Value::default();
+		start.set(
+			&slider::Limits {
+				min_value: min,
+				max_value: max,
+				step,
+			},
+			value,
+		);
 		let mut params = TemplateParams::new();
 		params.insert("id", &id);
 		params.insert_rc("min", min.to_string().into());
 		params.insert_rc("max", max.to_string().into());
 		params.insert_rc("step", step.to_string().into());
-		params.insert_rc("value", value.clamp(min, max).to_string().into());
+		params.insert_rc("value", start.get().to_string().into());
 		self.instantiate("Slider", column, params)?;
 		let slider = self.state.fetch_component_as::<ComponentSlider>(&id)?;
 		slider.on_value_changed(Box::new(move |_common, e| on_change(e.value)));
@@ -268,6 +363,28 @@ impl<'a> Ui<'a> {
 		Ok(button)
 	}
 
+	/// A button with only an icon, `tooltip` says what it does
+	pub fn icon_button(
+		&mut self,
+		parent: WidgetID,
+		icon: &str,
+		tooltip: &str,
+		on_click: impl Fn() + 'static,
+	) -> anyhow::Result<Rc<ComponentButton>> {
+		let id = self.id();
+		let mut params = TemplateParams::new();
+		params.insert("id", &id);
+		params.insert("icon", icon);
+		params.insert("tooltip", tooltip);
+		self.instantiate("IconButton", parent, params)?;
+		let button = self.state.fetch_component_as::<ComponentButton>(&id)?;
+		button.on_click(Rc::new(move |_common, _e| {
+			on_click();
+			Ok(())
+		}));
+		Ok(button)
+	}
+
 	/// A button with only an icon that opens a menu where it was clicked
 	pub fn menu_button(
 		&mut self,
@@ -291,7 +408,7 @@ impl<'a> Ui<'a> {
 		Ok(())
 	}
 
-	/// A text field; only the desktop window has a keyboard for it
+	/// A text field; in VR the keyboard types into it while it has focus
 	pub fn editbox(&mut self, parent: WidgetID, text: &str) -> anyhow::Result<Rc<ComponentEditBox>> {
 		let id = self.id();
 		let mut params = TemplateParams::new();

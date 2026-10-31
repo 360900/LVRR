@@ -47,6 +47,8 @@ use crate::{
 
 // LVRR: side buttons, power menu actions and confirmations for the LVRR pages
 mod lvrr_ext;
+// LVRR: WayVR's tick looks for the session of an app the Library started
+pub use lvrr_ext::lvrr_poll_start;
 
 pub struct FrontendWidgets {
 	id_label_time: WidgetID,
@@ -319,6 +321,8 @@ impl<T: 'static> Frontend<T> {
 	fn process_power_action(&mut self, action: &str, data: &mut T) {
 		match action {
 			"restart" => {
+				// LVRR: the dashboard comes back on the same page
+				self.lvrr_save_page();
 				self.interface.restart(data);
 			}
 			"close" => {
@@ -530,8 +534,10 @@ impl<T: 'static> Frontend<T> {
 			alterables: &mut self.layout.alterables,
 		};
 
+		// LVRR: a page opened from an LVRR page lights that page's button
+		let lit = lvrr_ext::lvrr_side_tab(tab_type);
 		for (t, btn) in self.side_buttons.iter() {
-			btn.set_sticky_state(&mut common, tab_type == *t);
+			btn.set_sticky_state(&mut common, lit == *t);
 		}
 
 		Ok(())

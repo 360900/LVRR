@@ -23,6 +23,7 @@ pub mod home;
 pub mod library;
 pub mod pc;
 pub mod running;
+pub(crate) mod started;
 mod ui;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -283,7 +284,7 @@ mod tests {
 
 	const EN: &str = include_str!("../../../lvrr-assets/lang/en.json");
 
-	const SOURCES: [(&str, &str); 12] = [
+	const SOURCES: [(&str, &str); 13] = [
 		("home.rs", include_str!("home.rs")),
 		("library.rs", include_str!("library.rs")),
 		("running.rs", include_str!("running.rs")),
@@ -296,6 +297,8 @@ mod tests {
 		("headset.xml", include_str!("../../../lvrr-assets/gui/lvrr/headset.xml")),
 		("pc.xml", include_str!("../../../lvrr-assets/gui/lvrr/pc.xml")),
 		("widgets.xml", include_str!("../../../lvrr-assets/gui/lvrr/widgets.xml")),
+		// what failed and why, for the desktop window's toasts
+		("state.rs", include_str!("../../../../lvrr-common/src/state.rs")),
 	];
 
 	fn exists(en: &serde_json::Value, key: &str) -> bool {
