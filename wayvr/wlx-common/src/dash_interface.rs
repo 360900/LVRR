@@ -114,7 +114,7 @@ pub trait DashInterface<T> {
 		None
 	}
 	fn lvrr_request(&mut self, _data: &mut T, _request: lvrr_common::state::LvrrRequest) -> anyhow::Result<()> {
-		anyhow::bail!("Not connected to the LVRR server")
+		anyhow::bail!("The LVRR server is not running")
 	}
 	fn lvrr_perf_overlay(&mut self, _data: &mut T) -> bool {
 		false
@@ -140,9 +140,17 @@ pub trait DashInterface<T> {
 	fn lvrr_start_server(&mut self, _data: &mut T) -> anyhow::Result<()> {
 		anyhow::bail!("Can't start the LVRR server from here")
 	}
-	/// Ends the headset session if one runs, then lets a new headset pair
+	/// LVRR starts from lvrr_start_server or lvrr_pair, and lvrr_state isn't online yet
+	fn lvrr_starting(&self) -> bool {
+		false
+	}
+	/// Lets a new headset pair, after starting LVRR or ending the headset session if needed
 	fn lvrr_pair(&mut self, _data: &mut T) -> anyhow::Result<()> {
 		anyhow::bail!("Can't pair a headset from here")
+	}
+	/// A pairing from lvrr_pair has no PIN yet: LVRR starts, or the session ends
+	fn lvrr_pairing(&self) -> bool {
+		false
 	}
 }
 

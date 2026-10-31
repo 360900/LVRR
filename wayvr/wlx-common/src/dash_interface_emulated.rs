@@ -177,13 +177,19 @@ impl DashInterface<()> for DashInterfaceEmulated {
 		use lvrr_common::state::LvrrBackend;
 		match self.lvrr.as_mut() {
 			Some(lvrr) => lvrr.request(request),
-			None => anyhow::bail!("Not connected to the LVRR server"),
+			None => anyhow::bail!("The LVRR server is not running"),
 		}
 	}
 
 	fn lvrr_batteries(&mut self, _data: &mut ()) -> Vec<lvrr_common::state::Battery> {
-		use lvrr_common::state::{Battery, BatteryDevice};
-		if self.lvrr.is_none() {
+		use lvrr_common::state::{Battery, BatteryDevice, Link, LvrrBackend};
+		// LVRR: only a connected headset has batteries to read
+		let connected = self
+			.lvrr
+			.as_ref()
+			.map(LvrrBackend::state)
+			.is_some_and(|s| s.link == Link::Online && s.headset_connected);
+		if !connected {
 			return Vec::new();
 		}
 		vec![
@@ -361,6 +367,16 @@ impl DashInterface<()> for DashInterfaceEmulated {
 		_data: &mut (),
 		_filtered: bool,
 	) -> anyhow::Result<Vec<dash_interface::MonadoClient>> {
+		use lvrr_common::state::{Link, LvrrBackend};
+		// LVRR: apps run in the emulated server's session; LVRR_EMU=none is WayVR without LVRR
+		let stopped = self
+			.lvrr
+			.as_ref()
+			.map(LvrrBackend::state)
+			.is_some_and(|s| s.link != Link::Online || !s.session_running);
+		if stopped {
+			return Ok(Vec::new());
+		}
 		Ok(self.monado_clients.clone())
 	}
 

@@ -1,6 +1,8 @@
 //! The LVRR server's configuration file (`JsonConfiguration` on D-Bus), with the settings
 //! the dashboard shows. Keys it doesn't know are kept as they are.
 
+use std::path::PathBuf;
+
 use serde_json::{Map, Value};
 
 /// Encoders, as named in the configuration
@@ -23,19 +25,30 @@ pub enum OpenVrCompat {
 	Unmanaged,
 }
 
-#[derive(Clone, Debug, Default)]
+/// The file lvrr starts the server with, as lvrr's `config_path()` finds it
+pub fn path() -> Option<PathBuf> {
+	crate::xdg_dir("XDG_CONFIG_HOME", ".config").map(|config| config.join("lvrr/wivrn-server.json"))
+}
+
+#[derive(Clone, Debug)]
 pub struct ServerConfig(pub Value);
+
+/// No settings, so the server's defaults
+impl Default for ServerConfig {
+	fn default() -> Self {
+		Self(Value::Object(Map::new()))
+	}
+}
 
 impl ServerConfig {
 	fn map(&self) -> Option<&Map<String, Value>> {
 		self.0.as_object()
 	}
 
-	fn map_mut(&mut self) -> &mut Map<String, Value> {
-		if !self.0.is_object() {
-			self.0 = Value::Object(Map::new());
-		}
-		self.0.as_object_mut().unwrap()
+	/// None for a file the server couldn't parse, which it publishes as null. A setting changed
+	/// then would become the whole file once sent.
+	fn map_mut(&mut self) -> Option<&mut Map<String, Value>> {
+		self.0.as_object_mut()
 	}
 
 	fn get(&self, key: &str) -> Option<&Value> {
@@ -50,13 +63,17 @@ impl ServerConfig {
 		self.get(key).and_then(Value::as_f64)
 	}
 
+	/// Does nothing unless the configuration is an object, see [Self::map_mut]
 	pub fn set(&mut self, key: &str, value: Option<Value>) {
+		let Some(map) = self.map_mut() else {
+			return;
+		};
 		match value {
 			Some(v) => {
-				self.map_mut().insert(key.into(), v);
+				map.insert(key.into(), v);
 			}
 			None => {
-				self.map_mut().remove(key);
+				map.remove(key);
 			}
 		}
 	}
@@ -140,5 +157,15 @@ mod tests {
 		assert_eq!(config.openvr_compat(), OpenVrCompat::Unmanaged);
 		config.set_openvr_compat(&OpenVrCompat::Automatic);
 		assert!(config.0.get("openvr-compat-path").is_none());
+	}
+
+	#[test]
+	fn leaves_an_unread_file_alone() {
+		let mut config = ServerConfig(Value::Null);
+		config.set("usb-auto-connect", Some(Value::Bool(true)));
+		config.set("hid-forwarding", None);
+		config.set_encoder(&Encoder::Named("nvenc".into()));
+		config.set_openvr_compat(&OpenVrCompat::Unmanaged);
+		assert_eq!(config.0, Value::Null);
 	}
 }

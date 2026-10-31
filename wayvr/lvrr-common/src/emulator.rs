@@ -5,12 +5,14 @@
 use std::time::Instant;
 
 use crate::{
-	headset::{HeadsetSettings, HeadsetStats},
-	state::{KnownKey, Link, LvrrBackend, LvrrRequest, LvrrState, Message, MessageKind, Notice, VrApplication},
+	headset::{HeadsetSettings, HeadsetStats, RESTART_KEYS},
+	state::{
+		Failure, KnownKey, Link, LvrrBackend, LvrrRequest, LvrrState, Message, MessageKind, Notice, Reason, VrApplication,
+	},
 };
 
-// Written by the server's `lvrr-test --example`
-const EXAMPLE: &str = include_str!("../../../docs/dbus-example.json");
+/// The server's `HeadsetSettings` and `HeadsetStats`, written by its `lvrr-test --example`
+pub const EXAMPLE: &str = include_str!("../../../docs/dbus-example.json");
 
 pub struct LvrrEmulator {
 	state: LvrrState,
@@ -22,6 +24,9 @@ pub struct LvrrEmulator {
 	notices: Vec<Notice>,
 	/// The headset is away; settings changes wait for it
 	offline: bool,
+	/// The config the emulated session started with, for `restart_required`. None until a
+	/// RestartSession: the example's session started with other restart settings, which it doesn't show.
+	session: Option<serde_json::Value>,
 }
 
 impl LvrrEmulator {
@@ -37,6 +42,8 @@ impl LvrrEmulator {
 		if running {
 			state.headset_connected = true;
 			state.session_running = true;
+			// as the link counts the session its first GetAll finds
+			state.sessions = 1;
 			state.system_name = "Meta Quest 3 on LVRR".into();
 			state.encryption_enabled = true;
 			state.known_keys = vec![
@@ -65,21 +72,32 @@ impl LvrrEmulator {
 			last_stats: Instant::now(),
 			notices: Vec::new(),
 			offline: false,
+			session: None,
 		}
 	}
 
 	/// A running server without a headset, which knows the last one's settings
 	pub fn offline() -> Self {
 		let mut emulator = Self::new(true);
-		emulator.offline = true;
-		emulator.state.headset_connected = false;
+		emulator.headset_left();
 		emulator.state.session_running = false;
 		emulator.state.bitrate_bps = 0;
-		emulator.settings["offline"] = true.into();
-		emulator.settings["restart_required"] = false.into();
-		emulator.settings["pending"] = serde_json::Value::Null;
 		emulator.set_settings(&serde_json::json!({"bitrate_bps": 80_000_000}));
 		emulator
+	}
+
+	/// The headset disconnected, as the server sees it: its settings stay, marked offline, and
+	/// the session waits for it to come back
+	fn headset_left(&mut self) {
+		self.offline = true;
+		self.state.headset_connected = false;
+		self.settings["offline"] = true.into();
+		self.settings["restart_required"] = false.into();
+		self.settings["pending"] = serde_json::Value::Null;
+		self.state.headset = serde_json::from_value(self.settings.clone()).ok();
+		// the server's HeadsetStats is "" then
+		self.state.clear_stats();
+		self.state.changed();
 	}
 
 	fn message(&mut self, text: &str) {
@@ -110,14 +128,27 @@ impl LvrrEmulator {
 			self.state.changed();
 			return;
 		}
-		let mut settings: HeadsetSettings = serde_json::from_value(self.settings.clone()).unwrap_or_default();
-		settings.restart_required = ["resolution_scale", "foveation", "codec", "bit_depth", "microphone"]
-			.iter()
-			.any(|k| patch.contains_key(*k))
-			|| self.state.headset.as_ref().is_some_and(|h| h.restart_required);
+		// as on the headset: due while restart settings differ from the session's. Before a
+		// RestartSession they are unknown, and the example's flag stays.
+		if let Some(session) = &self.session {
+			let restart_required = RESTART_KEYS
+				.iter()
+				.any(|k| !same_value(&self.settings["config"][*k], &session[*k]));
+			self.settings["restart_required"] = restart_required.into();
+		}
+		let settings: HeadsetSettings = serde_json::from_value(self.settings.clone()).unwrap_or_default();
 		self.state.bitrate_bps = settings.config.bitrate_bps;
 		self.state.headset = Some(settings);
 		self.state.changed();
+	}
+}
+
+/// Whether the headset stores both as the same value. Its numbers are f32 or integers, so the
+/// 1.2000000476837158 it reports is 1.2, and 10.0 is 10.
+fn same_value(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+	match (a.as_f64(), b.as_f64()) {
+		(Some(a), Some(b)) => (a - b).abs() < 1e-4,
+		_ => a == b,
 	}
 }
 
@@ -151,11 +182,39 @@ impl LvrrBackend for LvrrEmulator {
 		}
 		match request {
 			LvrrRequest::SetHeadsetSettings(patch) => self.set_settings(&patch),
-			LvrrRequest::RestartSession => self.message("Restarting the session"),
-			LvrrRequest::Disconnect | LvrrRequest::Quit => {
-				self.state.link = Link::ServerAbsent;
-				self.state.headset = None;
+			LvrrRequest::RestartSession => {
+				// the headset comes back to a new session, which starts with the current settings
+				if !self.offline {
+					self.session = Some(self.settings["config"].clone());
+					self.settings["restart_required"] = false.into();
+					self.state.headset = serde_json::from_value(self.settings.clone()).ok();
+					// a new session as the link counts it, though session_running doesn't drop here
+					self.state.sessions += 1;
+					self.state.changed();
+				}
+				self.message("Restarting the session");
+			}
+			LvrrRequest::StopSession => {
+				if self.state.headset_connected {
+					self.headset_left();
+				}
+				self.state.session_running = false;
 				self.state.changed();
+			}
+			LvrrRequest::Disconnect => {
+				if self.state.headset_connected {
+					self.headset_left();
+				}
+			}
+			LvrrRequest::Quit => self.state.set_link(Link::ServerAbsent),
+			// what the link reports once the session didn't end
+			request @ LvrrRequest::EnablePairing { .. } if self.state.session_running || self.state.headset_connected => {
+				if let Some(title) = request.failure_key() {
+					self.notices.push(Notice::RequestFailed {
+						title,
+						failure: Failure::Known(Reason::Busy),
+					});
+				}
 			}
 			LvrrRequest::EnablePairing { .. } => {
 				self.state.pairing_enabled = true;
@@ -233,5 +292,93 @@ mod tests {
 		);
 		assert!(emulator.poll().is_empty());
 		assert!(emulator.state().stats.is_empty());
+	}
+
+	// Like the server: it keeps running, the session waits for the headset, changes wait too
+	#[test]
+	fn disconnect_keeps_the_server() {
+		let mut emulator = LvrrEmulator::new(true);
+		emulator.state.push_stats(HeadsetStats::default());
+		let stats_generation = emulator.state.stats_generation;
+		emulator.request(LvrrRequest::Disconnect).unwrap();
+		let state = emulator.state();
+		assert_eq!(state.link, Link::Online);
+		assert!(!state.headset_connected && state.session_running);
+		assert!(state.headset.as_ref().is_some_and(|h| h.offline && !h.restart_required));
+		assert!(state.stats.is_empty());
+		// a step for clearing them, like the link's, so PC > Performance sees the gap
+		assert_eq!(state.stats_generation, stats_generation + 1);
+
+		emulator
+			.request(LvrrRequest::SetHeadsetSettings(serde_json::json!({"codec": "h265"})))
+			.unwrap();
+		let headset = emulator.state().headset.clone().unwrap();
+		assert_eq!(headset.pending, serde_json::json!({"codec": "h265"}));
+	}
+
+	// The server refuses to pair during a session, lvrr-ui ends it first
+	#[test]
+	fn pairing_ends_the_session_first() {
+		let mut emulator = LvrrEmulator::new(true);
+		let pair = || LvrrRequest::EnablePairing { timeout_secs: 120 };
+		emulator.request(pair()).unwrap();
+		assert!(matches!(
+			&emulator.poll()[..],
+			[Notice::RequestFailed {
+				title: "LVRR.FAILED.PAIR",
+				failure: Failure::Known(Reason::Busy),
+			}]
+		));
+		assert!(!emulator.state().pairing_enabled && emulator.state().pin.is_empty());
+
+		emulator.request(LvrrRequest::StopSession).unwrap();
+		let state = emulator.state();
+		assert!(!state.session_running && !state.headset_connected);
+		assert!(state.headset.as_ref().is_some_and(|h| h.offline));
+		emulator.request(pair()).unwrap();
+		assert!(emulator.state().pairing_enabled && !emulator.state().pin.is_empty());
+		assert!(emulator.poll().is_empty());
+	}
+
+	#[test]
+	fn quit_leaves_no_server_state() {
+		let mut emulator = LvrrEmulator::new(true);
+		emulator.request(LvrrRequest::StopSession).unwrap();
+		emulator
+			.request(LvrrRequest::EnablePairing { timeout_secs: 120 })
+			.unwrap();
+		assert!(emulator.state().pairing_enabled);
+		emulator.request(LvrrRequest::Quit).unwrap();
+		let state = emulator.state();
+		assert_eq!(state.link, Link::ServerAbsent);
+		assert!(!state.headset_connected && !state.session_running && state.headset.is_none());
+		assert!(!state.pairing_enabled && state.pin.is_empty());
+		assert!(emulator.request(LvrrRequest::DisablePairing).is_err());
+	}
+
+	// Like the headset: a restart is due while restart settings differ from the session's
+	#[test]
+	fn restart_follows_the_session() {
+		let mut emulator = LvrrEmulator::new(true);
+		let restart_required = |e: &LvrrEmulator| e.state().headset.as_ref().is_some_and(|h| h.restart_required);
+		// the example's session started with other restart settings
+		assert!(restart_required(&emulator));
+		assert_eq!(emulator.state().sessions, 1);
+		emulator.request(LvrrRequest::RestartSession).unwrap();
+		assert!(!restart_required(&emulator));
+		assert_eq!(emulator.state().sessions, 2);
+
+		for (patch, restart) in [
+			(serde_json::json!({"hand_tracking": false}), true),
+			(serde_json::json!({"hand_tracking": true}), false),
+			(serde_json::json!({"bitrate_bps": 30_000_000}), false),
+			// the f32 the headset reports, sent as an f64
+			(serde_json::json!({"resolution_scale": 1.2}), false),
+		] {
+			emulator
+				.request(LvrrRequest::SetHeadsetSettings(patch.clone()))
+				.unwrap();
+			assert_eq!(restart_required(&emulator), restart, "after {patch}");
+		}
 	}
 }

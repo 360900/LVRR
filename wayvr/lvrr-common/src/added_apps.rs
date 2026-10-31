@@ -14,28 +14,9 @@ const MARKER: &str = "X-LVRR-Added=true";
 /// Prefix of the copied desktop entries
 const PREFIX: &str = "lvrr-";
 
-fn non_empty(name: &str) -> Option<std::ffi::OsString> {
-	std::env::var_os(name).filter(|v| !v.is_empty())
-}
-
-fn data_home() -> Option<PathBuf> {
-	non_empty("XDG_DATA_HOME")
-		.map(PathBuf::from)
-		.filter(|d| d.is_absolute())
-		.or_else(|| Some(Path::new(&non_empty("HOME")?).join(".local").join("share")))
-}
-
-fn data_dirs() -> Vec<PathBuf> {
-	let dirs = non_empty("XDG_DATA_DIRS").unwrap_or_else(|| "/usr/local/share:/usr/share".into());
-	data_home()
-		.into_iter()
-		.chain(std::env::split_paths(&dirs).filter(|d| d.is_absolute()))
-		.collect()
-}
-
 fn applications_dir() -> anyhow::Result<PathBuf> {
 	Ok(
-		data_home()
+		crate::xdg_dir("XDG_DATA_HOME", ".local/share")
 			.ok_or_else(|| anyhow::anyhow!("no home directory"))?
 			.join("applications"),
 	)
@@ -55,11 +36,16 @@ fn added_in(dir: &Path) -> HashSet<String> {
 		.filter_map(|entry| {
 			let path = entry.path();
 			let id = path.file_stem()?.to_str()?.to_owned();
-			let ours = path.extension().is_some_and(|e| e == "desktop")
-				&& fs::read_to_string(&path).is_ok_and(|s| s.lines().any(|l| l.trim() == MARKER));
+			// only the names add_steam and add_desktop write, so other entries aren't read
+			let named = id.starts_with(PREFIX) || id.bytes().all(|b| b.is_ascii_digit());
+			let ours = named && path.extension().is_some_and(|e| e == "desktop") && is_ours(&path);
 			ours.then_some(id)
 		})
 		.collect()
+}
+
+fn is_ours(path: &Path) -> bool {
+	fs::read_to_string(path).is_ok_and(|s| s.lines().any(|l| l.trim() == MARKER))
 }
 
 /// Adds an installed Steam game
@@ -67,11 +53,15 @@ pub fn add_steam(app_id: u64, name: &str) -> anyhow::Result<()> {
 	write(&applications_dir()?, &app_id.to_string(), &steam_entry(app_id, name))
 }
 
-/// Adds a copy of a desktop entry, returns the copy's id
-pub fn add_desktop(id: &str) -> anyhow::Result<String> {
-	let original = find_entry(id).ok_or_else(|| anyhow::anyhow!("no desktop entry {id}"))?;
+/// Adds a copy of the desktop entry `original`, whose id is `id`; returns the copy's id
+pub fn add_desktop(id: &str, original: &Path) -> anyhow::Result<String> {
+	let entry = vr_entry(&fs::read_to_string(original)?);
+	anyhow::ensure!(
+		listable(&entry),
+		"its desktop entry has no Name or Exec, or isn't an application"
+	);
 	let new_id = format!("{PREFIX}{id}");
-	write(&applications_dir()?, &new_id, &vr_entry(&fs::read_to_string(original)?))?;
+	write(&applications_dir()?, &new_id, &entry)?;
 	Ok(new_id)
 }
 
@@ -88,34 +78,34 @@ fn remove_in(dir: &Path, id: &str) -> anyhow::Result<()> {
 
 fn write(dir: &Path, id: &str, content: &str) -> anyhow::Result<()> {
 	let path = dir.join(format!("{id}.desktop"));
-	anyhow::ensure!(!path.exists(), "{} already exists", path.display());
+	// our own copy is replaced, so adding again works and fixes an outdated copy
+	anyhow::ensure!(!path.exists() || is_ours(&path), "{} already exists", path.display());
 	fs::create_dir_all(dir)?;
 	fs::write(path, content)?;
 	Ok(())
 }
 
-/// The desktop file with this id, see the desktop entry spec's file naming
-fn find_entry(id: &str) -> Option<PathBuf> {
-	fn walk(root: &Path, dir: &Path, id: &str) -> Option<PathBuf> {
-		for entry in fs::read_dir(dir).ok()?.flatten() {
-			let path = entry.path();
-			if path.is_dir() {
-				if let Some(found) = walk(root, &path, id) {
-					return Some(found);
-				}
-			} else if path.extension().is_some_and(|e| e == "desktop")
-				&& let Ok(relative) = path.with_extension("").strip_prefix(root)
-				&& relative.to_string_lossy().replace('/', "-") == id
-			{
-				return Some(path);
-			}
+/// Whether the server lists this entry. Like do_desktop_entry in wivrn/common/application.cpp,
+/// it needs a Name without locale and an Exec, both with a value, and no Type other than Application.
+fn listable(entry: &str) -> bool {
+	let (mut name, mut exec) = (false, false);
+	for line in entry.split('\n') {
+		let Some((key, value)) = line.split_once('=') else {
+			continue;
+		};
+		// as in the server, blank values and indented lines don't count
+		let value = value.trim_start_matches(' ');
+		if value.is_empty() {
+			continue;
 		}
-		None
+		match key.trim_end_matches(' ') {
+			"Type" if value != "Application" => return false,
+			"Name" => name = true,
+			"Exec" => exec = true,
+			_ => {}
+		}
 	}
-	data_dirs().iter().find_map(|dir| {
-		let dir = dir.join("applications");
-		walk(&dir, &dir, id)
-	})
+	name && exec
 }
 
 fn escape(value: &str) -> String {
@@ -157,6 +147,11 @@ fn vr_entry(original: &str) -> String {
 		"NotShowIn",
 		"Actions",
 		"DBusActivatable",
+		// NoDisplay entries still handle the files, URLs and D-Bus interfaces they list, and the copy's
+		// Exec takes no file or URL; the server only reads Type, Name, Exec, Path, Icon and Categories
+		"MimeType",
+		"Implements",
+		"X-KDE-Protocols",
 	];
 	let mut out = String::new();
 	let mut main = false;
@@ -211,13 +206,24 @@ mod tests {
 
 	#[test]
 	fn copies_main_section_into_vr_category() {
-		let original = "# comment\n[Desktop Entry]\nName=Foo\nName[de]=Föö\nExec=foo %U\nCategories=Game\nNoDisplay=false\nActions=new;\n\n[Desktop Action new]\nExec=foo --new\n";
+		let original = "# comment\n[Desktop Entry]\nName=Foo\nName[de]=Föö\nExec=foo %U\nCategories=Game\nNoDisplay=false\nActions=new;\nMimeType=video/mp4;x-scheme-handler/foo;\nImplements=org.example.Foo;\nX-KDE-Protocols=foo\n\n[Desktop Action new]\nExec=foo --new\n";
 		assert_eq!(
 			vr_entry(original),
 			"[Desktop Entry]\nName=Foo\nName[de]=Föö\nExec=foo\nCategories=Game;X-WiVRn-VR;\n\nNoDisplay=true\nX-LVRR-Added=true\n"
 		);
 		assert_eq!(strip_field_codes("Exec=bar --x=100%% %f"), "Exec=bar --x=100%");
 		assert!(vr_entry("[Desktop Entry]\nExec=bar\n").contains("Categories=X-WiVRn-VR;\n"));
+	}
+
+	#[test]
+	fn copies_only_what_the_server_lists() {
+		let listed = |original: &str| listable(&vr_entry(original));
+		assert!(listed("[Desktop Entry]\nType=Application\nName=Foo\nExec=foo %U\n"));
+		// a NoDisplay override, a localized name only, a blank command, a link
+		assert!(!listed("[Desktop Entry]\nNoDisplay=true\n"));
+		assert!(!listed("[Desktop Entry]\nName=\nName[en]=Foo\nExec=foo\n"));
+		assert!(!listed("[Desktop Entry]\nName=Foo\nExec=%U\n"));
+		assert!(!listed("[Desktop Entry]\nType=Link\nName=Foo\nExec=foo\n"));
 	}
 
 	#[test]
@@ -229,12 +235,23 @@ mod tests {
 				.unwrap()
 				.contains("Name=Portal\\n2\n")
 		);
-		assert!(write(&dir, "620", "").is_err());
+		// adding again replaces our copy, never someone else's file
+		write(&dir, "620", &steam_entry(620, "Portal 2")).unwrap();
+		assert!(
+			fs::read_to_string(dir.join("620.desktop"))
+				.unwrap()
+				.contains("Name=Portal 2\n")
+		);
 		fs::write(dir.join("other.desktop"), "[Desktop Entry]\nName=Other\n").unwrap();
+		assert!(write(&dir, "other", &steam_entry(1, "Other")).is_err());
+		write(&dir, "lvrr-foo", &vr_entry("[Desktop Entry]\nName=Foo\nExec=foo\n")).unwrap();
+		// a file with the marker under a name LVRR doesn't write isn't read
+		fs::write(dir.join("renamed.desktop"), steam_entry(620, "Portal 2")).unwrap();
 
-		assert_eq!(added_in(&dir), HashSet::from(["620".to_owned()]));
+		assert_eq!(added_in(&dir), HashSet::from(["620".to_owned(), "lvrr-foo".to_owned()]));
 		assert!(remove_in(&dir, "other").is_err());
 		remove_in(&dir, "620").unwrap();
+		remove_in(&dir, "lvrr-foo").unwrap();
 		assert!(added_in(&dir).is_empty());
 
 		fs::remove_dir_all(&dir).unwrap();

@@ -3073,6 +3073,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dbus",
+ "libc",
  "log",
  "serde",
  "serde_json",
@@ -3091,6 +3092,8 @@ dependencies = [
  "lvrr-common",
  "serde_json",
  "tracing-subscriber",
+ "wayland-client",
+ "wayland-protocols",
  "wayvr-ipc",
  "wgui",
  "winit",

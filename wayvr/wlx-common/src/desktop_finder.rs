@@ -23,6 +23,8 @@ struct DesktopEntryOwned {
 	app_name: Box<str>,
 	icon_path: Option<Box<str>>,
 	categories: Box<[Box<str>]>,
+	// LVRR: see DesktopEntry::path
+	path: Box<str>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +34,9 @@ pub struct DesktopEntry {
 	pub app_name: Rc<str>,
 	pub icon_path: Option<Rc<str>>,
 	pub categories: Rc<[Rc<str>]>,
+	/// LVRR: the file the entry was read from, which the Library copies to add the app
+	#[serde(default)]
+	pub path: Rc<str>,
 }
 
 impl From<DesktopEntryOwned> for DesktopEntry {
@@ -42,6 +47,7 @@ impl From<DesktopEntryOwned> for DesktopEntry {
 			app_name: value.app_name.into(),
 			icon_path: value.icon_path.map(|x| x.into()),
 			categories: value.categories.into_iter().map(|x| x.into()).collect(),
+			path: value.path.into(),
 		}
 	}
 }
@@ -242,6 +248,7 @@ impl DesktopFinder {
 						exec_argv,
 						icon_path: icon_path.map(|i| i.into_boxed_str()),
 						categories: vec_categories.into_boxed_slice(),
+						path: file_path.into_boxed_str(),
 					},
 				);
 			}

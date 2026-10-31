@@ -3,17 +3,16 @@
 
 use std::{
 	cell::RefCell,
-	io::Write,
-	path::PathBuf,
 	process::{Command, Stdio},
 	rc::Rc,
-	sync::mpsc::{self, Receiver, Sender},
-	thread::sleep,
+	sync::mpsc::{self, Receiver, TryRecvError},
 	time::{Duration, Instant},
 };
 
-use dbus::blocking::{Connection, stdintf::org_freedesktop_dbus::Properties};
-use lvrr_common::state::{Battery, BatteryDevice, LvrrBackend, LvrrRequest, LvrrState, Notice};
+use lvrr_common::{
+	lvrr_command,
+	state::{Battery, BatteryDevice, Failure, Link, LvrrBackend, LvrrRequest, LvrrState, Notice, Reason},
+};
 use wayvr_ipc::{
 	packet_client::WvrProcessLaunchParams,
 	packet_server::{WvrProcess, WvrProcessHandle, WvrWindow, WvrWindowHandle},
@@ -31,28 +30,60 @@ use wlx_common::{
 
 use crate::UserEvent;
 
-const SERVER: &str = "io.github.wivrn.Server";
-const SERVER_PATH: &str = "/io/github/wivrn/Server";
 /// How long a PIN works, like `lvrr pair`'s
 const PAIRING_SECS: i32 = 120;
-/// How long the old session gets to end before pairing gives up
-const SESSION_END_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long the link gets to reach LVRR once `lvrr start` started it. It asks again at least every
+/// 5 s while a starting server doesn't answer.
+const LINK_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct UiInterface {
 	lvrr: Box<dyn LvrrBackend>,
 	desktop_finder: DesktopFinder,
 	general_config: GeneralConfig,
-	/// Messages for the window to show as toasts
-	toasts: Rc<RefCell<Vec<String>>>,
-	pairing: Option<Receiver<anyhow::Result<()>>>,
+	/// What the window shows as toasts
+	toasts: Rc<RefCell<Vec<Notice>>>,
+	/// LVRR starts, until the link reaches it or the start fails
+	start: Option<Start>,
 	proxy: EventLoopProxy<UserEvent>,
+}
+
+/// `lvrr start` run by Start LVRR, or by Pair headset while LVRR was stopped
+struct Start {
+	/// Whether it started LVRR, once it returned
+	started: Receiver<bool>,
+	/// It did: when to stop waiting for the link
+	deadline: Option<Instant>,
+	/// Pair headset ran it or came while it ran: pairing follows once the link reaches LVRR
+	pair: bool,
+}
+
+impl Start {
+	/// Runs `lvrr start`, which notifies its own failures, on a thread that reaps it
+	fn spawn(pair: bool) -> anyhow::Result<Self> {
+		let mut child = Command::new(lvrr_command())
+			.arg("start")
+			.stdin(Stdio::null())
+			.spawn()
+			// not a context: the toasts and the tray's notification show to_string(), without the cause
+			.map_err(|e| anyhow::anyhow!("Could not run lvrr start: {e}"))
+			.inspect_err(|e| log::error!("{e}"))?;
+		let (tx, rx) = mpsc::channel();
+		std::thread::spawn(move || {
+			let _ = tx.send(child.wait().is_ok_and(|status| status.success()));
+		});
+		Ok(Self {
+			started: rx,
+			deadline: None,
+			pair,
+		})
+	}
 }
 
 impl UiInterface {
 	pub fn new(
 		lvrr: Box<dyn LvrrBackend>,
 		locale: &Locale,
-		toasts: Rc<RefCell<Vec<String>>>,
+		toasts: Rc<RefCell<Vec<Notice>>>,
 		proxy: EventLoopProxy<UserEvent>,
 	) -> Self {
 		// serde defaults, not WayVR's config: nothing here is saved. The panel is see-through
@@ -63,61 +94,81 @@ impl UiInterface {
 			desktop_finder: DesktopFinder::new(locale),
 			general_config,
 			toasts,
-			pairing: None,
+			start: None,
 			proxy,
 		}
 	}
-}
 
-/// This install's `lvrr`, next to `lvrr-ui`, or the one on PATH
-pub fn lvrr_command() -> PathBuf {
-	std::env::current_exe()
-		.ok()
-		.and_then(|exe| Some(exe.canonicalize().ok()?.parent()?.join("lvrr")))
-		.filter(|path| path.is_file())
-		.unwrap_or_else(|| "lvrr".into())
-}
-
-/// What `lvrr pair` does: ends a session, which refuses pairing, then shows a PIN
-fn pair() -> anyhow::Result<()> {
-	let conn = Connection::new_session()?;
-	let server = conn.with_proxy(SERVER, SERVER_PATH, Duration::from_secs(5));
-	let busy = |property| server.get::<bool>(SERVER, property);
-	if busy("HeadsetConnected")? || busy("SessionRunning")? {
-		server.method_call::<(), _, _, _>(SERVER, "StopSession", ())?;
+	/// Ends the session if one runs, then asks for a PIN, which the link waits for
+	fn pair(&mut self) -> anyhow::Result<()> {
+		let state = self.lvrr.state();
+		// A PIN is up: it stays, with its timeout. Stop pairing, then Pair headset gives a new one.
+		if state.link == Link::Online && state.pairing_enabled && !state.pin.is_empty() {
+			return Ok(());
+		}
+		// The server refuses to pair during a session. Pair headset asked to end it, or it began as
+		// LVRR started for this pairing.
+		if state.session_running || state.headset_connected {
+			self.lvrr.request(LvrrRequest::StopSession)?;
+		}
+		self.lvrr.request(LvrrRequest::EnablePairing {
+			timeout_secs: PAIRING_SECS,
+		})
 	}
-	let deadline = Instant::now() + SESSION_END_TIMEOUT;
-	loop {
-		if !busy("SessionRunning")? {
-			let (pin,): (String,) = server.method_call(SERVER, "EnablePairing", (PAIRING_SECS,))?;
-			if !pin.is_empty() {
-				return Ok(());
+
+	/// Follows a start until the link reaches LVRR, then pairs if Pair headset asked. Returns why
+	/// that pairing couldn't start.
+	fn follow_start(&mut self) -> Option<Notice> {
+		let Some(start) = &mut self.start else {
+			return None;
+		};
+		let online = self.lvrr.state().link == Link::Online;
+		if !online {
+			let failed = match start.deadline {
+				Some(deadline) => Instant::now() > deadline,
+				None => match start.started.try_recv() {
+					Ok(true) => {
+						start.deadline = Some(Instant::now() + LINK_TIMEOUT);
+						false
+					}
+					Err(TryRecvError::Empty) => false,
+					// lvrr notified why
+					Ok(false) | Err(TryRecvError::Disconnected) => true,
+				},
+			};
+			if !failed {
+				return None;
 			}
 		}
-		if Instant::now() > deadline {
-			anyhow::bail!(
-				"The headset session didn't end, so pairing couldn't start. Quit LVRR on the headset and try again."
-			);
+		let (pair, started) = (start.pair, start.deadline.is_some());
+		self.start = None;
+		if !pair {
+			return None;
 		}
-		sleep(Duration::from_millis(250));
+		// told like the link's own pairing failures: "Couldn't start pairing: <why>"
+		let failure = if online {
+			match self.pair() {
+				Ok(()) => return None,
+				Err(e) => Failure::Other(e.to_string()),
+			}
+		} else if started {
+			// `lvrr start` succeeded, but the link didn't reach the server since
+			Failure::Known(Reason::ServerGone)
+		} else {
+			Failure::Other("LVRR didn't start.".into())
+		};
+		Some(Notice::RequestFailed {
+			title: "LVRR.FAILED.PAIR",
+			failure,
+		})
 	}
 }
 
 impl DashInterface<()> for UiInterface {
 	fn lvrr_state<'a>(&'a mut self, _: &'a mut ()) -> Option<&'a LvrrState> {
-		let mut toasts = self.toasts.borrow_mut();
-		for notice in self.lvrr.poll() {
-			match notice {
-				Notice::Message(message) => toasts.push(message.text),
-				Notice::RequestFailed { request, error } => toasts.push(format!("{request} failed: {error}")),
-			}
-		}
-		if let Some(result) = self.pairing.as_ref().and_then(|r| r.try_recv().ok()) {
-			self.pairing = None;
-			if let Err(e) = result {
-				toasts.push(e.to_string());
-			}
-		}
+		let mut notices = self.lvrr.poll();
+		notices.extend(self.follow_start());
+		self.toasts.borrow_mut().extend(notices);
 		Some(self.lvrr.state())
 	}
 
@@ -146,42 +197,47 @@ impl DashInterface<()> for UiInterface {
 	}
 
 	fn lvrr_start_server(&mut self, _: &mut ()) -> anyhow::Result<()> {
-		// it reports failures as notifications, so it can run on its own
-		Command::new(lvrr_command()).arg("start").stdin(Stdio::null()).spawn()?;
+		// a second one would only notify again
+		if self.start.is_none() {
+			self.start = Some(Start::spawn(false)?);
+		}
 		Ok(())
+	}
+
+	fn lvrr_starting(&self) -> bool {
+		self.start.is_some()
 	}
 
 	fn lvrr_pair(&mut self, _: &mut ()) -> anyhow::Result<()> {
-		if self.pairing.is_some() {
+		if self.lvrr_pairing() {
 			return Ok(());
 		}
-		let state = self.lvrr.state();
-		if !state.session_running && !state.headset_connected {
-			return self.lvrr.request(LvrrRequest::EnablePairing {
-				timeout_secs: PAIRING_SECS,
-			});
+		// with another WiVRn server running, the request fails and says why
+		if matches!(self.lvrr.state().link, Link::Online | Link::Foreign) {
+			return self.pair();
 		}
-		// the link has no request for ending a session first
-		let (tx, rx): (Sender<_>, _) = mpsc::channel();
-		std::thread::spawn(move || {
-			let _ = tx.send(pair());
-		});
-		self.pairing = Some(rx);
+		// like `lvrr pair`, which starts LVRR first, unless Start LVRR runs it already
+		match &mut self.start {
+			Some(start) => start.pair = true,
+			// Told like a start that failed, see `follow_start`. An error would be toasted as a refused
+			// request, which says that LVRR isn't running.
+			None => match Start::spawn(true) {
+				Ok(start) => self.start = Some(start),
+				Err(e) => self.toasts.borrow_mut().push(Notice::RequestFailed {
+					title: "LVRR.FAILED.PAIR",
+					failure: Failure::Other(e.to_string()),
+				}),
+			},
+		}
 		Ok(())
 	}
 
+	fn lvrr_pairing(&self) -> bool {
+		self.start.as_ref().is_some_and(|s| s.pair) || self.lvrr.state().pairing_pending
+	}
+
 	fn clipboard_set_text(&mut self, _: &mut (), text: &str) -> anyhow::Result<()> {
-		for (program, args) in [("wl-copy", &[][..]), ("xclip", &["-selection", "clipboard"][..])] {
-			let Ok(mut child) = Command::new(program).args(args).stdin(Stdio::piped()).spawn() else {
-				continue;
-			};
-			if let Some(mut stdin) = child.stdin.take() {
-				stdin.write_all(text.as_bytes())?;
-			}
-			child.wait()?;
-			return Ok(());
-		}
-		anyhow::bail!("Install wl-clipboard or xclip to copy text")
+		lvrr_common::clipboard::set_text(text)
 	}
 
 	fn toggle_dashboard(&mut self, _: &mut ()) {

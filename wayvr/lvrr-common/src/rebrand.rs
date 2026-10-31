@@ -18,7 +18,9 @@ const KEEP_PREFIXES: &[&str] = &["DONATE."];
 
 /// Loads `path` from LVRR's assets if present, otherwise from upstream. Language files are
 /// always built from upstream, rebranded, with LVRR's strings merged over them; LVRR's own
-/// strings fall back to English until translated.
+/// strings fall back to English until translated. Upstream keys keep their translations, so
+/// LVRR's `en.json` only adds strings under `LVRR`: rewording an upstream key there would
+/// change only English.
 pub fn load(
 	path: &str,
 	lvrr: impl Fn(&str) -> Option<Cow<'static, [u8]>>,
@@ -139,6 +141,25 @@ mod tests {
 		assert_eq!(de["LVRR"]["A"], "Deutsch");
 		assert_eq!(de["LVRR"]["B"], "English");
 		assert_eq!(de["X"], "upstream");
+	}
+
+	#[test]
+	fn english_only_adds_lvrr_strings() {
+		for (file, json) in [
+			(
+				"dash-frontend",
+				include_str!("../../dash-frontend/lvrr-assets/lang/en.json"),
+			),
+			("wayvr", include_str!("../../wayvr/lvrr-assets/lang/en.json")),
+		] {
+			let root: Value = serde_json::from_str(json).unwrap();
+			for key in root.as_object().unwrap().keys() {
+				assert_eq!(
+					key, LVRR_KEY,
+					"{file}: rewording {key} changes only English, add an LVRR key instead"
+				);
+			}
+		}
 	}
 
 	#[test]

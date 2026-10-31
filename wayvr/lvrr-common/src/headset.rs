@@ -23,12 +23,13 @@ impl Codec {
 		}
 	}
 
-	pub const fn display_name(self) -> &'static str {
+	/// The name shown as is; None for Automatic, which the dashboard translates
+	pub const fn display_name(self) -> Option<&'static str> {
 		match self {
-			Codec::Automatic => "Automatic",
-			Codec::H264 => "H.264",
-			Codec::H265 => "HEVC",
-			Codec::Av1 => "AV1",
+			Codec::Automatic => None,
+			Codec::H264 => Some("H.264"),
+			Codec::H265 => Some("HEVC"),
+			Codec::Av1 => Some("AV1"),
 		}
 	}
 }
@@ -84,7 +85,22 @@ pub const BODY_PARTS: [&str; 8] = [
 	"right_foot",
 ];
 
-#[derive(Clone, Debug, Default, Deserialize)]
+/// Config keys that only apply to a new session, marked "restart" in LVRR's `docs/dbus.md`. The
+/// server's `restart_keys` (lvrr_offline.cpp) and the headset's `restart_fields` list the same.
+pub const RESTART_KEYS: [&str; 10] = [
+	"resolution_scale",
+	"foveation",
+	"codec",
+	"bit_depth",
+	"microphone",
+	"mic_unprocessed",
+	"hand_tracking",
+	"eye_gaze",
+	"face_tracking",
+	"body_tracking",
+];
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Capabilities {
 	pub android: bool,
@@ -110,7 +126,7 @@ pub struct Capabilities {
 	pub body_parts: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Config {
 	pub preferred_refresh_rate: f32,
@@ -158,7 +174,7 @@ impl Config {
 	}
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct HeadsetSettings {
 	pub request_id: u32,
@@ -170,7 +186,7 @@ pub struct HeadsetSettings {
 	pub permission_denied: Vec<String>,
 	/// The headset isn't connected: the settings it had last time, with `pending` applied
 	pub offline: bool,
-	/// Config keys changed while offline, applied when the headset connects; null when none
+	/// Changes waiting for the headset, config key to new value, sent when it connects; null when none
 	pub pending: serde_json::Value,
 }
 
@@ -204,6 +220,12 @@ pub struct HeadsetStats {
 	pub game_missed_fps: f32,
 	/// Frames per second the encoders were too busy for
 	pub encoder_skipped_fps: f32,
+	/// What the session streams with, until a new one; None for raw video
+	pub codec: Option<Codec>,
+	/// 8 or 10
+	pub bit_depth: u8,
+	/// The recommended render size per eye, after `resolution_scale`
+	pub render_size: [u32; 2],
 }
 
 impl HeadsetStats {
@@ -220,10 +242,12 @@ impl HeadsetStats {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
+	use std::collections::BTreeSet;
 
-	// Written by the server's `lvrr-test --example`
-	const EXAMPLE: &str = include_str!("../../../docs/dbus-example.json");
+	use super::*;
+	use crate::emulator::EXAMPLE;
+
+	const DOCS: &str = include_str!("../../../docs/dbus.md");
 
 	#[test]
 	fn parses_server_example() {
@@ -249,6 +273,9 @@ mod tests {
 		assert!(stats.charging);
 		assert_eq!(stats.game_fps, Some(88.0));
 		assert_eq!(stats.encoder_skipped_fps, 0.5);
+		assert_eq!(stats.codec, Some(Codec::H265));
+		assert_eq!(stats.bit_depth, 10);
+		assert_eq!(stats.render_size, [2016, 2112]);
 	}
 
 	// Without a headset, the server sends the last one's settings with the changes waiting for it
@@ -265,17 +292,36 @@ mod tests {
 		assert_eq!(settings.config.bitrate_bps, 30_000_000);
 	}
 
-	// Every config key the dashboard may send is one the server reports
+	// The D-Bus documentation lists the config keys the server reports, and marks RESTART_KEYS "restart"
 	#[test]
-	fn config_keys_match_server() {
+	fn config_keys_match_docs() {
+		let (_, table) = DOCS
+			.split_once("| Key | Type | Applies |")
+			.expect("no config table in docs/dbus.md");
+		let rows = table
+			.lines()
+			.skip_while(|l| !l.starts_with("| `"))
+			.take_while(|l| l.starts_with('|'));
+		let mut documented = BTreeSet::new();
+		let mut restart = BTreeSet::new();
+		for row in rows {
+			let cells: Vec<&str> = row.trim_matches('|').split('|').map(str::trim).collect();
+			// the first cell names one or more `keys`, the last says when they apply
+			let keys = cells[0].split('`').skip(1).step_by(2);
+			if cells.last() == Some(&"restart") {
+				restart.extend(keys.clone());
+			}
+			documented.extend(keys);
+		}
+
 		let example: serde_json::Value = serde_json::from_str(EXAMPLE).unwrap();
-		let keys: Vec<&String> = example["HeadsetSettings"]["config"]
+		let reported: BTreeSet<&str> = example["HeadsetSettings"]["config"]
 			.as_object()
 			.unwrap()
 			.keys()
+			.map(String::as_str)
 			.collect();
-		for key in crate::state::HEADSET_KEYS {
-			assert!(keys.iter().any(|k| k == key), "server does not report {key}");
-		}
+		assert_eq!(documented, reported);
+		assert_eq!(restart, BTreeSet::from(RESTART_KEYS));
 	}
 }

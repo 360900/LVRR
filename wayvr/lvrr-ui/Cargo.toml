@@ -16,8 +16,10 @@ wlx-common = { path = "../wlx-common" }
 anyhow.workspace = true
 dbus.workspace = true
 glam.workspace = true
-ksni = { version = "0.3.6", default-features = false, features = ["async-io", "blocking"] }
+ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }
 log.workspace = true
 serde_json.workspace = true
 tracing-subscriber.workspace = true
+wayland-client = { workspace = true, features = ["system"] }
+wayland-protocols = { workspace = true, features = ["client", "staging"] }
 winit.workspace = true

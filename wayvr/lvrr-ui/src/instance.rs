@@ -48,18 +48,22 @@ pub fn forward(request: Request, token: &str) -> anyhow::Result<()> {
 
 /// Answers other instances, and `lvrr stop`, until the window quits
 pub fn serve(conn: Connection, proxy: EventLoopProxy<UserEvent>) {
+	// Only our interface, so dbus-rs answers the rest itself (Peer.Ping, UnknownMethod)
 	conn.start_receive(
-		MatchRule::new_method_call(),
+		MatchRule::new_method_call().with_path(PATH).with_interface(INTERFACE),
 		Box::new(move |message, conn| {
-			if message.path().as_deref() != Some(PATH) || message.interface().as_deref() != Some(INTERFACE) {
-				return true;
-			}
 			let token = message.read1::<String>().unwrap_or_default();
 			let event = match message.member().as_deref() {
 				Some("Activate") => UserEvent::Open(Request::Open, token),
 				Some("Pair") => UserEvent::Open(Request::Pair, token),
 				Some("Quit") => UserEvent::Quit,
-				_ => return true,
+				_ => {
+					// UnknownMethod, or the caller would wait out its timeout
+					if let Some(reply) = dbus::channel::default_reply(&message) {
+						let _ = conn.channel().send(reply);
+					}
+					return true;
+				}
 			};
 			let _ = proxy.send_event(event);
 			let _ = conn.channel().send(message.method_return());

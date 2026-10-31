@@ -38,12 +38,7 @@ impl ControllerType {
 }
 
 fn apps_dir() -> Option<PathBuf> {
-	let non_empty = |name| std::env::var_os(name).filter(|v| !v.is_empty());
-	let config = non_empty("XDG_CONFIG_HOME")
-		.map(PathBuf::from)
-		.filter(|d| d.is_absolute())
-		.or_else(|| Some(Path::new(&non_empty("HOME")?).join(".config")))?;
-	Some(config.join("xrizer").join("apps"))
+	crate::xdg_dir("XDG_CONFIG_HOME", ".config").map(|config| config.join("xrizer/apps"))
 }
 
 fn file(dir: &Path, steam_app_id: u64) -> PathBuf {

@@ -49,7 +49,8 @@
   },
   // Hand tracking: point with the hand, pinch to click, make a fist to grab;
   // a double fist with the left hand toggles the dashboard, with the right hand
-  // shows or hides the screens
+  // shows or hides the screens. A double fist counts only while that hand points
+  // at nothing and holds nothing, so retrying a grab doesn't trigger it
   {
     profile: "/interaction_profiles/ext/hand_interaction_ext",
     pose: {

@@ -384,6 +384,10 @@ pub enum DevicePreference {
 		major: u32,
 		minor: u32,
 	},
+	/// LVRR: for a window that draws little, the GPU that drove the boot display, then an
+	/// integrated GPU before a discrete one. A hybrid laptop's discrete GPU can sleep, and a
+	/// desktop doesn't copy each frame from its integrated GPU to the card with the monitors.
+	LowPower,
 }
 
 #[derive(Debug, Clone)]
