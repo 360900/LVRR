@@ -833,7 +833,7 @@ msgstr "Ordenadores"
 #: client/scenes/lobby_gui.cpp:370
 msgctxt "page header subtitle"
 msgid "Pick a PC running the LVRR server to stream from."
-msgstr "Elija un PC de los cuales corre LVRR para empezar la transimsión."
+msgstr "Elija un PC que ejecute el servidor LVRR para empezar la transmisión."
 
 #: client/scenes/lobby_gui.cpp:373
 msgid "Add server"

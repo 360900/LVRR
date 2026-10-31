@@ -22,6 +22,7 @@
 #include "application.h"
 #include "jnipp.h"
 
+#include <deque>
 #include <map>
 #include <mutex>
 #include <set>
@@ -29,6 +30,9 @@
 static std::mutex permission_callbacks_mutex;
 static std::map<int, std::pair<std::string, std::function<void(bool)>>> permission_callbacks;
 static int next_permission_request_id;
+// LVRR: Android cancels a request made while another one is open, so the others wait for its answer
+static bool permission_request_in_flight;
+static std::deque<std::pair<std::string, std::function<void(bool)>>> permission_requests;
 
 static bool check_permission(jni::object<jni::details::string_literal<24>{"android/content/Context"}> & ctx, jni::string & permission)
 {
@@ -85,6 +89,14 @@ void request_permission(const char * permission, std::function<void(bool)> callb
 		int request_code;
 		{
 			std::lock_guard lock(permission_callbacks_mutex);
+			// LVRR: the open request's answer asks for this one
+			if (permission_request_in_flight)
+			{
+				spdlog::info("{} permission request waits for the open one", permission);
+				permission_requests.emplace_back(permission, std::move(callback));
+				return;
+			}
+			permission_request_in_flight = true;
 			request_code = ++next_permission_request_id;
 			permission_callbacks.emplace(request_code, std::make_pair(permission, callback));
 		}
@@ -107,6 +119,9 @@ void Java_org_meumeu_wivrn_MainActivity_onRequestPermissionsResult(
         jobjectArray permissions,
         jintArray grant_results)
 {
+	// LVRR: the waiting requests are asked from this thread, jnipp needs its env
+	jni::jni_thread::setup_thread(env);
+
 	std::pair<std::string, std::function<void(bool)>> callback;
 	{
 		std::lock_guard lock(permission_callbacks_mutex);
@@ -125,6 +140,12 @@ void Java_org_meumeu_wivrn_MainActivity_onRequestPermissionsResult(
 
 	jint * results = env->GetIntArrayElements(grant_results, nullptr);
 
+	// LVRR: empty arrays mean the prompt was dismissed or cancelled: not granted. The callback
+	// runs exactly once, after the arrays are released
+	bool granted = false;
+	if (nb_permissions == 0)
+		spdlog::info("Permission {} request cancelled", callback.first);
+
 	for (size_t i = 0; i < nb_permissions; ++i)
 	{
 		jstring string = (jstring)(env->GetObjectArrayElement(permissions, i));
@@ -133,11 +154,29 @@ void Java_org_meumeu_wivrn_MainActivity_onRequestPermissionsResult(
 
 		if (permission == callback.first)
 		{
-			callback.second(results[i] == 0);
+			granted = results[i] == 0;
 		}
 
 		env->ReleaseStringUTFChars(string, permission);
 	}
 
 	env->ReleaseIntArrayElements(grant_results, results, 0);
+
+	callback.second(granted);
+
+	// LVRR: requests for the same permission made while its prompt was open share this answer,
+	// the others are asked in order, one prompt at a time
+	std::deque<std::pair<std::string, std::function<void(bool)>>> waiting;
+	{
+		std::lock_guard lock(permission_callbacks_mutex);
+		permission_request_in_flight = false;
+		waiting.swap(permission_requests);
+	}
+	for (auto & request: waiting)
+	{
+		if (request.first == callback.first)
+			request.second(granted);
+		else
+			request_permission(request.first.c_str(), std::move(request.second));
+	}
 }

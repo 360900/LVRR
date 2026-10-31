@@ -549,17 +549,32 @@ void imgui_context::initialize_fonts()
 	for (auto & font: fonts)
 		spdlog::info("Using font {}", font, application::get_messages_info().language);
 
+	// LVRR: map each system font once, both families merge the same bytes
+	for (auto & font: fonts)
+	{
+		try
+		{
+			utils::mapped_file file{font};
+			if (file.size() > 100) // AddFontFromMemoryTTF asserts on 100 bytes or less
+				system_fonts.push_back(std::move(file));
+			else
+				spdlog::warn("Cannot load font {}: too small", font);
+		}
+		catch (std::exception & e)
+		{
+			spdlog::warn("Cannot load font {}: {}", font, e.what());
+		}
+	}
+
 	auto add_family = [&](const utils::mapped_file & base) {
 		ImFontConfig config;
 		config.FontDataOwnedByAtlas = false;
 		ImFont * f = io.Fonts->AddFontFromMemoryTTF(const_cast<std::byte *>(base.data()), base.size(), constants::gui::font_size_small, &config);
 
 		config.MergeMode = true;
-		config.FontDataOwnedByAtlas = true;
-		for (auto & font: fonts)
-			io.Fonts->AddFontFromFileTTF(font.c_str(), constants::gui::font_size_small, &config);
+		for (auto & font: system_fonts)
+			io.Fonts->AddFontFromMemoryTTF(const_cast<std::byte *>(font.data()), font.size(), constants::gui::font_size_small, &config);
 
-		config.FontDataOwnedByAtlas = false;
 		config.GlyphMinAdvanceX = 40; // Use if you want to make the icon monospaced
 		for (auto & fa: font_awesome)
 			io.Fonts->AddFontFromMemoryTTF(const_cast<std::byte *>(fa.data()), fa.size(), constants::gui::font_size_small, &config);
@@ -969,16 +984,28 @@ std::vector<std::pair<int, XrCompositionLayerQuad>> imgui_context::end_frame()
 
 	ImGui::Render();
 
-	// LVRR: nothing changed since the last submitted image, the layers below keep
-	// pointing at it (a swapchain shows its most recently released image). An animation
-	// nobody points at (a spinner, a caret) is drawn every other frame.
-	if (not draw_data_changed(ImGui::GetDrawData()))
-		return build_layers();
+	// LVRR: a swapchain shows its most recently released image, so the quads keep
+	// pointing at it while the draw data and their rects match it. A change nobody points
+	// at waits one frame, so an animation (a spinner, a caret) is drawn every other frame.
+	// A window that appears, moves or resizes is drawn at once: the quads would crop the
+	// old image with its new rect.
+	auto quads = build_layers();
+	std::vector<std::array<int, 5>> layout;
+	for (const auto & [z_index, quad]: quads)
+	{
+		const XrRect2Di & rect = quad.subImage.imageRect;
+		layout.push_back({z_index, rect.offset.x, rect.offset.y, rect.extent.width, rect.extent.height});
+	}
+	bool textures_pending;
+	const uint64_t hash = draw_data_hash(ImGui::GetDrawData(), textures_pending);
+	const bool reusable = have_image and not textures_pending and layout == drawn_layout;
+	if (reusable and hash == last_draw_hash)
+		return quads;
 	const bool pointed_at = std::ranges::any_of(controllers, [](const auto & c) { return c.second.pointer_position.has_value(); });
-	if (have_image and not pointed_at and not skipped_last)
+	if (reusable and not pointed_at and not skipped_last)
 	{
 		skipped_last = true;
-		return build_layers();
+		return quads;
 	}
 	skipped_last = false;
 
@@ -1028,14 +1055,16 @@ std::vector<std::pair<int, XrCompositionLayerQuad>> imgui_context::end_frame()
 
 	swapchain.release();
 	have_image = true;
+	last_draw_hash = hash;
+	drawn_layout = std::move(layout);
 
-	return build_layers();
+	return quads;
 }
 
-bool imgui_context::draw_data_changed(const ImDrawData * draw_data)
+uint64_t imgui_context::draw_data_hash(const ImDrawData * draw_data, bool & textures_pending) const
 {
 	// textures the backend still has to create, update or destroy need a render pass
-	bool textures_pending = false;
+	textures_pending = false;
 	if (draw_data->Textures)
 		for (ImTextureData * tex: *draw_data->Textures)
 			textures_pending |= tex->Status != ImTextureStatus_OK;
@@ -1070,9 +1099,7 @@ bool imgui_context::draw_data_changed(const ImDrawData * draw_data)
 		}
 	}
 
-	const bool changed = not have_image or textures_pending or h != last_draw_hash;
-	last_draw_hash = h;
-	return changed;
+	return h;
 }
 
 std::vector<std::pair<int, XrCompositionLayerQuad>> imgui_context::build_layers()
@@ -1351,7 +1378,7 @@ void imgui_context::tooltip(std::string_view text, std::optional<ImVec2> anchor)
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, wivrn::ui::metrics::tooltip_padding);
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, t.card_rounding);
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, t.border_size);
-	ImGui::PushStyleColor(ImGuiCol_PopupBg, t.card);
+	ImGui::PushStyleColor(ImGuiCol_PopupBg, t.background_contrast); // LVRR: card is translucent, the panel behind would show through
 	ImGui::PushStyleColor(ImGuiCol_Border, t.border);
 
 	auto & style = ImGui::GetStyle();

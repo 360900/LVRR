@@ -58,6 +58,7 @@ class lobby : public scene_impl<lobby>
 	bool add_server_tcp_only = false;
 	std::string add_server_cookie;
 	std::string delete_server_cookie; // server pending a delete confirmation
+	std::string forget_server_cookie; // LVRR: server pending a forget confirmation
 
 	utils::future<std::unique_ptr<wivrn_session>, std::string> async_session;
 	std::optional<std::string> async_error;
@@ -158,7 +159,8 @@ class lobby : public scene_impl<lobby>
 		std::string pin;
 	};
 
-	thread_safe_notifyable<pin_request_data> pin_request;
+	// LVRR: shared with the connect thread, which can outlive the lobby
+	std::shared_ptr<thread_safe_notifyable<pin_request_data>> pin_request = std::make_shared<thread_safe_notifyable<pin_request_data>>();
 	std::string pin_buffer;
 
 	struct environment_model
@@ -256,22 +258,28 @@ class lobby : public scene_impl<lobby>
 	void setup_passthrough();
 
 	void connect(const configuration::server_data & data);
-	std::unique_ptr<wivrn_session> connect_to_session(wivrn_discover::service service, bool manual_connection);
+	// LVRR: static, the connect thread owns what it uses
+	static std::unique_ptr<wivrn_session> connect_to_session(wivrn_discover::service service, bool manual_connection, std::shared_ptr<crypto::key> key, std::shared_ptr<thread_safe_notifyable<pin_request_data>> pin_request);
 
 	std::optional<glm::vec3> check_recenter_gesture(xr::spaces space, const xr::hand_tracker::joint_array & joints, const std::pair<glm::vec3, glm::quat> & head_pose);
 	std::optional<glm::vec3> check_recenter_action(XrTime predicted_display_time, glm::vec3 head_position);
 	std::optional<glm::vec3> check_recenter_gui(glm::vec3 head_position, glm::quat head_orientation);
 
-	crypto::key keypair;
+	// LVRR: shared with the connect thread
+	std::shared_ptr<crypto::key> keypair;
 
 	// LVRR, see lobby_lvrr.cpp
 	std::optional<configuration::server_data> lvrr_server; // last server connected to
 	XrTime lobby_last_display_time = 0;                    // for the power governor
 	std::chrono::steady_clock::time_point lvrr_reconnect_until{};
 	std::chrono::steady_clock::time_point lvrr_retry_at{};
+	std::chrono::steady_clock::time_point lvrr_list_checked{};    // last time a settled discovery checked the server list
+	std::chrono::steady_clock::time_point lvrr_restart_pressed{}; // when Restart desktop was pressed
+	bool lvrr_discovery_settled() const;
+	bool lvrr_list_kept() const;
 	void lvrr_focused();
 	void lvrr_connected();
-	void lvrr_remember_mac(const std::optional<std::array<uint8_t, 6>> & mac);
+	void lvrr_remember_mac(const std::optional<std::array<uint8_t, 6>> & mac, const std::string & interface);
 	void lvrr_wake(const configuration::server_data & server);
 	std::map<std::string, std::chrono::steady_clock::time_point> lvrr_woken; // cookie, when Wake was pressed
 	bool lvrr_connect_failed();
@@ -291,6 +299,7 @@ public:
 	void on_unfocused() override;
 	void on_focused() override;
 	void on_xr_event(const xr::event &) override;
+	void lvrr_idle() override; // LVRR: see lobby_lvrr.cpp
 
 	static meta & get_meta_scene();
 };

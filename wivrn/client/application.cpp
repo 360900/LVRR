@@ -1808,6 +1808,11 @@ void application::loop()
 		if (scene and std::chrono::steady_clock::now() - *timestamp_unsynchronized > 3s)
 			scene->set_focused(false);
 
+		// LVRR: the dashboard's requests still get answered while the headset is off the head or
+		// another app is in front
+		if (scene)
+			scene->lvrr_idle();
+
 		// Throttle loop since xrWaitFrame won't be called.
 		std::this_thread::sleep_for(250ms);
 	}

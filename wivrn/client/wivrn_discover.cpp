@@ -5,12 +5,14 @@
 #include "utils/named_thread.h"
 #include "utils/overloaded.h"
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <poll.h>
 #include <spdlog/spdlog.h>
 #include <string>
 #include <sys/ioctl.h>
+#include <unistd.h>
 #include <variant>
 #include <vector>
 
@@ -221,7 +223,9 @@ private:
 
 	// pollfds[0] is used for inter-thread communication, the others are for mDNS
 	std::vector<pollfd> pollfds;
-	int itc_fd;
+	// LVRR: one pipe for the cache's life: one per socket reopen leaked its write end, and
+	// stop_polling() writes to it while the dnssd thread may reopen the sockets
+	int itc_read = -1, itc_write = -1;
 
 	void open_client_sockets()
 	{
@@ -244,16 +248,7 @@ private:
 		}
 
 		pollfds.reserve(if_names.size() + 1);
-
-		int fds[2];
-		if (pipe(fds) < 0)
-		{
-			spdlog::error("Cannot create pipe: {}", strerror(errno));
-			abort();
-		}
-
-		itc_fd = fds[1];
-		pollfds.push_back({.fd = fds[0], .events = POLLIN});
+		pollfds.push_back({.fd = itc_read, .events = POLLIN});
 
 		for (auto [socket, _]: if_names)
 			pollfds.push_back(pollfd{.fd = socket, .events = POLLIN});
@@ -261,12 +256,12 @@ private:
 
 	void close_client_sockets()
 	{
-		for (pollfd socket: pollfds)
-			mdns_socket_close(socket.fd);
+		// LVRR: the mDNS sockets only, the pipe stays open
+		for (auto [socket, _]: if_names)
+			mdns_socket_close(socket);
 
 		pollfds.clear();
 		if_names.clear();
-		itc_fd = -1;
 	}
 
 	void log_entry(const cache_entry & entry)
@@ -497,7 +492,7 @@ public:
 	void stop_polling()
 	{
 		char c = 0;
-		if (write(itc_fd, &c, 1) < 0)
+		if (write(itc_write, &c, 1) < 0)
 			spdlog::debug("Cannot write to interthread pipe");
 	}
 
@@ -522,6 +517,16 @@ public:
 
 	dnssd_cache()
 	{
+		// LVRR: see itc_read
+		int fds[2];
+		if (pipe2(fds, O_CLOEXEC) < 0)
+		{
+			spdlog::error("Cannot create pipe: {}", strerror(errno));
+			abort();
+		}
+		itc_read = fds[0];
+		itc_write = fds[1];
+
 		addresses = get_if_addrs(5353);
 		open_client_sockets();
 	}
@@ -531,6 +536,9 @@ public:
 	~dnssd_cache()
 	{
 		close_client_sockets();
+		// LVRR: the dnssd thread has stopped
+		close(itc_read);
+		close(itc_write);
 	}
 };
 

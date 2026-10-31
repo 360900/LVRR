@@ -180,12 +180,13 @@ scenes::lobby::lobby() :
 	try
 	{
 		std::ifstream f{keypair_path};
-		keypair = crypto::key::from_private_key(std::string{(std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()});
+		// LVRR: shared with the connect thread
+		keypair = std::make_shared<crypto::key>(crypto::key::from_private_key(std::string{(std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()}));
 	}
 	catch (...)
 	{
-		keypair = crypto::key::generate_x448_keypair();
-		std::ofstream{keypair_path} << keypair.private_key();
+		keypair = std::make_shared<crypto::key>(crypto::key::generate_x448_keypair());
+		std::ofstream{keypair_path} << keypair->private_key();
 		spdlog::info("Generated X448 keypair");
 	}
 }
@@ -214,7 +215,9 @@ static std::string ip_address_to_string(const sockaddr_in6 & addr)
 	return ip_address_to_string(addr.sin6_addr);
 }
 
-std::unique_ptr<wivrn_session> scenes::lobby::connect_to_session(wivrn_discover::service service, bool manual_connection)
+// LVRR: runs on the connect thread, which outlives the lobby when it is closed during an
+// attempt: future::cancel() only drops the result. It uses nothing from the lobby.
+std::unique_ptr<wivrn_session> scenes::lobby::connect_to_session(wivrn_discover::service service, bool manual_connection, std::shared_ptr<crypto::key> key, std::shared_ptr<thread_safe_notifyable<pin_request_data>> pin_request)
 {
 	if (!manual_connection)
 	{
@@ -288,13 +291,12 @@ std::unique_ptr<wivrn_session> scenes::lobby::connect_to_session(wivrn_discover:
 		{
 			spdlog::info("Connection to {}", address_string);
 
-			return std::visit([this, &service](auto & address) {
-				return std::make_unique<wivrn_session>(address, service.tcp_only, keypair, [&](int fd) {
-					auto request = pin_request.lock();
+			auto session = std::visit([&service, &key, &pin_request](auto & address) {
+				return std::make_unique<wivrn_session>(address, service.tcp_only, *key, [&](int fd) {
+					auto request = pin_request->lock();
 					request->pin_requested = true;
 					request->pin_cancelled = false;
 					request->pin = service.pin;
-					pin_buffer = "";
 
 					while (not request.wait_for(500ms, [&]() { return request->pin != "" or request->pin_cancelled; }))
 					{
@@ -331,7 +333,10 @@ std::unique_ptr<wivrn_session> scenes::lobby::connect_to_session(wivrn_discover:
 					return request->pin;
 				});
 			},
-			                  entry.address);
+			                          entry.address);
+			// LVRR: lvrr_remember_mac() skips a USB networking link
+			session->lvrr_interface = entry.interface;
+			return session;
 		}
 		catch (connection_cancelled)
 		{
@@ -342,6 +347,9 @@ std::unique_ptr<wivrn_session> scenes::lobby::connect_to_session(wivrn_discover:
 		{
 			spdlog::warn("Error during handshake to {} ({}): {}", service.hostname, address_string, e.what());
 			std::string txt = fmt::format(_F("Cannot connect to {} ({}): {}"), service.hostname, address_string, e.what());
+			// LVRR: a refusal keeps its type, render() does not reconnect after it
+			if (dynamic_cast<handshake_refused *>(&e))
+				throw handshake_refused(txt);
 			throw std::runtime_error(txt);
 		}
 		catch (std::exception & e)
@@ -371,10 +379,16 @@ void scenes::lobby::update_server_list()
 
 	// TODO: only if discovered_services changed
 	auto & servers = application::get_config().servers;
-	for (auto & [cookie, data]: servers)
+	// LVRR: a restarted discovery has not heard from every PC yet, see lvrr_list_kept()
+	if (not lvrr_list_kept())
 	{
-		data.visible = false;
+		for (auto & [cookie, data]: servers)
+		{
+			data.visible = false;
+		}
 	}
+	if (lvrr_discovery_settled())
+		lvrr_list_checked = std::chrono::steady_clock::now();
 
 	char protocol_string[17];
 	sprintf(protocol_string, "%016lx", wivrn::protocol_version);
@@ -428,11 +442,13 @@ void scenes::lobby::connect(const configuration::server_data & data)
 	server_name = data.service.name;
 	lvrr_server = data;
 	async_error.reset();
+	// LVRR: cleared here, the connect thread does not touch the lobby
+	pin_buffer = "";
 
 	async_session = utils::async<std::unique_ptr<wivrn_session>, std::string>(
-	        [this](auto token, wivrn_discover::service service, bool manual) {
+	        [key = keypair, request = pin_request](auto token, wivrn_discover::service service, bool manual) {
 		        token.set_progress(_("Waiting for connection"));
-		        return connect_to_session(service, manual);
+		        return connect_to_session(service, manual, key, request);
 	        },
 	        data.service,
 	        data.manual);
@@ -876,7 +892,7 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 			auto session = async_session.get();
 			if (session)
 			{
-				lvrr_remember_mac(session->lvrr_mac);
+				lvrr_remember_mac(session->lvrr_mac, session->lvrr_interface);
 				next_scene = stream::create(std::move(session), 1'000'000'000.f / frame_state.predictedDisplayPeriod, server_name, *this);
 				lvrr_connected();
 			}
@@ -887,7 +903,10 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 		{
 			spdlog::error("Error connecting to server: {}", e.what());
 			async_session.cancel();
-			// LVRR: retried silently while the server restarts the session
+			// LVRR: retried silently while the server restarts the session, unless it refused
+			// the headset: then the error shows at once
+			if (dynamic_cast<handshake_refused *>(&e))
+				lvrr_reconnect_until = {};
 			if (not lvrr_connect_failed())
 				async_error = e.what();
 		}
@@ -902,6 +921,8 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 		switch (next_scene->current_state())
 		{
 			case scenes::stream::state::streaming:
+				// LVRR: the desktop shows, a Restart desktop pressed before is done
+				lvrr_restart_pressed = {};
 				application::push_scene(next_scene);
 				break;
 
@@ -917,10 +938,11 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 	}
 
 	// LVRR: discovery holds the Wi-Fi multicast lock, which keeps the radio awake for every
-	// multicast packet on the network; it only runs while a PC is being looked for
+	// multicast packet on the network; it only runs while a PC is being looked for. A silent
+	// reconnect dials the saved addresses with the list hidden, so it does not look
 	if constexpr (not lvrr::stock_ui)
 	{
-		const bool looking = not async_session.valid() and not next_scene;
+		const bool looking = not async_session.valid() and not next_scene and lvrr_reconnect_until == std::chrono::steady_clock::time_point{};
 		if (looking and not discover)
 			discover.emplace();
 		else if (not looking and discover)
@@ -935,7 +957,7 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 	{
 		if (auto intent = application::get_intent())
 		{
-			pin_request.lock()->pin = intent->pin;
+			pin_request->lock()->pin = intent->pin;
 			connect(configuration::server_data{
 			        .manual = true,
 			        .service = *intent,
@@ -1191,6 +1213,10 @@ void scenes::lobby::on_focused()
 
 	auto & config = application::get_config();
 
+	// LVRR: picks the meadow, so it runs before the environment loads: client.json from an
+	// older build may name another environment
+	lvrr_focused();
+
 	try
 	{
 		lobby_entity = add_gltf(config.environment_model, layer_lobby).first;
@@ -1405,15 +1431,28 @@ void scenes::lobby::on_focused()
 
 	std::ranges::sort(local_environments, std::less{});
 
-	lvrr_focused();
 	setup_passthrough();
-	discover.emplace();
+	// LVRR: render() starts it once the lobby looks for a PC, not under a stream that is
+	// still pending
+	if constexpr (lvrr::stock_ui)
+		discover.emplace();
 
-	// LVRR: a menu does not need high clocks or the fastest refresh rate; the stream
-	// picks its own rate once it starts
+	// LVRR: a menu does not need high clocks or the fastest refresh rate, but under 72 Hz
+	// the panels flicker (Meta keeps 60 Hz for video players): take the lowest rate from
+	// 72 Hz up, else the highest. The stream asks for its own rate when it starts or comes back
 	application::get_power().idle();
 	if (auto rates = session.get_refresh_rates(); not rates.empty())
-		session.set_refresh_rate(*std::ranges::min_element(rates));
+	{
+		float rate = std::ranges::max(rates);
+		for (float r: rates)
+			if (r >= 71.5f) // a runtime may report 71.99
+				rate = std::min(rate, r);
+		session.set_refresh_rate(rate);
+	}
+
+	// LVRR: the last lobby frame predates the stream or a stopped session, and the governor
+	// would count the gap as a missed frame; render() does not measure the first frame
+	lobby_last_display_time = 0;
 }
 
 void scenes::lobby::setup_passthrough()

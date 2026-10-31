@@ -28,7 +28,9 @@ class session;
 // The headset runs at the sustained low clock level and only raises a domain when it
 // shows signs of not keeping up: missed frames, a long frame on our side, or the runtime
 // reporting its compositor or our rendering as late. A raised domain drops back after a
-// hold, which doubles when the drop was followed by another raise.
+// hold, which doubles when the drop was followed by another raise. While the headset is
+// not showing us, the runtime is sent power savings, and each domain gets its level back
+// when shown again.
 class power_governor
 {
 public:
@@ -39,6 +41,8 @@ public:
 	};
 
 	power_governor() = default;
+	// Without XR_EXT_performance_settings (stock Monado builds, SteamVR) this does nothing
+	// and logs nothing: the runtime would ignore every level
 	explicit power_governor(xr::session & session);
 
 	// Both domains pinned at sustained high, the "High power mode" setting
@@ -47,7 +51,8 @@ public:
 	// A menu scene: both domains at power savings, raised one step on missed frames
 	void idle();
 
-	// The headset is not showing us (system menu, taken off): power savings until it does
+	// The headset is not showing us (system menu, taken off): power savings until it does,
+	// then each domain's level again
 	void set_visible(bool visible);
 
 	// Once per rendered frame. real_period is the time since the previous frame, which
@@ -60,7 +65,7 @@ public:
 private:
 	struct state
 	{
-		XrPerfSettingsLevelEXT level = XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT;
+		XrPerfSettingsLevelEXT level = XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT; // the level wanted, sent while visible
 		XrPerfSettingsLevelEXT floor = XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT; // where relax() goes
 		XrTime hold_until = 0;                                                   // not before this does a raised domain try lower again
 		XrTime last_probe = 0;                                                   // when it last went down
@@ -74,6 +79,8 @@ private:
 	bool visible = true;
 	bool menu = false;
 	std::array<state, 2> domains;
+	// last level given to the runtime, MAX_ENUM: unknown
+	std::array<XrPerfSettingsLevelEXT, 2> sent{XR_PERF_SETTINGS_LEVEL_MAX_ENUM_EXT, XR_PERF_SETTINGS_LEVEL_MAX_ENUM_EXT};
 	XrTime quiet_since = 0; // start of the current stretch without a raise
 
 	// missed frames in the current window
@@ -81,7 +88,9 @@ private:
 	int misses = 0;
 	XrTime last_miss = 0;
 
+	void reset(bool pinned, bool menu);
 	void apply(domain d, XrPerfSettingsLevelEXT level);
+	void push(domain d);
 	void raise(domain d, XrTime now, const char * why);
 	void relax(domain d, XrTime now);
 };

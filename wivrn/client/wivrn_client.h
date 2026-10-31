@@ -23,7 +23,9 @@
 #include "wivrn_packets.h"
 #include "wivrn_sockets.h"
 #include <chrono>
+#include <limits>
 #include <poll.h>
+#include <sys/socket.h>
 
 using namespace wivrn;
 
@@ -34,6 +36,13 @@ class handshake_error : public std::exception
 public:
 	const char * what() const noexcept override;
 	handshake_error(std::string_view message);
+};
+
+// LVRR: the server refused this headset (pairing disabled, other version), retrying won't help
+class handshake_refused : public handshake_error
+{
+public:
+	using handshake_error::handshake_error;
 };
 
 class wivrn_session
@@ -56,6 +65,8 @@ public:
 	std::variant<in_addr, in6_addr> address;
 	// LVRR: the PC's MAC address, for wake-on-LAN
 	std::optional<std::array<uint8_t, 6>> lvrr_mac;
+	// LVRR: headset interface the session connected through, empty for a typed address
+	std::string lvrr_interface;
 
 	wivrn_session(sockaddr_in6 address, bool tcp_only, crypto::key & headset_keypair, std::function<std::string(int fd)> pin_enter);
 	wivrn_session(sockaddr_in address, bool tcp_only, crypto::key & headset_keypair, std::function<std::string(int fd)> pin_enter);
@@ -92,6 +103,9 @@ public:
 			std::visit(std::forward<T>(visitor), std::move(*packet));
 
 		int r = ::poll(fds, std::size(fds), timeout.count());
+		// LVRR: a signal is not a socket error, the caller polls again
+		if (r < 0 and errno == EINTR)
+			return 0;
 		if (r < 0)
 			throw std::system_error(errno, std::system_category());
 
@@ -118,6 +132,22 @@ public:
 		}
 
 		return r;
+	}
+
+	// LVRR: ends the connection but keeps the sockets other threads use open, like the server's
+	// wivrn_connection::shutdown(); a thread blocked sending into a full buffer gets an error
+	void shutdown()
+	{
+		if (stream)
+			::shutdown(stream.get_fd(), SHUT_RDWR);
+		if (control)
+		{
+			::shutdown(control.get_fd(), SHUT_RDWR);
+			// drops the unread input, or a full queue keeps the window shut and the server's send
+			// blocked until the socket closes; now its next window probe finds room and its data gets a reset.
+			// One call takes it all (MSG_TRUNC needs no buffer), so the network thread's read can't skip bytes
+			::recv(control.get_fd(), nullptr, std::numeric_limits<int>::max(), MSG_DONTWAIT | MSG_TRUNC);
+		}
 	}
 
 	uint64_t bytes_received() const

@@ -461,6 +461,37 @@ void scenes::stream::on_focused()
 {
 	gui_status_last_change = instance.now();
 
+	menu_chord.a = get_action("menu_toggle_1").first;
+	menu_chord.b = get_action("menu_toggle_2").first;
+	gamepad_chord.a = get_action("gamepad_mode_1").first;
+	gamepad_chord.b = get_action("gamepad_mode_2").first;
+	recenter_left = get_action("recenter_left").first;
+	recenter_right = get_action("recenter_right").first;
+	gui_distance_left = get_action("gui_distance_left").first;
+	gui_distance_right = get_action("gui_distance_right").first;
+	settings_adjust = get_action("settings_adjust").first;
+	foveation_distance = get_action("foveation_distance").first;
+	foveation_ok = get_action("foveation_ok").first;
+	foveation_cancel = get_action("foveation_cancel").first;
+
+	// LVRR: clocks start low and follow the load, unless the setting pins them high
+	application::get_power().set_pinned_high(application::get_config().high_power_mode);
+
+	// LVRR: the lobby lowers the refresh rate when it shows, also while a stalled stream waits
+	// for frames. Not compared with the current rate: the lobby's request may still be pending
+	if (float hz = lvrr_refresh_rate; hz > 0)
+		session.set_refresh_rate(hz);
+
+	// LVRR: the last frame predates a stall or a stopped session, and the governor would
+	// count the gap as a missed frame; render() takes the first period as the nominal one
+	last_display_time = 0;
+
+	lvrr_setup_hands();
+
+	// LVRR: the rest builds the in-stream window, which render() never draws
+	if constexpr (not lvrr::stock_ui)
+		return;
+
 	const auto & profile = application::get_hmd_traits().controller_profile;
 	input.emplace(
 	        *this,
@@ -565,24 +596,6 @@ void scenes::stream::on_focused()
 				break;
 		}
 	}
-
-	menu_chord.a = get_action("menu_toggle_1").first;
-	menu_chord.b = get_action("menu_toggle_2").first;
-	gamepad_chord.a = get_action("gamepad_mode_1").first;
-	gamepad_chord.b = get_action("gamepad_mode_2").first;
-	recenter_left = get_action("recenter_left").first;
-	recenter_right = get_action("recenter_right").first;
-	gui_distance_left = get_action("gui_distance_left").first;
-	gui_distance_right = get_action("gui_distance_right").first;
-	settings_adjust = get_action("settings_adjust").first;
-	foveation_distance = get_action("foveation_distance").first;
-	foveation_ok = get_action("foveation_ok").first;
-	foveation_cancel = get_action("foveation_cancel").first;
-
-	// LVRR: clocks start low and follow the load, unless the setting pins them high
-	application::get_power().set_pinned_high(application::get_config().high_power_mode);
-
-	lvrr_setup_hands();
 }
 
 void scenes::stream::on_unfocused()
@@ -855,11 +868,13 @@ void scenes::stream::render(const XrFrameState & frame_state)
 
 	if (state_ == state::stalled)
 	{
-		network_session->send_control(from_headset::get_application_list{
-		        .language = application::get_messages_info().language,
-		        .country = application::get_messages_info().country,
-		        .variant = application::get_messages_info().variant,
-		});
+		// LVRR: the lobby has no app launcher, the list and its icons would go unused
+		if constexpr (lvrr::stock_ui)
+			network_session->send_control(from_headset::get_application_list{
+			        .language = application::get_messages_info().language,
+			        .country = application::get_messages_info().country,
+			        .variant = application::get_messages_info().variant,
+			});
 
 		next_gui_status = stream_tab::hidden;
 		application::pop_scene();
@@ -1165,12 +1180,13 @@ void scenes::stream::render(const XrFrameState & frame_state)
 
 		// LVRR: see-through fades the opaque stream over passthrough
 		float see_through = 0;
-		if (not use_alpha and composition_layer_color_scale_bias_supported and system.passthrough_supported() != xr::passthrough_type::none)
+		if (not use_alpha and lvrr_see_through_supported)
 			see_through = std::clamp(application::get_config().see_through, 0.f, lvrr::max_see_through);
 		const bool passthrough = use_alpha or see_through > 0;
 
+		// LVRR: see-through alone never hides the boundary, the user is still playing in VR
 		if (passthrough)
-			session.enable_passthrough(system);
+			session.enable_passthrough(system, use_alpha);
 		else
 			session.disable_passthrough();
 
@@ -1179,6 +1195,10 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		// full-FOV dummy layer for Meta foveation, used when cropping FOV
 		if (auto layer = foveation_center.get_layer())
 			add_projection_layer(layer->flags, layer->space, layer->views);
+
+		// LVRR: see-through dims the room over the full FOV, not just where the stream is. Before
+		// the stream's layer, so set_color_scale_bias() and set_layer_settings() still target it
+		const bool room_dimmed = see_through > 0 and lvrr_render_see_through(frame_state.predictedDisplayTime, 1 - see_through);
 
 		// Add the layer with the streamed content
 		std::array<XrCompositionLayerProjectionView, view_count> layer_view;
@@ -1206,9 +1226,11 @@ void scenes::stream::render(const XrFrameState & frame_state)
 		        layer_view);
 		if (see_through > 0)
 		{
-			// premultiplied: the stream is opaque, so alpha is scaled with the color
+			// premultiplied: the black layer already dimmed the room to see_through, so the stream
+			// adds its faded light with alpha 0. Without it, the opaque stream's alpha is scaled
+			// with the color, and the edges a reduced FOV leaves show the room unfaded
 			const float opacity = 1 - see_through;
-			set_color_scale_bias({opacity, opacity, opacity, opacity}, {});
+			set_color_scale_bias({opacity, opacity, opacity, room_dimmed ? 0.f : opacity}, {});
 		}
 
 		if (const configuration::openxr_post_processing_settings openxr_post_processing = application::get_config().openxr_post_processing;
@@ -1219,7 +1241,6 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			lvrr_render_hands(frame_state.predictedDisplayTime);
 
 		accumulate_metrics(frame_state.predictedDisplayTime, current_blit_handles, timestamps);
-		lvrr_stats(frame_state.predictedDisplayTime);
 
 		// LVRR: no in-stream window or toasts, the dashboard shows them
 		if constexpr (lvrr::stock_ui)
@@ -1236,6 +1257,9 @@ void scenes::stream::render(const XrFrameState & frame_state)
 			else
 				throw;
 		}
+
+		// LVRR: may block on the control socket, so after submission, and only for rendered frames
+		lvrr_stats(frame_state.predictedDisplayTime);
 	}
 
 	// Network operations may be blocking, do them once everything was submitted
@@ -1325,7 +1349,8 @@ void scenes::stream::render(const XrFrameState & frame_state)
 void scenes::stream::exit()
 {
 	// LVRR: a deliberate exit tells the PC, which ends the session instead of waiting
-	// for the headset to come back
+	// for the headset to come back. Errors don't come here: lvrr_connection_lost() and
+	// lvrr_headset_error() end the stream without it, so the PC waits for a reconnect
 	if (state_ != state::shutdown and network_session)
 	{
 		try
@@ -1344,6 +1369,8 @@ void scenes::stream::setup(const to_headset::video_stream_description & descript
 {
 	spdlog::info("setup, refresh rate {}", description.refresh_rate);
 	session.set_refresh_rate(description.refresh_rate);
+	// LVRR: asked for again when the stream comes back from the lobby
+	lvrr_refresh_rate = description.refresh_rate;
 
 	std::unique_lock lock(decoder_mutex);
 	if (video_stream_description == description)
@@ -1367,8 +1394,11 @@ void scenes::stream::setup_reprojection_swapchain(uint32_t swapchain_width, uint
 	assert(swapchain_width);
 	assert(swapchain_height);
 	device.waitIdle();
-	spdlog::info("swapchain setup, refresh rate {}", video_stream_description->refresh_rate);
-	session.set_refresh_rate(video_stream_description->refresh_rate);
+	// LVRR: the rate last asked for, video_stream_description misses the dashboard's changes.
+	// setup() sets it before any frame, so it is set by the first swapchain
+	float hz = lvrr_refresh_rate;
+	spdlog::info("swapchain setup, refresh rate {}", hz);
+	session.set_refresh_rate(hz);
 
 	auto views = system.view_configuration_views(viewconfig);
 
@@ -1522,7 +1552,14 @@ std::optional<std::string> scenes::stream::pop_stream_error()
 }
 
 void scenes::stream::on_xr_event(const xr::event & event)
+// LVRR: a send on a connection that just died must not quit the app, the network thread
+// ends the stream and the lobby shows why
+try
 {
+	// LVRR: the lobby passes its events on to a stream that ended, its connection is gone
+	if (state_ == state::shutdown)
+		return;
+
 	switch (event.header.type)
 	{
 		case XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING:
@@ -1565,13 +1602,30 @@ void scenes::stream::on_xr_event(const xr::event & event)
 			break;
 	}
 }
+catch (std::exception & e)
+{
+	spdlog::warn("Failed to handle an OpenXR event: {}", e.what());
+}
 
 bool scenes::stream::forward_hid_input(from_headset::hid::input_t packet, bool device_enabled)
 {
 	// hid_forwarding is whether the server permits it; device_enabled is the headset toggle.
 	if (not hid_forwarding or not device_enabled)
 		return false;
-	network_session->send_control(from_headset::hid::input{packet});
+	// LVRR: input meant for the PC stays handled when it can't get there, so Android doesn't act on
+	// it. A stream that ended stays in front until its next frame, its connection is gone
+	if (state_ == state::shutdown)
+		return true;
+	// LVRR: this runs on the main thread, whose event loop catches nothing: a send on a connection
+	// that just died must not quit the app
+	try
+	{
+		network_session->send_control(from_headset::hid::input{packet});
+	}
+	catch (std::exception & e)
+	{
+		spdlog::warn("Failed to forward input: {}", e.what());
+	}
 	return true;
 }
 

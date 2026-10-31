@@ -665,9 +665,22 @@ void scenes::stream::tracking()
 				scheduled_derived_pose.compare_exchange_strong(old, 0);
 			}
 		}
-		catch (std::exception & e)
+		// LVRR: this loop only sends to the server, so only socket errors mean a lost connection;
+		// OpenXR and tracker errors are the headset's
+		catch (socket_shutdown & e)
 		{
 			lvrr_connection_lost(e);
+		}
+		catch (std::system_error & e)
+		{
+			if (e.code().category() == xr::error_category())
+				lvrr_headset_error(e);
+			else
+				lvrr_connection_lost(e);
+		}
+		catch (std::exception & e)
+		{
+			lvrr_headset_error(e);
 		}
 	}
 

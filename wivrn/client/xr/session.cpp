@@ -364,8 +364,11 @@ void xr::session::sync_actions(XrActionSet action_set, const std::string & subac
 	sync_actions(action_set, inst->string_to_path(subaction_path));
 }
 
-void xr::session::enable_passthrough(xr::system & system)
+void xr::session::enable_passthrough(xr::system & system, bool background)
 {
+	// LVRR: also when passthrough already runs: the stream reuses the lobby's for see-through
+	passthrough_background = background;
+
 	if (not std::holds_alternative<std::monostate>(passthrough))
 		return;
 
@@ -406,12 +409,13 @@ void xr::session::on_boundary_visibility_changed(XrBoundaryVisibilityMETA v)
 
 // the runtime only allows suppression while passthrough is shown and restores
 // the boundary when it stops, so this re-requests every time passthrough comes back
+// LVRR: only a backdrop passthrough may hide it, see-through still shows a VR game
 void xr::session::update_boundary_visibility()
 {
 	if (not xrRequestBoundaryVisibilityMETA)
 		return;
 
-	auto v = not passthrough_boundary_enabled and not std::holds_alternative<std::monostate>(passthrough)
+	auto v = not passthrough_boundary_enabled and passthrough_background and not std::holds_alternative<std::monostate>(passthrough)
 	                 ? XR_BOUNDARY_VISIBILITY_SUPPRESSED_META
 	                 : XR_BOUNDARY_VISIBILITY_NOT_SUPPRESSED_META;
 	if (v == runtime_boundary_visibility)

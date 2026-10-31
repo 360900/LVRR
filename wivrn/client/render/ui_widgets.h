@@ -200,8 +200,9 @@ void shell_dividers(float top_bar_h, float tab_width);
 // main window: a pill of round buttons on the left, a title pill with a close button on top,
 // a content panel with the dashboard's gradient and a bar at the bottom
 
-// Rounded rectangle whose fill goes from top to bottom, with the vertex alpha kept for AA
-void gradient_rect(ImDrawList * draw, const ImVec2 & min, const ImVec2 & max, float rounding, const ImVec4 & top, const ImVec4 & bottom);
+// Rounded rectangle whose fill goes from top to bottom, or left to right when horizontal, with the
+// vertex alpha kept for AA; corners takes ImDrawFlags_RoundCorners*, 0 rounds all four
+void gradient_rect(ImDrawList * draw, const ImVec2 & min, const ImVec2 & max, float rounding, const ImVec4 & from, const ImVec4 & to, bool horizontal = false, ImDrawFlags corners = 0);
 
 // Column of height h with a pill around buttons round buttons and separators separators, centered vertically
 void shell_side_begin(float height, int buttons, int separators);
@@ -209,7 +210,8 @@ bool shell_side_button(const char * icon, const std::string & tooltip, bool sele
 void shell_side_separator();
 void shell_side_end();
 
-// Title pill centered in width, close button at the right edge; true when close is clicked
+// Title pill centered in width, close button at the right edge, a title too long to fit between
+// them ends in an ellipsis; true when close is clicked
 bool shell_top(float width, const char * icon, const std::string & title, const std::string & close_tooltip);
 
 // Content panel; the cursor is inside a scrolling child with padding, pair with shell_content_end

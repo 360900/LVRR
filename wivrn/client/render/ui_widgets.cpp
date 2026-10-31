@@ -1165,7 +1165,7 @@ bool begin_modal(const char * id, const std::string & title, float width)
 	if (width > 0)
 		ImGui::SetNextWindowSize({width, 0});
 
-	ImGui::PushStyleColor(ImGuiCol_PopupBg, t.card);
+	ImGui::PushStyleColor(ImGuiCol_PopupBg, t.background_contrast); // LVRR: card is translucent, the panel behind would show through
 	ImGui::PushStyleColor(ImGuiCol_Border, t.border);
 	ImGui::PushStyleColor(ImGuiCol_Text, t.text);
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, t.card_rounding);
@@ -1337,7 +1337,7 @@ int action_menu(const char * id, const char * icon, const std::vector<action_ite
 	ImGui::SetNextWindowPos(popup_center, ImGuiCond_Always, {0.5f, 0.5f});
 	ImGui::SetNextWindowSize({ImMax(content_w, metrics::combo_modal_min_width), 0});
 
-	ImGui::PushStyleColor(ImGuiCol_PopupBg, t.card);
+	ImGui::PushStyleColor(ImGuiCol_PopupBg, t.background_contrast); // LVRR: card is translucent, the panel behind would show through
 	ImGui::PushStyleColor(ImGuiCol_Border, t.border);
 	ImGui::PushStyleColor(ImGuiCol_Text, t.text);
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, t.card_rounding);
@@ -1485,24 +1485,26 @@ void shell_dividers(float top_bar_h, float tab_width)
 
 // LVRR: the dashboard's shell
 
-void gradient_rect(ImDrawList * draw, const ImVec2 & min, const ImVec2 & max, float rounding, const ImVec4 & top, const ImVec4 & bottom)
+void gradient_rect(ImDrawList * draw, const ImVec2 & min, const ImVec2 & max, float rounding, const ImVec4 & from, const ImVec4 & to, bool horizontal, ImDrawFlags corners)
 {
 	const theme & t = current();
 	const int first = draw->VtxBuffer.Size;
-	draw->PathRect(min, max, rounding);
-	draw->PathFillConvex(t.col(top));
+	// AddConvexPolyFilled draws nothing for alpha 0, so fill with the more opaque end
+	const ImU32 fill = t.col(from.w >= to.w ? from : to);
+	draw->PathRect(min, max, rounding, corners);
+	draw->PathFillConvex(fill);
 
-	// the fan's vertices sit on the outline, recolor them by height and keep the AA fringe alpha
-	const float h = std::max(max.y - min.y, 1.f);
+	// the fan's vertices sit on the outline, recolor them along the gradient and keep the AA fringe alpha
+	const float len = std::max(horizontal ? max.x - min.x : max.y - min.y, 1.f);
 	for (int i = first; i < draw->VtxBuffer.Size; ++i)
 	{
 		ImDrawVert & v = draw->VtxBuffer[i];
-		const float f = std::clamp((v.pos.y - min.y) / h, 0.f, 1.f);
-		const ImVec4 c = {std::lerp(top.x, bottom.x, f), std::lerp(top.y, bottom.y, f), std::lerp(top.z, bottom.z, f), std::lerp(top.w, bottom.w, f)};
+		const float f = std::clamp((horizontal ? v.pos.x - min.x : v.pos.y - min.y) / len, 0.f, 1.f);
+		const ImVec4 c = {std::lerp(from.x, to.x, f), std::lerp(from.y, to.y, f), std::lerp(from.z, to.z, f), std::lerp(from.w, to.w, f)};
 		const ImU32 packed = t.col(c);
-		// fringe vertices were written with alpha 0, the others with top's alpha
-		const ImU32 top_a = (t.col(top) >> IM_COL32_A_SHIFT) & 0xff;
-		const ImU32 fringe = top_a ? ((v.col >> IM_COL32_A_SHIFT) & 0xff) * 255 / top_a : 0;
+		// fringe vertices were written with alpha 0, the others with the fill's alpha
+		const ImU32 fill_a = (fill >> IM_COL32_A_SHIFT) & 0xff;
+		const ImU32 fringe = fill_a ? ((v.col >> IM_COL32_A_SHIFT) & 0xff) * 255 / fill_a : 0;
 		const ImU32 a = fringe * ((packed >> IM_COL32_A_SHIFT) & 0xff) / 255;
 		v.col = (packed & ~IM_COL32_A_MASK) | (std::min<ImU32>(a, 255) << IM_COL32_A_SHIFT);
 	}
@@ -1646,21 +1648,32 @@ bool shell_top(float width, const char * icon, const std::string & title, const 
 	ImDrawList * draw = window->DrawList;
 	const ImVec2 p = window->Pos;
 
-	// title pill in the middle
+	// title pill in the middle, a gap clear of the close button; a longer title ends in an ellipsis
 	ImFont * bold = bold_font();
 	ImGui::PushFont(bold, ImGui::GetStyle().FontSizeBase * 1.1f);
 	const ImVec2 ts = ImGui::CalcTextSize(title.c_str());
 	const float glyph = metrics::shell_title_glyph;
 	const float gap = 12;
-	const float pill_w = std::max(metrics::shell_title_min_width, glyph + gap + ts.x + 48);
+	const float max_w = width - 2 * (h + gap);
+	const float pill_w = std::clamp(glyph + gap + ts.x + 48, std::min(metrics::shell_title_min_width, max_w), max_w);
+	const float text_w = std::max(0.f, std::min(ts.x, max_w - 48 - glyph - gap));
 	const ImVec2 pill_min = {p.x + (width - pill_w) * 0.5f, p.y};
 	const ImVec2 pill_max = pill_min + ImVec2{pill_w, h};
 	draw->AddRectFilled(pill_min, pill_max, t.col(t.background_contrast), h * 0.5f);
-	const float content_w = glyph + gap + ts.x;
+	const float content_w = glyph + gap + text_w;
 	float x = pill_min.x + (pill_w - content_w) * 0.5f;
 	glyph_centered(draw, icon, {x + glyph * 0.5f, p.y + h * 0.5f}, glyph, t.col(t.text));
 	x += glyph + gap;
-	draw->AddText({x, p.y + (h - ts.y) * 0.5f}, t.col(t.text), title.c_str());
+	const ImVec2 text_pos = {x, p.y + (h - ts.y) * 0.5f};
+	if (text_w < ts.x)
+	{
+		// draws in the current font and ImGuiCol_Text; with no end it would stop at "##"
+		ImGui::PushStyleColor(ImGuiCol_Text, t.text);
+		ImGui::RenderTextEllipsis(draw, text_pos, {x + text_w, p.y + h}, x + text_w, title.c_str(), title.c_str() + title.size(), &ts);
+		ImGui::PopStyleColor();
+	}
+	else
+		draw->AddText(text_pos, t.col(t.text), title.c_str());
 	ImGui::PopFont();
 
 	// close button at the right edge
@@ -1729,12 +1742,12 @@ void shell_bottom(float width, const std::function<void()> & left, const std::fu
 	const ImVec2 p = window->Pos;
 	const ImVec2 q = p + ImVec2{width, h};
 	draw->AddRectFilled(p, q, t.col(t.background), r);
-	// shadows at both ends and a shine along the top, like the dashboard's bar
-	const ImU32 shadow = t.col({0, 0, 0, 0.35f});
-	const ImU32 clear = t.col({0, 0, 0, 0});
-	draw->AddRectFilledMultiColor({p.x + r, p.y}, {p.x + width * 0.4f, q.y}, shadow, clear, clear, shadow);
-	draw->AddRectFilledMultiColor({q.x - width * 0.4f, p.y}, {q.x - r, q.y}, clear, shadow, shadow, clear);
-	draw->AddRectFilled({p.x + r, p.y}, {q.x - r, p.y + 2}, t.col({1, 1, 1, 0.2f}));
+	// shadows at both ends, rounded like the bar so its ends get them too, and a shine along the
+	// top over 99% of the width, like the dashboard's bar
+	gradient_rect(draw, p, {p.x + width * 0.4f, q.y}, r, {0, 0, 0, 0.35f}, {0, 0, 0, 0}, true, ImDrawFlags_RoundCornersLeft);
+	gradient_rect(draw, {q.x - width * 0.4f, p.y}, q, r, {0, 0, 0, 0}, {0, 0, 0, 0.35f}, true, ImDrawFlags_RoundCornersRight);
+	const float inset = width * 0.005f;
+	draw->AddRectFilled({p.x + inset, p.y}, {q.x - inset, p.y + 2}, t.col({1, 1, 1, 0.2f}));
 
 	const float side = ImGui::GetFrameHeight() * metrics::control_height;
 	ImGui::SetCursorPos({12, (h - side) * 0.5f});

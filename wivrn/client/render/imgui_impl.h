@@ -179,8 +179,9 @@ private:
 
 	xr::swapchain swapchain;
 	int image_index;
-	// LVRR: the swapchain keeps showing its last image while the draw data does not change
-	uint64_t last_draw_hash = 0;
+	// LVRR: the swapchain keeps showing its last image while the draw data and the quad rects do not change
+	uint64_t last_draw_hash = 0;                  // draw data hash of the image last released
+	std::vector<std::array<int, 5>> drawn_layout; // z_index and imageRect of each quad of that image
 	bool have_image = false;
 	bool skipped_last = false; // half rate for animations nobody points at
 
@@ -208,11 +209,12 @@ private:
 
 	beman::inplace_vector::inplace_vector<utils::mapped_file, 3> font_awesome;
 	beman::inplace_vector::inplace_vector<utils::mapped_file, 2> ui_font; // LVRR: regular and bold
+	std::vector<utils::mapped_file> system_fonts;                         // LVRR: mapped once, merged into both families
 	ImFont * bold = nullptr;
 	void initialize_fonts();
 
 	std::vector<controller_state> read_controllers_state(XrTime display_time);
-	bool draw_data_changed(const ImDrawData * draw_data);
+	uint64_t draw_data_hash(const ImDrawData * draw_data, bool & textures_pending) const;
 	std::vector<std::pair<int, XrCompositionLayerQuad>> build_layers();
 	size_t choose_focused_controller(const std::vector<controller_state> & new_states) const;
 

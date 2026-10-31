@@ -54,15 +54,22 @@ using namespace std::chrono_literals;
 
 namespace
 {
-// How long a restarted session may take to accept the headset again
+// How long a restarted session may take to accept the headset again, when the server gave no time
 constexpr auto reconnect_window = 60s;
 constexpr auto retry_delay = 1s;
 
+// How long after the last check a restarted discovery keeps the server list, see lvrr_list_kept()
+constexpr auto list_kept_for = 30s;
+
+// How long Restart desktop waits after a press: --replace gives the old WayVR up to 3 s to
+// quit, then the new one opens its session
+constexpr auto restart_hold = 10s;
+
 // Written once autoconnect was turned on for the first paired PC, so it is only done once
 const char * const autoconnect_stamp = "lvrr-autoconnect";
-// Written once the microphone was turned on, so turning it off later sticks
+// Written once the microphone permission was answered, so turning it off later sticks
 const char * const microphone_stamp = "lvrr-microphone";
-// Written once hand tracking was turned on, so turning it off later sticks
+// Written once the hand tracking permission was answered, so turning it off later sticks
 const char * const hand_tracking_stamp = "lvrr-hand-tracking";
 } // namespace
 
@@ -79,28 +86,24 @@ void scenes::lobby::lvrr_focused()
 
 	if (config.first_run)
 	{
-		// no wizard: hand tracking only, the dashboard asks for the rest when it is enabled
+		// no wizard: hands and the microphone are asked for below, the dashboard asks for the rest
+		// when it is enabled
 		config.first_run = false;
-		if (system.hand_tracking_supported())
-			config.set_feature(feature::hand_tracking, true);
 		config.save();
 	}
 
-	// The microphone streams by default, like Virtual Desktop; this asks for the permission once
-	const auto mic_stamp = application::get_config_path() / microphone_stamp;
-	if (not std::filesystem::exists(mic_stamp))
-	{
-		std::ofstream{mic_stamp};
-		config.set_feature(feature::microphone, true);
-	}
+	// Stamps are written once the permission is answered, so a prompt lost to a killed app is
+	// asked again at the next focus. Android shows one prompt at a time: hands first
 
-	// Hands work out of the box too, in the lobby and in the dashboard
+	// Hands work out of the box, in the lobby and in the dashboard
 	const auto hand_stamp = application::get_config_path() / hand_tracking_stamp;
 	if (system.hand_tracking_supported() and not std::filesystem::exists(hand_stamp))
-	{
-		std::ofstream{hand_stamp};
-		config.set_feature(feature::hand_tracking, true);
-	}
+		config.set_feature(feature::hand_tracking, true, [hand_stamp](bool) { std::ofstream{hand_stamp}; });
+
+	// The microphone streams by default too, like Virtual Desktop; this asks for the permission once
+	const auto mic_stamp = application::get_config_path() / microphone_stamp;
+	if (not std::filesystem::exists(mic_stamp))
+		config.set_feature(feature::microphone, true, [mic_stamp](bool) { std::ofstream{mic_stamp}; });
 }
 
 void scenes::lobby::lvrr_connected()
@@ -109,6 +112,7 @@ void scenes::lobby::lvrr_connected()
 		return;
 
 	lvrr_reconnect_until = {};
+	lvrr_restart_pressed = {};
 
 	// like Virtual Desktop, connect to the first paired PC automatically from then on
 	const auto stamp = application::get_config_path() / autoconnect_stamp;
@@ -130,9 +134,11 @@ void scenes::lobby::lvrr_connected()
 	spdlog::info("Autoconnect turned on for {}", server->second.service.name);
 }
 
-void scenes::lobby::lvrr_remember_mac(const std::optional<std::array<uint8_t, 6>> & mac)
+void scenes::lobby::lvrr_remember_mac(const std::optional<std::array<uint8_t, 6>> & mac, const std::string & interface)
 {
-	if (not mac or not lvrr_server)
+	// the PC's end of a USB networking link can't be woken over the LAN, keep the MAC learnt
+	// over Wi-Fi or Ethernet; the server list's USB icon uses the same test
+	if (not mac or not lvrr_server or interface.starts_with("usb"))
 		return;
 
 	auto cookie = lvrr_server->service.txt.find("cookie");
@@ -146,6 +152,24 @@ void scenes::lobby::lvrr_remember_mac(const std::optional<std::array<uint8_t, 6>
 
 	server->second.mac = mac;
 	config.save();
+}
+
+// A new discovery has heard from every PC once a PTR query had time to be answered, a lost one
+// included
+bool scenes::lobby::lvrr_discovery_settled() const
+{
+	return not discover or std::chrono::steady_clock::now() - discover->started >= wivrn_discover::discover_period + 1s;
+}
+
+// Discovery stops while connecting: after a short pause (a failed attempt, Disconnect, a
+// cancelled PIN) the server list keeps what it showed until the restarted discovery settles,
+// instead of calling every PC gone. At start or after a stream it starts over
+bool scenes::lobby::lvrr_list_kept() const
+{
+	if constexpr (lvrr::stock_ui)
+		return false;
+
+	return not lvrr_discovery_settled() and lvrr_list_checked != std::chrono::steady_clock::time_point{} and discover->started - lvrr_list_checked < list_kept_for;
 }
 
 void scenes::lobby::lvrr_wake(const configuration::server_data & server)
@@ -219,10 +243,13 @@ bool scenes::lobby::lvrr_stream_ended()
 	// the session restarts on purpose, its errors are expected
 	while (next_scene->pop_stream_error())
 		;
+	auto timeout = next_scene->reconnect_timeout();
+	if (timeout == 0ms)
+		timeout = reconnect_window;
 	next_scene.reset();
 
 	auto now = std::chrono::steady_clock::now();
-	lvrr_reconnect_until = now + reconnect_window;
+	lvrr_reconnect_until = now + timeout;
 	lvrr_retry_at = now;
 	current_tab = tab::connected;
 	spdlog::info("Reconnecting to {}", lvrr_server->service.hostname);
@@ -234,6 +261,11 @@ void scenes::lobby::lvrr_tick()
 	if constexpr (lvrr::stock_ui)
 		return;
 
+	// a PIN prompt (the PC no longer knows the headset) makes it a normal connection: a wrong
+	// PIN shows its error, cancel ends it
+	if (lvrr_reconnect_until != std::chrono::steady_clock::time_point{} and async_session.valid() and pin_request->lock()->pin_requested)
+		lvrr_reconnect_until = {};
+
 	if (lvrr_reconnect_until == std::chrono::steady_clock::time_point{} or not lvrr_server or async_session.valid() or next_scene)
 		return;
 
@@ -241,17 +273,25 @@ void scenes::lobby::lvrr_tick()
 		connect(*lvrr_server);
 }
 
+// A stream not shown yet answers the dashboard while the session is stopped, as render() lets it
+void scenes::lobby::lvrr_idle()
+{
+	if (next_scene)
+		next_scene->lvrr_update();
+}
+
 void scenes::lobby::lvrr_disconnect()
 {
 	lvrr_server.reset();
 	lvrr_reconnect_until = {};
+	lvrr_restart_pressed = {};
 	async_error.reset();
 	autoconnect_enabled = false;
 
 	if (async_session.valid())
 	{
 		async_session.cancel();
-		auto request = pin_request.lock();
+		auto request = pin_request->lock();
 		request->pin_cancelled = true;
 		request.notify_one();
 	}
@@ -275,7 +315,7 @@ void scenes::lobby::lvrr_gui_waiting()
 	namespace ui = wivrn::ui;
 
 	// the PC asks to pair again: the server list shows the PIN keypad
-	if (async_session.valid() and pin_request.lock()->pin_requested)
+	if (async_session.valid() and pin_request->lock()->pin_requested)
 	{
 		current_tab = tab::server_list;
 		return;
@@ -291,12 +331,18 @@ void scenes::lobby::lvrr_gui_waiting()
 	ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4{0, 0, 0, 0});
 	ImGui::BeginChild("waiting", {0, 0}, ImGuiChildFlags_AlwaysUseWindowPadding);
 
+	// a press says so and holds the button while the new desktop starts: pressed again, it
+	// would replace that one too
+	const bool restarting = lvrr_restart_pressed != std::chrono::steady_clock::time_point{} and std::chrono::steady_clock::now() - lvrr_restart_pressed < restart_hold;
+
 	const float header_top = ImGui::GetCursorPosY();
 	// the title is in the shell's title pill, only the status goes here
 	ImGui::PushStyleColor(ImGuiCol_Text, ui::current().text_muted);
 	ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x * 0.6f);
 	if (async_error)
 		ImGui::TextUnformatted(async_error->c_str());
+	else if (next_scene and restarting)
+		ImGui::TextUnformatted(_S("Restarting the desktop…"));
 	else if (next_scene)
 		ImGui::TextUnformatted(_S("The desktop appears here in a moment. If it does not, restart it."));
 	else
@@ -318,10 +364,22 @@ void scenes::lobby::lvrr_gui_waiting()
 	if (not async_error)
 	{
 		ImGui::SetCursorPos({right - close_w - gap - restart_w, header_top});
-		ImGui::BeginDisabled(not next_scene);
-		// starts the configured application on the PC when it is not running
+		ImGui::BeginDisabled(not next_scene or restarting);
+		// replaces the desktop, also a running or frozen one: for an empty id the server starts
+		// the configured application, wayvr with --replace
 		if (ui::button(ICON_FA_ROTATE_RIGHT, restart_label, ui::button_style::secondary) and next_scene)
-			next_scene->start_application("");
+		{
+			// fails on a lost connection, which the network thread reports
+			try
+			{
+				next_scene->start_application("");
+				lvrr_restart_pressed = std::chrono::steady_clock::now();
+			}
+			catch (std::exception & e)
+			{
+				spdlog::warn("Cannot restart the desktop: {}", e.what());
+			}
+		}
 		ImGui::EndDisabled();
 	}
 
@@ -359,10 +417,13 @@ void scenes::lobby::lvrr_gui_shell(XrTime predicted_display_time)
 
 	ImGui::SetCursorPos({shell_pad, shell_pad});
 	ui::shell_side_begin(win.y - 2 * shell_pad, 2, 1);
+	// while a stream or a silent reconnect is pending, back to the waiting page and its
+	// Disconnect: the server list would flash the connecting popup with each attempt
 	if (ui::shell_side_button(ICON_FA_COMPUTER, _cS("tab label", "Computers"), on_computers) and not on_computers)
-		current_tab = tab::server_list;
+		current_tab = (next_scene or lvrr_reconnect_until != std::chrono::steady_clock::time_point{}) ? tab::connected : tab::server_list;
 	ui::shell_side_separator();
-	if (ui::shell_side_button(ICON_FA_SCALE_BALANCED, _cS("tab label", "Licenses"), current_tab == tab::licenses))
+	// no msgctxt: the "tab label" Licenses is fuzzy, so untranslated, in several catalogs
+	if (ui::shell_side_button(ICON_FA_SCALE_BALANCED, _("Licenses"), current_tab == tab::licenses))
 		current_tab = tab::licenses;
 	ui::shell_side_end();
 
@@ -376,7 +437,7 @@ void scenes::lobby::lvrr_gui_shell(XrTime predicted_display_time)
 			break;
 		case tab::licenses:
 			icon = ICON_FA_SCALE_BALANCED;
-			title = _cS("tab label", "Licenses");
+			title = _("Licenses");
 			break;
 		default:
 			break;
@@ -434,7 +495,7 @@ void scenes::lobby::lvrr_gui_shell(XrTime predicted_display_time)
 
 	if (close)
 		ImGui::OpenPopup("stop lvrr");
-	if (ui::confirm_modal("stop lvrr", _cS("confirmation messagebox title", "Close the app"), _S("Close the headset app? The PC keeps running."), _cS("button", "Close"), _("Cancel"), true) == 1)
+	if (ui::confirm_modal("stop lvrr", _cS("confirmation messagebox title", "Close the app"), _S("Close the headset app? The PC keeps running."), _("Close"), _("Cancel"), true) == 1)
 		application::pop_scene();
 
 	ImGui::End();

@@ -124,7 +124,9 @@ static std::shared_ptr<renderer::material> create_hand_material(scene & scene, X
 		material.fragment_shader = "hand.frag";
 		material.double_sided = false;
 		material.blend_enable = true;
-		material.depth_write_enable = false;
+		// depth_write_enable stays true: the lobby composites the hands' layer with
+		// XR_FB_composition_layer_depth_test (LESS_OR_EQUAL), where a pixel without depth
+		// counts as infinitely far and would vanish behind the panels and the meadow dome
 	});
 }
 

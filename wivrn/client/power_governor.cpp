@@ -27,7 +27,8 @@ constexpr XrDuration second = 1'000'000'000;
 
 constexpr XrDuration hold_min = 20 * second;
 constexpr XrDuration hold_max = 5 * 60 * second;
-// a raise this soon after a probe means the probe failed: hold longer next time
+// a raise this soon after a probe (a domain going down) means the probe failed: the hold
+// doubles, or for a power savings try, the wait before the next one
 constexpr XrDuration probe_failed_within = 60 * second;
 // a domain only relaxes once this long passed without a missed frame
 constexpr XrDuration quiet_before_relax = 5 * second;
@@ -39,8 +40,8 @@ constexpr int misses_to_raise = 2;
 constexpr float budget = 0.6f;
 constexpr int over_budget_to_raise = 3;
 
-// a stream tries power savings after this long without any raise; a failed try costs a
-// couple of missed frames, so the wait doubles each time, up to an hour
+// a stream tries power savings after this long at sustained low without any raise; a
+// failed try costs a couple of missed frames, so the wait doubles each time, up to an hour
 constexpr XrDuration savings_probe_min = 2 * 60 * second;
 constexpr XrDuration savings_probe_max = 60 * 60 * second;
 
@@ -84,46 +85,54 @@ XrPerfSettingsLevelEXT one_up(XrPerfSettingsLevelEXT level)
 } // namespace
 
 power_governor::power_governor(xr::session & session) :
-        session(&session)
+        session(session.performance_settings_supported() ? &session : nullptr)
 {
 }
 
 void power_governor::apply(domain d, XrPerfSettingsLevelEXT level)
 {
-	state & s = domains[int(d)];
-	if (not visible)
-		level = XR_PERF_SETTINGS_LEVEL_POWER_SAVINGS_EXT;
-	if (s.level == level or not session)
+	domains[int(d)].level = level;
+	push(d);
+}
+
+// the runtime gets power savings while hidden, s.level is kept for when it shows again
+void power_governor::push(domain d)
+{
+	const XrPerfSettingsLevelEXT level = visible ? domains[int(d)].level : XR_PERF_SETTINGS_LEVEL_POWER_SAVINGS_EXT;
+	if (not session or sent[int(d)] == level)
 		return;
-	s.level = level;
-	spdlog::info("{} clock level: {}", name(d), name(level));
+	sent[int(d)] = level;
+	spdlog::info("{} clock level: {}{}", name(d), name(level), visible ? "" : " (not visible)");
 	session->set_performance_level(xr_domain(d), level);
 }
 
-void power_governor::set_pinned_high(bool pinned_)
+void power_governor::reset(bool pinned_, bool menu_)
 {
 	pinned = pinned_;
-	menu = false;
-	for (auto d: {domain::cpu, domain::gpu})
-	{
-		domains[int(d)] = {};
-		apply(d, pinned ? XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT : XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT);
-	}
+	menu = menu_;
+	domains = {};
+	// a reset always reaches the runtime, whatever it was told before
+	sent.fill(XR_PERF_SETTINGS_LEVEL_MAX_ENUM_EXT);
 	misses = 0;
 	miss_window_start = 0;
 	last_miss = 0;
 	quiet_since = 0;
+	for (auto d: {domain::cpu, domain::gpu})
+	{
+		state & s = domains[int(d)];
+		s.floor = menu ? XR_PERF_SETTINGS_LEVEL_POWER_SAVINGS_EXT : XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT;
+		apply(d, pinned ? XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT : s.floor);
+	}
+}
+
+void power_governor::set_pinned_high(bool pinned_)
+{
+	reset(pinned_, false);
 }
 
 void power_governor::idle()
 {
-	set_pinned_high(false);
-	menu = true;
-	for (auto d: {domain::cpu, domain::gpu})
-	{
-		domains[int(d)].floor = XR_PERF_SETTINGS_LEVEL_POWER_SAVINGS_EXT;
-		apply(d, XR_PERF_SETTINGS_LEVEL_POWER_SAVINGS_EXT);
-	}
+	reset(false, true);
 }
 
 void power_governor::set_visible(bool visible_)
@@ -131,28 +140,31 @@ void power_governor::set_visible(bool visible_)
 	if (visible == visible_)
 		return;
 	visible = visible_;
-	if (not session)
-		return;
-	// apply() clamps to power savings while hidden; coming back restores each domain's level
 	for (auto d: {domain::cpu, domain::gpu})
-	{
-		state & s = domains[int(d)];
-		XrPerfSettingsLevelEXT level = pinned ? XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT : s.level;
-		if (not visible)
-			level = XR_PERF_SETTINGS_LEVEL_POWER_SAVINGS_EXT;
-		if (level != s.level or not visible)
-		{
-			s.level = level;
-			spdlog::info("{} clock level: {} ({})", name(d), name(level), visible ? "visible again" : "not visible");
-			session->set_performance_level(xr_domain(d), level);
-		}
-	}
+		push(d);
 }
 
 void power_governor::raise(domain d, XrTime now, const char * why)
 {
 	state & s = domains[int(d)];
 	quiet_since = now;
+
+	// a stream raised from power savings gets sustained low back as its floor. A raise soon
+	// after the try means the try failed: sustained low held through the quiet time before
+	// it, so go back there and wait twice as long before the next try. A later raise means
+	// the load went up: a usual raise, and the wait stays the same
+	if (s.level == XR_PERF_SETTINGS_LEVEL_POWER_SAVINGS_EXT and not menu)
+	{
+		s.floor = XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT;
+		if (s.last_probe and now - s.last_probe < probe_failed_within)
+		{
+			s.savings_backoff = std::clamp(s.savings_backoff * 2, savings_probe_min, savings_probe_max);
+			s.over_budget = 0;
+			spdlog::info("{} clocks: power savings failed ({}), back to sustained low, next try after {}s", name(d), why, s.savings_backoff / second);
+			apply(d, XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT);
+			return;
+		}
+	}
 
 	// a menu only needs the next step, a stream goes straight to high
 	const XrPerfSettingsLevelEXT target = menu ? one_up(s.level) : XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT;
@@ -163,19 +175,14 @@ void power_governor::raise(domain d, XrTime now, const char * why)
 		return;
 	}
 
+	// at least hold_min: a domain only lowered by a power savings try was never given a
+	// hold, and twice its 0 is no hold at all
 	if (s.last_probe and now - s.last_probe < probe_failed_within)
-		s.hold = std::min(s.hold * 2, hold_max);
+		s.hold = std::clamp(s.hold * 2, hold_min, hold_max);
 	else
 		s.hold = hold_min;
 	s.hold_until = now + s.hold;
 	s.over_budget = 0;
-	// a stream that could not live at power savings goes back above it, and waits
-	// twice as long before trying again
-	if (s.level == XR_PERF_SETTINGS_LEVEL_POWER_SAVINGS_EXT and not menu)
-	{
-		s.floor = XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT;
-		s.savings_backoff = std::min(s.savings_backoff * 2, savings_probe_max);
-	}
 
 	spdlog::info("{} clocks raised: {}, for at least {}s", name(d), why, s.hold / second);
 	apply(d, target);
@@ -191,7 +198,7 @@ void power_governor::relax(domain d, XrTime now)
 
 void power_governor::frame(XrTime now, XrDuration display_period, XrDuration real_period, float cpu_time, float gpu_time)
 {
-	if (pinned or not visible or display_period <= 0)
+	if (not session or pinned or not visible or display_period <= 0)
 		return;
 	if (not quiet_since)
 		quiet_since = now;
@@ -229,10 +236,11 @@ void power_governor::frame(XrTime now, XrDuration display_period, XrDuration rea
 		if (s.level != s.floor and now > s.hold_until and now - last_miss > quiet_before_relax)
 			relax(d, now);
 
-		// a stream that ran a while without trouble tries power savings
+		// a stream that ran a while at sustained low without trouble tries power savings; the
+		// wait counts from when it came down, not from the raise before a long hold
 		if (s.savings_backoff == 0)
 			s.savings_backoff = savings_probe_min;
-		if (not menu and s.level == XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT and s.floor == XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT and now - quiet_since > s.savings_backoff)
+		if (not menu and s.level == XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT and s.floor == XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT and now - std::max(quiet_since, s.last_probe) > s.savings_backoff)
 		{
 			s.floor = XR_PERF_SETTINGS_LEVEL_POWER_SAVINGS_EXT;
 			spdlog::info("{} clocks: trying power savings after {}s quiet", name(d), s.savings_backoff / second);
@@ -243,6 +251,9 @@ void power_governor::frame(XrTime now, XrDuration display_period, XrDuration rea
 
 void power_governor::on_event(const XrEventDataPerfSettingsEXT & event, XrTime now)
 {
+	if (not session)
+		return;
+
 	spdlog::info("Performance notification: domain {} sub-domain {} level {} -> {}",
 	             int(event.domain),
 	             int(event.subDomain),

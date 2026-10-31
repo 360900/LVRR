@@ -144,6 +144,14 @@ void scenes::lobby::gui_connecting(locked_notifiable<pin_request_data> & pin_req
 
 		pin_request->pin_cancelled = true;
 
+		// LVRR: stops reconnecting, as lvrr_disconnect() does; calling it here would lock
+		// pin_request twice
+		if constexpr (not lvrr::stock_ui)
+		{
+			lvrr_reconnect_until = {};
+			autoconnect_enabled = false;
+		}
+
 		ImGui::CloseCurrentPopup();
 	}
 }
@@ -211,6 +219,13 @@ void scenes::lobby::gui_enter_pin(locked_notifiable<pin_request_data> & pin_requ
 		next_scene.reset();
 		pin_request->pin_cancelled = true;
 		pin_request.notify_one();
+
+		// LVRR: stops reconnecting, as the connecting popup's Disconnect does
+		if constexpr (not lvrr::stock_ui)
+		{
+			lvrr_reconnect_until = {};
+			autoconnect_enabled = false;
+		}
 
 		ImGui::CloseCurrentPopup();
 	}
@@ -354,9 +369,20 @@ void scenes::lobby::gui_new_server()
 		};
 
 		auto & config = application::get_config();
+		// LVRR: lvrr_remember_mac finds the server by its cookie, as one loaded from client.json
+		const std::string key = "manual-" + data.service.name;
+		data.service.txt["cookie"] = key;
 		if (add_server_cookie != "")
+		{
+			// LVRR: keep what was learnt about the PC, connecting to another one replaces the MAC
+			if (auto old = config.servers.find(add_server_cookie); old != config.servers.end())
+			{
+				data.autoconnect = old->second.autoconnect;
+				data.mac = old->second.mac;
+			}
 			config.servers.erase(add_server_cookie);
-		config.servers.emplace("manual-" + data.service.name, data);
+		}
+		config.servers.emplace(key, data);
 		config.save();
 
 		reset();
@@ -395,7 +421,11 @@ void scenes::lobby::gui_server_list()
 	// open below at this scope so OpenPopup and begin_modal hash to the same id
 	bool open_add_edit = false;
 	bool open_delete = false;
-	std::optional<std::string> forget_cookie;
+	bool open_forget = false;
+
+	// LVRR: a PC missing from the list is only known to be off once discovery heard from every
+	// PC, or while the list keeps what the last one found
+	const bool servers_known = lvrr_discovery_settled() or lvrr_list_kept();
 
 	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ui::metrics::card_item_spacing);
 	ui::begin_list_card("##servers");
@@ -412,7 +442,8 @@ void scenes::lobby::gui_server_list()
 			add_server = ui::button(ICON_FA_PLUS, add_label, ui::button_style::primary);
 			ImGui::SetCursorPos(hend);
 			ImGui::PushStyleColor(ImGuiCol_Text, t.text_muted);
-			ImGui::TextUnformatted(_S("Pick a PC running the LVRR server to stream from."));
+			// LVRR: the stock header's msgctxt, the catalogs translate the text only under it
+			ImGui::TextUnformatted(_cS("page header subtitle", "Pick a PC running the LVRR server to stream from."));
 			ImGui::PopStyleColor();
 		}
 
@@ -445,30 +476,55 @@ void scenes::lobby::gui_server_list()
 			// incompatible: discovered but protocol version differs, otherwise still searching
 			const bool reachable = (data.visible and data.compatible) or data.manual;
 			const bool incompatible = data.visible and data.service.txt.contains("protocol") and not data.compatible;
-			// LVRR: a remembered PC that is off can be woken up, then we wait for it to show up
-			const bool wakeable = not reachable and not incompatible and data.mac;
-			if (reachable)
+			// LVRR: a remembered PC that is off can be woken up, then we wait for it to show up.
+			// Before discovery can tell it is off, it shows Searching…
+			const bool wakeable = not reachable and not incompatible and data.mac and servers_known;
+			// LVRR: manual PCs are always reachable, they stay woken until Connect is pressed
+			if (reachable and not data.manual)
 				lvrr_woken.erase(cookie);
 			const auto woken = lvrr_woken.find(cookie);
-			const bool waking = wakeable and woken != lvrr_woken.end() and std::chrono::steady_clock::now() - woken->second < std::chrono::minutes(2);
+			const bool woken_recently = woken != lvrr_woken.end() and std::chrono::steady_clock::now() - woken->second < std::chrono::minutes(2);
+			const bool waking = wakeable and woken_recently;
 			const bool wake_failed = wakeable and woken != lvrr_woken.end() and not waking;
 			const float gap = ImGui::GetStyle().ItemSpacing.x;
 			const float bh = ImGui::GetFrameHeight() * ui::metrics::control_height;
-			const std::string sub = fmt::format("{} : {}", data.service.hostname, data.service.port);
+			std::string sub = fmt::format("{} : {}", data.service.hostname, data.service.port);
+			// LVRR: a manual PC is never found on the network, its row says it was woken
+			if (data.manual and woken_recently)
+				sub = _("Waiting for the PC and LVRR to start");
 
 			// trailing controls [Auto chip] [Connect] [menu], measured up front to exclude from the row click area
 			const char * c_icon = reachable ? ICON_FA_PLAY : (incompatible ? ICON_FA_TRIANGLE_EXCLAMATION : ICON_FA_MAGNIFYING_GLASS);
 			std::string c_label = ui::icon_label(c_icon, reachable ? _("Connect") : (incompatible ? _C("button label when the server has an incompatible version", "Incompatible") : _C("button label when the server is known but not visible", "Searching…")));
 			std::string c_tooltip = reachable ? std::string{} : (incompatible ? _("Incompatible server version") : _("Looking for this server on your network"));
+			// LVRR: the protocol changes with most updates, show both versions and how to match them.
+			// Another WiVRn server publishes the same keys, only an LVRR one adds "lvrr"
+			if (incompatible and not lvrr::stock_ui)
+			{
+				const auto it = data.service.txt.find("version");
+				const std::string server_version = it == data.service.txt.end() ? "?" : it->second;
+				if (data.service.txt.contains("lvrr"))
+				{
+					sub += "\n" + fmt::format(_F("LVRR {} on the PC, {} on this headset"), server_version, wivrn::display_version());
+					c_tooltip = _("The PC and this headset run different LVRR versions.\nOn the PC, update LVRR, or run \"lvrr install APK\" to install the matching headset app.");
+				}
+				else
+				{
+					// LVRR: also an LVRR built before the key. xtask rebrand refuses WiVRn in headset strings
+					sub += "\n" + fmt::format(_F("Server {} on the PC, LVRR {} on this headset"), server_version, wivrn::display_version());
+					c_tooltip = _("This PC runs another VR streaming server, or an older LVRR.\nQuit it and start LVRR, or update LVRR on the PC.");
+				}
+			}
 			if (wakeable)
 			{
 				c_label = ui::icon_label(ICON_FA_POWER_OFF, waking ? _("Waking…") : _("Wake"));
+				// LVRR: the server only runs once LVRR is started, a woken PC waits at its login screen
 				if (waking)
-					c_tooltip = _("Waiting for the PC to start");
+					c_tooltip = _("Waiting for the PC and LVRR to start");
 				else if (wake_failed)
-					c_tooltip = _("The PC didn't respond. Check that wake-on-LAN is on in its BIOS and on its network card.");
+					c_tooltip = _("LVRR didn't show up. If the PC is on, start LVRR on it.\nIf it stayed off, check that wake-on-LAN is on in its BIOS and on its network card.");
 				else
-					c_tooltip = _("Not found on your network, turn it on with wake-on-LAN");
+					c_tooltip = _("Not found on your network. If the PC is off, wake it; if it's on, start LVRR on it.");
 			}
 			const float cw = ui::button_width(c_label);
 			const std::string chip_label = ui::icon_label(ICON_FA_BOLT, _C("chip displayed in server list when autoconnect is enabled", "Auto"));
@@ -520,6 +576,8 @@ void scenes::lobby::gui_server_list()
 						break;
 					case 2:
 						lvrr_wake(data);
+						// LVRR: the row then says it waits for the PC
+						lvrr_woken[cookie] = std::chrono::steady_clock::now();
 						break;
 				}
 			}
@@ -536,7 +594,8 @@ void scenes::lobby::gui_server_list()
 						config.save();
 						break;
 					case 1:
-						forget_cookie = cookie;
+						forget_server_cookie = cookie;
+						open_forget = true;
 						break;
 				}
 			}
@@ -553,7 +612,11 @@ void scenes::lobby::gui_server_list()
 					lvrr_woken[cookie] = std::chrono::steady_clock::now();
 				}
 				else
+				{
+					// LVRR: ends the wait of a woken manual PC
+					lvrr_woken.erase(cookie);
 					connect(data);
+				}
 				// popup opened at window scope below, outside begin_card's PushID so the id matches BeginPopupModal
 			}
 			if (not c_tooltip.empty() and ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -576,17 +639,14 @@ void scenes::lobby::gui_server_list()
 	}
 	ImGui::PopStyleVar();
 
-	if (forget_cookie)
-	{
-		config.servers.erase(*forget_cookie);
-		config.save();
-	}
-
 	if (open_add_edit)
 		ImGui::OpenPopup("add or edit server");
 
 	if (open_delete)
 		ImGui::OpenPopup("delete server");
+
+	if (open_forget)
+		ImGui::OpenPopup("forget server");
 
 	// Check if we need to report errors after a disconnect
 	if (next_scene and next_scene->current_state() == scenes::stream::state::shutdown and not ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup))
@@ -598,7 +658,7 @@ void scenes::lobby::gui_server_list()
 
 	if (wivrn::ui::begin_modal("connecting", ""))
 	{
-		auto pin_request = this->pin_request.lock();
+		auto pin_request = this->pin_request->lock();
 		if (pin_request->pin_requested)
 			gui_enter_pin(pin_request);
 		else
@@ -633,6 +693,27 @@ void scenes::lobby::gui_server_list()
 				break;
 			case -1:
 				delete_server_cookie = "";
+				break;
+		}
+	}
+
+	// LVRR: a visible PC stays listed once forgotten, so say what changes
+	if (not forget_server_cookie.empty())
+	{
+		std::string name;
+		if (auto it = config.servers.find(forget_server_cookie); it != config.servers.end())
+			name = it->second.service.name;
+
+		switch (wivrn::ui::confirm_modal("forget server", _C("confirmation messagebox title", "Forget server"), fmt::format(_cF("confirmation message", "Forget \"{}\"? Autoconnect turns off, and the headset can't wake it until you connect to it again. It stays paired."), name), _("Forget"), _("Cancel"), true))
+		{
+			case 1:
+				config.servers.erase(forget_server_cookie);
+				lvrr_woken.erase(forget_server_cookie);
+				config.save();
+				forget_server_cookie = "";
+				break;
+			case -1:
+				forget_server_cookie = "";
 				break;
 		}
 	}

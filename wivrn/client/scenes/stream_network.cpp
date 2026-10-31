@@ -32,11 +32,20 @@ void scenes::stream::process_packets()
 #ifdef __ANDROID__
 	application::instance().setup_jni();
 #endif
+	// LVRR: the handshake's bytes don't arm lvrr_check_alive()
+	lvrr_bytes_seen = network_session->bytes_received();
 	while (state_ != state::shutdown)
 	{
 		try
 		{
 			network_session->poll(*this, std::chrono::milliseconds(500));
+			// LVRR: a link that went silent is lost too
+			lvrr_check_alive();
+		}
+		// LVRR: decoder and socket errors share exception types, so the handlers mark the headset's
+		catch (lvrr_headset_failure & e)
+		{
+			lvrr_headset_error(e);
 		}
 		catch (std::exception & e)
 		{
@@ -76,7 +85,7 @@ void scenes::stream::operator()(to_headset::video_stream_data_shard && shard)
 		// We don't know (yet?) about this stream, ignore packet
 		return;
 	}
-	decoders[idx].decoder->push_shard(std::move(shard));
+	lvrr_on_headset([&] { decoders[idx].decoder->push_shard(std::move(shard)); }); // LVRR
 }
 
 void scenes::stream::operator()(to_headset::feature_control && control)
@@ -102,12 +111,13 @@ void scenes::stream::operator()(to_headset::feature_control && control)
 
 void scenes::stream::operator()(to_headset::audio_stream_description && desc)
 {
-	audio_handle.emplace(desc, *network_session, instance);
+	lvrr_on_headset([&] { audio_handle.emplace(desc, *network_session, instance); }); // LVRR
 }
 
 void scenes::stream::operator()(to_headset::video_stream_description && desc)
 {
-	setup(desc);
+	// LVRR: rethrown so the poll stops before shards reach a half-built set, and tracking doesn't start
+	lvrr_on_headset([&] { setup(desc); });
 
 	if (not tracking_thread)
 	{
@@ -119,6 +129,8 @@ void scenes::stream::operator()(to_headset::refresh_rate_change && rate)
 {
 	spdlog::info("refresh rate change request: {}", rate.hz);
 	session.set_refresh_rate(rate.hz);
+	// LVRR: asked for again when the stream comes back from the lobby
+	lvrr_refresh_rate = rate.hz;
 	std::shared_lock lock(decoder_mutex);
 	if (video_stream_description)
 		video_stream_description->refresh_rate = rate.hz;

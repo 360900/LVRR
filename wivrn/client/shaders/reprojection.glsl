@@ -70,7 +70,9 @@ vec4 sRGB_to_linear_rgba(vec4 x)
 	        x.a);
 }
 
-// LVRR: contrast adaptive sharpening, after AMD FidelityFX CAS (MIT), 5 taps
+// LVRR: contrast adaptive sharpening, after AMD FidelityFX CAS (MIT), 5 taps.
+// sharpness is a linear amount up to CAS's strongest: CAS's own sharpness
+// starts at AMD's default, which already doubles local contrast
 vec3 sharpen(vec3 e, vec2 uv)
 {
 	vec2 texel = 1.0 / vec2(rgb_rect.zw);
@@ -83,8 +85,9 @@ vec3 sharpen(vec3 e, vec2 uv)
 	vec3 mx = max(max(max(b, d), max(f, h)), e);
 
 	vec3 amp = sqrt(clamp(min(mn, 1.0 - mx) / max(mx, 1e-5), 0.0, 1.0));
-	vec3 w = amp * (-1.0 / mix(8.0, 5.0, sharpness));
-	return clamp(((b + d + f + h) * w + e) / (1.0 + 4.0 * w), 0.0, 1.0);
+	vec3 w = amp * -0.2;
+	vec3 cas = clamp(((b + d + f + h) * w + e) / (1.0 + 4.0 * w), 0.0, 1.0);
+	return mix(e, cas, sharpness);
 }
 
 void main()

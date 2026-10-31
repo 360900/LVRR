@@ -34,6 +34,7 @@
 #include "wivrn_client.h"
 #include "wivrn_packets.h"
 #include "xr/space.h"
+#include <chrono>
 #include <mutex>
 #include <optional>
 #include <queue>
@@ -171,6 +172,8 @@ private:
 	void lvrr_setup_hands();
 	bool lvrr_locate_hands(XrTime predicted_display_time);
 	void lvrr_render_hands(XrTime predicted_display_time);
+	// LVRR: the black layer under a see-through stream; false when it could not be added
+	bool lvrr_render_see_through(XrTime predicted_display_time, float opacity);
 
 	// Size of the composition layer used for the controllers
 	uint32_t width;
@@ -245,14 +248,44 @@ private:
 	thread_safe<std::vector<lvrr::set_headset_settings>> lvrr_requests;
 	std::atomic<bool> lvrr_report_needed = false;
 	std::atomic<bool> reconnect_expected_ = false;
-	std::atomic<bool> lvrr_end_reported = false; // why the connection ends is in stream_error_queue
+	std::atomic<uint32_t> lvrr_reconnect_timeout_ms = 0; // from expect_reconnect, stored before reconnect_expected_
+	std::atomic<bool> lvrr_end_reported = false;         // why the connection ends is in stream_error_queue
 	void lvrr_connection_lost(const std::exception &);
+	void lvrr_end_stream(std::string message);
+	// thrown by packet handlers that failed on the headset, the connection is fine
+	struct lvrr_headset_failure : std::runtime_error
+	{
+		using std::runtime_error::runtime_error;
+	};
+	// runs a handler step that can only fail on the headset (decoders, audio device); its errors
+	// reach process_packets() as lvrr_headset_failure
+	template <typename F>
+	static void lvrr_on_headset(F && f)
+	{
+		try
+		{
+			f();
+		}
+		catch (std::exception & e)
+		{
+			throw lvrr_headset_failure(e.what());
+		}
+	}
+	void lvrr_headset_error(const std::exception &);
+	// network thread only: the byte count lvrr_check_alive() last saw, and when it changed
+	uint64_t lvrr_bytes_seen = 0;
+	std::chrono::steady_clock::time_point lvrr_bytes_time{}; // unset until the server's first packet
+	void lvrr_check_alive();
 	std::atomic<uint8_t> lvrr_permission_pending = 0;
 	std::atomic<uint8_t> lvrr_permission_denied = 0;
 	std::atomic<float> lvrr_fov_horizontal = 1; // read by the tracking thread
 	std::atomic<float> lvrr_fov_vertical = 1;
 	std::atomic<bool> lvrr_simultaneous_hands = false;
+	std::atomic<float> lvrr_refresh_rate = 0; // the last rate this stream asked for; network and render threads
+	uint8_t lvrr_prompts_waiting = 0;         // feature_bit mask: permission prompts held while the session is stopped
+	void lvrr_set_feature(feature, bool);
 	lvrr::headset_config lvrr_session_config; // connection-time settings of this stream
+	bool lvrr_see_through_supported = false;  // set once by lvrr_start(): render() checks it every frame
 	XrTime lvrr_last_stats = 0;
 	int lvrr_stats_offset = 0;
 	void lvrr_start();
@@ -315,10 +348,17 @@ public:
 
 	// Applies settings sent by the LVRR dashboard, on the render thread
 	void lvrr_update();
+	// LVRR: lvrr_update() while the session is stopped
+	void lvrr_idle() override;
 	// The server closed the connection on purpose and expects a silent reconnect
 	bool reconnect_expected() const
 	{
 		return reconnect_expected_;
+	}
+	// LVRR: how long the server said to keep reconnecting, 0 when it gave no time
+	std::chrono::milliseconds reconnect_timeout() const
+	{
+		return std::chrono::milliseconds(lvrr_reconnect_timeout_ms.load());
 	}
 
 	void push_blit_handle(wivrn::shard_accumulator * decoder, std::shared_ptr<wivrn::shard_accumulator::blit_handle> handle);

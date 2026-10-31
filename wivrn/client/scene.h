@@ -212,6 +212,8 @@ public:
 	void set_focused(bool status);
 	virtual void render(const XrFrameState &) = 0;
 	virtual void on_xr_event(const xr::event &);
+	// LVRR: called instead of render(), about every 250 ms, while the XR session is not running
+	virtual void lvrr_idle() {}
 
 	virtual bool on_input_key_down(uint8_t key_code);
 	virtual bool on_input_key_up(uint8_t key_code);

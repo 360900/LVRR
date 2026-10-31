@@ -191,13 +191,14 @@ void wivrn_session::handshake(T address, bool tcp_only, crypto::key & headset_ke
 			break;
 		}
 
+		// LVRR: refusals, the lobby does not retry them
 		case to_headset::crypto_handshake::crypto_state::pairing_disabled:
 			spdlog::info("Pairing is disabled on server");
-			throw std::runtime_error(_("Pairing is disabled on server"));
+			throw handshake_refused(_("Pairing is disabled on server"));
 
 		case to_headset::crypto_handshake::crypto_state::incompatible_version:
 			spdlog::error("Incompatible protocol versions");
-			throw std::runtime_error(_("Incompatible server version"));
+			throw handshake_refused(_("Incompatible server version"));
 	}
 
 	// may be on control socket if forced TCP
@@ -230,6 +231,11 @@ wivrn_session::wivrn_session(sockaddr_in6 address, bool tcp_only, crypto::key & 
 	{
 		handshake(address, tcp_only, headset_keypair, pin_enter);
 	}
+	catch (handshake_refused &)
+	{
+		// LVRR: keeps its type
+		throw;
+	}
 	catch (std::exception & e)
 	{
 		throw handshake_error{e.what()};
@@ -242,6 +248,11 @@ wivrn_session::wivrn_session(sockaddr_in address, bool tcp_only, crypto::key & h
 	try
 	{
 		handshake(address, tcp_only, headset_keypair, pin_enter);
+	}
+	catch (handshake_refused &)
+	{
+		// LVRR: keeps its type
+		throw;
 	}
 	catch (std::exception & e)
 	{

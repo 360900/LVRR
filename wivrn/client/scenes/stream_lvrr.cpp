@@ -30,6 +30,10 @@
 #include <utility>
 #include <openxr/openxr.h>
 
+#ifdef __ANDROID__
+#include "android/permissions.h"
+#endif
+
 // The LVRR dashboard (WayVR, on the PC) replaces the in-stream settings: it sends
 // set_headset_settings, which are applied here like the settings window did, and gets
 // headset_settings and headset_stats back.
@@ -38,6 +42,12 @@ namespace
 {
 constexpr uint32_t mbit = 1'000'000;
 constexpr uint32_t min_bitrate = 5 * mbit;
+// Safe ranges; extended_config raises the resolution limit and lets foveation go down to 0
+constexpr float min_resolution_scale = 0.5f;
+constexpr float max_resolution_scale = 1.5f;
+constexpr float max_resolution_scale_extended = 3.5f;
+constexpr float min_foveation = 0.3f;
+constexpr float max_foveation = 0.8f;
 
 lvrr::codec_choice to_choice(video_codec codec)
 {
@@ -91,6 +101,16 @@ lvrr::feature_bit bit_of(feature f)
 	return std::ranges::find(features, f, &std::pair<feature, lvrr::feature_bit>::first)->second;
 }
 
+// Whether turning the feature on shows a permission prompt
+bool prompts(feature f)
+{
+#ifdef __ANDROID__
+	return not check_permission(application::get_hmd_traits().permission_name(f));
+#else
+	return false;
+#endif
+}
+
 // The connection-time fields, which only apply to a new session
 lvrr::headset_config restart_fields(const lvrr::headset_config & c)
 {
@@ -125,6 +145,8 @@ bool same(const lvrr::headset_config & a, const lvrr::headset_config & b)
 
 void scenes::stream::lvrr_start()
 {
+	// fixed for the session; before lvrr_report(), which sends it in the capabilities
+	lvrr_see_through_supported = composition_layer_color_scale_bias_supported and system.passthrough_supported() != xr::passthrough_type::none;
 	lvrr_session_config = restart_fields(lvrr_config());
 	const auto & config = application::get_config();
 	lvrr_fov_horizontal = std::clamp(config.fov_horizontal, lvrr::min_fov_tangent, 1.f);
@@ -166,7 +188,7 @@ lvrr::headset_capabilities scenes::stream::lvrr_capabilities()
 	caps.post_processing = application::get_openxr_post_processing_supported();
 	caps.high_power_mode = instance.has_extension(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
 	caps.passthrough_boundary = session.boundary_visibility_supported();
-	caps.see_through = composition_layer_color_scale_bias_supported and system.passthrough_supported() != xr::passthrough_type::none;
+	caps.see_through = lvrr_see_through_supported;
 	caps.simultaneous_hands = session.simultaneous_hands_and_controllers_supported();
 #ifdef __ANDROID__
 	caps.usb_network = application::get_hmd_traits().usb_net;
@@ -259,14 +281,21 @@ void scenes::stream::lvrr_report(uint32_t request_id)
 void scenes::stream::lvrr_send_settings_changed()
 {
 	const auto & config = application::get_config();
-	network_session->send_control(from_headset::settings_changed{
-	        .preferred_refresh_rate = config.preferred_refresh_rate,
-	        .minimum_refresh_rate = config.minimum_refresh_rate.value_or(0),
-	        .fps_divider = config.fps_divider,
-	        .bitrate_bps = config.bitrate_bps,
-	        .mirror_gamepad = config.forward_gamepad,
-	        .enabled_body_parts = config.body_part_mask,
-	});
+	try
+	{
+		network_session->send_control(from_headset::settings_changed{
+		        .preferred_refresh_rate = config.preferred_refresh_rate,
+		        .minimum_refresh_rate = config.minimum_refresh_rate.value_or(0),
+		        .fps_divider = config.fps_divider,
+		        .bitrate_bps = config.bitrate_bps,
+		        .mirror_gamepad = config.forward_gamepad,
+		        .enabled_body_parts = config.body_part_mask,
+		});
+	}
+	catch (std::exception & e)
+	{
+		spdlog::warn("Failed to send settings changes: {}", e.what());
+	}
 }
 
 bool scenes::stream::lvrr_apply(const lvrr::headset_config & patch)
@@ -277,7 +306,22 @@ bool scenes::stream::lvrr_apply(const lvrr::headset_config & patch)
 
 	// first, it changes the allowed ranges below
 	if (patch.extended_config)
+	{
 		config.extended_config = *patch.extended_config;
+		// turned off: values past the safe limits would stay in use, hidden by the dashboard's narrower sliders
+		if (not config.extended_config)
+		{
+			config.resolution_scale = std::min(config.resolution_scale, max_resolution_scale);
+			// an unset stream scale defaults within the range and stays unset
+			if (1 - config.get_stream_scale() < min_foveation)
+				config.set_stream_scale(1 - min_foveation);
+			if (config.bitrate_bps > config.max_bitrate())
+			{
+				config.bitrate_bps = config.max_bitrate();
+				live_changed = true;
+			}
+		}
+	}
 
 	if (patch.preferred_refresh_rate)
 	{
@@ -291,7 +335,9 @@ bool scenes::stream::lvrr_apply(const lvrr::headset_config & patch)
 		else if (caps.refresh_rate_control and contains(caps.refresh_rates, rate))
 		{
 			session.set_refresh_rate(rate);
-			config.preferred_refresh_rate = rate;
+			// video_stream_description keeps the stream's first rate: a new swapchain and
+			// on_focused() ask for this one
+			lvrr_refresh_rate = config.preferred_refresh_rate = rate;
 			live_changed = true;
 		}
 	}
@@ -308,13 +354,13 @@ bool scenes::stream::lvrr_apply(const lvrr::headset_config & patch)
 	}
 
 	if (patch.resolution_scale)
-		config.resolution_scale = std::clamp(*patch.resolution_scale, 0.5f, config.extended_config ? 3.5f : 1.5f);
+		config.resolution_scale = std::clamp(*patch.resolution_scale, min_resolution_scale, config.extended_config ? max_resolution_scale_extended : max_resolution_scale);
 	if (patch.fov_horizontal)
 		lvrr_fov_horizontal = config.fov_horizontal = std::clamp(*patch.fov_horizontal, lvrr::min_fov_tangent, 1.f);
 	if (patch.fov_vertical)
 		lvrr_fov_vertical = config.fov_vertical = std::clamp(*patch.fov_vertical, lvrr::min_fov_tangent, 1.f);
 	if (patch.foveation)
-		config.set_stream_scale(1 - std::clamp(*patch.foveation, config.extended_config ? 0.f : 0.3f, 0.8f));
+		config.set_stream_scale(1 - std::clamp(*patch.foveation, config.extended_config ? 0.f : min_foveation, max_foveation));
 	if (patch.codec)
 	{
 		if (*patch.codec == lvrr::codec_choice::automatic)
@@ -383,7 +429,10 @@ bool scenes::stream::lvrr_apply(const lvrr::headset_config & patch)
 	if (patch.high_power_mode and caps.high_power_mode)
 	{
 		config.high_power_mode = *patch.high_power_mode;
-		application::get_power().set_pinned_high(config.high_power_mode);
+		// a stream not shown yet leaves the lobby's clocks to idle(); on_focused() applies
+		// the saved setting when it shows
+		if (focused)
+			application::get_power().set_pinned_high(config.high_power_mode);
 	}
 	if (patch.passthrough_boundary and caps.passthrough_boundary)
 	{
@@ -412,31 +461,77 @@ bool scenes::stream::lvrr_apply(const lvrr::headset_config & patch)
 	};
 	for (auto [f, value]: features_patch)
 	{
-		if (not value or *value == config.check_feature(f))
+		if (not value)
 			continue;
 		uint8_t bit = bit_of(f);
+		// this value replaces a prompt still waiting for the session
+		if (lvrr_prompts_waiting & bit)
+		{
+			lvrr_prompts_waiting &= uint8_t(~bit);
+			lvrr_permission_pending &= uint8_t(~bit);
+		}
+		if (*value == config.check_feature(f))
+			continue;
 		lvrr_permission_denied &= uint8_t(~bit);
 		if (*value)
 			lvrr_permission_pending |= bit;
-		// The stream outlives the request: answers after the stream ended are dropped with it
-		std::weak_ptr<stream> weak = weak_from_this();
-		config.set_feature(f, *value, [weak, bit, wanted = *value](bool enabled) {
-			if (auto self = weak.lock())
-			{
-				self->lvrr_permission_pending &= uint8_t(~bit);
-				if (wanted and not enabled)
-					self->lvrr_permission_denied |= bit;
-				self->lvrr_report_needed = true;
-			}
-		});
+		// Android may cancel the prompt of an app it doesn't show, which reads as refused: it
+		// waits for the session, see lvrr_update()
+		if (*value and not application::is_session_running() and prompts(f))
+			lvrr_prompts_waiting |= bit;
+		else
+			lvrr_set_feature(f, *value);
 	}
 
 	config.save();
 	return live_changed;
 }
 
+void scenes::stream::lvrr_set_feature(feature f, bool value)
+{
+	uint8_t bit = bit_of(f);
+	// The stream outlives the request: answers after the stream ended are dropped with it
+	std::weak_ptr<stream> weak = weak_from_this();
+	application::get_config().set_feature(f, value, [weak, bit, wanted = value](bool enabled) {
+		if (auto self = weak.lock())
+		{
+			self->lvrr_permission_pending &= uint8_t(~bit);
+			if (wanted and not enabled)
+				self->lvrr_permission_denied |= bit;
+			self->lvrr_report_needed = true;
+		}
+	});
+}
+
 void scenes::stream::lvrr_update()
 {
+	// An ended stream drops its queue: the server fails these calls (Timeout), or keeps their
+	// changes when the headset leaves, and sends its offline changes again next time. Applying
+	// them would change the lobby's refresh rate or ask for permissions in it. The held prompts
+	// drop too, the server keeps their features from permission_pending the same way
+	if (state_ == state::shutdown)
+	{
+		lvrr_requests.lock()->clear();
+		lvrr_report_needed = false;
+		return;
+	}
+
+	// the prompts held while the session was stopped, now that the headset shows the app
+	if (lvrr_prompts_waiting and application::is_session_running())
+	{
+		uint8_t waiting = std::exchange(lvrr_prompts_waiting, 0);
+		try
+		{
+			for (auto [f, bit]: features)
+				if (waiting & bit)
+					lvrr_set_feature(f, true);
+		}
+		catch (std::exception & e)
+		{
+			spdlog::warn("Failed to ask for permissions: {}", e.what());
+		}
+	}
+
 	std::vector<lvrr::set_headset_settings> requests;
 	std::swap(requests, *lvrr_requests.lock());
 
@@ -461,6 +556,13 @@ void scenes::stream::lvrr_update()
 		lvrr_report(0);
 }
 
+// Answers the dashboard while the headset is off the head or another app is in front: applying
+// works without a running session, and refresh rate and clocks are set again by on_focused()
+void scenes::stream::lvrr_idle()
+{
+	lvrr_update();
+}
+
 void scenes::stream::lvrr_stats(XrTime now)
 {
 	if (now - lvrr_last_stats < 1'000'000'000)
@@ -473,7 +575,8 @@ void scenes::stream::lvrr_stats(XrTime now)
 	        .gpu_time_ms = compact_gpu_time * 1000,
 	        .rx_bps = compact_bandwidth_rx * 8,
 	        .tx_bps = compact_bandwidth_tx * 8,
-	        .display_hz = real_display_period ? 1e9f / float(real_display_period) : 0.f,
+	        // the runtime's period: the last frame interval doubles after a missed frame
+	        .display_hz = display_time_period ? 1e9f / float(display_time_period) : 0.f,
 	        .motion_to_photon_ms = float(tracking_control.lock()->motions_to_photons) / 1e6f,
 	        .battery = battery.charge,
 	        .charging = battery.charging,
@@ -493,7 +596,9 @@ void scenes::stream::lvrr_stats(XrTime now)
 				continue;
 			sum.encode_ms += (m.encode_end - m.encode_begin) * 1000;
 			sum.send_ms += (m.send_end - m.send_begin) * 1000;
-			sum.network_ms += (m.received_last_packet - m.send_begin) * 1000;
+			// after send_ms, not overlapping it; send_end comes from the PC's clock through the
+			// offset estimate, which can put it after the arrival
+			sum.network_ms += std::max(0.f, m.received_last_packet - m.send_end) * 1000;
 			sum.decode_ms += (m.received_from_decoder - m.sent_to_decoder) * 1000;
 			sum.display_ms += (m.displayed - m.received_from_decoder) * 1000;
 			sum.total_ms += (m.displayed - m.encode_begin) * 1000;
@@ -578,8 +683,25 @@ void scenes::stream::lvrr_render_hands(XrTime predicted_display_time)
 	render_world(XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT, world_space, views, width, height, false, layer_hands, {});
 }
 
-void scenes::stream::operator()(lvrr::expect_reconnect &&)
+// Head-locked, full-FOV premultiplied black that dims the room to 1 - opacity, also where the
+// stream doesn't reach: the edges a reduced FOV leaves, and those reprojection shows on a fast
+// turn. Layer mask 0 draws nothing, render_world only clears, so any size does
+bool scenes::stream::lvrr_render_see_through(XrTime predicted_display_time, float opacity)
 {
+	XrSpace view_space = application::space(xr::spaces::view);
+	auto [flags, views] = session.locate_views(viewconfig, predicted_display_time, view_space);
+	// like the foveation layer: an invalid pose would make xrEndFrame drop the whole frame
+	constexpr XrViewStateFlags valid = XR_VIEW_STATE_POSITION_VALID_BIT | XR_VIEW_STATE_ORIENTATION_VALID_BIT;
+	if ((flags & valid) != valid)
+		return false;
+	render_world(XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT, view_space, views, 64, 64, false, 0, {0, 0, 0, opacity});
+	return true;
+}
+
+void scenes::stream::operator()(lvrr::expect_reconnect && packet)
+{
+	// first: the lobby reads the time once it sees the flag
+	lvrr_reconnect_timeout_ms = packet.timeout_ms;
 	reconnect_expected_ = true;
 }
 
@@ -603,7 +725,47 @@ void scenes::stream::operator()(lvrr::server_stopping && packet)
 void scenes::stream::lvrr_connection_lost(const std::exception & e)
 {
 	spdlog::info("Connection to the server lost: {}", e.what());
+	lvrr_end_stream(_("The connection to the PC ended unexpectedly. If LVRR crashed, run \"lvrr logs\" on the PC for details."));
+}
+
+// Called by the network thread after each poll. A link that died without a reset (the PC hung, the
+// path dropped) errors only after TCP retransmits for about 15 minutes, or never: with nothing in
+// flight, or through adbd. The server sends a timesync query at least every 100 ms all session, also
+// over TCP in USB mode. steady_clock stops while Android is suspended, so a headset waking is not cut
+void scenes::stream::lvrr_check_alive()
+{
+	constexpr auto timeout = std::chrono::seconds(15);
+	auto now = std::chrono::steady_clock::now();
+	if (uint64_t bytes = network_session->bytes_received(); bytes != lvrr_bytes_seen)
+	{
+		lvrr_bytes_seen = bytes;
+		lvrr_bytes_time = now;
+		return;
+	}
+
+	// armed by the first packet: until then the server may still be starting the session
+	if (lvrr_bytes_time == std::chrono::steady_clock::time_point{} or now - lvrr_bytes_time < timeout)
+		return;
+
+	lvrr_connection_lost(std::runtime_error(fmt::format("nothing received from the server for {} s", timeout.count())));
+}
+
+// Called by the network and tracking threads when the headset itself fails, e.g. its decoder
+void scenes::stream::lvrr_headset_error(const std::exception & e)
+{
+	spdlog::error("Error on the headset, ending the stream: {}", e.what());
+	lvrr_end_stream(fmt::format(_F("The stream stopped because of an error on the headset: {}"), e.what()));
+}
+
+// Not exit(): an error is not a quit. Shutting the sockets down tells the server, which pauses the
+// session and waits five minutes for a reconnect, instead of streaming to a headset that no longer
+// reads; threads blocked sending into full buffers (tracking, feedback, the mic) get EPIPE. The
+// end is reported and state_ set first, so the errors this causes on other threads find it reported
+void scenes::stream::lvrr_end_stream(std::string message)
+{
 	if (state_ != state::shutdown and not reconnect_expected_ and not lvrr_end_reported.exchange(true))
-		stream_error_queue.lock()->emplace(_("The connection to the PC ended unexpectedly. If LVRR crashed, run \"lvrr logs\" on the PC for details."));
-	exit();
+		stream_error_queue.lock()->emplace(std::move(message));
+	state_ = state::shutdown;
+	if (network_session)
+		network_session->shutdown();
 }

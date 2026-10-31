@@ -39,7 +39,7 @@ struct theme
 
 	// Surfaces, back to front
 	ImVec4 background;
-	ImVec4 background_contrast; // LVRR: pills and bars of the dashboard shell, modal fill
+	ImVec4 background_contrast; // LVRR: pills and bars of the dashboard shell, the fill of modals, menus and tooltips
 	ImVec4 card;
 	ImVec4 card_hovered;
 	ImVec4 control; // slider rail, secondary button, input
