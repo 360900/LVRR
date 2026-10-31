@@ -94,7 +94,9 @@
   },
   "HeadsetStats": {
     "battery": 0.800000011920929,
+    "bit_depth": 10,
     "charging": true,
+    "codec": "h265",
     "cpu_time_ms": 4.199999809265137,
     "decoders": [
       {
@@ -120,6 +122,10 @@
     "game_missed_fps": 2.0,
     "gpu_time_ms": 1.5,
     "motion_to_photon_ms": 38.0,
+    "render_size": [
+      2016,
+      2112
+    ],
     "rx_bps": 48000000.0,
     "tx_bps": 400000.0
   }

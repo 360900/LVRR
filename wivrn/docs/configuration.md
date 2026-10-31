@@ -84,10 +84,14 @@ Default value: unset
 Manually specify the device for encoding, can be used to offload encode to an iGPU. Device shall be in the form "/dev/dri/renderD128".
 
 
-### `options` (very advanced), only for vaapi
+### `options` (very advanced), only for vaapi and vulkan
 Default value: unset
 
-Json object of additional options to pass directly to ffmpeg `avcodec_open2`'s `option` parameter.
+Json object of additional encoder options, with string values, such as `{"quality": "0"}`.
+
+`vaapi` passes them directly to ffmpeg `avcodec_open2`'s `option` parameter. On AMD, LVRR asks Mesa for its balanced preset with pre-encode and VBAQ, which `compression_level` overrides.
+
+`vulkan` reads `quality`, the encode quality level. 0 is the driver's default, and a level above what the driver supports is lowered to its highest. On AMD, LVRR uses level 1. Mesa 26.1 and later map 0 to the speed preset (balanced for `h265` before RDNA 4), 1 to balanced, 2 to quality and, on RDNA 3 and later, 3 to high quality. Older Mesa ignores the level and uses the speed preset.
 
 ## `application`
 Default value: unset
@@ -148,14 +152,21 @@ adaptive triggers or the touchpad are not available.
 ## `usb-auto-connect`
 Default value: `false`
 
-Needs `adb`, and USB debugging allowed on the headset.
+Needs `adb`, and USB debugging allowed on the headset. Only headsets plugged in by USB are
+connected, not ones adb reaches over Wi-Fi.
 
 When a headset with the app installed shows up in `adb` while the server waits for a headset
 (plugged in, or the adb connection coming back after a drop), the server sets up the adb tunnel
-and starts the app on the headset, which connects to it. It does this once each time the headset
-shows up, so quitting the app doesn't start it again. A headset that shows up during a session is
-connected if the session ends within a minute. During a session the server only restores the adb
-tunnel, so a headset whose adb connection dropped can reconnect to the session.
+and starts the app on the headset, which connects to it. This also happens while a session waits
+for its lost headset, so a headset whose adb connection dropped reconnects to the session once
+its disconnection message is closed. The server does this once each time the headset shows up, so
+quitting the app doesn't start it again, and retries an attempt that failed, such as one before
+the app was installed. A headset that shows up during a stream is connected if that session ends
+or loses its headset within a minute. While a headset streams the server only sets up the adb
+tunnel. The tunnel is set up again every 10 seconds, since a restart of adb's server takes it down.
+
+The server runs `adb devices` every 2 seconds. With `systemd-run` it starts adb's server in its
+own systemd scope, so adb keeps running when LVRR stops.
 
 ## `debug-gui`
 Default value: `false`

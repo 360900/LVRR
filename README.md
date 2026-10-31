@@ -21,13 +21,17 @@ This installs to `/opt/lvrr` and adds `lvrr` to the app menu. It doesn't conflic
 Other distributions: install the build dependencies of WiVRn, xrizer and wayvr, then:
 
 ```sh
-cargo xtask build --release --i686 --prefix $HOME/.local/opt/lvrr
+cargo xtask build --release --i686 --prefix "$HOME/.local/opt/lvrr"
 cargo xtask install
+mkdir -p ~/.local/bin ~/.local/share/applications
+ln -sf "$HOME/.local/opt/lvrr/bin/lvrr" ~/.local/bin/
+ln -sf "$HOME/.local/opt/lvrr/share/applications/io.github.lvrr.desktop" ~/.local/share/applications/
+ln -sf "$HOME/.local/opt/lvrr/share/applications/io.github.lvrr.wayvr.desktop" ~/.local/share/applications/
 ```
 
-The prefix is fixed at build time. Run `$HOME/.local/opt/lvrr/bin/lvrr`.
+The prefix is fixed at build time. The links put `lvrr` in `~/.local/bin` and LVRR in the app menu. On Plasma before 6.8, the `io.github.lvrr.wayvr.desktop` link lets LVRR capture screens without a dialog and add virtual monitors.
 
-The headset APK is built by CI.
+The headset APK is the `lvrr-apk-release` artifact of [CI](https://github.com/360900/LVRR/actions/workflows/ci.yml).
 
 # Usage
 
@@ -35,12 +39,12 @@ Run `lvrr` (or LVRR from the app menu) to start the server in the background and
 
 LVRR keeps its server settings in `~/.config/lvrr/wivrn-server.json`. Pairing is shared with WiVRn.
 
-- `lvrr stop`, `lvrr status`, `lvrr logs`
+- `lvrr start`: the server without the window; `lvrr stop`, `lvrr status`, `lvrr logs`
 - `lvrr pair`: pair another headset
 - `lvrr headsets`, `lvrr rename`, `lvrr unpair`: manage paired headsets
 - `lvrr usb`: connect the headset plugged in by USB; `lvrr install APK` installs the app
 - `lvrr steam`: launch options for Steam VR games, if they need any
-- `lvrr doctor`: check that the headset can reach this PC; `--fix` repairs what it can, the first start offers it too
+- `lvrr doctor`: check the PC for VR (network, GPU, runtimes, Steam, input, audio); `--fix` repairs what it can, the first start offers to open the firewall and start Avahi
 - `lvrr server`: the server in the foreground
 
 # Development
